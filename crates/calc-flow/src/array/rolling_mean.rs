@@ -2,9 +2,9 @@ use datafusion::arrow::buffer::{BooleanBuffer, Buffer, NullBuffer};
 
 use super::{
     ArrayExecutionOptions, FloatValues, FloatView, NativeArray, control, invalid,
-    rolling_mean_math::{self, ArithmeticError, FloatSummary},
+    rolling_mean_math::{ArithmeticError, FloatSummary},
 };
-use crate::{Result, RollingNumericalProfile};
+use crate::Result;
 
 /// Parameters for an ordered, single-sequence row-window mean.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -12,11 +12,10 @@ use crate::{Result, RollingNumericalProfile};
 pub struct RollingMeanOptions {
     window: u64,
     min_periods: u64,
-    numerical_profile: RollingNumericalProfile,
 }
 
 impl RollingMeanOptions {
-    /// Selects a positive window, one minimum valid sample, and `StableV1`.
+    /// Selects a positive window and one minimum valid sample.
     ///
     /// # Errors
     ///
@@ -31,7 +30,6 @@ impl RollingMeanOptions {
         Ok(Self {
             window,
             min_periods: 1,
-            numerical_profile: RollingNumericalProfile::StableV1,
         })
     }
 
@@ -54,14 +52,6 @@ impl RollingMeanOptions {
         })
     }
 
-    /// Explicitly selects an existing native rolling numerical profile.
-    pub const fn with_numerical_profile(self, numerical_profile: RollingNumericalProfile) -> Self {
-        Self {
-            numerical_profile,
-            ..self
-        }
-    }
-
     /// Returns the number of input positions retained by the window.
     pub const fn window(&self) -> u64 {
         self.window
@@ -71,20 +61,14 @@ impl RollingMeanOptions {
     pub const fn min_periods(&self) -> u64 {
         self.min_periods
     }
-
-    /// Returns the explicitly selected numerical profile.
-    pub const fn numerical_profile(&self) -> RollingNumericalProfile {
-        self.numerical_profile
-    }
 }
 
 /// Computes a row-aligned mean using the native stateful table transitions.
 ///
 /// Nulls and NaNs occupy window positions but do not count as valid samples.
 /// Infinities remain valid. Output values are `Float64`, including for `Float32`
-/// input. The default preserves the released `StableV1` operation order and
-/// its documented extreme-value behavior; it does not use the exact ordinary
-/// mean reduction or the SQL AVG NaN-value compatibility path.
+/// input. Finite samples use the shared compensated sliding-sum contract, with
+/// division only at readout.
 ///
 /// ```
 /// use calc_flow::{Result, array::{ArrayExecutionOptions, FloatView, RollingMeanOptions, rolling_mean}};
@@ -198,7 +182,7 @@ impl MeanKernel {
     pub(super) fn new(capacity: usize) -> Self {
         Self {
             history: RowsHistory::new(capacity),
-            summary: FloatSummary::default(),
+            summary: FloatSummary::mean_only(),
             positions: 0,
         }
     }
@@ -218,7 +202,7 @@ impl MeanKernel {
                 start: 0,
                 len: 0,
             },
-            summary: FloatSummary::default(),
+            summary: FloatSummary::mean_only(),
             positions: 0,
         })
     }
@@ -273,14 +257,8 @@ impl MeanKernel {
             .checked_add(1)
             .ok_or_else(|| invalid("input.rows", "sequence position exceeds u64"))?;
         advance(&mut self.summary, &mut self.history, sample, window)?;
-        repair(
-            &mut self.summary,
-            &self.history,
-            options.numerical_profile,
-            self.positions,
-            check,
-        )?;
-        Ok((self.summary.valid_count >= options.min_periods).then(|| self.summary.read_mean()))
+        repair(&mut self.summary, &self.history, window, check)?;
+        Ok((self.summary.valid_count >= options.min_periods).then(|| self.summary.mean()))
     }
 }
 
@@ -290,14 +268,13 @@ fn advance(
     sample: Option<f64>,
     window: usize,
 ) -> Result<()> {
-    if let Some(sample) = sample {
-        summary.as_mut().add(sample).map_err(arithmetic_error)?;
-    }
+    let leaving = (history.len >= window)
+        .then(|| history.values[history.start])
+        .flatten();
+    summary.rows(leaving, sample).map_err(arithmetic_error)?;
     history.push(sample);
-    if history.len > window
-        && let Some(sample) = history.pop_front()
-    {
-        summary.as_mut().remove(sample).map_err(arithmetic_error)?;
+    if history.len > window {
+        history.pop_front();
     }
     Ok(())
 }
@@ -322,26 +299,16 @@ pub(super) fn required_bytes(len: usize, options: RollingMeanOptions) -> Result<
         .and_then(|bytes| bytes.checked_add(len.div_ceil(8)))
         .and_then(|bytes| bytes.checked_add(size_of::<usize>()))
         .ok_or_else(|| invalid("outputs.output.bytes", "output byte count overflowed usize"))?;
-    Ok((
-        output,
-        scratch_bytes(len, capacity, options.numerical_profile)?,
-    ))
+    Ok((output, scratch_bytes(capacity)?))
 }
 
-fn scratch_bytes(len: usize, capacity: usize, profile: RollingNumericalProfile) -> Result<usize> {
-    if len == 0 {
+fn scratch_bytes(capacity: usize) -> Result<usize> {
+    if capacity == 0 {
         return Ok(0);
     }
-    let state = size_of::<FloatSummary>();
-    let fold = if profile == RollingNumericalProfile::StableV2Preview {
-        rolling_mean_math::stable_scratch_bytes()
-    } else {
-        0
-    };
     capacity
         .checked_mul(size_of::<Option<f64>>())
-        .and_then(|bytes| bytes.checked_add(state))
-        .and_then(|bytes| bytes.checked_add(fold))
+        .and_then(|bytes| bytes.checked_add(size_of::<FloatSummary>()))
         .ok_or_else(|| invalid("scratch.bytes", "history byte count overflowed usize"))
 }
 
@@ -362,33 +329,41 @@ fn sample_at(input: FloatView<'_>, index: usize) -> Option<f64> {
 fn repair(
     summary: &mut FloatSummary,
     history: &RowsHistory,
-    profile: RollingNumericalProfile,
-    count: u64,
+    window: usize,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
-    if profile == RollingNumericalProfile::StableV2Preview
-        && rolling_mean_math::rebase_due(count, history.len, summary.is_non_finite())
-    {
-        *summary =
-            rolling_mean_math::stable_fold_controlled(history.iter(), check, arithmetic_error)?;
-    } else if summary.is_non_finite() {
-        *summary = FloatSummary::default();
-        refold_v1(summary, history, check)?;
-    }
-    Ok(())
-}
+    use std::{cell::RefCell, rc::Rc};
 
-fn refold_v1(
-    summary: &mut FloatSummary,
-    history: &RowsHistory,
-    check: &mut dyn FnMut() -> Result<()>,
-) -> Result<()> {
-    for (index, value) in history.iter().enumerate() {
-        control::checkpoint(index, check)?;
-        if let Some(value) = value {
-            summary.as_mut().add(value).map_err(arithmetic_error)?;
+    let check = Rc::new(RefCell::new(check));
+    let failure = Rc::new(RefCell::new(None));
+    let controlled = history.iter().enumerate().map({
+        let check = Rc::clone(&check);
+        let failure = Rc::clone(&failure);
+        move |(index, value)| {
+            if failure.borrow().is_some() {
+                return None;
+            }
+            if index.is_multiple_of(4096)
+                && let Err(error) = (check.borrow_mut())()
+            {
+                *failure.borrow_mut() = Some(error);
+                return None;
+            }
+            value
         }
+    });
+    summary
+        .finish_rows(window, controlled)
+        .map_err(arithmetic_error)?;
+    if let Some(error) = Rc::try_unwrap(failure)
+        .expect("controlled iterator released")
+        .into_inner()
+    {
+        return Err(error);
     }
+    let check = Rc::try_unwrap(check)
+        .unwrap_or_else(|_| panic!("controlled iterator retained"))
+        .into_inner();
     check()
 }
 
@@ -439,7 +414,7 @@ impl RowsHistory {
         value
     }
 
-    fn iter(&self) -> impl Iterator<Item = Option<f64>> + '_ {
+    fn iter(&self) -> impl Iterator<Item = Option<f64>> + Clone + '_ {
         (0..self.len).map(|index| self.values[self.index(index)])
     }
 }
@@ -448,17 +423,16 @@ impl RowsHistory {
 mod tests {
     use super::*;
 
-    fn assert_null_refold_checks(profile: RollingNumericalProfile) {
+    #[test]
+    fn test_refold_visits_null_slots_with_the_compensated_contract() {
         let mut history = RowsHistory::new(8193);
         for _ in 0..8193 {
             history.push(None);
         }
-        let mut summary = FloatSummary {
-            sum: f64::INFINITY,
-            ..FloatSummary::default()
-        };
+        let mut summary = FloatSummary::mean_only();
+        summary.restore_mean_parts(0, 0, 0, 0, 0, f64::INFINITY, 0.0);
         let mut checks = 0;
-        let result = repair(&mut summary, &history, profile, 1, &mut || {
+        let result = repair(&mut summary, &history, 8192, &mut || {
             checks += 1;
             if checks == 3 {
                 Err(crate::CalcFlowError::Cancelled {
@@ -473,14 +447,6 @@ mod tests {
             Err(crate::CalcFlowError::Cancelled { .. })
         ));
         assert_eq!(checks, 3);
-    }
-    #[test]
-    fn test_refold_visits_null_slots_in_stable_v1() {
-        assert_null_refold_checks(RollingNumericalProfile::StableV1);
-    }
-    #[test]
-    fn test_refold_visits_null_slots_in_stable_v2() {
-        assert_null_refold_checks(RollingNumericalProfile::StableV2Preview);
     }
 
     #[test]

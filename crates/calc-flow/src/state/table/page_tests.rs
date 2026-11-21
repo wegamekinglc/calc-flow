@@ -1,0 +1,293 @@
+use super::{
+    EntityKey, RingKind, StateTable, ValueKind,
+    core::{KeyGroupId, PageId, Retention},
+};
+use datafusion::arrow::array::StringArray;
+
+fn entity(table: &mut StateTable, key: &[u8]) -> super::EntityId {
+    table.begin().unwrap();
+    let entity = table
+        .resolve_or_append(EntityKey::new(key.to_vec()))
+        .unwrap();
+    table.commit().unwrap();
+    entity
+}
+
+#[test]
+fn cloned_table_has_independent_page_storage_and_undo() {
+    let mut table = StateTable::with_checkpointing(true);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(4));
+    let entity = entity(&mut table, b"a");
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.commit().unwrap();
+    let log = table.add_value_log("values");
+    table.begin().unwrap();
+    table
+        .append_strings(log, StringArray::from(vec!["x"]))
+        .unwrap();
+    table.commit().unwrap();
+
+    let mut cloned = table.clone();
+    assert_eq!(cloned.value_log_len(log), 1);
+    cloned.begin().unwrap();
+    cloned.push_f64(history, entity, Some(2.0)).unwrap();
+    cloned.commit().unwrap();
+    assert_eq!(table.f64_history(history, entity).unwrap(), vec![Some(1.0)]);
+    assert_eq!(
+        cloned.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0)]
+    );
+
+    cloned.begin().unwrap();
+    cloned.push_f64(history, entity, Some(3.0)).unwrap();
+    cloned.rollback().unwrap();
+    assert_eq!(
+        cloned.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0)]
+    );
+    assert_eq!(table.f64_history(history, entity).unwrap(), vec![Some(1.0)]);
+}
+
+#[test]
+fn checkpoint_off_has_zero_dirty_allocation_and_writes_in_place() {
+    let mut table = StateTable::with_checkpointing(false);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(4));
+    let entity = entity(&mut table, b"a");
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.commit().unwrap();
+    let before = table.ring_page_id(history, entity).unwrap();
+
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(2.0)).unwrap();
+    table.commit().unwrap();
+
+    assert_eq!(table.ring_page_id(history, entity).unwrap(), before);
+    let snapshot = table.snapshot();
+    table.restore(snapshot).unwrap();
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(3.0)).unwrap();
+    table.commit().unwrap();
+    assert_eq!(table.ring_page_id(history, entity).unwrap(), before);
+    assert!(table.first_dirty_slots(KeyGroupId(0)).is_empty());
+    assert_eq!(table.dirty_list_capacity(KeyGroupId(0)), 0);
+}
+
+#[test]
+fn frozen_ring_is_immutable_and_first_post_freeze_write_cows_once() {
+    let mut table = StateTable::with_checkpointing(true);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(4));
+    let entity = entity(&mut table, b"a");
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.push_f64(history, entity, Some(2.0)).unwrap();
+    table.commit().unwrap();
+    let before = table.ring_page_id(history, entity).unwrap();
+    let freeze = table.freeze(1).unwrap();
+    assert!(freeze.reservation_bytes() > 0);
+    assert_eq!(
+        table.checkpoint_reservation_bytes(),
+        freeze.reservation_bytes()
+    );
+
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(3.0)).unwrap();
+    table.commit().unwrap();
+    let cow = table.ring_page_id(history, entity).unwrap();
+    assert_eq!(cow.slot, before.slot);
+    assert_eq!(cow.generation, before.generation + 1);
+    assert_eq!(
+        freeze.ring_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0)]
+    );
+    assert_eq!(
+        table.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0), Some(3.0)]
+    );
+
+    table.begin().unwrap();
+    table.push_f64(history, entity, Some(4.0)).unwrap();
+    table.commit().unwrap();
+    assert_eq!(table.ring_page_id(history, entity).unwrap(), cow);
+    assert_eq!(
+        freeze.ring_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(2.0)]
+    );
+}
+
+#[test]
+fn dirty_first_touch_and_undo_restore_page_and_allocator_state() {
+    let mut table = StateTable::with_checkpointing(true);
+    let counter = table.add_keyed_column("counter", ValueKind::UInt64);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(3));
+    let first = entity(&mut table, b"first");
+    table.begin().unwrap();
+    table.set_u64(counter, first, 1).unwrap();
+    table.push_f64(history, first, Some(1.0)).unwrap();
+    table.commit().unwrap();
+    let first_page = table.ring_page_id(history, first).unwrap();
+    let first_dirty = table.first_dirty_slots(KeyGroupId(0));
+    let before_bytes = table.logical_bytes();
+
+    table.begin().unwrap();
+    table.set_u64(counter, first, 9).unwrap();
+    table.push_f64(history, first, Some(2.0)).unwrap();
+    let second = table
+        .resolve_or_append(EntityKey::new(b"second".to_vec()))
+        .unwrap();
+    table.set_u64(counter, second, 2).unwrap();
+    table.push_f64(history, second, Some(3.0)).unwrap();
+    table.rollback().unwrap();
+
+    assert_eq!(table.entity_count(), 1);
+    assert_eq!(table.u64(counter, first).unwrap(), 1);
+    assert_eq!(table.f64_history(history, first).unwrap(), vec![Some(1.0)]);
+    assert_eq!(table.ring_page_id(history, first).unwrap(), first_page);
+    assert_eq!(table.first_dirty_slots(KeyGroupId(0)), first_dirty);
+    assert_eq!(table.logical_bytes(), before_bytes);
+    assert!(table.freeze(1).is_ok());
+}
+
+#[test]
+fn rollback_restores_transaction_stamp_and_first_touch_undo() {
+    let mut table = StateTable::with_checkpointing(true);
+    let counter = table.add_keyed_column("counter", ValueKind::UInt64);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(4));
+    let entity = entity(&mut table, b"a");
+    table.begin().unwrap();
+    table.set_u64(counter, entity, 1).unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.commit().unwrap();
+
+    for rejected in [2_u32, 3, 4] {
+        table.begin().unwrap();
+        table.set_u64(counter, entity, u64::from(rejected)).unwrap();
+        table
+            .push_f64(history, entity, Some(f64::from(rejected)))
+            .unwrap();
+        table.rollback().unwrap();
+        assert_eq!(table.u64(counter, entity).unwrap(), 1);
+        assert_eq!(table.f64_history(history, entity).unwrap(), vec![Some(1.0)]);
+    }
+    table.begin().unwrap();
+    table.set_u64(counter, entity, 5).unwrap();
+    table.push_f64(history, entity, Some(5.0)).unwrap();
+    table.commit().unwrap();
+    assert_eq!(table.u64(counter, entity).unwrap(), 5);
+    assert_eq!(
+        table.f64_history(history, entity).unwrap(),
+        vec![Some(1.0), Some(5.0)]
+    );
+}
+
+#[test]
+fn freeze_rejects_open_transaction_and_overlap() {
+    let mut table = StateTable::with_checkpointing(true);
+    table.begin().unwrap();
+    assert!(table.freeze(1).is_err());
+    table.rollback().unwrap();
+    let _freeze = table.freeze(1).unwrap();
+    assert!(table.freeze(2).is_err());
+    table.abort_freeze(1).unwrap();
+    assert_eq!(table.checkpoint_reservation_bytes(), 0);
+}
+
+#[test]
+fn multiple_groups_tombstones_and_free_slots_preserve_identity() {
+    let mut table = StateTable::with_key_groups(true, &[KeyGroupId(0), KeyGroupId(1)]).unwrap();
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(2));
+    table.begin().unwrap();
+    let entity = table
+        .resolve_or_append_in_group(EntityKey::new(b"right".to_vec()), KeyGroupId(1))
+        .unwrap();
+    table.push_f64(history, entity, Some(1.0)).unwrap();
+    table.commit().unwrap();
+    let before = table.ring_page_id(history, entity).unwrap();
+    assert_eq!(before.key_group, KeyGroupId(1));
+
+    let first = table.freeze(1).unwrap();
+    assert_eq!(first.partition_count(), 2);
+    assert_eq!(first.captured_pages(), 2);
+    table.settle_freeze(1, first.complete()).unwrap();
+    table.begin().unwrap();
+    table.delete_ring(history, entity).unwrap();
+    table.commit().unwrap();
+    let second = table.freeze(2).unwrap();
+    table.settle_freeze(2, second.complete()).unwrap();
+
+    table.begin().unwrap();
+    let replacement = table
+        .resolve_or_append_in_group(EntityKey::new(b"replacement".to_vec()), KeyGroupId(1))
+        .unwrap();
+    table.commit().unwrap();
+    let reused = table.ring_page_id(history, replacement).unwrap();
+    assert_eq!(reused.slot, before.slot);
+    assert!(reused.generation > before.generation);
+    assert_ne!(reused, before);
+}
+
+#[test]
+fn keyed_pages_split_and_duration_ring_growth_changes_generation() {
+    let mut table = StateTable::with_checkpointing(true);
+    let keyed = table.add_keyed_column("keyed", ValueKind::UInt64);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Duration);
+    let mut previous: Option<PageId> = None;
+    table.begin().unwrap();
+    let duration = table
+        .resolve_or_append(EntityKey::new(b"duration".to_vec()))
+        .unwrap();
+    for value in 0..5 {
+        table
+            .push_f64(history, duration, Some(f64::from(value)))
+            .unwrap();
+        let current = table.ring_page_id(history, duration).unwrap();
+        if matches!(value, 0 | 1 | 2 | 4) {
+            assert!(current.generation > previous.map_or(0, |page| page.generation));
+        } else {
+            assert_eq!(current, previous.unwrap());
+        }
+        previous = Some(current);
+    }
+    table.commit().unwrap();
+    assert_eq!(
+        table.f64_history(history, duration).unwrap(),
+        (0..5)
+            .map(|value| Some(f64::from(value)))
+            .collect::<Vec<_>>()
+    );
+
+    table.begin().unwrap();
+    for index in 0..1_025_u32 {
+        let entity = table
+            .resolve_or_append(EntityKey::new(index.to_le_bytes().to_vec()))
+            .unwrap();
+        table.set_u64(keyed, entity, u64::from(index)).unwrap();
+    }
+    table.commit().unwrap();
+    assert_eq!(table.keyed_page_count(keyed, KeyGroupId(0)), 2);
+}
+
+#[test]
+fn freeze_captures_only_dirty_pages_and_restore_starts_clean() {
+    let mut table = StateTable::with_checkpointing(true);
+    let history = table.add_ring_column("history", RingKind::Float64, Retention::Rows(2));
+    let first = entity(&mut table, b"first");
+    let first_freeze = table.freeze(1).unwrap();
+    table.settle_freeze(1, first_freeze.complete()).unwrap();
+    for index in 0..32_u32 {
+        entity(&mut table, &index.to_le_bytes());
+    }
+    let second_freeze = table.freeze(2).unwrap();
+    table.settle_freeze(2, second_freeze.complete()).unwrap();
+
+    table.begin().unwrap();
+    table.push_f64(history, first, Some(1.0)).unwrap();
+    table.commit().unwrap();
+    let freeze = table.freeze(3).unwrap();
+    assert_eq!(freeze.captured_pages(), 1);
+    table.settle_freeze(3, freeze.complete()).unwrap();
+    let snapshot = table.snapshot();
+    table.restore(snapshot).unwrap();
+    assert!(table.first_dirty_slots(KeyGroupId(0)).is_empty());
+}

@@ -83,9 +83,17 @@ configuration. Compile it with `compile_stream_project(project)` and start
 `StreamingRunner(plan)`. The plan supplies the registered connector factories
 and managed state settings.
 
+A source binding's `watermark` selects `{"policy": "source_provided"}`,
+`{"policy": "disabled"}`, or `{"policy": "bounded_out_of_orderness"}` with
+`column`, a positive `delay_ms`, an optional `emit_interval_ms`, and an
+optional positive `idle_timeout_ms`. A positive `emit_interval_ms` publishes
+generated watermarks on that period. An omitted or zero `emit_interval_ms`
+arms no watermark timer and publishes after every data batch that advances
+the column's observed maximum.
+
 For async results without durable restart, use `TableExpr.stream` or
-`Program.stream` directly; their input iterables and temporary checkpoint roots
-are not project configuration. See [streaming results](python-api.md#streaming-results).
+`Program.stream` directly; their input iterables and runtime config are not
+project configuration. See [streaming results](python-api.md#streaming-results).
 
 For application-owned Python sources and durable sinks, use `program.compile_stream()`
 and supply physical source/sink bindings plus a managed checkpoint runtime to the
@@ -107,6 +115,17 @@ The generated [JSON Schema](../schemas/project-v3.schema.json) is the field
 reference. See [Python API](python-api.md#projects-and-persistence) for method
 usage and [architecture](design.md#project-and-registry-design) for storage
 and registry ownership.
+
+## SQL aggregate output
+
+Within a SQL node's `operator` object, optional `aggregate_output` accepts
+`"snapshot"` or `"changelog"`. Omission defaults to `"snapshot"`; an explicit
+snapshot has the same meaning and fingerprint and is omitted from canonical
+serialization. `"changelog"` is valid only for a compact single-alias stream
+aggregate and changes the node output schema and semantic identity. It is not
+a field on `snapshot_sql` nodes. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for visible-group, operation, and recovery contracts.
 
 ## Late side-output projects
 

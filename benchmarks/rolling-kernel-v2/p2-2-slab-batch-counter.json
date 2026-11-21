@@ -1,0 +1,493 @@
+{
+  "contract": "paired-native-evidence-v1",
+  "status": "completed",
+  "cases": [
+    "1x1-dual",
+    "6400x64-dual"
+  ],
+  "requested_rounds": 10,
+  "completed_rounds": 10,
+  "timed_samples_per_round": 30,
+  "sample_pairs_per_case": 300,
+  "budget_seconds": 590.0,
+  "elapsed_seconds": 2.627741791991866,
+  "numeric_contract_change": true,
+  "binaries": [
+    {
+      "side": "baseline",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa",
+      "sha256": "1b27105bf3607eee87cc997376fc628bc0622d6a9b4cbac8db291ca27d0bb77d"
+    },
+    {
+      "side": "candidate",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter",
+      "sha256": "b3c0f4a0685b174fd5d86ebf22883c6b98310a1bfbce3eb07ec05684caed9121"
+    }
+  ],
+  "round_evidence": [
+    {
+      "round": 1,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-1-baseline.json",
+          "sha256": "3a395a44e39ccac8543f1512142e75872cfce2541d5fa0160f320b509c9e065c",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-1-candidate.json",
+          "sha256": "ece8059da540775acdf0ac2c0950d89a3fc76fcea55464668af5c886b98ade83",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 2,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-2-baseline.json",
+          "sha256": "eb2788fd8ec7923da2ee304844996110b8189e8419d11fed6f71051bfdd289f0",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-2-candidate.json",
+          "sha256": "6a6b1c6cfa52f50a62a952356dcc03ebb21c5539a2229bd1f98ab2d655def65d",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 3,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-3-baseline.json",
+          "sha256": "a8c6e5aaf16fa069be437bd740d041fa19fc1729d6f468c0a1138d8d3f55d1e9",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-3-candidate.json",
+          "sha256": "c4f381c5d39a9403aaf906e4704173312d768a6d353c814c6cbfb12a079f7cf8",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 4,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-4-baseline.json",
+          "sha256": "615a9934de98c7b02fe54cd14bd035074c013ecd36080fe41ec43cffecc16de0",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-4-candidate.json",
+          "sha256": "d8a32b5deb27a969a57f43e337fae02f1a7f3c131faf939949ff77feb3e33846",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 5,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-5-baseline.json",
+          "sha256": "8a31ae39e326aef2b6d00b526ce0f1a0eee441d1e7232251c20e0d32218492eb",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-5-candidate.json",
+          "sha256": "f982f0d66e8157c408b29d09da794e30fe988a3128f6ad44e3063755242224e8",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 6,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-6-baseline.json",
+          "sha256": "35225a1d3ecdff638808ca31d2ee0ede568932a42c9f2dbf2c72e8e6609a0acb",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-6-candidate.json",
+          "sha256": "46cf4c768553d06ddff80606a7bec379ebeb5ffb8ffb9429d408787d4aef9488",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 7,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-7-baseline.json",
+          "sha256": "70a2dd187cab1483816b21164fa7ebedd7c6f0b6310dda628fb5b1f302b540b4",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-7-candidate.json",
+          "sha256": "77ecb0e2d3f85b4936c2c70be27781d77a86a5dfc4ebc537855f3d29b6c63678",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 8,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-8-baseline.json",
+          "sha256": "b905a60cc655d0ec3dce14185e5cc9c88059f452b96592454bdb1375b100c54a",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-8-candidate.json",
+          "sha256": "7f25428139b47cec8cc5c60fe4f48419ebb076363ef5138c1a35e28b4f188b2d",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 9,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-9-baseline.json",
+          "sha256": "d35c8716ba7393949f86406e24b4691acff89388c5784532526b139bb7d7915f",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-9-candidate.json",
+          "sha256": "045ee888d4cc404fc366127d598dbf004899d0bc451eec47de8b705dd90bfe3d",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    },
+    {
+      "round": 10,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-10-baseline.json",
+          "sha256": "42901a9a3bf3a5f8c2ee3547d84183ca79c2d3bb6769aee6e7e7bcf28378e2dd",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter-work/round-10-candidate.json",
+          "sha256": "08e215a354feceb72452b39a29303cd152299ccb4d05434d05e206a271146cdf",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-batch-counter"
+        }
+      }
+    }
+  ],
+  "arms": [
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 5.928e-06,
+        "p95_seconds": 6.994750000000002e-06,
+        "cv": 1.2794129243407792,
+        "rows_per_second": 168690.9581646424
+      },
+      "candidate": {
+        "p50_seconds": 5.3004999999999995e-06,
+        "p95_seconds": 1.1019550000000002e-05,
+        "cv": 0.31256166944604263,
+        "rows_per_second": 188661.44703329875
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          5.7075e-06,
+          5.6965000000000004e-06,
+          6.044e-06,
+          5.907500000000001e-06,
+          6.023e-06,
+          6.049e-06,
+          5.840499999999999e-06,
+          5.893e-06,
+          5.916e-06,
+          6.211e-06
+        ],
+        "candidate": [
+          5.458e-06,
+          4.987e-06,
+          5.1815e-06,
+          5.213e-06,
+          5.5115e-06,
+          5.376e-06,
+          5.3825e-06,
+          5.3325e-06,
+          1.10695e-05,
+          5.1905000000000005e-06
+        ]
+      },
+      "paired_round_speedups": [
+        1.0457127152803225,
+        1.142269901744536,
+        1.1664575895011096,
+        1.1332246307308653,
+        1.0928059511929602,
+        1.1251860119047619,
+        1.0850905712958663,
+        1.1051101734646038,
+        0.5344414833551651,
+        1.1966091898661015
+      ],
+      "paired_round_speedup_median": 1.1151480926846828,
+      "paired_round_speedup_ci95": [
+        1.0692593332366414,
+        1.1498411101159873
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "faster",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 7.4945e-06,
+        "p95_seconds": 9.508200000000002e-06,
+        "cv": 0.6529757587398606,
+        "rows_per_second": 133431.18286743612
+      },
+      "candidate": {
+        "p50_seconds": 6.492e-06,
+        "p95_seconds": 1.247235e-05,
+        "cv": 0.36064423591925543,
+        "rows_per_second": 154035.73629081948
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          7.1525e-06,
+          7.1994999999999994e-06,
+          7.689e-06,
+          7.396e-06,
+          7.6255e-06,
+          7.686e-06,
+          7.450499999999999e-06,
+          7.4075e-06,
+          7.4485e-06,
+          7.911e-06
+        ],
+        "candidate": [
+          6.6305e-06,
+          6.1335e-06,
+          6.334e-06,
+          6.3925e-06,
+          6.6495e-06,
+          6.608e-06,
+          6.624e-06,
+          6.514e-06,
+          1.1773e-05,
+          6.3275e-06
+        ]
+      },
+      "paired_round_speedups": [
+        1.078727094487595,
+        1.1737996250101899,
+        1.213924850015788,
+        1.1569808369182635,
+        1.146777953229566,
+        1.163135593220339,
+        1.1247735507246377,
+        1.1371661037764815,
+        0.632676463093519,
+        1.2502568154879494
+      ],
+      "paired_round_speedup_median": 1.1518793950739148,
+      "paired_round_speedup_ci95": [
+        1.1079465991320383,
+        1.1885302216180635
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "faster",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 145.5,
+        "candidate": 218.0
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.0004345995,
+        "p95_seconds": 0.00048968465,
+        "cv": 0.16649756908689511,
+        "rows_per_second": 14726201.93994701
+      },
+      "candidate": {
+        "p50_seconds": 0.0010888215,
+        "p95_seconds": 0.00115204195,
+        "cv": 0.04228338836713696,
+        "rows_per_second": 5877914.791359282
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.000432953,
+          0.0004413725,
+          0.0004358875,
+          0.0004240685,
+          0.0004287645,
+          0.0004259625,
+          0.00042110300000000004,
+          0.00044211,
+          0.0004719965,
+          0.00044209649999999996
+        ],
+        "candidate": [
+          0.0010815935,
+          0.0010921445,
+          0.0010767580000000001,
+          0.001084094,
+          0.0010883059999999998,
+          0.0010601125,
+          0.001095753,
+          0.0010893895,
+          0.001108064,
+          0.0010960995
+        ]
+      },
+      "paired_round_speedups": [
+        0.4002917916943843,
+        0.40413379365093177,
+        0.40481473088660586,
+        0.3911731823993122,
+        0.3939742131349088,
+        0.40180877029560547,
+        0.38430467450237416,
+        0.40583280819211126,
+        0.42596501646114304,
+        0.4033361022425427
+      ],
+      "paired_round_speedup_median": 0.4025724362690741,
+      "paired_round_speedup_ci95": [
+        0.3939742131349088,
+        0.4049833009215215
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "slower",
+        "confirmed_regression": true
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.0004405125,
+        "p95_seconds": 0.0005150856,
+        "cv": 0.07767819686973712,
+        "rows_per_second": 14528532.107488437
+      },
+      "candidate": {
+        "p50_seconds": 0.001088993,
+        "p95_seconds": 0.0011386669,
+        "cv": 0.03569767682022674,
+        "rows_per_second": 5876989.108286279
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.000439342,
+          0.0004437135,
+          0.0004410785,
+          0.000421302,
+          0.000443148,
+          0.00042725550000000004,
+          0.0004236615,
+          0.000440497,
+          0.00048541350000000003,
+          0.0004510405
+        ],
+        "candidate": [
+          0.001079119,
+          0.001092431,
+          0.001077381,
+          0.001074341,
+          0.001086268,
+          0.0010671445,
+          0.0010887445000000002,
+          0.0010870595,
+          0.0011111914999999998,
+          0.001099185
+        ]
+      },
+      "paired_round_speedups": [
+        0.40713026088874354,
+        0.4061707329799319,
+        0.40939881063430666,
+        0.39214923380937716,
+        0.40795457474582697,
+        0.40037267680243865,
+        0.3891284869866162,
+        0.4052188495661921,
+        0.43684054458659927,
+        0.4103408434430965
+      ],
+      "paired_round_speedup_median": 0.40665049693433775,
+      "paired_round_speedup_ci95": [
+        0.3986840416877846,
+        0.40939881063430666
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "slower",
+        "confirmed_regression": true
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 18.8674609375,
+        "candidate": 74.6407421875
+      }
+    }
+  ],
+  "gate_values": {
+    "G1": {
+      "case": "1x1-dual",
+      "arm": "absent",
+      "value_seconds": 5.3004999999999995e-06,
+      "limit_seconds": 1e-06,
+      "met": false
+    },
+    "G2": {
+      "case": "6400x64-dual",
+      "arm": "present",
+      "value_ns_per_window_row": 74.6407421875,
+      "limit_ns_per_window_row": 4.0,
+      "met": false
+    },
+    "G3": {
+      "case": "6400x64-dual",
+      "arm": "absent",
+      "value_seconds": 0.0010888215,
+      "limit_seconds": 0.0001,
+      "met": false
+    }
+  },
+  "timed_boundary": "current-thread dispatch_data plus dispatch_watermark_handler on a RollingOperator; no projection; output drain outside the timer",
+  "comparison_note": "P2.1 uses the async dispatch boundary; later cross-boundary speedups are informational, while G1-G3 remain absolute",
+  "harness_sha256": "4496479e206390cabdcaf988cc92acb4c180309beb6e9986d17785fc4a4352ea"
+}

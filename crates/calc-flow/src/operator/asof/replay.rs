@@ -158,7 +158,7 @@ impl StreamAsofJoinOperator {
         if self.replay_inputs.is_some() {
             self.replay = self.new_replay_log().ok().map(Box::new);
             self.status.state_bytes = self
-                .current_inventory(None)
+                .current_inventory()
                 .map_or(0, |inventory| inventory.bytes);
         }
     }
@@ -182,7 +182,7 @@ impl StreamAsofJoinOperator {
 
     pub(super) fn stop_replay(&mut self) -> Result<()> {
         self.replay = None;
-        self.status.state_bytes = self.current_inventory(self.prepared.as_ref())?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         Ok(())
     }
 
@@ -239,7 +239,7 @@ impl StreamAsofJoinOperator {
             .expect("record credit was admitted")
             .records
             .push(record);
-        self.status.state_bytes = self.current_inventory(self.prepared.as_ref())?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         Ok(())
     }
 
@@ -268,7 +268,7 @@ impl StreamAsofJoinOperator {
         let log = self.replay.as_ref().expect("replay is enabled");
         let (capacity, delta) = replay_record_allocation(log, cursor_bytes)?;
         if self
-            .current_inventory(None)?
+            .current_inventory()?
             .bytes
             .checked_add(delta as u64)
             .is_none_or(|bytes| bytes > self.spec.limits().max_state_bytes())

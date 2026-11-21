@@ -1,0 +1,1723 @@
+use super::{HotProjection, JoinSide, StreamJoinOperator, counter_overflow, operator_error};
+use crate::{Batch, BatchMetadata, Result, StreamCollector, StreamOperatorContext};
+use datafusion::arrow::{
+    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    compute::{concat_batches, take},
+    datatypes::{DataType, SchemaRef, TimeUnit},
+    record_batch::{RecordBatch, RecordBatchOptions},
+};
+use futures::StreamExt;
+use std::{collections::BTreeMap, sync::Arc};
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum HotKind {
+    Equi,
+    Band,
+}
+
+pub(super) struct HotJoinCore {
+    kind: HotKind,
+    query: String,
+    left: Option<Batch>,
+    right: Option<Batch>,
+    completed: bool,
+}
+
+impl HotJoinCore {
+    pub(super) fn new(operator: &StreamJoinOperator) -> Option<Self> {
+        if output_schema(operator).fields().is_empty() {
+            return None;
+        }
+        let kind = if operator.spec.bounds.after_micros == 0 {
+            HotKind::Equi
+        } else if operator.spec.bounds.before_micros == operator.spec.bounds.after_micros
+            && operator.spec.bounds.before_micros.is_multiple_of(1_000_000)
+            && operator.spec.bounds.before_micros <= 60_000_000
+        {
+            HotKind::Band
+        } else {
+            return None;
+        };
+        match (kind, operator.hot_projection) {
+            (_, None)
+            | (HotKind::Equi, Some(HotProjection::Equi { .. }))
+            | (HotKind::Band, Some(HotProjection::Band)) => {}
+            _ => return None,
+        }
+        if operator.spec.left_keys() != ["symbol"]
+            || operator.spec.right_keys() != ["symbol"]
+            || operator.spec.left_event_time() != "event_time"
+            || operator.spec.right_event_time() != "event_time"
+        {
+            return None;
+        }
+        for side in [0, 1] {
+            let schema = operator.input_schema(side);
+            for (name, data_type) in [("symbol", DataType::Utf8), ("sequence", DataType::UInt64)] {
+                let index = schema.index_of(name).ok()?;
+                if schema.field(index).data_type() != &data_type {
+                    return None;
+                }
+            }
+            let index = schema.index_of("event_time").ok()?;
+            if !matches!(
+                schema.field(index).data_type(),
+                DataType::Timestamp(TimeUnit::Microsecond, _)
+            ) {
+                return None;
+            }
+            let price = schema.index_of("price").ok();
+            let factor = schema.index_of("factor").ok();
+            if price.is_none() && (kind == HotKind::Band || factor.is_none()) {
+                return None;
+            }
+            for index in [price, factor].into_iter().flatten() {
+                if schema.field(index).data_type() != &DataType::Float64 {
+                    return None;
+                }
+            }
+        }
+        let query = if kind == HotKind::Band {
+            band_query(operator.spec.bounds.before_micros / 1_000_000)
+        } else {
+            String::new()
+        };
+        Some(Self {
+            kind,
+            query,
+            left: None,
+            right: None,
+            completed: false,
+        })
+    }
+
+    pub(super) fn has_history(&self) -> bool {
+        self.left.is_some() || self.right.is_some()
+    }
+
+    pub(super) fn needs_migration(&self, ingress: &str) -> bool {
+        self.completed
+            || ingress == "left" && self.left.is_some()
+            || ingress == "right" && self.right.is_some()
+    }
+
+    pub(super) fn history(&self) -> [Option<Batch>; 2] {
+        [self.left.clone(), self.right.clone()]
+    }
+
+    pub(super) async fn process(
+        &mut self,
+        operator: &mut StreamJoinOperator,
+        ingress: &str,
+        batch: &Batch,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        if self.completed {
+            return Err(operator_error(
+                &operator.name,
+                "whole-batch hot Join accepts one input batch per side",
+            ));
+        }
+        let plan = operator.begin_batch(ingress, batch)?;
+        let side = if plan.incoming_is_left {
+            JoinSide::Left
+        } else {
+            JoinSide::Right
+        };
+        let next_row_id = u64::try_from(batch.num_rows())
+            .map_err(|_| counter_overflow(&operator.name, "hot_input_row_id"))?;
+        match side {
+            JoinSide::Left => {
+                self.left = Some(batch.clone());
+                operator.state.next_left_row_id = next_row_id;
+            }
+            JoinSide::Right => {
+                self.right = Some(batch.clone());
+                operator.state.next_right_row_id = next_row_id;
+            }
+        }
+        let (Some(left), Some(right)) = (self.left.as_ref(), self.right.as_ref()) else {
+            return Ok(());
+        };
+        #[cfg(feature = "benchmark-internals")]
+        let execute_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "hot_execute", batch.num_rows());
+        let joined = match self.kind {
+            HotKind::Equi => Self::execute_equi(operator, left, right)?,
+            HotKind::Band => self.execute_band(operator, left, right).await?,
+        };
+        #[cfg(feature = "benchmark-internals")]
+        drop(execute_span);
+        let mut sequence = operator.state.next_output_sequence;
+        let schema = output_schema(operator);
+        #[cfg(feature = "benchmark-internals")]
+        let emit_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "hot_emit", joined.num_rows());
+        for record in joined.table_payload()?.batches() {
+            let record = RecordBatch::try_new_with_options(
+                Arc::clone(&schema),
+                record.columns().to_vec(),
+                &RecordBatchOptions::new().with_row_count(Some(record.num_rows())),
+            )
+            .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+            let metadata = BatchMetadata::new(&operator.name, sequence, BTreeMap::new())?;
+            sequence = sequence
+                .checked_add(1)
+                .ok_or_else(|| counter_overflow(&operator.name, "output_sequence"))?;
+            output
+                .emit("output", Batch::table(vec![record], metadata)?)
+                .await?;
+        }
+        #[cfg(feature = "benchmark-internals")]
+        drop(emit_span);
+        operator.state.next_output_sequence = sequence;
+        operator.state.next_left_row_id = u64::try_from(left.num_rows())
+            .map_err(|_| counter_overflow(&operator.name, "left_row_id"))?;
+        operator.state.next_right_row_id = u64::try_from(right.num_rows())
+            .map_err(|_| counter_overflow(&operator.name, "right_row_id"))?;
+        operator.state.metrics.emitted_match_rows = operator
+            .state
+            .metrics
+            .emitted_match_rows
+            .checked_add(
+                u64::try_from(joined.num_rows())
+                    .map_err(|_| counter_overflow(&operator.name, "emitted_match_rows"))?,
+            )
+            .ok_or_else(|| counter_overflow(&operator.name, "emitted_match_rows"))?;
+        operator.ingress_progress = context.ingress_progress().clone();
+        self.completed = true;
+        Ok(())
+    }
+
+    fn execute_equi(
+        operator: &mut StreamJoinOperator,
+        left: &Batch,
+        right: &Batch,
+    ) -> Result<Batch> {
+        let left = concat_input(operator, left)?;
+        let right = concat_input(operator, right)?;
+        let (left_indices, right_indices) =
+            temporal_indices(operator, &left, &right, operator.spec.bounds.before_micros);
+        super::enforce_match_limit(
+            left_indices.len(),
+            &mut operator.state.metrics.match_limit_failures,
+            operator.spec.limits.max_matches_per_input_batch(),
+            &operator.name,
+        )?;
+        if let Some(projection @ HotProjection::Equi { .. }) = operator.hot_projection {
+            return projected_equi(
+                operator,
+                &left,
+                &right,
+                &left_indices,
+                &right_indices,
+                projection,
+            );
+        }
+        let schema = output_schema(operator);
+        let left_width = operator.input_schema(0).fields().len();
+        let sources = (0..schema.fields().len())
+            .map(|ordinal| output_source(operator, ordinal))
+            .collect::<Vec<_>>();
+        let records = (0..left_indices.len())
+            .step_by(65_536)
+            .map(|start| {
+                let length = (left_indices.len() - start).min(65_536);
+                let left_indices = left_indices.slice(start, length);
+                let right_indices = right_indices.slice(start, length);
+                let columns = sources
+                    .iter()
+                    .map(|&source| {
+                        let (input, indices, column) = if source < left_width {
+                            (&left, &left_indices, source)
+                        } else {
+                            (&right, &right_indices, source - left_width)
+                        };
+                        take(input.column(column), &indices, None)
+                            .map_err(|error| operator_error(&operator.name, &error.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                RecordBatch::try_new(Arc::clone(&schema), columns)
+                    .map_err(|error| operator_error(&operator.name, &error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Batch::table(records, BatchMetadata::default())
+    }
+
+    async fn execute_band(
+        &self,
+        operator: &mut StreamJoinOperator,
+        left: &Batch,
+        right: &Batch,
+    ) -> Result<Batch> {
+        let tables = BTreeMap::from([
+            ("input".into(), left.clone()),
+            ("reference".into(), right.clone()),
+        ]);
+        let query = crate::expression::parse_select_query(&self.query)
+            .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+        let schema = output_schema(operator);
+        let plan = if operator.hot_projection == Some(HotProjection::Band) {
+            crate::datafusion::datafusion_join::plan(&query, &tables, schema, 1)
+        } else {
+            let left_width = operator.input_schema(0).fields().len();
+            let columns = (0..schema.fields().len())
+                .map(|ordinal| {
+                    let source = output_source(operator, ordinal);
+                    if source < left_width {
+                        crate::datafusion::datafusion_join::BandColumn::Left(source)
+                    } else {
+                        crate::datafusion::datafusion_join::BandColumn::Right(source - left_width)
+                    }
+                })
+                .collect::<Vec<_>>();
+            crate::datafusion::datafusion_join::plan_with_output(
+                &query, &tables, schema, columns, 1,
+            )
+        }
+        .ok_or_else(|| operator_error(&operator.name, "native band planning is unsupported"))?;
+        let session = datafusion::execution::context::SessionContext::new_with_config(
+            datafusion::execution::context::SessionConfig::new()
+                .with_target_partitions(1)
+                .with_batch_size(65_536),
+        );
+        let mut stream = datafusion::physical_plan::execute_stream(plan, session.task_ctx())
+            .map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+        let mut records = Vec::new();
+        let mut matches: usize = 0;
+        while let Some(record) = stream.next().await {
+            let record =
+                record.map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+            #[cfg(test)]
+            limit_tests::note_output_batch(record.num_rows());
+            matches = matches
+                .checked_add(record.num_rows())
+                .ok_or_else(|| counter_overflow(&operator.name, "match_count"))?;
+            super::enforce_match_limit(
+                matches,
+                &mut operator.state.metrics.match_limit_failures,
+                operator.spec.limits.max_matches_per_input_batch(),
+                &operator.name,
+            )?;
+            records.push(record);
+        }
+        Batch::table(records, BatchMetadata::default())
+    }
+}
+
+pub(super) fn project_run_record(
+    operator: &StreamJoinOperator,
+    record: &RecordBatch,
+) -> Result<RecordBatch> {
+    let Some(projection) = operator.hot_projection else {
+        return Ok(record.clone());
+    };
+    let (mut columns, left_price, right_price) = match projection {
+        HotProjection::Equi {
+            sequence,
+            left_price,
+            right_price,
+        } => (
+            vec![record.column(sequence).clone()],
+            record.column(left_price).clone(),
+            record.column(right_price).clone(),
+        ),
+        HotProjection::Band => {
+            let left = operator.input_schema(0);
+            let right = operator.input_schema(1);
+            let left_width = left.fields().len();
+            let sequence = left.index_of("sequence").map_err(|error| {
+                operator_error(&operator.name, &format!("hot sequence: {error}"))
+            })?;
+            let right_sequence = right.index_of("sequence").map_err(|error| {
+                operator_error(&operator.name, &format!("hot right sequence: {error}"))
+            })?;
+            let left_price = left
+                .index_of("price")
+                .map_err(|error| operator_error(&operator.name, &format!("hot price: {error}")))?;
+            let right_price = right.index_of("price").map_err(|error| {
+                operator_error(&operator.name, &format!("hot right price: {error}"))
+            })?;
+            (
+                vec![
+                    record.column(sequence).clone(),
+                    record.column(left_width + right_sequence).clone(),
+                ],
+                record.column(left_price).clone(),
+                record.column(left_width + right_price).clone(),
+            )
+        }
+    };
+    let left_price = left_price
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("hot Join price is Float64");
+    let right_price = right_price
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("hot Join right price is Float64");
+    let values = left_price
+        .iter()
+        .zip(right_price.iter())
+        .map(|(left, right)| match (left, right) {
+            (Some(left), Some(right)) => Some(left * right),
+            _ => None,
+        })
+        .collect::<Float64Array>();
+    columns.push(Arc::new(values));
+    RecordBatch::try_new(output_schema(operator), columns)
+        .map_err(|error| operator_error(&operator.name, &error.to_string()))
+}
+
+fn projected_equi(
+    operator: &StreamJoinOperator,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    left_indices: &UInt64Array,
+    right_indices: &UInt64Array,
+    projection: HotProjection,
+) -> Result<Batch> {
+    let schema = output_schema(operator);
+    let records = left_indices
+        .values()
+        .chunks(65_536)
+        .zip(right_indices.values().chunks(65_536))
+        .map(|(left_rows, right_rows)| {
+            projected_equi_record(
+                operator, left, right, left_rows, right_rows, projection, &schema,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Batch::table(records, BatchMetadata::default())
+}
+
+fn projected_equi_record(
+    operator: &StreamJoinOperator,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    left_rows: &[u64],
+    right_rows: &[u64],
+    projection: HotProjection,
+    schema: &SchemaRef,
+) -> Result<RecordBatch> {
+    let HotProjection::Equi {
+        sequence,
+        left_price,
+        right_price,
+    } = projection
+    else {
+        unreachable!("static projection has a concrete shape")
+    };
+    let left_width = operator.input_schema(0).fields().len();
+    let sequences = left
+        .column(sequence)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .expect("hot Join sequence is UInt64");
+    let left_prices = left
+        .column(left_price)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("hot Join price is Float64");
+    let right_prices = right
+        .column(right_price - left_width)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .expect("hot Join factor is Float64");
+    let sequence = left_rows.iter().map(|row| {
+        let row = usize::try_from(*row).expect("Arrow row fits usize");
+        (!sequences.is_null(row)).then(|| sequences.value(row))
+    });
+    let values = left_rows.iter().zip(right_rows).map(|(left, right)| {
+        let left = usize::try_from(*left).expect("Arrow row fits usize");
+        let right = usize::try_from(*right).expect("Arrow row fits usize");
+        if left_prices.is_null(left) || right_prices.is_null(right) {
+            None
+        } else {
+            Some(left_prices.value(left) * right_prices.value(right))
+        }
+    });
+    let columns = vec![
+        Arc::new(sequence.collect::<UInt64Array>()) as ArrayRef,
+        Arc::new(values.collect::<Float64Array>()) as ArrayRef,
+    ];
+    RecordBatch::try_new(Arc::clone(schema), columns)
+        .map_err(|error| operator_error(&operator.name, &error.to_string()))
+}
+
+#[derive(Clone, Copy)]
+struct TemporalEntry {
+    time: i64,
+    row: u64,
+}
+
+fn concat_input(operator: &StreamJoinOperator, input: &Batch) -> Result<RecordBatch> {
+    let table = input.table_payload()?;
+    concat_batches(table.schema(), table.batches())
+        .map_err(|error| operator_error(&operator.name, &error.to_string()))
+}
+
+fn temporal_indices(
+    operator: &StreamJoinOperator,
+    left: &RecordBatch,
+    right: &RecordBatch,
+    before: u64,
+) -> (UInt64Array, UInt64Array) {
+    let right_keys = right
+        .column(operator.compiled.right_key_indices[0])
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("hot Join key is Utf8");
+    let right_times = right
+        .column(operator.compiled.right_event_time_index)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .expect("hot Join time is microseconds");
+    let mut entries =
+        hashbrown::HashMap::<String, Vec<TemporalEntry>, ahash::RandomState>::default();
+    for row in 0..right.num_rows() {
+        if right_keys.is_null(row) || right_times.is_null(row) {
+            continue;
+        }
+        entries
+            .entry_ref(right_keys.value(row))
+            .or_default()
+            .push(TemporalEntry {
+                time: right_times.value(row),
+                row: u64::try_from(row).expect("Arrow row fits u64"),
+            });
+    }
+    for values in entries.values_mut() {
+        values.sort_unstable_by_key(|entry| (entry.time, entry.row));
+    }
+
+    let left_keys = left
+        .column(operator.compiled.left_key_indices[0])
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("hot Join key is Utf8");
+    let left_times = left
+        .column(operator.compiled.left_event_time_index)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .expect("hot Join time is microseconds");
+    let before = i128::from(before);
+    let mut left_indices = Vec::new();
+    let mut right_indices = Vec::new();
+    for row in 0..left.num_rows() {
+        if left_keys.is_null(row) || left_times.is_null(row) {
+            continue;
+        }
+        let Some(candidates) = entries.get(left_keys.value(row)) else {
+            continue;
+        };
+        let time = i128::from(left_times.value(row));
+        let lower = time - before;
+        let start = candidates.partition_point(|entry| i128::from(entry.time) < lower);
+        let end = candidates.partition_point(|entry| i128::from(entry.time) <= time);
+        let row = u64::try_from(row).expect("Arrow row fits u64");
+        left_indices.extend(std::iter::repeat_n(row, end - start));
+        right_indices.extend(candidates[start..end].iter().map(|entry| entry.row));
+    }
+    (
+        UInt64Array::from_iter_values(left_indices),
+        UInt64Array::from_iter_values(right_indices),
+    )
+}
+
+fn output_schema(operator: &StreamJoinOperator) -> SchemaRef {
+    Arc::clone(
+        operator.output_ports[0]
+            .schema()
+            .expect("compiled Join output schema"),
+    )
+}
+
+fn output_source(operator: &StreamJoinOperator, ordinal: usize) -> usize {
+    let field = &output_schema(operator).fields[ordinal];
+    operator
+        .logical_output_schema
+        .index_of(field.name())
+        .expect("projected Join field has a logical source")
+}
+
+fn band_query(seconds: u64) -> String {
+    let seconds = i64::try_from(seconds).expect("hot band is limited to 60 seconds");
+    let offsets = (-seconds..=seconds)
+        .map(|offset| format!("(INTERVAL '{offset} seconds')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "WITH offsets(event_offset) AS (VALUES {offsets}) \
+         SELECT probes.left_sequence AS sequence, \
+         reference.sequence AS right_sequence, \
+         probes.left_price * reference.price AS value \
+         FROM reference JOIN (SELECT input.sequence AS left_sequence, \
+         input.symbol AS left_symbol, input.price AS left_price, \
+         input.event_time + offsets.event_offset AS match_time \
+         FROM input CROSS JOIN offsets) AS probes \
+         ON probes.left_symbol = reference.symbol \
+         AND probes.match_time = reference.event_time"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CancellationToken, EdgeCollector, JoinStateLimits, JoinTimeBounds, JsonMap,
+        OperatorMetadata, StreamJobContext, StreamJoinSpec, StreamOperator,
+    };
+    use datafusion::arrow::{
+        array::{Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+        datatypes::{Field, Schema},
+    };
+    use std::time::Duration;
+
+    fn quote_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]))
+    }
+
+    fn dimension_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("factor", DataType::Float64, false),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+        ]))
+    }
+
+    fn spec() -> StreamJoinSpec {
+        StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "event_time",
+            "event_time",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::ZERO).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("quote", "dimension")
+        .unwrap()
+    }
+
+    fn static_inputs() -> (RecordBatch, RecordBatch) {
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0, 1])),
+                Arc::new(StringArray::from(vec!["S000", "S000"])),
+                Arc::new(Float64Array::from(vec![2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            dimension_schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["S000"])),
+                Arc::new(Float64Array::from(vec![2.0])),
+                Arc::new(UInt64Array::from(vec![0])),
+                Arc::new(TimestampMicrosecondArray::from(vec![1_000_000]).with_timezone("UTC")),
+            ],
+        )
+        .unwrap();
+        (left, right)
+    }
+
+    fn static_left_history() -> RecordBatch {
+        let (left, _) = static_inputs();
+        RecordBatch::try_new(
+            left.schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from(vec![0, 301_000_000]).with_timezone("UTC"),
+                ),
+                left.column(1).clone(),
+                left.column(2).clone(),
+                left.column(3).clone(),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn static_right_history() -> RecordBatch {
+        RecordBatch::try_new(
+            dimension_schema(),
+            vec![
+                Arc::new(StringArray::from(vec!["S000", "S000"])),
+                Arc::new(Float64Array::from(vec![2.0, 2.0])),
+                Arc::new(UInt64Array::from(vec![0, 1])),
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC")),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn static_operator(fused: bool) -> StreamJoinOperator {
+        let mut operator =
+            StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec()).unwrap();
+        if fused {
+            operator
+                .set_hot_projection(
+                    HotProjection::Equi {
+                        sequence: 1,
+                        left_price: 3,
+                        right_price: 5,
+                    },
+                    Arc::new(Schema::new(vec![
+                        Field::new("sequence", DataType::UInt64, false),
+                        Field::new("value", DataType::Float64, false),
+                    ])),
+                )
+                .unwrap();
+        }
+        operator.enable_native_checkpoint().unwrap();
+        operator
+    }
+
+    fn static_pairs(messages: &[crate::StreamMessage], fused: bool) -> Vec<(u64, f64)> {
+        prefixed_pairs(messages, fused, "quote", "dimension", "factor")
+    }
+
+    fn band_pairs(messages: &[crate::StreamMessage], fused: bool) -> Vec<(u64, f64)> {
+        prefixed_pairs(messages, fused, "left", "right", "price")
+    }
+
+    fn prefixed_pairs(
+        messages: &[crate::StreamMessage],
+        fused: bool,
+        left_prefix: &str,
+        right_prefix: &str,
+        right_value: &str,
+    ) -> Vec<(u64, f64)> {
+        let sequence_name = if fused {
+            "sequence".into()
+        } else {
+            format!("{left_prefix}__sequence")
+        };
+        let left_value_name = if fused {
+            "value".into()
+        } else {
+            format!("{left_prefix}__price")
+        };
+        let right_value_name = format!("{right_prefix}__{right_value}");
+        let mut pairs = Vec::new();
+        for message in messages {
+            let batch = message.as_data().unwrap();
+            let record = &batch.table_payload().unwrap().batches()[0];
+            let sequence = record
+                .column(record.schema().index_of(&sequence_name).unwrap())
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let values = if fused {
+                record
+                    .column(record.schema().index_of("value").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .clone()
+            } else {
+                let left = record
+                    .column(record.schema().index_of(&left_value_name).unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let right = record
+                    .column(record.schema().index_of(&right_value_name).unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                left.iter()
+                    .zip(right.iter())
+                    .map(|(left, right)| Some(left.unwrap() * right.unwrap()))
+                    .collect::<Float64Array>()
+            };
+            pairs.extend(
+                sequence
+                    .iter()
+                    .zip(values.iter())
+                    .map(|(sequence, value)| (sequence.unwrap(), value.unwrap())),
+            );
+        }
+        pairs
+    }
+
+    fn hot_context(job: &StreamJobContext) -> StreamOperatorContext<'_> {
+        StreamOperatorContext::new(job, "hot", None)
+    }
+
+    struct NoopLateMetrics;
+
+    impl crate::operator::LateMetricSink for NoopLateMetrics {
+        fn record(&self, _delta: crate::operator::LateMetricDelta) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn hot_ended_context(job: &StreamJobContext) -> StreamOperatorContext<'_> {
+        let progress = crate::IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                crate::IngressProgress::new(
+                    crate::IngressState::Ended,
+                    Some(crate::EventTime::from_micros(0)),
+                ),
+            ),
+            (
+                "right".into(),
+                crate::IngressProgress::new(
+                    crate::IngressState::Ended,
+                    Some(crate::EventTime::from_micros(0)),
+                ),
+            ),
+        ]));
+        StreamOperatorContext::for_task(
+            job,
+            "hot",
+            None,
+            progress,
+            crate::EdgeBudget::default(),
+            Arc::new(NoopLateMetrics),
+        )
+    }
+
+    async fn native_snapshot(operator: &mut StreamJoinOperator) -> crate::OperatorStateSnapshot {
+        let name = operator.name.clone();
+        let capture = operator
+            .native_checkpoint(crate::Epoch::new(1).unwrap())
+            .unwrap()
+            .expect("hot Join native capture");
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temporary.path().join("lineage"));
+        let entry = crate::state::v4::native::persist_native(
+            &mut store,
+            &name,
+            capture,
+            1,
+            BTreeMap::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let mut manifest = crate::state::v4::V4Manifest::from_bytes(
+            include_str!("../../../tests/fixtures/checkpoint-v4/manifest-v4.json").as_bytes(),
+        )
+        .unwrap();
+        manifest.operators = BTreeMap::from([(name.clone(), entry)]);
+        manifest.epoch = 1;
+        manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
+        store.publish_manifest(&manifest).unwrap();
+        crate::state::v4::native::load_native(&mut store, &manifest, &name).unwrap()
+    }
+
+    #[tokio::test]
+    async fn hot_multi_accumulates_same_side_batches_before_joining() {
+        for fused in [false, true] {
+            let mut operator = static_operator(fused);
+            let left = static_left_history();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for record in [left.slice(0, 1), left.slice(1, 1)] {
+                operator
+                    .process_data(
+                        "left",
+                        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+            }
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![static_right_history()], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                static_pairs(&collector.drain("output"), fused),
+                [(0, 4.0), (1, 6.0)],
+                "fused={fused}"
+            );
+            assert_eq!(operator.state.metrics.emitted_match_rows, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_multi_continues_after_the_first_pair_without_replaying_matches() {
+        for fused in [false, true] {
+            let mut operator = static_operator(fused);
+            let left = static_left_history();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = hot_context(&job);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for (side, record) in [
+                ("left", left.slice(0, 1)),
+                ("right", static_right_history()),
+                ("left", left.slice(1, 1)),
+            ] {
+                operator
+                    .process_data(
+                        side,
+                        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+            }
+            let messages = collector.drain("output");
+            assert_eq!(
+                static_pairs(&messages, fused),
+                [(0, 4.0), (1, 6.0)],
+                "fused={fused}"
+            );
+            assert_eq!(messages[0].as_data().unwrap().metadata().sequence(), 0);
+            assert_eq!(messages[1].as_data().unwrap().metadata().sequence(), 1);
+            assert_eq!(operator.state.metrics.emitted_match_rows, 2);
+            assert_eq!(operator.state.next_left_row_id, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_multi_static_enforces_the_match_limit_before_emitting() {
+        let mut operator = static_operator(false);
+        operator.spec.limits.max_matches_per_input_batch = 1;
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = hot_context(&job);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, record) in [
+            ("left", static_left_history()),
+            ("right", static_right_history()),
+        ] {
+            let result = operator
+                .process_data(
+                    side,
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await;
+            if side == "left" {
+                result.unwrap();
+            } else {
+                let error = result.expect_err("two static matches must exceed the cap of one");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("input batch match limit exceeded")
+                );
+            }
+        }
+        assert!(collector.drain("output").is_empty());
+        assert_eq!(operator.state.metrics.match_limit_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn hot_multi_native_checkpoint_preserves_a_pending_side() {
+        for fused in [false, true] {
+            let mut original = static_operator(fused);
+            let left = static_left_history();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = hot_context(&job);
+            let mut original_output = EdgeCollector::new(original.output_ports().to_vec());
+            original
+                .process_data(
+                    "left",
+                    Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut original_output,
+                )
+                .await
+                .unwrap();
+            assert!(original_output.drain("output").is_empty());
+            assert_eq!(original.state.next_left_row_id, 2);
+            let snapshot = native_snapshot(&mut original).await;
+            let mut restored = static_operator(fused);
+            restored.restore_native(&snapshot).unwrap();
+            let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+            restored
+                .process_data(
+                    "right",
+                    Batch::table(vec![static_right_history()], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut restored_output,
+                )
+                .await
+                .unwrap();
+            let messages = restored_output.drain("output");
+            assert_eq!(
+                static_pairs(&messages, fused),
+                [(0, 4.0), (1, 6.0)],
+                "fused={fused}"
+            );
+            assert_eq!(messages[0].as_data().unwrap().metadata().sequence(), 0);
+            assert_eq!(restored.state.metrics.emitted_match_rows, 2);
+            assert_eq!(restored.state.next_right_row_id, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_multi_native_checkpoint_restores_history_and_output_sequence() {
+        for fused in [false, true] {
+            let mut original = static_operator(fused);
+            let left = static_left_history();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = hot_context(&job);
+            let mut original_output = EdgeCollector::new(original.output_ports().to_vec());
+            for (side, record) in [
+                ("left", left.slice(0, 1)),
+                ("right", static_right_history()),
+            ] {
+                original
+                    .process_data(
+                        side,
+                        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut original_output,
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                static_pairs(&original_output.drain("output"), fused),
+                [(0, 4.0)]
+            );
+            let snapshot = native_snapshot(&mut original).await;
+            let mut restored = static_operator(fused);
+            restored.restore_native(&snapshot).unwrap();
+            let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+            restored
+                .process_data(
+                    "left",
+                    Batch::table(vec![left.slice(1, 1)], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut restored_output,
+                )
+                .await
+                .unwrap();
+            let messages = restored_output.drain("output");
+            assert_eq!(static_pairs(&messages, fused), [(1, 6.0)], "fused={fused}");
+            assert_eq!(messages[0].as_data().unwrap().metadata().sequence(), 1);
+            assert_eq!(restored.state.metrics.emitted_match_rows, 2);
+            assert_eq!(restored.state.next_left_row_id, 2);
+        }
+    }
+
+    fn large_static_inputs(rows: usize, dimensions: usize) -> (RecordBatch, RecordBatch) {
+        let symbols = (0..rows)
+            .map(|row| format!("S{:03}", row % dimensions))
+            .collect::<Vec<_>>();
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(0, rows))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    symbols.iter().map(String::as_str),
+                )),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, rows,
+                ))),
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            dimension_schema(),
+            vec![
+                Arc::new(StringArray::from_iter_values(
+                    symbols[..dimensions].iter().map(String::as_str),
+                )),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, dimensions,
+                ))),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..dimensions).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(0, dimensions))
+                        .with_timezone("UTC"),
+                ),
+            ],
+        )
+        .unwrap();
+        (left, right)
+    }
+
+    #[tokio::test]
+    async fn hot_multi_native_checkpoint_accepts_large_static_history() {
+        let rows = 1_000_000usize;
+        let dimensions = 64usize;
+        let capacity = u64::try_from(dimensions + rows).unwrap();
+        let spec = StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "event_time",
+            "event_time",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::ZERO).unwrap(),
+            JoinStateLimits::new(capacity, 1 << 30, capacity).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("quote", "dimension")
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec).unwrap();
+        operator
+            .set_hot_projection(
+                HotProjection::Equi {
+                    sequence: 1,
+                    left_price: 3,
+                    right_price: 5,
+                },
+                Arc::new(Schema::new(vec![
+                    Field::new("sequence", DataType::UInt64, false),
+                    Field::new("value", DataType::Float64, false),
+                ])),
+            )
+            .unwrap();
+        operator.enable_native_checkpoint().unwrap();
+        let (left, right) = large_static_inputs(rows, dimensions);
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = hot_context(&job);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, record) in [("left", left), ("right", right)] {
+            operator
+                .process_data(
+                    side,
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            collector
+                .drain("output")
+                .iter()
+                .map(|message| message.as_data().unwrap().num_rows())
+                .sum::<usize>(),
+            rows
+        );
+        let ended = hot_ended_context(&job);
+        for side in ["left", "right"] {
+            operator.on_ingress_progress(side, &ended).await.unwrap();
+        }
+        operator.on_end(&ended, &mut collector).await.unwrap();
+        assert!(operator.state.ended);
+        drop(native_snapshot(&mut operator).await);
+        let core = operator.run_core.as_ref().unwrap();
+        assert_eq!(core.rows(JoinSide::Left), 0);
+        assert_eq!(core.rows(JoinSide::Right), 0);
+        assert_eq!(operator.state.metrics.left.retained_rows, 0);
+        assert_eq!(operator.state.metrics.right.retained_rows, 0);
+    }
+
+    #[tokio::test]
+    async fn hot_join_emits_the_complete_downstream_schema() {
+        for (projection, fused) in [(None, false), (Some(vec![1, 3, 5]), false), (None, true)] {
+            let mut operator =
+                StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec()).unwrap();
+            if fused {
+                operator
+                    .set_hot_projection(
+                        HotProjection::Equi {
+                            sequence: 1,
+                            left_price: 3,
+                            right_price: 5,
+                        },
+                        Arc::new(Schema::new(vec![
+                            Field::new("sequence", DataType::UInt64, false),
+                            Field::new("value", DataType::Float64, false),
+                        ])),
+                    )
+                    .unwrap();
+            } else if let Some(columns) = &projection {
+                operator.set_output_projection(columns.clone()).unwrap();
+            }
+            operator.enable_run_core();
+            let (left, right) = static_inputs();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = StreamOperatorContext::new(&job, "hot", None);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            operator
+                .process_data(
+                    "left",
+                    Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            operator
+                .process_data(
+                    "right",
+                    Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+
+            let messages = collector.drain("output");
+            assert_eq!(messages.len(), 1);
+            let output = messages[0].as_data().unwrap();
+            assert_eq!(output.num_rows(), 1);
+            let record = &output.table_payload().unwrap().batches()[0];
+            assert_eq!(
+                record.schema().fields().len(),
+                if fused {
+                    2
+                } else {
+                    projection.as_ref().map_or(8, Vec::len)
+                }
+            );
+            if fused {
+                let sequence = record
+                    .column(record.schema().index_of("sequence").unwrap())
+                    .as_any()
+                    .downcast_ref::<UInt64Array>()
+                    .unwrap();
+                assert_eq!(sequence.values(), &[1]);
+                let value = record
+                    .column(record.schema().index_of("value").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(value.values(), &[6.0]);
+            } else {
+                let price = record
+                    .column(record.schema().index_of("quote__price").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(price.values(), &[3.0]);
+                let factor = record
+                    .column(record.schema().index_of("dimension__factor").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(factor.values(), &[2.0]);
+            }
+            assert_eq!(operator.state.metrics.emitted_match_rows, 1);
+            let core = operator.run_core.as_ref().unwrap();
+            assert!(core.hot_enabled());
+            assert_eq!(core.rows(JoinSide::Left), 0);
+            assert_eq!(core.rows(JoinSide::Right), 0);
+        }
+    }
+
+    fn band_spec() -> StreamJoinSpec {
+        StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "event_time",
+            "event_time",
+            JoinTimeBounds::new(Duration::from_secs(5), Duration::from_secs(5)).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("left", "right")
+        .unwrap()
+    }
+
+    fn band_history(prices: [f64; 2]) -> RecordBatch {
+        RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 10_000_000]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0, 1])),
+                Arc::new(StringArray::from(vec!["S000", "S000"])),
+                Arc::new(Float64Array::from(prices.to_vec())),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn band_operator(fused: bool) -> StreamJoinOperator {
+        let mut operator =
+            StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
+                .unwrap();
+        if fused {
+            operator
+                .set_hot_projection(
+                    HotProjection::Band,
+                    Arc::new(Schema::new(vec![
+                        Field::new("sequence", DataType::UInt64, false),
+                        Field::new("right_sequence", DataType::UInt64, false),
+                        Field::new("value", DataType::Float64, false),
+                    ])),
+                )
+                .unwrap();
+        }
+        operator.enable_native_checkpoint().unwrap();
+        operator
+    }
+
+    #[tokio::test]
+    async fn hot_multi_band_native_checkpoint_restores_history_and_output_sequence() {
+        for fused in [false, true] {
+            let mut original = band_operator(fused);
+            let left = band_history([2.0, 3.0]);
+            let right = band_history([2.0, 2.0]);
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = StreamOperatorContext::new(&job, "hot-band", None);
+            let mut original_output = EdgeCollector::new(original.output_ports().to_vec());
+            for (side, record) in [("left", left.slice(0, 1)), ("right", right)] {
+                original
+                    .process_data(
+                        side,
+                        Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut original_output,
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                band_pairs(&original_output.drain("output"), fused),
+                [(0, 4.0)]
+            );
+            let snapshot = native_snapshot(&mut original).await;
+            let mut restored = band_operator(fused);
+            restored.restore_native(&snapshot).unwrap();
+            let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+            restored
+                .process_data(
+                    "left",
+                    Batch::table(vec![left.slice(1, 1)], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut restored_output,
+                )
+                .await
+                .unwrap();
+            let messages = restored_output.drain("output");
+            assert_eq!(band_pairs(&messages, fused), [(1, 6.0)], "fused={fused}");
+            assert_eq!(messages[0].as_data().unwrap().metadata().sequence(), 1);
+            assert_eq!(restored.state.metrics.emitted_match_rows, 2);
+            assert_eq!(restored.state.next_left_row_id, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_band_emits_requested_input_columns() {
+        for (projection, fused) in [(None, false), (Some(vec![1, 3, 5, 7]), false), (None, true)] {
+            let mut operator =
+                StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
+                    .unwrap();
+            if fused {
+                operator
+                    .set_hot_projection(
+                        HotProjection::Band,
+                        Arc::new(Schema::new(vec![
+                            Field::new("sequence", DataType::UInt64, false),
+                            Field::new("right_sequence", DataType::UInt64, false),
+                            Field::new("value", DataType::Float64, false),
+                        ])),
+                    )
+                    .unwrap();
+            } else if let Some(columns) = &projection {
+                operator.set_output_projection(columns.clone()).unwrap();
+            }
+            operator.enable_run_core();
+            let record = RecordBatch::try_new(
+                quote_schema(),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![0, 1_000_000]).with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from(vec![0, 1])),
+                    Arc::new(StringArray::from(vec!["S000", "S000"])),
+                    Arc::new(Float64Array::from(vec![2.0, 3.0])),
+                ],
+            )
+            .unwrap();
+            let job = StreamJobContext::new(
+                1,
+                "fingerprint",
+                JsonMap::new(),
+                None,
+                CancellationToken::new(),
+            )
+            .with_checkpointing(false);
+            let context = StreamOperatorContext::new(&job, "hot-band", None);
+            let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+            for side in ["left", "right"] {
+                operator
+                    .process_data(
+                        side,
+                        Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap(),
+                        &context,
+                        &mut collector,
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            let messages = collector.drain("output");
+            assert_eq!(messages.len(), 1);
+            let output = messages[0].as_data().unwrap();
+            assert_eq!(output.num_rows(), 4);
+            let record = &output.table_payload().unwrap().batches()[0];
+            assert_eq!(
+                record.schema().fields().len(),
+                if fused {
+                    3
+                } else {
+                    projection.as_ref().map_or(8, Vec::len)
+                }
+            );
+            if fused {
+                let value = record
+                    .column(record.schema().index_of("value").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(value.values(), &[4.0, 6.0, 6.0, 9.0]);
+            } else {
+                let left = record
+                    .column(record.schema().index_of("left__price").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(left.values(), &[2.0, 2.0, 3.0, 3.0]);
+                let right = record
+                    .column(record.schema().index_of("right__price").unwrap())
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                assert_eq!(right.values(), &[2.0, 3.0, 2.0, 3.0]);
+            }
+            let right_sequence_name = if fused {
+                "right_sequence"
+            } else {
+                "right__sequence"
+            };
+            let right_sequence = record
+                .column(record.schema().index_of(right_sequence_name).unwrap())
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert_eq!(right_sequence.values(), &[0, 1, 0, 1]);
+            assert_eq!(operator.state.metrics.emitted_match_rows, 4);
+            assert!(operator.run_core.as_ref().unwrap().hot_enabled());
+        }
+    }
+
+    #[tokio::test]
+    async fn hot_band_uses_large_output_batches() {
+        let rows = 70_000usize;
+        let record = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(
+                        (0..rows).map(|row| i64::try_from((row % 2) * 1_000_000).unwrap()),
+                    )
+                    .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    "S000", rows,
+                ))),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, rows,
+                ))),
+            ],
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
+                .unwrap();
+        operator.spec.limits.max_matches_per_input_batch = 140_000;
+        operator
+            .set_hot_projection(
+                HotProjection::Band,
+                Arc::new(Schema::new(vec![
+                    Field::new("sequence", DataType::UInt64, false),
+                    Field::new("right_sequence", DataType::UInt64, false),
+                    Field::new("value", DataType::Float64, false),
+                ])),
+            )
+            .unwrap();
+        operator.enable_run_core();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "hot-band", None);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, input) in [("left", record.clone()), ("right", record.slice(0, 2))] {
+            operator
+                .process_data(
+                    side,
+                    Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+        }
+        let messages = collector.drain("output");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].as_data().unwrap().num_rows(), 65_536);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.as_data().unwrap().num_rows())
+                .sum::<usize>(),
+            2 * rows
+        );
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use crate::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec};
+    use datafusion::arrow::datatypes::{Field, Schema};
+    use std::{cell::Cell, time::Duration};
+
+    thread_local! {
+        static OUTPUT_BATCHES: Cell<usize> = const { Cell::new(0) };
+        static OUTPUT_ROWS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn note_output_batch(rows: usize) {
+        OUTPUT_BATCHES.with(|count| count.set(count.get() + 1));
+        OUTPUT_ROWS.with(|total| total.set(total.get() + rows));
+    }
+
+    fn quote_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new(
+                "event_time",
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                false,
+            ),
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("symbol", DataType::Utf8, false),
+            Field::new("price", DataType::Float64, false),
+        ]))
+    }
+
+    fn band_spec() -> StreamJoinSpec {
+        StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "event_time",
+            "event_time",
+            JoinTimeBounds::new(Duration::from_secs(5), Duration::from_secs(5)).unwrap(),
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("left", "right")
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hot_band_rejects_excess_matches_without_collecting_all_output() {
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0])),
+                Arc::new(StringArray::from(vec!["S000"])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 0]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0, 1])),
+                Arc::new(StringArray::from(vec!["S000", "S000"])),
+                Arc::new(Float64Array::from(vec![2.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let mut spec = band_spec();
+        spec.limits.max_matches_per_input_batch = 1;
+        let mut operator =
+            StreamJoinOperator::new("hot-band-limit", quote_schema(), quote_schema(), spec)
+                .unwrap();
+        let core = HotJoinCore::new(&operator).unwrap();
+        let error = core
+            .execute_band(
+                &mut operator,
+                &Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                &Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+            )
+            .await
+            .expect_err("two matches must exceed the configured cap of one");
+        assert!(
+            error
+                .to_string()
+                .contains("input batch match limit exceeded")
+        );
+        assert_eq!(operator.state.metrics.match_limit_failures, 1);
+    }
+
+    #[test]
+    fn hot_band_stops_after_first_oversized_output_batch() {
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0])),
+                Arc::new(StringArray::from(vec!["S000"])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let rows = 100_000;
+        let right = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(0, rows))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    "S000", rows,
+                ))),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, rows,
+                ))),
+            ],
+        )
+        .unwrap();
+        let mut spec = band_spec();
+        spec.limits.max_matches_per_input_batch = 1;
+        let mut operator =
+            StreamJoinOperator::new("hot-band-limit", quote_schema(), quote_schema(), spec)
+                .unwrap();
+        let core = HotJoinCore::new(&operator).unwrap();
+        let left = Batch::table(vec![left], BatchMetadata::default()).unwrap();
+        let right = Batch::table(vec![right], BatchMetadata::default()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        OUTPUT_BATCHES.with(|count| count.set(0));
+        OUTPUT_ROWS.with(|total| total.set(0));
+        let mut result = None;
+        let allocations = allocation_counter::measure(|| {
+            result = Some(runtime.block_on(core.execute_band(&mut operator, &left, &right)));
+        });
+        let error = result
+            .expect("the BandJoin measurement must run")
+            .expect_err("the first output batch must exceed the configured cap of one");
+        assert!(
+            error
+                .to_string()
+                .contains("input batch match limit exceeded")
+        );
+        assert_eq!(operator.state.metrics.match_limit_failures, 1);
+        assert_eq!(OUTPUT_BATCHES.with(Cell::get), 1);
+        assert_eq!(OUTPUT_ROWS.with(Cell::get), 65_536);
+        assert!(
+            allocations.bytes_max < 16 * 1024 * 1024,
+            "the first output batch and planning must remain below 16 MiB: {allocations:?}"
+        );
+        eprintln!(
+            "BandJoin limit resource: right_rows={rows}, output_batches=1, output_rows=65536, allocations={allocations:?}"
+        );
+    }
+}

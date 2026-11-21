@@ -1,5 +1,5 @@
 use super::{
-    Arc, DataType, GatherStop, MemoryReservation, RecordBatch, RecordWork, Result, ScalarValue,
+    Arc, DataType, MemoryReservation, MorselLease, RecordBatch, RecordWork, Result, ScalarValue,
     Update, checked_bytes, df_error,
 };
 use datafusion::arrow::{
@@ -22,7 +22,7 @@ pub(in crate::operator::sql) struct State {
 fn capacity(
     records: &[RecordBatch],
     previous: Option<&State>,
-    stop: &GatherStop,
+    stop: &MorselLease,
     name: &str,
 ) -> Result<usize> {
     let schema = records[0].schema();
@@ -52,7 +52,7 @@ fn column_capacity(
     records: &[RecordBatch],
     previous: Option<&State>,
     column: usize,
-    stop: &GatherStop,
+    stop: &MorselLease,
     name: &str,
 ) -> Result<usize> {
     match dtype {
@@ -72,7 +72,7 @@ fn string_capacity<O: OffsetSizeTrait>(
     records: &[RecordBatch],
     previous: Option<&State>,
     column: usize,
-    stop: &GatherStop,
+    stop: &MorselLease,
     name: &str,
 ) -> Result<usize> {
     let mut total = 0;
@@ -93,7 +93,7 @@ fn string_capacity<O: OffsetSizeTrait>(
     checked_bytes(values, [(ROWS + 1, size_of::<O>())], name)
 }
 
-fn largest_string<O: OffsetSizeTrait>(offsets: &[O], stop: &GatherStop) -> Result<usize> {
+fn largest_string<O: OffsetSizeTrait>(offsets: &[O], stop: &MorselLease) -> Result<usize> {
     let mut largest = 0;
     for (index, pair) in offsets.windows(2).enumerate() {
         if index % ROWS == 0 {
@@ -107,7 +107,7 @@ fn largest_string<O: OffsetSizeTrait>(offsets: &[O], stop: &GatherStop) -> Resul
 pub(super) fn run(
     work: &RecordWork,
     predicate: &super::super::predicate::InputPredicate,
-    stop: &GatherStop,
+    stop: &MorselLease,
 ) -> Result<Update> {
     reserve_buffers(work, stop)?;
     let saved = work
@@ -138,7 +138,7 @@ pub(super) fn run(
     )
 }
 
-fn reserve_buffers(work: &RecordWork, stop: &GatherStop) -> Result<()> {
+fn reserve_buffers(work: &RecordWork, stop: &MorselLease) -> Result<()> {
     let bound = capacity(&work.records, work.previous.as_deref(), stop, &work.name)?;
     super::super::ensure_reservation(
         work.coalesced_scratch
@@ -160,7 +160,7 @@ fn reserve_buffers(work: &RecordWork, stop: &GatherStop) -> Result<()> {
 fn restore_tail(
     work: &RecordWork,
     coalescer: &mut BatchCoalescer,
-    stop: &GatherStop,
+    stop: &MorselLease,
 ) -> Result<()> {
     if let Some(previous) = &work.previous {
         for offset in (0..previous.tail.num_rows()).step_by(ROWS / 2) {
@@ -184,7 +184,7 @@ fn update_records(
     predicate: &super::super::predicate::InputPredicate,
     coalescer: &mut BatchCoalescer,
     accumulators: &mut Accumulators,
-    stop: &GatherStop,
+    stop: &MorselLease,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     for record in &work.records {
@@ -221,7 +221,7 @@ fn finish_update(
     accumulators: &mut Accumulators,
     coalescer: &mut BatchCoalescer,
     schema: super::SchemaRef,
-    stop: &GatherStop,
+    stop: &MorselLease,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<Update> {
     let complete = work.values(accumulators, check)?;
@@ -261,7 +261,7 @@ fn finish_state(
     work: &RecordWork,
     complete: Vec<Vec<ScalarValue>>,
     tail: RecordBatch,
-    stop: &GatherStop,
+    stop: &MorselLease,
 ) -> Result<Arc<State>> {
     let reservation = work
         .coalesced_credit

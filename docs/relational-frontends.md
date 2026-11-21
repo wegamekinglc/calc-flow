@@ -40,7 +40,8 @@ async def run(data):
 
 Exit, cancellation, exceptions and EOF await owned cleanup. Each fresh stream
 context owns a fresh job; iterators and explicit source bindings have one active
-owner. Convenience streams use temporary state and do not promise durable replay.
+owner. Convenience streams run without checkpoints by default and do not promise
+durable replay.
 Use the explicit runner and managed checkpoint contracts for recovery.
 
 Provide exactly one of `mode="batch"|"stream"` or legacy
@@ -313,8 +314,9 @@ No synthetic maximum watermark is used. Compare whole results with
 of the same complete input were accepted. A closed-window prefix remains
 `finality_unproven` without a concrete selected cut. Explicit latest accepts
 append inputs and rejects complete snapshots entering windows before resources
-are acquired. Window state version remains 1; supported checkpoint layouts are
-1 and 2, with no checkpoint format change.
+are acquired. Window semantic state version remains 1. Per-window snapshots use
+physical layouts 1 and 2. Project and manifest formats are unchanged. See
+[window state and storage](runtime-envelope.md#window-state-and-storage).
 
 Run [the Python example](../examples/finite_event_window.py) or
 [the standalone Rust core example](../crates/calc-flow/examples/finite_event_window.rs).

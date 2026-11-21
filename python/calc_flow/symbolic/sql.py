@@ -37,18 +37,30 @@ def snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr:
     return _sql_declaration("snapshot_sql", query, tables)
 
 
-def _sql_declaration(kind: str, query: str, tables: dict[str, TableExpr]) -> TableExpr:
+def changelog_sql(query: str, /, **tables: TableExpr) -> TableExpr:
+    """Declare a compact stream aggregate that emits retract/upsert changes."""
+    return _sql_declaration("sql", query, tables, aggregate_output="changelog")
+
+
+def _sql_declaration(
+    kind: str,
+    query: str,
+    tables: dict[str, TableExpr],
+    *,
+    aggregate_output: str | None = None,
+) -> TableExpr:
     require_non_empty_str(query, f"{kind}.query")
     names = _sql_aliases(kind, tables)
+    if aggregate_output == "changelog" and len(names) != 1:
+        raise ValueError("changelog_sql.tables: expected one table alias")
+    attrs = {
+        "query": CStr(query),
+        "aliases": CSeq(tuple(CStr(name) for name in names)),
+    }
+    if aggregate_output is not None:
+        attrs["aggregate_output"] = CStr(aggregate_output)
     return TableExpr(
-        build(
-            kind,
-            tuple(tables[name]._node for name in names),
-            {
-                "query": CStr(query),
-                "aliases": CSeq(tuple(CStr(name) for name in names)),
-            },
-        )
+        build(kind, tuple(tables[name]._node for name in names), attrs)
     )
 
 

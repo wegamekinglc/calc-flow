@@ -344,7 +344,9 @@ def test_over_unknown_source_is_rejected_before_iterator_and_root(monkeypatch):
         with pytest.raises(
             cf.StreamingRuntimeError, match="source_boundedness_unproved"
         ):
-            async with program.stream({"events": Unknown()}):
+            async with program.stream(
+                {"events": Unknown()}, config=cf.StreamRuntimeConfig(checkpointing=True)
+            ):
                 pass
 
     asyncio.run(run())

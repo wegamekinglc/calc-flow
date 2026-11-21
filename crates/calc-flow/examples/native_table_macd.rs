@@ -5,8 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use calc_flow::{
     Batch, BatchMetadata, ExecutionOptions, LateErrorScope, LatePolicySpec, MacdComponent,
     PipelineBuilder, ROLLING_CONFIGURATION_VERSION, ROLLING_MACD_STATE_LAYOUT_VERSION,
-    RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
-    UdfRegistry,
+    RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{ArrayRef, Float64Array, TimestampMicrosecondArray, UInt64Array},
@@ -54,7 +53,6 @@ fn specification() -> RollingSpec {
     RollingSpec {
         configuration_version: ROLLING_CONFIGURATION_VERSION,
         state_layout_version: ROLLING_MACD_STATE_LAYOUT_VERSION,
-        numerical_profile: RollingNumericalProfile::StableV1,
         partition_by: vec!["entity".into()],
         event_time: "ts".into(),
         sequence_by: vec!["seq".into()],

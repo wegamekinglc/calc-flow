@@ -1,0 +1,220 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-20T13:56:32+08:00",
+    "baseline": {
+      "kind": "archived_descriptive_reference",
+      "revision": "98012d8a91bb3d0847a50cb77d21025f13629864",
+      "evidence": ".codex/artifacts/analysis/join-single-thread-performance.md",
+      "join_p50_ms": 78.51,
+      "interval_p50_ms": 672.51,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "212ca55b8b8a7deabd37a33f105122c6458e31a8",
+      "required_tracked_source_clean": true,
+      "build_budget": "separate from the 600-second acquisition budget"
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "Join, interval; no retries or extensions",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "state_root_policy": "new empty root for every warmup and measured observation; never reuse diagnostic, failed or per-observation sample-N checkpoint roots"
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "shared-key run admission, native probe and materialization",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 78.51
+      },
+      {
+        "id": "interval-1m-single-cpu",
+        "scenario": "interval_join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "native interval selection, run/index updates and output materialization",
+        "threshold_p50_ms": 350,
+        "baseline_p50_ms": 672.51
+      }
+    ],
+    "startup_diagnostics": {
+      "initial_ready_timeout_seconds": 30,
+      "previous_failure": "each EngineCase restarted at sample-1; the second warmup restored the first warmup's terminal checkpoint and never opened current Python sources or sink",
+      "previous_evidence": "target/p5-join-measurement-final/join-1m-single-cpu/sample-1/failure-before-cancel.json",
+      "valid_samples_before_diagnosis": 0,
+      "retry_policy": "per-observation root isolation validity fix; one complete acquisition; no timing-driven retries"
+    },
+    "unmeasured": "partition-index serialization cost, other row counts/types/modes, ASOF and the remaining acceptance matrix"
+  },
+  "candidate": {
+    "wheel": "target/p5-join-wheel-212ca55b/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "aa22455ef8bfad91c5866119b470f3930bbdadab6eaaba7a1d8b961dcbabff57",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-join-venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "4a1e8090e54b1c06f6fea180555b2ab205013773514846d556b5ca9cfcdd244e",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "cpu0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "shared-key run admission, native probe and materialization",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 78.51,
+      "samples": [
+        {
+          "seconds": 0.423947732,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.424876695,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.431473924,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.425439809,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.420423453,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.425878001,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.422721252,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.417742907,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.428624216,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.420421948,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 424.4122135,
+      "p95_ms": 430.19155539999997,
+      "threshold_pass": false,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 610.1736994749517,
+  "within_budget": false,
+  "error": "TimeoutError()"
+}

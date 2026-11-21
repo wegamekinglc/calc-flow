@@ -2,7 +2,7 @@ use super::*;
 use arrow::array::Float64Array;
 use async_trait::async_trait;
 use calc_flow::{
-    BatchMetadata, CheckpointManifest, Cursor, DeliveryGuarantee, ExpressionOperator, JobState,
+    BatchMetadata, Cursor, DeliveryGuarantee, ExpressionOperator, JobState,
     ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder, ReplayPositioning,
     Result, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
     SourceSchema, StreamRequirements, StreamRuntimeConfig, StreamSource, StreamingRunner,
@@ -159,11 +159,13 @@ async fn runner(root: &Path, url: &Url, source: ReplaySource) -> StreamingRunner
 }
 
 async fn manifests(root: &Path) -> BTreeMap<String, Vec<u8>> {
-    let mut entries = tokio::fs::read_dir(root.join("manifests")).await.unwrap();
+    let mut entries = tokio::fs::read_dir(root.join("manifests/lineage/manifests"))
+        .await
+        .unwrap();
     let mut manifests = BTreeMap::new();
     while let Some(entry) = entries.next_entry().await.unwrap() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("manifest-")
+        if name.starts_with("epoch-")
             && entry
                 .path()
                 .extension()
@@ -219,8 +221,9 @@ async fn invalid_values_do_not_publish_a_manifest_and_previous_checkpoint_recove
         assert_eq!(first.cancel().await.state, JobState::Cancelled);
         let saved = manifests(root.path()).await;
         assert_eq!(saved.len(), 1);
-        let manifest = CheckpointManifest::from_bytes(saved.values().next().unwrap()).unwrap();
-        assert_eq!(manifest.epoch(), epoch);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(saved.values().next().unwrap()).unwrap();
+        assert_eq!(manifest["epoch"].as_u64().unwrap(), epoch.as_u64());
 
         let bad = runner(root.path(), &url, source(vec![1.0, f64::NAN], None))
             .await

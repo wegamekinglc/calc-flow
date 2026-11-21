@@ -1,4 +1,10 @@
+# ruff: noqa: E402 -- distribution exclusivity must run before native import.
 from __future__ import annotations
+
+from calc_flow._distribution import ensure_single_distribution
+
+ensure_single_distribution()
+del ensure_single_distribution
 
 from calc_flow import _native as _native
 from calc_flow import symbolic
@@ -87,6 +93,7 @@ from calc_flow.runtime import (
     Watermark,
     WatermarkPolicy,
 )
+from calc_flow.session import StreamSession
 from calc_flow.store import FileProjectStore
 from calc_flow.stream import StreamInput, StreamOutput, StreamResults
 from calc_flow.symbolic import (
@@ -113,6 +120,7 @@ from calc_flow.symbolic import (
     TableExpr,
     WindowAggregate,
     array_input,
+    changelog_sql,
     count_rows,
     cs,
     duration,
@@ -207,11 +215,13 @@ __all__ = [
     "AsofStateLimits",
     "compute",
     "compute_async",
+    "changelog_sql",
     "sql",
     "snapshot_sql",
     "StreamInput",
     "StreamOutput",
     "StreamResults",
+    "StreamSession",
     "Expr",
     "ColumnExpr",
     "TableExpr",

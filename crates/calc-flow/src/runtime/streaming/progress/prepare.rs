@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, num::NonZeroUsize, sync::Arc, time::Duration};
 
-use datafusion::arrow::datatypes::{DataType, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Schema, SchemaRef, TimeUnit};
 use datafusion::arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -130,6 +130,21 @@ impl NormalizedWatermarkMode {
                 *idle_timeout
             }
         }
+    }
+
+    /// Period of the generated watermark timer; zero-interval generation has none.
+    pub(crate) const fn watermark_timer_interval(&self) -> Option<Duration> {
+        match self {
+            Self::Generated { emit_interval, .. } if !emit_interval.is_zero() => {
+                Some(*emit_interval)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether generated watermarks advance after every data batch.
+    pub(crate) const fn generates_per_batch(&self) -> bool {
+        matches!(self, Self::Generated { emit_interval, .. } if emit_interval.is_zero())
     }
 }
 
@@ -394,7 +409,7 @@ fn normalize_generated_policy(
     native_directive: NativeWatermarkDirective,
 ) -> Result<NormalizedWatermarkMode> {
     validate_duration(descriptor, "max_out_of_orderness", max_out_of_orderness)?;
-    validate_duration(descriptor, "emit_interval", emit_interval)?;
+    validate_emit_interval(descriptor, emit_interval)?;
     validate_optional_idle_timeout(descriptor, idle_timeout)?;
     Ok(NormalizedWatermarkMode::Generated {
         event_time: resolve_event_time(descriptor, event_time_column)?,
@@ -415,6 +430,14 @@ fn normalize_disabled_policy(
         idle_timeout,
         native_directive,
     })
+}
+
+/// A zero interval selects per-batch emission; positive intervals arm a timer.
+fn validate_emit_interval(descriptor: &SourceDescriptor, emit_interval: Duration) -> Result<()> {
+    if emit_interval.is_zero() {
+        return Ok(());
+    }
+    validate_duration(descriptor, "emit_interval", emit_interval)
 }
 
 fn validate_optional_idle_timeout(
@@ -459,8 +482,13 @@ fn normalize_capability(
     }
 }
 
+/// Whether a progress duration is positive and fits logical nanoseconds.
+pub(crate) fn is_logical_nanos_duration(duration: Duration) -> bool {
+    !duration.is_zero() && u64::try_from(duration.as_nanos()).is_ok()
+}
+
 fn validate_duration(descriptor: &SourceDescriptor, name: &str, duration: Duration) -> Result<()> {
-    if !duration.is_zero() && u64::try_from(duration.as_nanos()).is_ok() {
+    if is_logical_nanos_duration(duration) {
         return Ok(());
     }
     Err(CalcFlowError::InvalidArgument {
@@ -486,6 +514,16 @@ fn resolve_event_time(
             message: "generated watermarks require a statically known Arrow schema".into(),
         });
     };
+    resolve_event_time_column(path, schema, column)
+}
+
+/// Resolves a generated-watermark event-time column in a known schema;
+/// `path` names the column field in errors.
+pub(crate) fn resolve_event_time_column(
+    path: String,
+    schema: &Schema,
+    column: &Arc<str>,
+) -> Result<ResolvedEventTimeColumn> {
     let (index, field) = schema
         .fields()
         .iter()
@@ -776,6 +814,27 @@ mod tests {
     }
 
     #[test]
+    fn generated_policy_accepts_zero_emit_interval_as_per_batch() {
+        let prepared = prepare(
+            NativeWatermarkCapability::NeverEmits,
+            DeclaredSchema::Known(schema(DataType::Timestamp(TimeUnit::Microsecond, None))),
+            WatermarkPolicy::BoundedOutOfOrderness {
+                event_time_column: Arc::from("at"),
+                max_out_of_orderness: Duration::from_micros(1),
+                emit_interval: Duration::ZERO,
+                idle_timeout: None,
+            },
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            prepared.bindings[0].normalized_watermark,
+            NormalizedWatermarkMode::Generated { emit_interval, .. }
+                if emit_interval.is_zero()
+        ));
+    }
+
+    #[test]
     fn watermark_policy_rejects_invalid_durations() {
         for policy in [
             WatermarkPolicy::BoundedOutOfOrderness {
@@ -787,7 +846,7 @@ mod tests {
             WatermarkPolicy::BoundedOutOfOrderness {
                 event_time_column: Arc::from("at"),
                 max_out_of_orderness: Duration::from_secs(1),
-                emit_interval: Duration::ZERO,
+                emit_interval: Duration::MAX,
                 idle_timeout: None,
             },
             WatermarkPolicy::Disabled {

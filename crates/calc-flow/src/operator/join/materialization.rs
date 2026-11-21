@@ -679,42 +679,6 @@ fn oversized_row(bytes: usize, budget: EdgeBudget) -> CalcFlowError {
     OutputChunkErrors::STREAM_JOIN.over_budget_row(bytes, budget.max_bytes)
 }
 
-/// Conservative logical byte charges for every row of one incoming record.
-///
-/// Returns `None` when any column lacks the flat width model, so the charge
-/// fast path never runs for nested schemas. Each row carries the state-row
-/// overhead plus a whole-schema null-bitmap allowance, keeping the sum an
-/// upper bound of the detailed flat model for single-chunk decisions.
-pub(super) fn flat_row_charges(record: &RecordBatch, overhead: u64) -> Result<Option<Vec<u64>>> {
-    let bitmap_per_row = record.num_columns().div_ceil(8);
-    let overhead = usize::try_from(overhead).map_err(|_| overflow_charge())?;
-    let mut constant = checked_accumulate(overhead, bitmap_per_row, "batch")?;
-    for column in record.columns() {
-        let Some(width) = fixed_width(column.data_type()) else {
-            return Ok(None);
-        };
-        constant = checked_accumulate(constant, width, "batch")?;
-    }
-    let mut charges = vec![constant; record.num_rows()];
-    for column in record.columns() {
-        if let Some(offsets) = variable_offsets(column.as_ref()) {
-            offsets.add_charges(&mut charges)?;
-        }
-    }
-    let charges = charges
-        .into_iter()
-        .map(|charge| u64::try_from(charge).map_err(|_| overflow_charge()))
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Some(charges))
-}
-
-fn overflow_charge() -> CalcFlowError {
-    CalcFlowError::InvalidArgument {
-        field: "batch".into(),
-        message: "row charge overflowed".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

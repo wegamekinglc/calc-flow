@@ -36,6 +36,10 @@ struct TypedEntityUndo {
     groups: NumericGroupsUndo,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "single-group undo stays on the stack to avoid a per-batch allocation"
+)]
 enum NumericGroupsUndo {
     One(Float64NumericUndo),
     Many(Vec<Float64NumericUndo>),
@@ -161,6 +165,10 @@ struct ResidentInspection {
     previous_charge: StateCharge,
 }
 
+#[allow(
+    clippy::large_enum_variant,
+    reason = "resident undo is short-lived and must not allocate on the hot path"
+)]
 enum ResidentMatch {
     Existing {
         resident: usize,
@@ -498,11 +506,12 @@ impl RollingKernelPlan {
             event_times: &event_times,
             entity_ids: &entity_ids,
         };
+        let typed_inputs = self.typed_inputs(input, node_id)?;
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(*output, input.num_rows()))
-            .collect::<Vec<_>>();
+            .map(|output| DerivedBuilder::new_with_inputs(*output, input.num_rows(), &typed_inputs))
+            .collect::<Result<Vec<_>>>()?;
         let kernel_start = Instant::now();
         let numeric_result = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
@@ -549,6 +558,7 @@ impl RollingKernelPlan {
                 state: local,
             },
             in_place: Some(in_place),
+            slab: None,
         };
         complete_in_place_update(update, state, result)
     }
@@ -594,8 +604,6 @@ fn update_entity_groups_reversible(
         group.update_reversible(
             inputs.event_times.value(row_index),
             valid_float64(input, row_index, plan.nan_as_value),
-            plan.numerical_profile,
-            entity.transition_count,
             undo,
             node_id,
         )?;
@@ -690,19 +698,67 @@ impl Float64NumericState {
         &mut self,
         event_time: i64,
         sample: Option<f64>,
-        numerical_profile: super::RollingNumericalProfile,
-        transition_count: u64,
         undo: &mut Float64NumericUndo,
         node_id: &str,
     ) -> Result<()> {
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                self.update_rows_reversible(event_time, sample, window, undo, node_id)
+            }
+            TypedFrame::Duration(_) => {
+                self.update_duration_reversible(event_time, sample, undo, node_id)
+            }
+        }?;
+        self.accumulator.sync_float_sum();
+        Ok(())
+    }
+
+    fn update_rows_reversible(
+        &mut self,
+        event_time: i64,
+        sample: Option<f64>,
+        window: usize,
+        undo: &mut Float64NumericUndo,
+        node_id: &str,
+    ) -> Result<()> {
+        let leaving = (self.samples.values.len() >= window)
+            .then(|| self.samples.values.front().and_then(|sample| sample.value))
+            .flatten();
+        self.accumulator
+            .numeric
+            .rows(leaving, sample)
+            .map_err(|error| super::float_arithmetic_error(error, node_id))?;
+        self.samples.push(event_time, sample);
+        self.samples
+            .expire_reversible(event_time, undo, |_| Ok(()))?;
+        self.accumulator
+            .numeric
+            .finish_rows(
+                window,
+                self.samples.values.iter().map(|sample| sample.value),
+            )
+            .map_err(|error| super::float_arithmetic_error(error, node_id))
+    }
+
+    fn update_duration_reversible(
+        &mut self,
+        event_time: i64,
+        sample: Option<f64>,
+        undo: &mut Float64NumericUndo,
+        node_id: &str,
+    ) -> Result<()> {
+        let accumulator = &mut self.accumulator;
+        self.samples
+            .expire_reversible(event_time, undo, |value| remove_float64(accumulator, value))?;
+        self.accumulator.numeric.reset_if_empty();
         if let Some(sample) = sample {
             add_float64(&mut self.accumulator, sample, node_id)?;
         }
         self.samples.push(event_time, sample);
-        let accumulator = &mut self.accumulator;
-        self.samples
-            .expire_reversible(event_time, undo, |value| remove_float64(accumulator, value))?;
-        self.repair_accumulator(numerical_profile, transition_count, node_id)
+        self.accumulator
+            .numeric
+            .finish_duration(self.samples.values.iter().map(|sample| sample.value))
+            .map_err(|error| super::float_arithmetic_error(error, node_id))
     }
 }
 
@@ -744,13 +800,10 @@ impl super::SlidingSampleQueue<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RollingNumericalProfile;
 
     fn warm_state() -> Float64NumericState {
         let mut state = Float64NumericState::new(TypedFrame::Duration(6), 1);
-        state
-            .update(1, Some(1.0), RollingNumericalProfile::StableV1, 1, "r")
-            .unwrap();
+        state.update(1, Some(1.0), "r").unwrap();
         state
     }
 
@@ -773,14 +826,7 @@ mod tests {
         let mut undo = Float64NumericUndo::new(&state);
         let measured = allocation_counter::measure(|| {
             state
-                .update_reversible(
-                    10,
-                    Some(10.0),
-                    RollingNumericalProfile::StableV1,
-                    2,
-                    &mut undo,
-                    "r",
-                )
+                .update_reversible(10, Some(10.0), &mut undo, "r")
                 .unwrap();
         });
         assert_eq!(measured.count_total, 0, "{measured:?}");

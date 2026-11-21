@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 
 use crate::{
-    JsonMap, Result, RollingNumericalProfile,
+    JsonMap, Result,
     array::{
         ArrayDType, ArrayExecutionOptions, ArrayStateOptions, AtrOptions, EwmaOptions, MacdOptions,
         RollingMeanOptions, RsiOptions, invalid,
@@ -94,14 +94,12 @@ fn kernel(values: &Map<String, Value>, version: u64) -> Result<KernelOptions> {
 fn mean(values: &Map<String, Value>) -> Result<KernelOptions> {
     let (window, minimum) = mean_counts(values)?;
     let options = RollingMeanOptions::new(window)?.with_min_periods(minimum)?;
-    Ok(KernelOptions::Mean(
-        options.with_numerical_profile(profile(values)?),
-    ))
+    Ok(KernelOptions::Mean(options))
 }
 fn mean_counts(values: &Map<String, Value>) -> Result<(u64, u64)> {
     fields(
         values.keys().map(String::as_str),
-        &["function", "window", "min_periods", "numerical_profile"],
+        &["function", "window", "min_periods"],
         "options.kernel",
     )?;
     let window = count(values.get("window"), "options.kernel.window")?;
@@ -111,20 +109,6 @@ fn mean_counts(values: &Map<String, Value>) -> Result<(u64, u64)> {
     }
     Ok((window, minimum))
 }
-fn profile(values: &Map<String, Value>) -> Result<RollingNumericalProfile> {
-    match values.get("numerical_profile") {
-        None => Ok(RollingNumericalProfile::StableV1),
-        Some(Value::String(name)) if name == "stable_v1" => Ok(RollingNumericalProfile::StableV1),
-        Some(Value::String(name)) if name == "stable_v2" => {
-            Ok(RollingNumericalProfile::StableV2Preview)
-        }
-        _ => Err(invalid(
-            "options.kernel.numerical_profile",
-            "requires stable_v1 or stable_v2",
-        )),
-    }
-}
-
 fn ewma(values: &Map<String, Value>) -> Result<KernelOptions> {
     fields(
         values.keys().map(String::as_str),

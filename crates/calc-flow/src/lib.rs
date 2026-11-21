@@ -6,7 +6,8 @@
 //! continuously running graphs executed by the streaming runtime.
 //!
 //! The removed v2 continuous-runtime owners and checkpoint store are not
-//! available after the A6 cutover.
+//! available after the A6 cutover. [`StreamSession`] is the supported
+//! caller-driven push API; the removed `StreamingRunner::step` stays absent.
 //!
 //! ```compile_fail
 //! use calc_flow::MicroBatchRunner;
@@ -32,6 +33,7 @@
 
 pub mod array;
 
+mod accumulate;
 mod batch;
 mod config;
 mod connector;
@@ -101,6 +103,7 @@ pub use datafusion::{
 };
 pub use error::{CalcFlowError, Result};
 pub use json::{JsonMap, MAX_JSON_DEPTH, canonical_json};
+pub(crate) use operator::HotProjection;
 pub use operator::{
     AggregateFunction, AggregateSpec, AnalyticExpr, AsofJoinSide, AsofLatePolicy, AsofStateLimits,
     BatchOperator, BatchOperatorContext, BatchOperatorFactory, BoundedOrderOperator,
@@ -115,14 +118,14 @@ pub use operator::{
     ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION, ROLLING_EWMA_STATE_LAYOUT_VERSION,
     ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_MACD_STATE_LAYOUT_VERSION,
     ROLLING_STATE_LAYOUT_VERSION, RankTieMethod, RollingFloatPrimitiveSpec, RollingFrameSpec,
-    RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
-    RowsFrame, STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1,
+    RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, RowsFrame,
+    STREAM_JOIN_MAX_SAFE_JSON_INTEGER, STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1,
     SnapshotSqlOperator, SortDirection, SortHistory, SortKey, SortSpec, SortTies, SortWindow,
-    SqlOperator, StateBudget, StateSegment, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
-    StreamAsofJoinSpec, StreamAsofJoinStatus, StreamCollector, StreamJoinOperator,
-    StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus, StreamJoinType, StreamOperator,
-    StreamOperatorContext, StreamOperatorFactory, StreamOperatorLifecycle, UnionOperator,
-    WindowAggregateOperator, WindowGeometry, WindowSpec,
+    SqlAggregateOutputMode, SqlOperator, StateBudget, StateSegment, StreamAsofJoinOperator,
+    StreamAsofJoinSideStatus, StreamAsofJoinSpec, StreamAsofJoinStatus, StreamCollector,
+    StreamJoinOperator, StreamJoinSideStatus, StreamJoinSpec, StreamJoinStatus, StreamJoinType,
+    StreamOperator, StreamOperatorContext, StreamOperatorFactory, StreamOperatorLifecycle,
+    UnionOperator, WindowAggregateOperator, WindowGeometry, WindowSpec,
 };
 pub use pipeline::{
     BatchExecutionPlan, DeliveryGuarantee, Edge, EdgeBudget, ExecutionOptions, NodeTiming,
@@ -142,8 +145,8 @@ pub use query_analysis::{
     QueryRowOrder, QuerySortKey, QueryTemporalIdentity, QueryTieOrder, SupportStatus, UpdateKind,
 };
 pub use runtime::{
-    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
-    StreamMessageKind, edge_channel,
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, SessionOutput, SessionWatermark,
+    StreamJobContext, StreamMessage, StreamMessageKind, StreamSession, edge_channel,
 };
 pub use state::{
     CheckpointManifest, CheckpointManifestFields, CursorManifestEntry, LocalStateBackend,
@@ -151,8 +154,8 @@ pub use state::{
     ManifestIngressState, OperatorIngressManifestEntry, OperatorManifestEntry, RecoveryStatus,
     RetentionClass, SOURCE_HISTORY_FORMAT_VERSION, SinkDeliveryManifest, SinkManifestEntry,
     SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistoryManifestEntry,
-    SourceHistorySpec, SourceManifestEntry, SourceWatermarkManifestState, StateBackend,
-    StateHandle, StateLineageBackend, StateLineageKey,
+    SourceHistorySegmentHandle, SourceHistorySpec, SourceManifestEntry,
+    SourceWatermarkManifestState, StateBackend, StateHandle, StateLineageBackend, StateLineageKey,
 };
 pub use static_input::{
     STATIC_INPUT_DIGEST_VERSION, StaticInputDigest, StaticInputSpec, StaticMutability,

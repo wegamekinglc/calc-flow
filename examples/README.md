@@ -1,13 +1,13 @@
 # Calc Flow examples
 
-The 36 numbered runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
+The 37 numbered runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
 including connector sources/sinks, recovery, and financial streams. Each pair
 uses the same unique number and filename stem, from `01_datafusion_pipeline`
-to `36_symbolic_event_window`.
+to `37_stream_session`.
 
 Numbers 01–31 retain their existing filenames. The formerly duplicated
-19–22 SQL/streaming examples are now 32–35, and the previously unnumbered
-event-window example is 36. Shared fixture modules and the WebSocket sample
+19–22 SQL/streaming examples are now 32–35, the previously unnumbered
+event-window example is 36, and the caller-driven session example is 37. Shared fixture modules and the WebSocket sample
 server keep descriptive, unnumbered names in both languages.
 
 Start with the [documentation overview](../docs/introduction.md) and
@@ -207,7 +207,7 @@ Temporary checkpoint lineages do not demonstrate durable restart recovery.
 
 ### SQL and streaming pipelines
 
-Examples 32–36 run without external services and are included in the default
+Examples 32–37 run without external services and are included in the default
 example runner.
 
 - [32_sql_expression_pipeline.py](32_sql_expression_pipeline.py) — compose
@@ -218,7 +218,7 @@ example runner.
   and nested rolling-mean state across two input batches, followed by SQL.
   The source stays open while `async for` receives `delta=[None, 2.0, 3.0]` and
   `mean_delta=[None, 2.0, 2.5]`. Exiting `async with` cancels the waiting source
-  and cleans up temporary checkpoints; the latest timestamp remains buffered.
+  and awaits job cleanup; the latest timestamp remains buffered.
   Guide: [first stream](../docs/streaming-guide.md#first-python-continuous-job).
 - [34_streaming_outputs.py](34_streaming_outputs.py) — branch a Program and
   consume independent `StreamOutput` events by name. Checks
@@ -227,14 +227,14 @@ example runner.
 - [35_stream_asof_join.py](35_stream_asof_join.py) — attach the latest quote
   within ten microseconds to each trade. Checks no output while both
   watermarks equal 105, then `quote__price=[10.2, None]` after they advance to
-  122. Uses explicit source watermarks and temporary state; no external service
-  or durable iterable replay is required.
+  122. Uses explicit source watermarks and runs without checkpoints; no external
+  service or durable iterable replay is required.
   Guide: [bounded backward ASOF Join](../docs/asof-join-guide.md).
 
 - [26_late_side_output.py](26_late_side_output.py) — consume both ports of one
   rolling stage through one owned Program iterator. Explicit source watermarks
   route `normal=[20.0]` and `late=[10.0]`; checks remain active under `python -O`.
-  Runs without external services and cleans up its job and temporary state.
+  Runs without external services or checkpoints and cleans up its job.
   Guide: [late-row routing](../docs/streaming-guide.md#route-late-rows).
 
 - [29_sql_stream_switch.py](29_sql_stream_switch.py) — use one aggregate SQL
@@ -281,6 +281,12 @@ example computes grouped one-minute trade count, volume, low, high, and
 arithmetic average price. It checks native final output with explicit source
 watermarks and a `price_range` branch sharing the same window declaration.
 Guide: [symbolic event windows](../docs/symbolic-workflows.md#aggregate-event-time-windows).
+
+- [37_stream_session.py](37_stream_session.py) — push two ordered quote batches
+  through a two-row `cf.ts.mean` in one table session. An explicit watermark
+  closes the first push at `mean_price=[10.0, 11.0]`; the second push stays open,
+  and `finish()` emits `[13.5]`. Context exit closes the in-memory session.
+  Guide: [stream sessions](../docs/python-api.md#stream-sessions).
 
 ## Rust counterparts
 

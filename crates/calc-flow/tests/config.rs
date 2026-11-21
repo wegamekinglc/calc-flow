@@ -570,6 +570,7 @@ fn compile_sql_honors_alias_ports_and_reports_graph_errors() {
             query: "SELECT left.value FROM left JOIN right ON left.value = right.value".into(),
             aliases: vec!["left".into(), "right".into()],
             udfs: Vec::new(),
+            aggregate_output: calc_flow::SqlAggregateOutputMode::Snapshot,
         },
         input_ports: vec![
             port("left", BatchKind::Table, true, Vec::new()),
@@ -909,6 +910,7 @@ fn builtin_config_inputs_must_be_required() {
             query: "SELECT * FROM input".into(),
             aliases: vec!["input".into()],
             udfs: Vec::new(),
+            aggregate_output: calc_flow::SqlAggregateOutputMode::Snapshot,
         },
         input_ports: vec![port("input", BatchKind::Table, false, Vec::new())],
         output_ports: Vec::new(),
@@ -931,6 +933,7 @@ fn invalid_query_syntax_has_stable_operator_issue_paths() {
             query: "DELETE FROM input".into(),
             aliases: vec!["input".into()],
             udfs: Vec::new(),
+            aggregate_output: calc_flow::SqlAggregateOutputMode::Snapshot,
         },
         input_ports: Vec::new(),
         output_ports: Vec::new(),

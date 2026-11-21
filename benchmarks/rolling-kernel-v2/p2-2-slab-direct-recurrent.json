@@ -1,0 +1,493 @@
+{
+  "contract": "paired-native-evidence-v1",
+  "status": "completed",
+  "cases": [
+    "1x1-dual",
+    "6400x64-dual"
+  ],
+  "requested_rounds": 10,
+  "completed_rounds": 10,
+  "timed_samples_per_round": 30,
+  "sample_pairs_per_case": 300,
+  "budget_seconds": 590.0,
+  "elapsed_seconds": 5.058461887994781,
+  "numeric_contract_change": true,
+  "binaries": [
+    {
+      "side": "baseline",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa",
+      "sha256": "1b27105bf3607eee87cc997376fc628bc0622d6a9b4cbac8db291ca27d0bb77d"
+    },
+    {
+      "side": "candidate",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent",
+      "sha256": "ebf6129ddff6bd3090820c2ebf497ff0b4b0cdca89e3185304237f601cb29f1d"
+    }
+  ],
+  "round_evidence": [
+    {
+      "round": 1,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-1-baseline.json",
+          "sha256": "f403edd884702614d498caf21c943c7ba24cf5afd6ffc0b79e4a69f7ca28ba66",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-1-candidate.json",
+          "sha256": "a37aeadd0ac475ff15f32c5a0ffb0d677491645055b184c341c0f609599c1838",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 2,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-2-baseline.json",
+          "sha256": "43027d8587f2be701389db3f42b1e9dd47be10fa3b00fcd8b8161739b2ad34f6",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-2-candidate.json",
+          "sha256": "328b7c56d101fe24fce7722da3d7dd545db2403bb2b661f0167cba4e89923981",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 3,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-3-baseline.json",
+          "sha256": "36485d88b6506219d315d50b23280628b470ac3115dcf87f1213f92a982f2191",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-3-candidate.json",
+          "sha256": "2764a271ecb97ad1552655c87df5172ace27d9831403a5f3067e37cb09bd57cf",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 4,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-4-baseline.json",
+          "sha256": "a25c9da00ccb324972e81c60c19c49d634f6bea33d602fd1f91a0b7cf07ae4c1",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-4-candidate.json",
+          "sha256": "e0ff488f263f1093a7ab15863f96d70fb19880d2319c8d7f324863e87fb17029",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 5,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-5-baseline.json",
+          "sha256": "1bcb0b304913591e521455dec2ca3bc5479c92e49981ddda4a82bac0c112438e",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-5-candidate.json",
+          "sha256": "d1a7533c707dbddfe79feb6e402d339fd437335e6c550676b83be5dff030f60a",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 6,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-6-baseline.json",
+          "sha256": "d8d8e01cadcc404f6e5761cf39e4bbf785f6b54ac15b79f4fea2d257505d8143",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-6-candidate.json",
+          "sha256": "b18a568af4987ac7e328411cfb834346bbab90a47ff128bebc3d32b3e40a232c",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 7,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-7-baseline.json",
+          "sha256": "2879ab5f4d6a1d058983e08ccad7a6343ecb37f68a4bd255cf5254769bcba79a",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-7-candidate.json",
+          "sha256": "95fc320a9f7c723c9b92301b5bda06e5adc79a1558296d5496a2e0d0cdee0267",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 8,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-8-baseline.json",
+          "sha256": "0a47626a1bcfe8544defe56583b651f510fe2bf3c61331cfd7832d55b3ca968b",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-8-candidate.json",
+          "sha256": "cf08c4eb90e4b98ba4a34899f83001ce5581ac48151275bf2f7d290d97ad2f95",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 9,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-9-baseline.json",
+          "sha256": "35e4b9a621586a35f8efbdda9bc97ab1947f5cead1784e522ef3c004da50d8fd",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-9-candidate.json",
+          "sha256": "38287500ccddc8bfc553ce6df49b5b1f0260d9374c3476ed5b340666984434b3",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    },
+    {
+      "round": 10,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-10-baseline.json",
+          "sha256": "f374b711989ec70653453d0db2e3e5ea30b40d1551ca2dbc8481cd9fa8b26add",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-baseline-f4faceaa"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent-work/round-10-candidate.json",
+          "sha256": "f8abf5b8af254aed5c83093cd7c1e98ec230db2b6bb249cf6d5253788ea7a38d",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/rolling-kernel-v2-p2-2-slab-direct-recurrent"
+        }
+      }
+    }
+  ],
+  "arms": [
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 2.1089e-05,
+        "p95_seconds": 2.7304150000000015e-05,
+        "cv": 0.4147627293937101,
+        "rows_per_second": 47418.08525771729
+      },
+      "candidate": {
+        "p50_seconds": 1.8132999999999997e-05,
+        "p95_seconds": 2.0765450000000003e-05,
+        "cv": 0.513548830736183,
+        "rows_per_second": 55148.072574863516
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          2.17155e-05,
+          2.2802e-05,
+          2.1677e-05,
+          9.1395e-06,
+          9.531e-06,
+          1.2791500000000001e-05,
+          9.3445e-06,
+          2.22315e-05,
+          2.3416e-05,
+          2.3163e-05
+        ],
+        "candidate": [
+          9.044500000000001e-06,
+          1.85485e-05,
+          1.8547e-05,
+          1.8688e-05,
+          1.88095e-05,
+          1.8781000000000002e-05,
+          1.815e-05,
+          1.84005e-05,
+          1.9628499999999997e-05,
+          8.448499999999999e-06
+        ]
+      },
+      "paired_round_speedups": [
+        2.4009619105533746,
+        1.2293177345877024,
+        1.1687604464333854,
+        0.48905714897260266,
+        0.506712033812701,
+        0.6810872690485065,
+        0.5148484848484848,
+        1.2082008641069535,
+        1.1929592174644015,
+        2.741670118956028
+      ],
+      "paired_round_speedup_median": 1.1808598319488934,
+      "paired_round_speedup_ci95": [
+        0.5148484848484848,
+        1.796960564008888
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 2.4746499999999998e-05,
+        "p95_seconds": 3.9382550000000035e-05,
+        "cv": 0.49606778560172266,
+        "rows_per_second": 40409.75491483645
+      },
+      "candidate": {
+        "p50_seconds": 2.0848e-05,
+        "p95_seconds": 2.7682700000000042e-05,
+        "cv": 0.32116830817686215,
+        "rows_per_second": 47966.231772831925
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          2.5767e-05,
+          2.65005e-05,
+          2.5313e-05,
+          1.1565e-05,
+          1.2003e-05,
+          1.56245e-05,
+          1.1731500000000001e-05,
+          2.6345e-05,
+          2.8439e-05,
+          2.7181999999999998e-05
+        ],
+        "candidate": [
+          1.0857499999999999e-05,
+          2.11285e-05,
+          2.12295e-05,
+          2.1386e-05,
+          2.1670500000000002e-05,
+          2.1011e-05,
+          2.13485e-05,
+          2.12765e-05,
+          2.24235e-05,
+          1.0349e-05
+        ]
+      },
+      "paired_round_speedups": [
+        2.373198250057564,
+        1.2542537331093075,
+        1.1923502673167055,
+        0.540774338352193,
+        0.5538866200595279,
+        0.7436342868021513,
+        0.5495233857179662,
+        1.238220571992574,
+        1.2682676656186591,
+        2.626533964634264
+      ],
+      "paired_round_speedup_median": 1.2152854196546397,
+      "paired_round_speedup_ci95": [
+        0.5538866200595279,
+        1.8057094110250689
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 432.0,
+        "candidate": 552.0
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.0010918585,
+        "p95_seconds": 0.0014203342000000002,
+        "cv": 0.17314903273525611,
+        "rows_per_second": 5861565.395149646
+      },
+      "candidate": {
+        "p50_seconds": 0.001031548,
+        "p95_seconds": 0.0011655079,
+        "cv": 0.21490915687878742,
+        "rows_per_second": 6204267.760685882
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.001111087,
+          0.001051573,
+          0.0012395675,
+          0.0010739245000000001,
+          0.0010522234999999999,
+          0.001026406,
+          0.001029313,
+          0.0012583479999999998,
+          0.001112195,
+          0.001376547
+        ],
+        "candidate": [
+          0.0010950145,
+          0.000622742,
+          0.00103868,
+          0.0010113869999999999,
+          0.0010315405,
+          0.0010569775,
+          0.000989255,
+          0.0010704065,
+          0.0009916130000000001,
+          0.00111172
+        ]
+      },
+      "paired_round_speedups": [
+        1.0146778878270561,
+        1.6886174370766707,
+        1.1934065352177765,
+        1.0618334030395884,
+        1.0200505942326064,
+        0.9710764893292433,
+        1.0404930983416814,
+        1.1755795578595607,
+        1.1216018749249959,
+        1.2382137588601447
+      ],
+      "paired_round_speedup_median": 1.091717638982292,
+      "paired_round_speedup_ci95": [
+        1.0200505942326064,
+        1.2068966583598528
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "faster",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.001102746,
+        "p95_seconds": 0.0014030202500000001,
+        "cv": 0.1703944949637261,
+        "rows_per_second": 5803693.688301749
+      },
+      "candidate": {
+        "p50_seconds": 0.001034027,
+        "p95_seconds": 0.00117534135,
+        "cv": 0.18459027284114363,
+        "rows_per_second": 6189393.507132792
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.0011326385,
+          0.0010489455,
+          0.0012829550000000001,
+          0.0010507245,
+          0.0010627185,
+          0.0010381245,
+          0.001024581,
+          0.0012587765,
+          0.0011007825,
+          0.001347149
+        ],
+        "candidate": [
+          0.0011132065,
+          0.00064543,
+          0.0010370085,
+          0.0010168525000000001,
+          0.0009568015,
+          0.001059312,
+          0.0009518415,
+          0.001051517,
+          0.000991193,
+          0.001106122
+        ]
+      },
+      "paired_round_speedups": [
+        1.0174558808271421,
+        1.6251886339339665,
+        1.2371692228173636,
+        1.0333106325647032,
+        1.1106990321398953,
+        0.9799988105487336,
+        1.0764197610631603,
+        1.1971052298726506,
+        1.1105632303698674,
+        1.217902726823985
+      ],
+      "paired_round_speedup_median": 1.1106311312548813,
+      "paired_round_speedup_ci95": [
+        1.0333106325647032,
+        1.217902726823985
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "faster",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 46.27828125,
+        "candidate": 54.08046875
+      }
+    }
+  ],
+  "gate_values": {
+    "G1": {
+      "case": "1x1-dual",
+      "arm": "absent",
+      "value_seconds": 1.8132999999999997e-05,
+      "limit_seconds": 1e-06,
+      "met": false
+    },
+    "G2": {
+      "case": "6400x64-dual",
+      "arm": "present",
+      "value_ns_per_window_row": 54.08046875,
+      "limit_ns_per_window_row": 4.0,
+      "met": false
+    },
+    "G3": {
+      "case": "6400x64-dual",
+      "arm": "absent",
+      "value_seconds": 0.001031548,
+      "limit_seconds": 0.0001,
+      "met": false
+    }
+  },
+  "timed_boundary": "current-thread dispatch_data plus dispatch_watermark_handler on a RollingOperator; no projection; output drain outside the timer",
+  "comparison_note": "P2.1 uses the async dispatch boundary; later cross-boundary speedups are informational, while G1-G3 remain absolute",
+  "harness_sha256": "4496479e206390cabdcaf988cc92acb4c180309beb6e9986d17785fc4a4352ea"
+}

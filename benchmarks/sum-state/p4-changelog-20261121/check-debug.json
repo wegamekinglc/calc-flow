@@ -1,0 +1,16 @@
+{
+  "schema": "calc-flow.sum-state-changelog.v1",
+  "scope": "fresh-stream-plan-execution-retained-output-and-cleanup",
+  "status": "checked",
+  "elapsed_seconds": 16.659360262,
+  "cases": [
+    {
+      "id": "stock-stream-1cpu",
+      "correctness": true
+    },
+    {
+      "id": "sparse-stream-1cpu",
+      "correctness": true
+    }
+  ]
+}

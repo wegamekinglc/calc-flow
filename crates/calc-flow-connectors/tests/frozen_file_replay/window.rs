@@ -129,13 +129,13 @@ async fn recovery_case(rows: u64, cuts: u64, idle_right: bool, projection: Proje
     let unchanged = first.trigger_checkpoint().await.unwrap();
     let unchanged_manifest = find_manifest(
         &root.path().join("checkpoints"),
-        &format!("manifest-{:020}.json", unchanged.as_u64()),
+        &format!("epoch-{}.json", unchanged.as_u64()),
     )
     .unwrap();
     assert_eq!(first.cancel().await.state, JobState::Cancelled);
     let manifest = find_manifest(
         &root.path().join("checkpoints"),
-        &format!("manifest-{:020}.json", last.unwrap().as_u64()),
+        &format!("epoch-{}.json", last.unwrap().as_u64()),
     )
     .unwrap();
     let replay = !matches!(
@@ -180,30 +180,33 @@ async fn recovery_case(rows: u64, cuts: u64, idle_right: bool, projection: Proje
 }
 
 fn assert_carried_checkpoint(
-    manifest: &CheckpointManifest,
-    unchanged: &CheckpointManifest,
+    manifest: &serde_json::Value,
+    unchanged: &serde_json::Value,
     replay: bool,
 ) {
-    let operator = manifest.operators().get("asof").unwrap();
+    let operator = &manifest["operators"]["asof"];
     assert_eq!(
-        operator.inline_metadata.contains_key("source_replay"),
+        operator["inline_metadata"]
+            .as_object()
+            .unwrap()
+            .contains_key("source_replay"),
         replay
     );
-    let carried = unchanged.operators().get("asof").unwrap();
-    assert_eq!(
-        operator
-            .segments
+    let blocks = |manifest: &serde_json::Value| {
+        manifest["operators"]["asof"]["blocks"]
+            .as_array()
+            .unwrap()
             .iter()
-            .filter(|handle| handle.segment_id() != "asof-replay-control")
-            .map(|handle| (handle.segment_id(), handle.sha256()))
-            .collect::<Vec<_>>(),
-        carried
-            .segments
-            .iter()
-            .filter(|handle| handle.segment_id() != "asof-replay-control")
-            .map(|handle| (handle.segment_id(), handle.sha256()))
-            .collect::<Vec<_>>(),
-    );
+            .filter(|handle| handle["object_id"] != "asof-replay-control")
+            .map(|handle| {
+                (
+                    handle["object_id"].as_str().unwrap().to_owned(),
+                    handle["sha256"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(blocks(manifest), blocks(unchanged));
 }
 
 fn assert_outputs(root: &Path, rows: u64, projection: ProjectionMode) {

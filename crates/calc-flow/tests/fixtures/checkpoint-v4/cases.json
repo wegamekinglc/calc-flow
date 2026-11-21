@@ -1,0 +1,243 @@
+[
+  {
+    "name": "stale manifest fingerprint",
+    "category": "identity",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/epoch",
+    "value": 8,
+    "repair_root_handle": false,
+    "repair_fingerprint": false,
+    "expected_error": "manifest fingerprint does not match its contents"
+  },
+  {
+    "name": "pipeline identity",
+    "category": "identity",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/pipeline_fingerprint",
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "pipeline identity mismatch"
+  },
+  {
+    "name": "recovery identity",
+    "category": "identity",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/recovery_fingerprint",
+    "value": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "recovery fingerprint mismatch"
+  },
+  {
+    "name": "recovery protocol component",
+    "category": "identity",
+    "target": "recovery",
+    "operation": "set",
+    "path": "/protocol",
+    "value": "capture-freeze-forward-v2",
+    "repair_root_handle": false,
+    "repair_fingerprint": false,
+    "expected_error": "recovery fingerprint mismatch"
+  },
+  {
+    "name": "recovery partitioner component",
+    "category": "identity",
+    "target": "recovery",
+    "operation": "set",
+    "path": "/operators/0/partitioner_version",
+    "value": "other-key-groups-v2",
+    "repair_root_handle": false,
+    "repair_fingerprint": false,
+    "expected_error": "recovery fingerprint mismatch"
+  },
+  {
+    "name": "recovery numeric contract component",
+    "category": "identity",
+    "target": "recovery",
+    "operation": "set",
+    "path": "/operators/0/numeric_contract_id",
+    "value": "other-numeric-contract",
+    "repair_root_handle": false,
+    "repair_fingerprint": false,
+    "expected_error": "recovery fingerprint mismatch"
+  },
+  {
+    "name": "recovery sink delivery component",
+    "category": "identity",
+    "target": "recovery",
+    "operation": "set",
+    "path": "/sinks/0/delivery_mechanism",
+    "value": "transactional",
+    "repair_root_handle": false,
+    "repair_fingerprint": false,
+    "expected_error": "recovery fingerprint mismatch"
+  },
+  {
+    "name": "missing source",
+    "category": "participant",
+    "target": "manifest",
+    "operation": "remove",
+    "path": "/sources/input",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "source participants differ"
+  },
+  {
+    "name": "missing operator",
+    "category": "participant",
+    "target": "manifest",
+    "operation": "remove",
+    "path": "/operators/rolling",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "operator participants differ"
+  },
+  {
+    "name": "additional sink",
+    "category": "participant",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/sinks/unexpected",
+    "value": {
+      "delivery": {
+        "kind": "ordinary"
+      },
+      "pre_commit": null,
+      "blocks": []
+    },
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "sink participants differ"
+  },
+  {
+    "name": "missing partition",
+    "category": "partition",
+    "target": "manifest",
+    "operation": "remove",
+    "path": "/operators/rolling/partitions/1",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "partition groups differ from prepared key groups"
+  },
+  {
+    "name": "duplicate partition",
+    "category": "partition",
+    "target": "manifest",
+    "operation": "duplicate",
+    "path": "/operators/rolling/partitions/0",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "partition groups differ from prepared key groups"
+  },
+  {
+    "name": "additional partition",
+    "category": "partition",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/operators/rolling/partitions/1/key_group",
+    "value": 2,
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "partition groups differ from prepared key groups"
+  },
+  {
+    "name": "partition root checksum",
+    "category": "partition",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/operators/rolling/partitions/0/root/sha256",
+    "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "partition index checksum mismatch"
+  },
+  {
+    "name": "partition key group",
+    "category": "partition",
+    "target": "partition0",
+    "operation": "set",
+    "path": "/key_group",
+    "value": 1,
+    "repair_root_handle": true,
+    "repair_fingerprint": true,
+    "expected_error": "partition index key group mismatch"
+  },
+  {
+    "name": "missing page",
+    "category": "page",
+    "target": "partition0",
+    "operation": "remove",
+    "path": "/pages/0",
+    "repair_root_handle": true,
+    "repair_fingerprint": true,
+    "expected_error": "page inventory or generation metadata mismatch"
+  },
+  {
+    "name": "duplicate page",
+    "category": "page",
+    "target": "partition0",
+    "operation": "duplicate",
+    "path": "/pages/0",
+    "repair_root_handle": true,
+    "repair_fingerprint": true,
+    "expected_error": "page entries are not strictly ordered and unique"
+  },
+  {
+    "name": "page generation regression",
+    "category": "page",
+    "target": "partition0",
+    "operation": "set",
+    "path": "/pages/0/page_id/generation",
+    "value": 2,
+    "repair_root_handle": true,
+    "repair_fingerprint": true,
+    "expected_error": "page inventory or generation metadata mismatch"
+  },
+  {
+    "name": "page logical range",
+    "category": "page",
+    "target": "partition0",
+    "operation": "set",
+    "path": "/pages/0/logical_range/end",
+    "value": 5,
+    "repair_root_handle": true,
+    "repair_fingerprint": true,
+    "expected_error": "page logical contract mismatch"
+  },
+  {
+    "name": "page digest handle mismatch",
+    "category": "page",
+    "target": "partition0",
+    "operation": "set",
+    "path": "/pages/0/sha256",
+    "value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "repair_root_handle": true,
+    "repair_fingerprint": true,
+    "expected_error": "page digest differs from handle"
+  },
+  {
+    "name": "page payload mutation",
+    "category": "page",
+    "target": "page0",
+    "operation": "flip_byte",
+    "index": 7,
+    "repair_root_handle": false,
+    "repair_fingerprint": false,
+    "expected_error": "page checksum mismatch: rolling/0/0/3"
+  },
+  {
+    "name": "v3 rejection",
+    "category": "compatibility",
+    "target": "manifest",
+    "operation": "set",
+    "path": "/format_version",
+    "value": 3,
+    "repair_root_handle": false,
+    "repair_fingerprint": true,
+    "expected_error": "UnsupportedVersion { expected: 4, found: 3 }; checkpoint manifest v3 is not restorable; start a new lineage"
+  }
+]

@@ -54,6 +54,69 @@ pub(super) async fn load_snapshot(
     loads.load(FundedLoad::new(future, owner)?).await
 }
 
+pub(in crate::runtime::streaming::runner) async fn load_snapshot_v4(
+    loads: &LoadOwner,
+    operator: &StreamJoinOperator,
+    operator_id: &str,
+    entry: &crate::state::v4::OperatorV4,
+    manifest_root: &std::path::Path,
+    cancellation: &CancellationToken,
+    reader: &Arc<crate::state::LocalStateLineageBackend>,
+) -> Result<OperatorStateSnapshot> {
+    let crate::state::v4::OperatorV4::Opaque {
+        inline_metadata,
+        blocks,
+        ..
+    } = entry
+    else {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: "Join v4 restore requires opaque state".into(),
+        });
+    };
+    if cancellation.is_cancelled() {
+        return Err(CalcFlowError::Cancelled {
+            run_id: "checkpoint:v4-join-load".into(),
+        });
+    }
+    for handle in blocks {
+        if handle.owner != operator_id {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "Join v4 block owner {:?} does not match {operator_id:?}",
+                    handle.owner
+                ),
+            });
+        }
+    }
+    let charge = blocks.iter().try_fold(4096_usize, |total, handle| {
+        let bytes = usize::try_from(handle.byte_len).ok()?;
+        total
+            .checked_add(bytes)?
+            .checked_add(handle.relative_path.len().checked_mul(4)?)?
+            .checked_add(1024)
+    });
+    let owner = Arc::new(operator.reserve_checkpoint_preload(charge.ok_or_else(oversized)?)?);
+    let reader = reader.clone();
+    let root = manifest_root.to_owned();
+    let metadata = inline_metadata.clone();
+    let blocks = blocks.clone();
+    let future_owner = owner.clone();
+    let future = async move {
+        let mut segments = BTreeMap::new();
+        for handle in &blocks {
+            let segment = reader
+                .load_opaque_prepaid(&root, handle, future_owner.clone())
+                .await?;
+            segments.insert(handle.object_id.clone(), segment);
+        }
+        Ok(OperatorStateSnapshot {
+            inline_metadata: metadata,
+            segments,
+        })
+    };
+    loads.load(FundedLoad::new(future, owner)?).await
+}
+
 fn validate_handles(operator_id: &str, entry: &OperatorManifestEntry) -> Result<()> {
     for handle in &entry.segments {
         handle.validate_owner(operator_id)?;

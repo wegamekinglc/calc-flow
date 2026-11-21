@@ -1,6 +1,11 @@
-use super::{CopySelection, PayloadChunk, Quantum, RowPayload, SelectedRow};
+#[cfg(test)]
+use super::{CopySelection, Quantum, SelectedRow};
+use super::{PayloadChunk, RowPayload};
+#[cfg(test)]
 use crate::operator::join::{RetainedRows, StreamJoinOperator};
-use crate::{Result, StreamOperatorContext, time::EventTime};
+use crate::time::EventTime;
+#[cfg(test)]
+use crate::{Result, StreamOperatorContext};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -16,6 +21,7 @@ pub(super) struct ChunkRow {
     pub dense: AtomicUsize,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(in crate::operator::join) struct SparseQueue {
     head: Option<Arc<PayloadChunk>>,
@@ -23,6 +29,7 @@ pub(in crate::operator::join) struct SparseQueue {
     count: usize,
 }
 
+#[cfg(test)]
 impl SparseQueue {
     fn push(&mut self, chunk: Arc<PayloadChunk>) {
         if chunk.queued.swap(true, Ordering::Relaxed) {
@@ -68,6 +75,7 @@ impl SparseQueue {
     }
 }
 
+#[cfg(test)]
 impl Drop for SparseQueue {
     fn drop(&mut self) {
         self.clear();
@@ -119,6 +127,7 @@ impl RowPayload {
     }
 }
 
+#[cfg(test)]
 impl StreamJoinOperator {
     pub(in crate::operator::join) fn has_sparse_candidates(&self) -> bool {
         self.state.left.2.count != 0 || self.state.right.2.count != 0

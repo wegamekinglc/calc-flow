@@ -4,7 +4,7 @@ use super::*;
 
 #[tokio::test]
 async fn test_execution_diagnostics_observe_incremental_history_and_serial_calls() {
-    let input = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(3.0))]);
+    let input = general_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(3.0))]);
     let spec = kernel_spec(json!([duration_output("mean", "price", "mean", 100)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let expected = reference_output(&operator, &input);
@@ -109,12 +109,12 @@ pub(super) async fn observe(
 
 #[tokio::test]
 async fn test_execution_diagnostics_distinguish_general_replacement_history() {
-    let input = float64_fast_record(&[
+    let input = general_record(&[
         (1, "a", 1, Some(1.0)),
         (2, "a", 2, Some(3.0)),
         (3, "a", 3, Some(5.0)),
     ]);
-    let spec = kernel_spec(json!([lag_price(1)]));
+    let spec = kernel_spec(json!([lag_label(1)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let expected = reference_output(&operator, &input);
     let job = crate::StreamJobContext::new(
@@ -163,8 +163,8 @@ async fn test_execution_diagnostics_distinguish_general_replacement_history() {
     );
     assert_general_charge(&operator);
     let work = store.snapshot().watermark;
-    assert_eq!(work.numeric_general_calls, 2);
-    assert_eq!(work.numeric_serial_calls, 0);
+    assert_eq!(work.numeric_general_calls, 0);
+    assert_eq!(work.numeric_serial_calls, 2);
     assert_eq!(work.numeric_parallel_calls, 0);
     assert_eq!(work.history_charge_scalar_rows, 3);
     assert_eq!(work.history_append_rows_prepared, 2);
@@ -183,9 +183,14 @@ fn assert_general_charge(operator: &RollingOperator) {
         )
         .unwrap()
     );
-    assert!(operator.state.histories.by_entity.values().all(|state| {
-        state.charge_cache.is_none() && state.rows.len() == 1 && state.columnar.rows == 0
-    }));
+    assert!(
+        operator
+            .state
+            .histories
+            .by_entity
+            .values()
+            .all(|state| { state.charge_cache.is_some() })
+    );
     assert_eq!(
         operator.state.charge.rows,
         2 * u64::try_from(operator.state.histories.by_entity.len()).unwrap()
@@ -194,13 +199,13 @@ fn assert_general_charge(operator: &RollingOperator) {
 
 #[tokio::test]
 async fn test_execution_diagnostics_preserve_general_prepared_prefix_on_later_entity_error() {
-    let input = float64_fast_record(&[
+    let input = general_record(&[
         (1, "a", 1, Some(1.0)),
         (2, "b", 2, Some(3.0)),
         (3, "a", 3, Some(5.0)),
         (4, "b", 4, Some(7.0)),
     ]);
-    let spec = kernel_spec(json!([lag_price(1)]));
+    let spec = kernel_spec(json!([lag_label(1)]));
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let job = crate::StreamJobContext::new(
         7,
@@ -326,7 +331,7 @@ async fn test_execution_diagnostics_distinguish_small_batch_from_actual_parallel
         );
         assert_cached_rolling_charge(&operator);
         let actual = store.snapshot().watermark;
-        let parallel = rows == 64_000;
+        let parallel = rows == 64_000 && !operator.compiled.kernel_plan.supports_slab();
         assert_eq!(actual.numeric_rows, u64::try_from(rows).unwrap());
         assert_eq!(
             actual.numeric_parallel_rows,
@@ -340,7 +345,14 @@ async fn test_execution_diagnostics_distinguish_small_batch_from_actual_parallel
         assert_eq!(actual.numeric_parallel_calls, u64::from(parallel));
         assert_eq!(actual.numeric_serial_calls, u64::from(!parallel));
         assert_eq!(actual.numeric_general_calls, 0);
-        assert_eq!(actual.parallel_fallback_small_batch, u64::from(!parallel));
+        assert_eq!(
+            actual.parallel_fallback_small_batch,
+            if operator.compiled.kernel_plan.supports_slab() {
+                0
+            } else {
+                u64::from(!parallel)
+            }
+        );
         assert_eq!(actual.parallel_fallback_unsupported_plan, 0);
         assert_eq!(launches, if parallel { 2 } else { 0 });
     }
@@ -353,28 +365,24 @@ async fn observe_managed_watermark(
     output: &mut crate::EdgeCollector,
     time: i64,
 ) -> u64 {
-    use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+    use crate::runtime::streaming::morsel_pool::JobMorselOwner;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
+    let job = job.clone().with_morsel_owner(owner.clone());
     let callback = store.begin(RollingCallback::Watermark, crate::CancellationToken::new());
-    let context = StreamOperatorContext::new(job, "rolling", operator.state.last_input_watermark)
-        .with_entity_work(task.context_client().unwrap())
+    let context = StreamOperatorContext::new(&job, "rolling", operator.state.last_input_watermark)
+        .with_task_id(Some(crate::runtime::streaming::gather_work::TaskId::new(0)))
         .with_rolling_metrics(callback.recorder());
     let result = operator
         .on_watermark(EventTime::from_micros(time), &context, output)
         .await;
     callback.complete(&result);
     result.unwrap();
-    scope.settle_abandoned().await;
     drop(context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
     launches.load(Ordering::SeqCst)
 }
 

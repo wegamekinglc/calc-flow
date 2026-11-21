@@ -1,0 +1,63 @@
+{
+  "schema": "calc-flow.join-p5-performance-plan.v1",
+  "created_at": "2026-11-21T00:36:54+08:00",
+  "baseline": {
+    "kind": "previous_sealed_candidate",
+    "revision": "705adc7f",
+    "evidence": "benchmarks/join-asof/p5-key-run-cache-20261120/result.json",
+    "join_p50_ms": 399.8451665,
+    "interval_p50_ms": 1076.1127749999998,
+    "paired_comparison": false
+  },
+  "failed_hot_candidate": {
+    "revision": "186adde0",
+    "evidence": "benchmarks/join-asof/p5-hot-whole-batch-20261120/result.json",
+    "join_p50_ms": 486.16329449999995,
+    "interval_p50_ms": 1222.780396,
+    "activation_defect": "production output pruning set output_columns and disabled the hot path"
+  },
+  "candidate": {
+    "kind": "sealed_default_feature_release_wheel",
+    "revision": "2983e787",
+    "required_tracked_source_clean_before_build": true,
+    "build_budget": "separate from the 600-second acquisition budget",
+    "change": "hot Join validates original input schemas and maps requested output fields through the logical schema, so output and retained-layout pruning no longer disable native execution"
+  },
+  "execution": {
+    "cpu_affinity": 0,
+    "tokio_worker_threads": 1,
+    "blas_openmp_workers": 1,
+    "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+    "timing_scope": "ready-source enqueue through Arrow output",
+    "warmups_per_case": 2,
+    "measured_samples_per_case": 10,
+    "sample_order": "Join, interval; no retries or extensions",
+    "correctness": "maintained EngineCase full-output oracle on every sample",
+    "total_budget_seconds": 600,
+    "acquisition_stop_seconds": 570,
+    "owned_cleanup_reserve_seconds": 30,
+    "external_backstop": "timeout --kill-after=30s 600s",
+    "state_root_policy": "new empty root for every warmup and measured observation"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "projected static Join now enters the whole-batch temporal HashJoin path and materializes only sequence, price and factor",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 399.8451665
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "projected interval Join now enters native BandJoin and takes only the two sequence and two price columns",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 1076.1127749999998
+    }
+  ],
+  "unmeasured": "ASOF, multi-batch hot-path inputs, durable hot-path restore, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+}

@@ -44,6 +44,7 @@ fn schema() -> SchemaRef {
         Field::new("sequence", DataType::UInt64, false),
         Field::new("symbol", DataType::Utf8, false),
         Field::new("price", DataType::Float64, false),
+        Field::new("price_copy", DataType::Float64, false),
     ]))
 }
 
@@ -69,24 +70,25 @@ fn input() -> RecordBatch {
             (0..TOTAL).map(|row| symbols[row % ENTITIES].as_str()),
         )),
         Arc::new(Float64Array::from_iter_values((0..TOTAL).map(price))),
+        Arc::new(Float64Array::from_iter_values((0..TOTAL).map(price))),
     ];
     RecordBatch::try_new(schema(), columns).unwrap()
 }
 
 fn plan() -> StreamExecutionPlan {
-    let leaf = |size| {
+    let leaf = |size, input| {
         json!({
-            "kind": "mean", "primitive_version": 1, "input": "price",
+            "kind": "mean", "primitive_version": 1, "input": input,
             "frame": {"kind": "rows", "size": size}, "min_periods": size,
         })
     };
     let spec = serde_json::from_value(json!({
         "configuration_version": 1, "state_layout_version": 1,
         "partition_by": ["symbol"], "event_time": "event_time", "sequence_by": ["sequence"],
-        "allowed_lateness_micros": 0, "late_policy": {"kind": "error", "scope": "envelope"},
+        "allowed_lateness_micros": 0, "late_policy": {"kind": "drop", "metrics_version": 1},
         "value_policy": "stateful_numeric_v1",
         "outputs": [{"kind": "difference", "primitive_version": 1,
-            "left": leaf(5), "right": leaf(20), "output": "spread"}],
+            "left": leaf(5, "price"), "right": leaf(20, "price_copy"), "output": "spread"}],
     }))
     .unwrap();
     PipelineBuilder::new("owned-entity-lanes")
@@ -144,7 +146,7 @@ impl OrdinaryStreamSink for Sink {
 }
 
 #[tokio::test]
-async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
+async fn managed_native_dual_sma_registers_two_owned_morsels() {
     let input = input();
     let plan = plan();
     let records = Arc::new(Mutex::new(Vec::new()));
@@ -185,7 +187,7 @@ async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
     };
     let mut runner = ContinuousRunner::new();
     let job = runner.start(spec).await.unwrap();
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     let outcome = job.wait().await;
     assert_eq!(
         outcome.state,
@@ -199,9 +201,10 @@ async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
         concat_batches(&records[0].schema(), records.iter()).unwrap()
     };
     assert_eq!(actual.num_rows(), TOTAL);
-    assert_eq!(&actual.columns()[..4], input.columns());
+    let input_width = input.num_columns();
+    assert_eq!(&actual.columns()[..input_width], input.columns());
     let spread = actual
-        .column(4)
+        .column(input_width)
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
@@ -223,6 +226,6 @@ async fn managed_native_dual_sma_registers_two_owned_numeric_lanes() {
     runner.shutdown().await.unwrap();
     assert_eq!(
         launched, 2,
-        "the qualified managed route must register two owned CPU lanes"
+        "the qualified managed route must register two owned compute morsels"
     );
 }

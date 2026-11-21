@@ -133,6 +133,6 @@ mod tests {
             })
             .sum::<i64>();
         assert_eq!(total, 4);
-        assert_eq!(operator.incremental.as_ref().unwrap().groups.len(), 3);
+        assert_eq!(operator.incremental.as_ref().unwrap().group_count(), 3);
     }
 }

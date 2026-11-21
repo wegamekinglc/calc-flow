@@ -358,12 +358,12 @@ fn compile_spec_against_schema(
     let kernel_plan = RollingKernelPlan::compile(
         input_schema,
         state_layout_version,
-        spec.numerical_profile,
         event_time_index,
         &partition_columns,
         &sequence_columns,
         &outputs,
         &window_groups,
+        &indicator_groups,
     );
     Ok(CompiledRollingSpec {
         state_layout_version,

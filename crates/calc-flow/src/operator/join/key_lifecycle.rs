@@ -78,6 +78,7 @@ impl StreamJoinOperator {
     }
 }
 
+#[cfg(test)]
 impl StreamJoinOperator {
     pub(super) fn sql_equality_tables(
         &mut self,

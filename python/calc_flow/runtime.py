@@ -17,7 +17,7 @@ from collections.abc import (
     ValuesView,
 )
 from copy import deepcopy
-from dataclasses import field
+from dataclasses import field, replace
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import (
@@ -751,8 +751,11 @@ class StateBudget:
 class StreamRuntimeConfig:
     """Immutable runtime tuning excluded from the plan fingerprint.
 
-    Set ``checkpointing=False`` to omit snapshots and recovery bookkeeping.
-    Disabled jobs require ordinary sinks and provide best-effort delivery.
+    ``checkpointing=None`` selects the entrypoint's default mode: convenience
+    streams run without checkpoints and an explicit ``StreamingRunner``
+    checkpoints. ``True`` or ``False`` selects the mode explicitly. Disabled
+    jobs omit snapshots and recovery bookkeeping, require ordinary sinks and
+    provide best-effort delivery.
     ``sql_state_budget`` caps cumulative accepted aggregate input, including
     compact execution. ``sql_compact_state_budget`` caps each aggregate node's
     live groups and conservative owned state bytes, including candidate copies
@@ -769,19 +772,28 @@ class StreamRuntimeConfig:
     checkpoint_timeout: timedelta = timedelta(minutes=10)
     edge_budget: EdgeBudget = EdgeBudget()
     retained_epochs: int = 2
+    checkpoint_inflight_max_bytes: int = 1 << 30
     sql_state_budget: StateBudget | None = None
-    checkpointing: bool = True
+    checkpointing: bool | None = None
     sql_compact_state_budget: StateBudget | None = None
     sql_snapshot_state_budget: StateBudget | None = None
     sql_replacement_state_budget: StateBudget | None = None
 
     def _native(self) -> dict[str, int | bool]:
-        if type(self.checkpointing) is not bool:
-            raise TypeError("checkpointing must be a bool")
+        # Entrypoints resolve the mode first; unresolved lowering keeps the
+        # explicit-runner default so the native layer only receives bools.
+        checkpointing = _checkpointing_mode(self.checkpointing, True)
         if not isinstance(self.edge_budget, EdgeBudget):
             raise TypeError("edge_budget must be a calc_flow.EdgeBudget")
         if type(self.retained_epochs) is not int or self.retained_epochs <= 0:
             raise ValueError("retained_epochs must be a positive integer")
+        if (
+            type(self.checkpoint_inflight_max_bytes) is not int
+            or not 0 < self.checkpoint_inflight_max_bytes <= 9_007_199_254_740_991
+        ):
+            raise ValueError(
+                "checkpoint_inflight_max_bytes must be a positive JSON-safe integer"
+            )
         budgets = (
             ("sql_state", self.sql_state_budget, "max_rows"),
             ("sql_compact_state", self.sql_compact_state_budget, "max_groups"),
@@ -794,7 +806,7 @@ class StreamRuntimeConfig:
                     f"{name}_budget must be a calc_flow.StateBudget or None"
                 )
         values = {
-            "checkpointing": self.checkpointing,
+            "checkpointing": checkpointing,
             "checkpoint_interval_micros": _duration_micros(
                 self.checkpoint_interval, "checkpoint_interval"
             ),
@@ -804,6 +816,7 @@ class StreamRuntimeConfig:
             "edge_max_rows": self.edge_budget.max_rows,
             "edge_max_bytes": self.edge_budget.max_bytes,
             "retained_epochs": self.retained_epochs,
+            "checkpoint_inflight_max_bytes": self.checkpoint_inflight_max_bytes,
         }
         for name, budget, rows_key in budgets:
             if budget is not None:
@@ -1244,11 +1257,31 @@ def _runner_config(config: StreamRuntimeConfig | None) -> StreamRuntimeConfig:
     return selected
 
 
+def _checkpointing_mode(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if type(value) is not bool:
+        raise TypeError("checkpointing must be a bool or None")
+    return value
+
+
+def _resolved_config(
+    config: StreamRuntimeConfig | None, default: bool
+) -> StreamRuntimeConfig:
+    """Return ``config`` with ``checkpointing=None`` resolved to ``default``."""
+    selected = _runner_config(config)
+    mode = _checkpointing_mode(selected.checkpointing, default)
+    if selected.checkpointing is mode:
+        return selected
+    return replace(selected, checkpointing=mode)
+
+
 class StreamingRunner:
     """One-shot source-driven continuous runner owning all bindings.
 
-    A disabled runtime config requires ``checkpoints=None``; enabled jobs
-    require managed checkpoint storage. Mode is fixed for the job's lifetime.
+    Checkpointing is on unless ``config.checkpointing=False``: enabled jobs
+    require managed checkpoint storage and disabled jobs require
+    ``checkpoints=None``. Mode is fixed for the job's lifetime.
     """
 
     __slots__ = ("_inner", "__weakref__")
@@ -1287,12 +1320,13 @@ class StreamingRunner:
                     settings.max_batch_rows, settings.max_batch_bytes
                 ),
                 retained_epochs=settings.retained_epochs,
+                checkpointing=True,
             )
         if not isinstance(sources, Mapping):
             raise TypeError("sources must be a mapping of source bindings")
         if not isinstance(sinks, Mapping):
             raise TypeError("sinks must be a mapping of sink bindings")
-        selected_config = _runner_config(config)
+        selected_config = _resolved_config(config, True)
         native_config = selected_config._native()
         if selected_config.checkpointing and not isinstance(
             checkpoints, ManagedCheckpointRuntime

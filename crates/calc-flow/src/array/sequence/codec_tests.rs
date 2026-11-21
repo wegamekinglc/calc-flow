@@ -16,15 +16,11 @@ fn step(state: &mut SequenceState, input: ArrayView<'_>) -> Result<NativeArray> 
 }
 
 #[test]
-fn test_sequence_mean_codec_retains_logical_history_and_raw_m2_without_refolding() {
-    use crate::{RollingNumericalProfile, array::RollingMeanOptions};
+fn test_sequence_mean_codec_retains_history_and_compensated_sum_parts() {
+    use crate::array::RollingMeanOptions;
     let spec = SequenceSpec::new(
         ArrayDType::Float32,
-        KernelOptions::Mean(
-            RollingMeanOptions::new(3)
-                .unwrap()
-                .with_numerical_profile(RollingNumericalProfile::StableV2Preview),
-        ),
+        KernelOptions::Mean(RollingMeanOptions::new(3).unwrap()),
     )
     .unwrap();
     let mut state = SequenceState::new(&spec, ArrayStateOptions::default()).unwrap();
@@ -38,7 +34,7 @@ fn test_sequence_mean_codec_retains_logical_history_and_raw_m2_without_refolding
     let execution = ArrayExecutionOptions::default();
     let bytes = encode(&spec, &state, &execution, 0, &mut || Ok(())).unwrap();
     assert_eq!(bytes.len(), 167);
-    assert_eq!(&bytes[16..20], &[1, 1, 2, 0]);
+    assert_eq!(&bytes[16..20], &[1, 1, 3, 0]);
     assert_eq!(&bytes[68..76], &4_u64.to_le_bytes());
     assert_eq!(&bytes[76..84], &1_u64.to_le_bytes());
     assert_eq!(&bytes[132..140], &3_u64.to_le_bytes());
@@ -52,12 +48,32 @@ fn test_sequence_mean_codec_retains_logical_history_and_raw_m2_without_refolding
         bits(&step(&mut state, view(&[6.0, 8.0])).unwrap())
     );
     let mut raw = bytes.clone();
-    raw[100..108].copy_from_slice(&0x7ff8_0000_0000_0055_u64.to_le_bytes());
+    raw[92..100].copy_from_slice(&0x55_u64.to_le_bytes());
     let restored = restore(&spec, &raw, &execution, 64).unwrap();
     assert_eq!(
         encode(&spec, &restored, &execution, 0, &mut || Ok(())).unwrap(),
         raw
     );
+}
+
+#[test]
+fn test_sequence_mean_codec_rejects_removed_profile_markers() {
+    let spec = SequenceSpec::new(
+        ArrayDType::Float64,
+        KernelOptions::Mean(crate::array::RollingMeanOptions::new(2).unwrap()),
+    )
+    .unwrap();
+    let state = SequenceState::new(&spec, ArrayStateOptions::default()).unwrap();
+    let execution = ArrayExecutionOptions::default();
+    let bytes = encode(&spec, &state, &execution, 0, &mut || Ok(())).unwrap();
+    for marker in [1, 2] {
+        let mut old = bytes.clone();
+        old[18] = marker;
+        let Err(error) = restore(&spec, &old, &execution, state.state_bytes()) else {
+            panic!("removed mean marker {marker} was accepted");
+        };
+        assert!(error.to_string().contains("stable_v1 and stable_v2"));
+    }
 }
 
 fn bits(output: &NativeArray) -> Vec<Option<u64>> {

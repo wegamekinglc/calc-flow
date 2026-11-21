@@ -53,10 +53,7 @@ async def settle_fixture_runner(runner, task):
 
 
 class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
-    async def test_candidate_join_preflight_records_refusal_control_once(self):
-        from scripts.test_benchmark_native_acceptance import (
-            dictionary_refusal_observation,
-        )
+    async def test_candidate_join_preflight_records_layout_control_once(self):
         from scripts.toolkit import sha256_file
 
         with TemporaryDirectory() as raw:
@@ -80,19 +77,11 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                 for case in acceptance_inventory()
                 if case.workload == "join_capture"
             )
-            control = AsyncMock(return_value=dictionary_refusal_observation())
             from scripts.test_issue406_measurement import layout_control_observation
 
             layouts = AsyncMock(return_value=layout_control_observation())
             with (
-                patch.object(
-                    runner,
-                    "_run_native_control",
-                    layouts,
-                ),
-                patch.object(
-                    runner, "_run_dictionary_refusal_control", control, create=True
-                ),
+                patch.object(runner, "_run_native_control", layouts),
                 patch.object(
                     runner, "sample", AsyncMock(return_value={"warmup": True})
                 ),
@@ -103,20 +92,13 @@ class AcceptanceDriverTests(unittest.IsolatedAsyncioTestCase):
                     ("baseline", 0),
                 ):
                     await runner.prepare((case,), side, round_index)
-            self.assertEqual(control.await_count, 1)
             self.assertEqual(layouts.await_count, 1)
-            self.assertEqual(
-                json.loads(
-                    (root / "correctness" / "join-layout-controls.json").read_text()
-                )["control"],
-                layout_control_observation(),
-            )
             observation = json.loads(
-                (root / "correctness" / "join-dictionary-refusal.json").read_text()
+                (root / "correctness" / "join-layout-controls.json").read_text()
             )
             self.assertEqual(observation["product_commit"], "c" * 40)
             self.assertEqual(observation["binary_sha256"], identity["sha256"])
-            self.assertEqual(observation["control"], dictionary_refusal_observation())
+            self.assertEqual(observation["control"], layout_control_observation())
 
     def test_native_replay_uses_the_exact_source_sample_trace(self):
         with TemporaryDirectory() as raw_root:

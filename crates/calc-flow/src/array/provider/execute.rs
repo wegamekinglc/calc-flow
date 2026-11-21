@@ -377,15 +377,12 @@ fn rolling_mean(
     let Node::RollingMean {
         window,
         min_periods,
-        numerical_profile,
         ..
     } = node
     else {
         unreachable!("rolling node was selected")
     };
-    let options = array::RollingMeanOptions::new(*window)?
-        .with_min_periods(*min_periods)?
-        .with_numerical_profile(numerical_profile.native());
+    let options = array::RollingMeanOptions::new(*window)?.with_min_periods(*min_periods)?;
     array::rolling_mean::rolling_mean_checked(input.float_view()?, options, execution, check)
 }
 fn ewma(

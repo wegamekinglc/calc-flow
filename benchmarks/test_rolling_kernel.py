@@ -117,7 +117,7 @@ def _run_paired_case(benchmark: BenchmarkFixture, *, dual: bool, scenario: str) 
     optimized, optimized_explanation = _symbolic_plan(dual=dual)
     expected_state_groups = 2 if dual else 1
     assert (
-        "selected=ordered_primitive profile=stable_v1 "
+        "selected=ordered_primitive "
         "complexity=amortized_constant" in optimized_explanation
     )
     assert f"shared_state_groups={expected_state_groups}" in optimized_explanation

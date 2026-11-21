@@ -230,34 +230,27 @@ fn cadence_prices() -> datafusion::arrow::array::Float64Array {
 
 #[test]
 fn test_sliced_nullable_chunks_keep_global_mean_cadence_and_eager_bits() {
-    use calc_flow::{RollingNumericalProfile, array::rolling_mean};
+    use calc_flow::array::rolling_mean;
     use datafusion::arrow::array::Array;
     use std::sync::Arc;
     let prices = cadence_prices();
     let sliced = prices.slice(1, 133);
     let input = NativeArray::from_arrow(Arc::new(sliced), vec![133]).unwrap();
     let execution = ArrayExecutionOptions::default();
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let options = RollingMeanOptions::new(7)
-            .unwrap()
-            .with_min_periods(3)
-            .unwrap()
-            .with_numerical_profile(profile);
-        let expected =
-            bits(&rolling_mean(input.float_view().unwrap(), options, &execution).unwrap());
-        let mut state = RollingMeanState::new(options, ArrayStateOptions::default()).unwrap();
-        let mut observed = Vec::new();
-        for (offset, len) in [(0, 13), (13, 50), (63, 0), (63, 1), (64, 69)] {
-            let chunk =
-                NativeArray::from_arrow(input.as_arrow().slice(offset, len), vec![len]).unwrap();
-            observed.extend(bits(&state.process(chunk.view(), &execution).unwrap()));
-        }
-        assert_eq!(observed, expected);
-        assert_eq!(input.as_arrow().null_count(), 2);
+    let options = RollingMeanOptions::new(7)
+        .unwrap()
+        .with_min_periods(3)
+        .unwrap();
+    let expected = bits(&rolling_mean(input.float_view().unwrap(), options, &execution).unwrap());
+    let mut state = RollingMeanState::new(options, ArrayStateOptions::default()).unwrap();
+    let mut observed = Vec::new();
+    for (offset, len) in [(0, 13), (13, 50), (63, 0), (63, 1), (64, 69)] {
+        let chunk =
+            NativeArray::from_arrow(input.as_arrow().slice(offset, len), vec![len]).unwrap();
+        observed.extend(bits(&state.process(chunk.view(), &execution).unwrap()));
     }
+    assert_eq!(observed, expected);
+    assert_eq!(input.as_arrow().null_count(), 2);
 }
 
 #[test]
@@ -271,7 +264,7 @@ fn test_states_preserve_independent_extreme_mean_and_ewma_oracles() {
     mean.process(view(&[-1e308]), &execution).unwrap();
     assert_eq!(
         bits(&mean.process(view(&[1e308]), &execution).unwrap()),
-        [Some(f64::INFINITY.to_bits())]
+        [Some(0.0_f64.to_bits())]
     );
     mean.reset();
     mean.process(view(&[1e155, 1e155, 1e155]), &execution)

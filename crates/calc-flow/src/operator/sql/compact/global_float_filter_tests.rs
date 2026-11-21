@@ -6,6 +6,32 @@ mod global_float_where_tests;
 
 const FILTERED: &str = "SELECT SUM(value) FILTER (WHERE selected) AS total, AVG(value) FILTER (WHERE selected) AS mean, SUM(alternate) FILTER (WHERE other) AS other_total, AVG(alternate) FILTER (WHERE other) AS other_mean, MIN(value) FILTER (WHERE other) AS lo, MAX(value) FILTER (WHERE selected) AS hi, COUNT(value) FILTER (WHERE selected) AS valid, COUNT(*) FILTER (WHERE other) AS hits, COUNT(*) AS rows, AVG(value) FILTER (WHERE selected) AS again FROM events";
 
+#[tokio::test]
+async fn test_coalesced_global_record_uses_morsels_after_gather_admission_closes() {
+    let dtype = DataType::Float64;
+    let job = job();
+    job.gather_owner().close_admission();
+    let context = StreamOperatorContext::new(&job, "float_extrema", None);
+    let mut state = filtered_operator(&dtype, FILTERED);
+    let parts = vec![vec![Some(ONE), None, Some(TWO)]];
+
+    let actual = process(&mut state, filtered_input(&dtype, &parts, 1), &context).await;
+    let expected = DataFusionRuntime::new(DataFusionConfig::default())
+        .unwrap()
+        .sql(
+            FILTERED,
+            &BTreeMap::from([("events".into(), filtered_input(&dtype, &parts, 1))]),
+            Some("coalesced-morsel-oracle"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows(&actual), rows(&expected));
+
+    drop((state, actual, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+}
+
 fn filtered_schema(dtype: &DataType) -> SchemaRef {
     let original = schema(dtype);
     let mut fields = original.fields().to_vec();

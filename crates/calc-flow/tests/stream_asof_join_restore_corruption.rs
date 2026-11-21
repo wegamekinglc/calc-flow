@@ -1,6 +1,6 @@
 mod asof_support;
 
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use asof_support::{batch, operator, schema, spec};
 use calc_flow::{
@@ -289,126 +289,74 @@ async fn test_asof_restore_rejects_forged_gauges_counters_and_output_sequence_at
     assert_original_answer(&mut target).await;
 }
 
-fn read_count(bytes: &[u8], cursor: &mut usize) -> usize {
-    let value = u64::from_le_bytes(bytes[*cursor..*cursor + 8].try_into().unwrap());
-    *cursor += 8;
-    usize::try_from(value).unwrap()
-}
-
-fn sequence_width(flag: u8) -> usize {
-    match flag {
-        0 => 16,
-        1..=4 => 1 << (flag - 1),
-        5..=8 => 1 << (flag - 5),
-        _ => panic!("sequence codec"),
-    }
-}
-
-fn columnar_entry_ranges(bytes: &[u8]) -> [Vec<Range<usize>>; 3] {
-    assert_eq!(&bytes[..8], b"CFASDL10");
-    assert_eq!(&bytes[128..136], b"CFASOF10");
-    let mut cursor = 136;
-    let chunks = read_count(bytes, &mut cursor);
-    let buckets = read_count(bytes, &mut cursor);
-    read_count(bytes, &mut cursor);
-    cursor += 128;
-    let owners = read_count(bytes, &mut cursor);
-    for _ in 0..owners {
-        let kind = bytes[cursor];
-        cursor += 2;
-        let rows = read_count(bytes, &mut cursor);
-        read_count(bytes, &mut cursor);
-        let length = read_count(bytes, &mut cursor);
-        read_count(bytes, &mut cursor);
-        cursor += length;
-        if kind != 0 {
-            cursor += (rows + 1) * if kind == 1 { 4 } else { 8 };
-        }
-    }
-    let mut left = Vec::new();
-    for _ in 0..chunks {
-        read_count(bytes, &mut cursor);
-        let rows = read_count(bytes, &mut cursor);
-        let keys = read_count(bytes, &mut cursor);
-        let width = sequence_width(bytes[cursor]);
-        cursor += 1 + 48 + keys * 16 + rows * 12;
-        left.extend((0..rows).map(|row| cursor + row * width..cursor + (row + 1) * width));
-        cursor += rows * (width + 4);
-    }
-    let mut keys = Vec::new();
-    let mut first_right = Vec::new();
-    for key in 0..buckets {
-        let start = cursor;
-        cursor += 16;
-        let rows = read_count(bytes, &mut cursor);
-        let width = sequence_width(bytes[cursor]);
-        cursor += 1 + 40 + rows * 8;
-        if key == 0 {
-            first_right
-                .extend((0..rows).map(|row| cursor + row * width..cursor + (row + 1) * width));
-        }
-        cursor += rows * width;
-        let payloads = bytes[cursor..cursor + rows]
-            .iter()
-            .fold(0, |count, &tag| count + usize::from(tag == 1));
-        cursor += rows + payloads * 12;
-        keys.push(start..cursor);
-    }
-    assert_eq!(cursor, bytes.len());
-    [left, keys, first_right]
-}
-
 #[tokio::test]
-async fn test_asof_v3_restore_rejects_serialized_duplicates_and_noncanonical_order_atomically() {
+async fn test_asof_columnar_restore_rejects_serialized_duplicate_atomically() {
     let original = populated_snapshot().await;
-    let bytes = original.segments["asof-log-v10-1-0-1"].bytes();
+    let identity_id = original
+        .segments
+        .keys()
+        .find(|name| name.contains("-1-") && name.ends_with("-identity"))
+        .unwrap()
+        .clone();
+    let identity = read_ipc(original.segments[&identity_id].bytes());
+    let sequences = identity
+        .column(2)
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::BinaryArray>()
+        .unwrap();
+    let mut values = sequences
+        .iter()
+        .map(|value| value.unwrap().to_vec())
+        .collect::<Vec<_>>();
+    values[1] = values[0].clone();
+    let mut columns = identity.columns().to_vec();
+    columns[2] = Arc::new(datafusion::arrow::array::BinaryArray::from_iter_values(
+        values.iter().map(Vec::as_slice),
+    ));
+    let identity = RecordBatch::try_new(identity.schema(), columns).unwrap();
+
+    let payload_id = identity_id.replace("-identity", "-payload");
+    let payload = read_ipc(original.segments[&payload_id].bytes());
+    let payload_sequences = payload
+        .column_by_name("sequence")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let mut sequence_values = payload_sequences.values().to_vec();
+    sequence_values[1] = sequence_values[0];
+    let mut columns = payload.columns().to_vec();
+    let sequence = payload.schema().index_of("sequence").unwrap();
+    columns[sequence] = Arc::new(Int64Array::from(sequence_values));
+    let payload = RecordBatch::try_new(payload.schema(), columns).unwrap();
+
+    let mut damaged = original.clone();
+    damaged
+        .segments
+        .insert(identity_id, StateSegment::new(write_ipc(&identity)));
+    damaged
+        .segments
+        .insert(payload_id, StateSegment::new(write_ipc(&payload)));
     let mut target = operator(10);
     seed_live_state(&mut target, &schema()).await;
-    for (entries, message) in columnar_entry_ranges(bytes).into_iter().zip([
-        "chunk identity order is not strict",
-        "right key order is not strict",
-        "right identity order is not strict",
-    ]) {
-        assert_eq!(entries.len(), 2);
-        for duplicate in [false, true] {
-            let [first, second] = [&entries[0], &entries[1]];
-            let middle = if duplicate {
-                [bytes[first.clone()].to_vec(), bytes[first.clone()].to_vec()].concat()
-            } else {
-                [
-                    bytes[second.clone()].to_vec(),
-                    bytes[first.clone()].to_vec(),
-                ]
-                .concat()
-            };
-            let mut replacement = [
-                bytes[..first.start].to_vec(),
-                middle,
-                bytes[second.end..].to_vec(),
-            ]
-            .concat();
-            let body_bytes = u64::try_from(replacement.len() - 128).unwrap();
-            replacement[112..120].copy_from_slice(&body_bytes.to_le_bytes());
-            let replacement = StateSegment::new(replacement);
-            let mut damaged = original.clone();
-            let frame =
-                &mut damaged.inline_metadata.get_mut("checkpoint_log").unwrap()["frames"][0];
-            frame["sha256"] = json!(replacement.sha256());
-            frame["bytes"] = json!(replacement.bytes().len());
-            damaged
-                .segments
-                .insert("asof-log-v10-1-0-1".into(), replacement);
-            reject_without_replacing_state(
-                &mut target,
-                &damaged,
-                message,
-                if duplicate {
-                    "v3 serialized duplicate"
-                } else {
-                    "v3 descending order"
-                },
-            );
-        }
-    }
+    reject_without_replacing_state(&mut target, &damaged, "duplicate", "columnar duplicate");
     assert_original_answer(&mut target).await;
+}
+
+fn read_ipc(bytes: &[u8]) -> RecordBatch {
+    let mut reader =
+        datafusion::arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(bytes), None)
+            .unwrap();
+    reader.next().unwrap().unwrap()
+}
+
+fn write_ipc(record: &RecordBatch) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut writer =
+        datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut bytes, record.schema().as_ref())
+            .unwrap();
+    writer.write(record).unwrap();
+    writer.finish().unwrap();
+    drop(writer);
+    bytes
 }

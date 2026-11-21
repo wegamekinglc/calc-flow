@@ -1,0 +1,24 @@
+{
+  "schema": "calc-flow.checkpoint-v4-runner-report.v1",
+  "configuration": {
+    "entities": 64,
+    "batch_rows": 6400,
+    "checkpoint_ms": 1000,
+    "rounds": 2,
+    "pairs": 10,
+    "seconds": 5,
+    "warmups_per_arm_round": 1,
+    "minimum_epochs": 4,
+    "budget_seconds": 250.0
+  },
+  "binary": {
+    "side": "checkpoint-v4-runner",
+    "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/checkpoint-v4/checkpoint-v4-runner-evidence",
+    "sha256": "9089b3e50ada57c4f87ba5f5cfa0e274db3539d163e4aca3955a9d92a94b22de"
+  },
+  "raw_rounds": [],
+  "statistics": null,
+  "wall_seconds": 5.276242393010762,
+  "within_budget": true,
+  "error": "RuntimeError('runner evidence binary exited 101; see /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/benchmarks/checkpoint-v4/m3-raw/round-1.log')"
+}

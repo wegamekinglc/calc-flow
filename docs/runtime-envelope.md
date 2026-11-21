@@ -7,7 +7,7 @@ Calc Flow's Python application API. Expression `Program.compile_stream` and
 explicit graph/project compilation reach this same runtime; Python convenience
 batch collection does not create a stream or alter its recovery protocol.
 
-The v3 Rust core moves stream traffic on one typed message: `StreamMessage`.
+The Rust core moves stream traffic on one typed message: `StreamMessage`.
 Each stream edge carries a single ordered sequence of data and control
 messages from one producer to one consumer. This document is the normative
 contract for that envelope: the message type, its typed `EventTime` and
@@ -16,16 +16,18 @@ operators see, the compiled stream plan, and the delivery invariants the
 runtime guarantees today. The source-driven runtime is public through the
 crate-root `StreamingRunner` and owning `StreamingJob`; control construction,
 checkpoint coordination, supervision, and reaper ownership remain internal
-implementation details.
+implementation details. The crate-root `StreamSession` drives admitted plans
+from the caller's thread instead; see
+[caller-driven sessions](#caller-driven-sessions).
 
 The public facade lives in `crates/calc-flow/src/continuous.rs`. Its runtime
 implementation lives in `crates/calc-flow/src/runtime/streaming/` (the message,
 bounded channel, job and task contexts, whole-job preflight, source, operator,
 and sink tasks, the job-scoped progress driver, checkpoint coordinator,
-supervisor, internal runner/reaper, metrics, and soak),
-`crates/calc-flow/src/state/` (the v3 manifest, segments, state backends, and
-production manifest transaction), `crates/calc-flow/src/time/` (event time and
-epoch),
+supervisor, internal runner/reaper, caller-driven session, metrics, and soak),
+`crates/calc-flow/src/state/` (internal v4 runner and session manifests,
+native source-history handles, segments, state backends, and manifest persistence),
+`crates/calc-flow/src/time/` (event time and epoch),
 `crates/calc-flow/src/operator/stream.rs` (the operator traits and public
 in-memory collector), `crates/calc-flow/src/operator/window.rs` (window
 declarations and execution), and `crates/calc-flow/src/pipeline/stream.rs`
@@ -54,6 +56,7 @@ On this page:
 - [Manifest publication and recovery](#manifest-publication-and-recovery)
 - [Terminal recovery](#terminal-recovery)
 - [Cancellation and ownership](#cancellation-and-ownership)
+- [Caller-driven sessions](#caller-driven-sessions)
 - [Status and metrics](#status-and-metrics)
 - [Execution paths](#execution-paths)
 - [Progress and replay](#progress-and-replay)
@@ -82,7 +85,11 @@ control values — watermark monotonicity and epoch consistency — belongs to
 the runtime paths that construct and enqueue them and runs before enqueue,
 before any downstream side effect. On coordinated jobs, the job-scoped
 progress driver validates source-provided watermark monotonicity and owns
-generated watermark/timer ordering. The direct single-source path performs
+generated watermark/timer ordering. A generated policy with a positive emit
+interval publishes on a phase-anchored timer. A zero interval arms no watermark
+timer; the driver evaluates the generated watermark in the same drain step as
+each data batch and enqueues it behind that batch on the same source route
+only when the observed maximum advances. The direct single-source path performs
 that monotonicity check in its source task before fan-out. A checkpoint-enabled job validates the
 single-flight epoch at its source cut, operator alignment, sink pre-commit,
 manifest publication, and sink finalization boundaries. An internal job path
@@ -208,38 +215,32 @@ operators prepare state asynchronously, yielding during index writing and moving
 bulk hashing or compaction to blocking workers. Managed capture shares prepared
 immutable segments and bounded metadata. Direct callers
 of `checkpoint` must first await preparation if they need this property; Join
-and ASOF retain synchronous encoding fallbacks for direct calls. Durable staging
-is runtime-owned. `restore(snapshot)` applies a captured snapshot, and
+and ASOF retain synchronous encoding fallbacks for direct calls. Durable v4
+persistence is runtime-owned and proceeds asynchronously after capture.
+`restore(snapshot)` applies a captured snapshot, and
 `reset()` returns the operator to its freshly constructed state. The
 defaults are stateless: capture returns an empty snapshot, restore rejects a
 non-empty one, and reset succeeds.
 
 `OperatorStateSnapshot` carries small bounded JSON `inline_metadata` plus
 named `segments` of allocation-shared `StateSegment` values (immutable bytes
-with a SHA-256 computed once at construction, so carried segments move
-between epochs without copying or re-hashing). Keyed row state never appears
-inline, and no segment may carry secrets; the runtime assigns
-segment paths, lengths, and checksums during staging, reusing the
-already-committed handle for segment content that is unchanged since the
-current session committed it.
+with a SHA-256 computed at construction). Keyed row state never appears
+inline, and no segment may carry secrets; the runtime assigns object paths,
+lengths, and checksums during v4 persistence.
 
-Streaming Join keeps semantic checkpoint state version `1`. Its Python
-capability inventory lists physical layouts `(1, 2, 3)`. Full retained payloads
-use columnar layout 2. When compiler projection actually narrows either side's
-retained schema, Join writes strict inner layout 3. Retained columns include
-consumer dependencies plus keys and event-time fields. Their independent
-buffers, sparse compaction and checkpoint IPC use the selected schemas.
-Complete logical input schemas, configuration and graph fingerprints remain
-unchanged. Project format 3 and the managed manifest v3 remain unchanged.
+Streaming Join writes native layout 12. Its metadata binds the Join spec,
+row-ID and output-sequence frontiers, metrics, ended state and epoch. Native
+pages contain immutable run payload and identity columns, per-key and
+expiration indexes, shared keys and control counters. The managed runner passes
+`NativeCapture` directly to manifest-v4 persistence; direct
+`checkpoint()`/`restore()` uses the same page encoding as an
+`OperatorStateSnapshot`. Layouts 1–3 remain only in explicit migration tests
+and are rejected by production restore.
 
-Layout 3 reuses frame/inventory codec 2 and adds
-`charge_mode: "v1_admission"` and an exact `retained_payloads` descriptor. Its
-only fields are `columns`, `logical_schema_digests` and `schema_digests`, each
-with left/right entries. Selected logical indices are sorted and unique;
-canonical digests bind both complete logical and retained physical schemas,
-including field order, names, types, nullability and metadata. Restore requires the
-compiled descriptor exactly, including for empty and terminal state; broader
-or narrower projected descriptors fail. Full-retention plans reject layout 3.
+Output projection is applied while materializing a result and does not create a
+second retained-schema checkpoint layout. Restore validates the spec, page
+inventory, Arrow schemas, group IDs, row locators, ordering, coverage, frontiers
+and retained accounting before installing the run core and shared key store.
 
 Join validates ingress and input schema before reserving batch-admission
 metadata. Inputs with at most 64 physical rows and four record batches use
@@ -250,68 +251,48 @@ new retained-state commit. This is separate from state and match limits and
 does not increment their failure counters. The default runtime has no implicit
 memory-pool limit.
 
-Admission preserves null/late classification and uses retained-row bitmaps to
-skip payload charging for rows that do not enter state. Retained rows' V1
-logical charges use the complete input before selecting columns. Projected
-groups with retained rows own independent selected buffers; groups with no
-retained rows can use a projected view of the input during output gathering.
-Batch-local key interning resolves repeated keys against the persistent
-dictionary once per distinct key in each eligible group, with funded scratch
-and the existing per-row fallback for unsupported keys or unavailable scratch.
-Layout 3 carries those authoritative historical charges. Every historical row's charge
-must meet a checked lower bound and the configured per-side byte cap. The bound
-includes V1 row overhead, encoded-key length, the existing 16-byte term,
-retained logical-cell charges and one validity byte per omitted logical column.
-Restore validates historical identities, keys, event times and inventory, sums
-live charges exactly into retained metrics, and reapplies live row/byte limits.
-It cannot recompute charges for discarded values. Checksums verify segment
-integrity; they do not authenticate original admission history. Logical state
-charges and limits retain their complete-input meaning. Physical payload and
-temporary work reservations separately fund actual storage.
+Admission preserves null/late classification and routes retained rows through
+the shared key store. Per-side logical charges cover live run payloads,
+identity and locator columns, run owners, per-key bucket capacity and
+expiration-index capacity. Output projection does not change those retained
+charges. Prospective admission includes replacement overlap, and restore checks
+the reconstructed live totals against metadata before applying the configured
+limits. Physical payload and temporary work reservations separately fund actual
+storage.
 
-Join tracks each side's capture row-ID frontier, dirty live-row count and
-compact tombstone list. Managed checkpoint preparation derives upserts from
-live rows at or above that frontier and encodes tombstones for previously
-captured rows that were evicted. Rows admitted and evicted between captures leave no delta
-entry. This row-ID frontier is separate from event-time watermark progress.
-Preparation also builds replacement bases on owned native workers under the
-configured memory budget. Capture shares the prepared immutable segments and
-advances the row-ID frontiers; clean captures share unchanged segment
-allocations. Direct capture without matching preparation can encode dirty
-state synchronously. Four dirty checkpoint epochs arm base compaction.
-History, prepared cuts and worker inputs bind the compiled physical layout and
-charge mode. Processing with checkpointing disabled invalidates reusable
-history and prepared cuts; a later capture requires successful preparation of
-a live base. Successful live-base preparation restores trusted incremental
-continuation and rebase.
+Join tracks run-ID, row-ID and output-sequence frontiers independently of
+watermark progress. Native capture caches clean run identity, per-key bucket,
+expiration and shared-key page images. New runs and changed identity prefixes
+rebuild only their own pages; touched buckets and expiration are tracked
+separately, retired runs and buckets drop cached pages, and unchanged key
+records are shared. Control pages are reused when their counters are unchanged.
+Capture assembles only upsert/remove changes against the previous page lineage
+and incrementally maintains page-count and reservation summaries. Persistence
+applies those changes directly to the previous partition index and writes only
+changed payloads plus metadata; clean handles remain unchanged. Direct
+snapshots still materialize every page, and each epoch still serializes a
+complete partition index, so the final end-to-end cost bound remains open.
 
-Legacy layouts 1 and 2 remain readable. Projected restore validates their full
-payload schemas, every historical upsert's key, event time and exact V1 charge,
-identities, inventory and live metrics before independently copying selected
-live payloads. It preserves no full legacy payload history. The first subsequent
-capture requires asynchronous preparation of a new narrow base, including clean,
-empty and terminal state; later captures use narrow deltas and rebase. Matching
-layout-3 restore preserves validated narrow history. Full-retention plans
-restoring layout 1 also require asynchronous base preparation before layout-2
-capture; matching layout-2 restore preserves validated full history. A refused,
-cancelled or invalid restore leaves the installed state unchanged, with
-temporary owners kept alive through actual cleanup. These physical formats
-remain distinct from the runtime capability envelope under
+Legacy layouts 1–3 and their base/delta history remain only in explicit
+migration tests. Production restore requires layout 12 and rejects those older
+formats rather than converting them. A refused, cancelled or invalid native
+restore leaves the installed state unchanged. These physical formats remain
+distinct from the runtime capability envelope under
 [checkpoint coordination](#checkpoint-coordination).
 
-The built-in window operator only marks touched, created, and closed window
-keys while processing data and control events, then encodes the net operations
-as one immutable Arrow IPC delta on a blocking worker during asynchronous
-checkpoint preparation. A window that opens and closes between two checkpoints
-cancels out of the delta entirely; a closed window that earlier checkpoints
-persisted owes the next checkpoint one tombstone. Its synchronous checkpoint
-encodes the same pending operations as a compatibility fallback for direct
-callers, then assigns deterministic segment IDs, moves prepared buffers, and
-captures bounded metadata. Restore validates every metadata field, Arrow
-schema, group-key encoding, row order, and accumulator shape on a worker
-before replacing live state. More than 32 retained deltas prepares one
-replacement base at the next capture; old immutable segments remain live
-until manifest reachability collection can remove them.
+On the built-in window's per-window path, the operator only marks touched,
+created, and closed window keys while processing data and control events, then
+encodes the net operations as one immutable Arrow IPC delta on a blocking worker
+during asynchronous checkpoint preparation. A window that opens and closes
+between two checkpoints cancels out of the delta entirely; a closed window that
+earlier checkpoints persisted owes the next checkpoint one tombstone. Its
+synchronous checkpoint encodes the same pending operations as a compatibility
+fallback for direct callers, then assigns deterministic segment IDs, moves
+prepared buffers, and captures bounded metadata. Restore validates every
+metadata field, Arrow schema, group-key encoding, row order, and accumulator
+shape on a worker before replacing live state. More than 32 retained deltas
+prepares one replacement base at the next capture; old immutable segments remain
+live until manifest reachability collection can remove them.
 
 `StreamCollector` is the only way a stream operator emits. `emit(port,
 batch)` validates the port name, the `BatchKind`, and the optional exact
@@ -351,6 +332,8 @@ there is no smaller global row or byte ceiling. The default row budget is
 1,000,000; callers may explicitly configure larger batches and queues.
 Project-v3 stream runtime options use the same bounds. Row and envelope backpressure remains active when the byte budget is
 `usize::MAX`; these queue charges do not cap total runtime or process memory.
+Caller-driven sessions apply the same oversize rule but no queue capacity; see
+[caller-driven sessions](#caller-driven-sessions).
 
 Project-v3 JSON requires an `options` object and preserves its historical field
 defaults: `{}` or omitted budget fields use 10,000 rows and 64 MiB. The omitted
@@ -420,7 +403,9 @@ Two hashes describe the plan:
   and timeout, the per-edge envelope/row/byte budget, and retained epochs —
   and feeds observability and diagnostics only, so retuning it never invalidates
   checkpoints. Durations must be exact multiples of one microsecond, and
-  both budget fields must be positive. Checkpointing defaults to enabled. Other defaults
+  both budget fields must be positive. The Rust default enables checkpointing;
+  the Python `checkpointing=None` default resolves per entry point, off for
+  convenience streams and on for `StreamingRunner`. Other defaults
   are a 60-second checkpoint
   interval, a 600-second checkpoint timeout, 1,000,000 envelopes and rows per
   edge, no byte ceiling below the native address-space limit, and two retained
@@ -506,8 +491,9 @@ For a periodic checkpoint, every live replayable source pauses new admission
 and settles its accepted slot. The `LiveProgressCoordinator` then holds its
 serial drive boundary, drains ready pre-cut inputs and timers, requires zero
 pending receipts, and fans out `Barrier(E)` over the source routes it owns.
-Only a successful fan-out promotes the observed cursor to durable and resumes
-source polling. Idle sources participate. Ended and previously restored-ended
+Only a successful fan-out resumes source polling; it does not acknowledge the
+cut as durable. The observed cursor becomes durable only after manifest
+publication and sink settlement. Idle sources participate. Ended and previously restored-ended
 sources contribute their final cut out of band and never reopen or receive a
 post-end barrier.
 
@@ -526,6 +512,14 @@ including failures during checkpoint alignment and state staging. Independent
 simultaneous failures still retain their stable task-ID ordering.
 
 ## Operator tasks and barrier alignment
+
+For an admitted single-source chain of Rolling, Expression, or native array
+sequence nodes without checkpoints or restore, the source task instead owns and
+drains one inline pipeline over session edges after each input event. There is
+no independent operator driver; logical task reservations still identify morsel
+workers and failure origins, physical sink emission provides backpressure, and
+pipeline completion releases the reservations. Other graphs retain the operator
+task model below.
 
 One logical operator task owns each compiled stream operator. It selects ready
 ingresses without weakening per-ingress FIFO, validates data emissions before
@@ -564,11 +558,14 @@ In a checkpoint-enabled job, an operator removes only barrier-arrived
 ingresses from receive selection; their post-barrier traffic remains in the
 bounded edge or its bounded ingress preparation stage while other live ingresses
 continue. Ended ingresses count as an out-of-band cut. When every required ingress reaches epoch E, the task awaits
-checkpoint preparation, captures and stages operator state, acknowledges the
-coordinator, then forwards
-the barrier, and reopens its live ingresses. An identical repeated barrier is
-idempotent. A foreign, conflicting, future, or regressed epoch fails closed,
-and snapshot/stage failure forwards no barrier.
+checkpoint preparation, captures an immutable operator snapshot, obtains its
+v4 capture reservation, acknowledges the coordinator, then forwards the
+barrier and reopens its live ingresses. Object persistence and manifest
+publication continue asynchronously. An identical repeated barrier is
+idempotent. A foreign, conflicting, future, or regressed epoch fails closed.
+Capture or reservation failure before forwarding sends no acknowledgement or
+downstream barrier. A later persistence failure invalidates the active epoch
+and live job; the last durable manifest remains the recovery truth.
 Stateful snapshots carry the operator's nonzero state-layout version in their
 inline metadata. Recovery removes that envelope only after checking the stored
 version against the compiled capability; missing or mismatched versions fail
@@ -585,18 +582,18 @@ microsecond; no watermark is emitted for an underflowing predecessor. This
 preserves downstream acceptance of later legal rows at `C`. The public
 `StreamOperator` trait gains no new control-injection or callback requirement.
 
-ASOF admission preflights retained capacities and, when checkpointing is
-enabled, checkpoint journal storage, then installs accepted rows without
-cloning the retained maps. Output prefix
-commits install prepared state and journal changes after output acceptance.
-Right-side eviction uses expiration indexes to select due keys and rows,
-preparing required copies and resource deltas before changing state in place
-once per completed progress tick. Its semantic state version is `3`; native
-layout/accounting version `10` stores an immutable base, bounded delta frames,
-and shared payload segments. Eligible source-history routes instead retain
-versioned callback replay records with native anchors. Managed preparation,
-capture, and native restore use awaited CPU work; direct operator checkpoint
-calls can prepare synchronously.
+ASOF admission preflights shared keys, immutable run payload/identity columns,
+locator indexes, and workspace before committing a complete batch. Per-key
+locators preserve `(time, sequence)` order, while pending left locators use
+canonical `(time, key, sequence)` order. Finalization selects a closed prefix,
+materializes left/right locators through Arrow `take` or `interleave`, and
+commits that prefix only after output acceptance. Right eviction cuts expired
+or dominated payload prefixes and separately retires identity-only history when
+right progress or EOF permits. Its semantic state version is `3`;
+layout/accounting version `11` uses `arrow-columnar-59.2.0` and stores canonical
+shared keys, per-run identity/payload columns, and control/index-capacity
+descriptors. Eligible source-history routes instead retain versioned callback
+replay records whose segments use native v4 source-history handles.
 Restore cross-validates native rows/counters/terminal state
 with the wrapper's ingress progress and output frontier before readiness is
 acknowledged. All sources reaching ASOF must have a non-disabled valid watermark
@@ -632,24 +629,33 @@ commit attempt or leaves the job in `RecoveryRequired`.
 
 ## Manifest publication and recovery
 
-The production `ManifestTransaction` reuses the public v3
-`CheckpointManifest` as the sole durable recovery truth. It serializes segment
-stage/validation/publication, manifest-last atomic publication, strict bounded
-candidate selection, referenced-segment reload, retention, and orphan
-collection. Semantic identity and exact participant sets fail closed;
-`runtime_config_hash` mismatch is a non-blocking private diagnostic. Recovery
-selects the highest complete valid epoch and validates every segment length and
-checksum. Corrupt higher candidates, links, unexpected entry types, and paths
-outside the managed roots fail closed. Regular abandoned `.tmp*` manifest
-files are removed during a serialized scan; links and directories are never
-followed or removed as temporary files.
+The runner's sole durable recovery truth is its canonical manifest v4 with
+`job_kind="runner"`. V4 storage persists source cuts, native source-history
+handles, opaque operator snapshots with ingress and output-frontier progress,
+and sink recovery blocks. Final manifest publication runs on a blocking worker.
+Recovery selects the highest complete epoch and validates semantic identity,
+exact participant sets, handles, lengths, and checksums. Legacy v3 manifests and
+source history are rejected rather than converted; corrupt higher candidates
+fail closed. A `runtime_config_hash` mismatch remains a non-blocking private
+diagnostic.
 
-Each managed operator or sink snapshot first classifies all its segments.
-Already-established session carries retain their original handles and avoid
-staging, validation, publication, and payload reloads. New segments stage in one
-batch, pass staged validation, and publish alongside any matching committed
-segments whose publication is not yet confirmed. These operations complete
-before the participant acknowledges the checkpoint.
+`SourceHistoryContext` archives each regular file directly as an immutable v4
+object and returns a public `SourceHistorySegmentHandle`.
+`SourceHistoryManifestEntry` carries these handles in canonical order without
+v3 operator-state staging or conversion. The handle's raw `byte_len` drives
+storage and prepaid buffer budgets during archive, restore, and load; reads
+verify the persisted checksum. Restore validates the history contract, owners,
+canonical order, and unique identities before use.
+
+Later manifests carry unchanged history handles, including handles created by
+earlier epochs. Retention preserves every object referenced by a retained
+manifest and removes unreferenced objects and temporary manifests. Restored
+ended sources contribute their history to out-of-band final cuts without
+reopening. ASOF ordinary and terminal v4 recovery retain `source_replay`
+metadata and configure replay through these restored native histories.
+
+The separate public `StateLineageBackend` API retains the low-level staging
+contracts below; native v4 source history does not pass through them.
 
 `StateLineageBackend::stage_segments` accepts borrowed handle/byte-slice pairs
 as `&[(&StateHandle, &[u8])]`. Its provided implementation preflights conflicting
@@ -690,13 +696,6 @@ Cancellation during staging then returns without validation, publication, or
 new session entries, pins, or acknowledgement. Arbitrarily dropping a public
 backend future does not provide this managed settlement guarantee.
 
-Bounded manifest loading also accepts legacy v3 source entries that omitted
-`history`. It retains that omission through serialization and checksum
-validation; new manifests emit the current field explicitly. Direct serde
-deserialization keeps its current required-field rules. This compatibility
-does not alter graph identity, source cursors, segment checksums, or delivery
-guarantees.
-
 The managed filesystem durability guarantee applies on Unix platforms. On
 non-Unix platforms, including Windows, file contents are synced but parent
 directory changes are not synced; an operating-system crash or power loss can
@@ -717,8 +716,8 @@ second durable completion record competes with the manifest. Retention failure
 after commit fails the live job but does not invalidate the completed epoch.
 Once publication is durable, the runtime sends sink commit commands before
 acknowledging source cursors. Settlement records the ordered phases Published,
-SinksCommanded, CoordinatorDurable, and SourceAcked. Source acknowledgement
-has the configured checkpoint timeout. A failure or timeout can leave an
+SinksCommanded, CoordinatorDurable, SinksFinalized, and SourceAcked. Source
+acknowledgement has the configured checkpoint timeout. A failure or timeout can leave an
 already committed sink; the durable manifest remains the recovery intent.
 The live job reports recovery required rather than aborting that transaction.
 
@@ -750,9 +749,12 @@ transactional recovery before the data gate is released. Ended sources are
 removed before connector ownership.
 
 The durable projection contains source cursor/sequence/end/watermark policy and
-operator ingress progress/state handles; it never serializes execution trace history,
+native history handles, operator ingress progress, output frontiers and opaque
+state handles, and sink recovery metadata and blocks; it never serializes execution trace history,
 pending receipts, or process-local timer coordinates. Restored timers re-arm
-from a fresh origin with their complete configured delay.
+from a fresh origin with their complete configured delay. A zero-interval
+generated binding has no watermark timer, so restore arms no watermark
+deadline for it; its idle timeout, if any, still re-arms.
 
 ## Terminal recovery
 
@@ -760,8 +762,8 @@ After the data-plane end cut, the coordinator allocates a terminal epoch out
 of band. Operators capture post-`on_end` state and sinks pre-commit final output
 without any post-end barrier. A terminal manifest is recognized only when all
 source and operator ingress entries are ended. Recovery from it opens only
-sinks after strictly restoring each Join and validating its native ended,
-empty state. Restored ended-ingress observations publish before operator
+sinks after restoring each Join and ASOF operator and validating native terminal
+state, ingress progress, and output frontier. Restored ended-ingress observations publish before operator
 entry. Recovery completes any sink commit, closes resources, and returns
 natural completion without starting data-plane handlers, reopening sources,
 or repeating `on_end`/final-window emission.
@@ -790,7 +792,9 @@ connector-open/close paths create operational
 `CalcFlowError::TaskPanicked` values with a stable task ID. Together these
 boundaries cover connector `open`, `next`, `write`, and `close` panics plus
 operator and uncaught task panics. Captured panic text is valid UTF-8 and at
-most 1,024 bytes; non-string payloads become `non-string panic payload`.
+most 1,024 bytes; non-string payloads become `non-string panic payload`. A
+caller-driven session has no tasks and returns contained operator panics as
+`CalcFlowError::Operator` instead.
 
 Source, operator, sink, progress, checkpoint, filesystem, and connector work
 remain owner-settled under cancellation: the owner waits for in-flight state
@@ -800,6 +804,91 @@ close has its own private five-second bound, and a close error, panic, or
 timeout becomes a typed bounded secondary diagnostic without replacing the
 primary failure. Cleanup continues through later resources and converges task,
 queue, state-lease, transaction, provisional-launch, and reaper ownership.
+
+## Caller-driven sessions
+
+`StreamSession` is a second public execution path for a compiled
+`StreamExecutionPlan`. It drives an admitted plan from the caller's thread
+instead of from source, operator, and sink tasks. The Python
+`TableExpr.session` and `Program.session` adapters bind it. The rules below
+differ from the runner path; everything else follows the per-operator code
+described above.
+
+**Admission.** Construction admits one dynamic source binding, no static
+inputs, no native array sequence nodes, no ExactlyOnce output, and only
+`Rolling`, `Expression`, and `Union` nodes. Rolling nodes with the RSI/ATR or
+MACD state layouts are rejected; rolling late side outputs are admitted. The
+check is an exhaustive match over compiled operator kinds, so a kind is
+rejected until it is explicitly admitted. Rejections are `InvalidArgument`
+values at `session.*` field paths, listed in the
+[Rust reference](rust-api.md#caller-driven-stream-sessions).
+
+**Scheduling.** A call first validates its input: input ID, batch kind and
+exact schema, input envelope budget, watermark, `Ordered` event time, and the
+next source sequence. It then stamps the batch as a source task does, with the
+binding ID, a sequence starting at 0, the original attributes, and no cursor.
+It enqueues `Data` on the source route followed by a `Watermark` when the
+effective watermark advances; `advance` enqueues only the watermark and
+`finish` enqueues `EndOfInput`. Nodes run in the plan's topological order.
+Each node empties its ingress queues in FIFO order through the runner's
+message dispatch and runs end-of-input finalization once after every ingress
+has ended. Watermark aggregation, late-port suppression,
+output frontiers, and `on_end` therefore follow the runner's per-operator code.
+Running each node to quiescence in topological order is one legal runner
+schedule; a union drains its first ingress before its second. Watermark, idle,
+and end-of-input messages that reach a graph output are not returned. The
+session constructs these control messages itself from validated call
+arguments; callers still cannot construct control messages.
+
+**Threads.** Each session owns one current-thread Tokio runtime with only the
+timer driver and blocks the caller on it. Operator futures run on the caller's
+thread, and nothing on the admitted path waits on another thread. Calls from
+inside a Tokio runtime context are rejected before any work.
+
+**Edges and budgets.** Session edges are FIFO queues that apply the oversize
+rule of runtime edges to every envelope against the configured `edge_budget`
+and report that budget, so operators chunk output exactly as on runner edges.
+They have no queue-capacity backpressure: a queue holds everything its producer
+emits during that producer's turn, and the call returns only after every queue
+is empty. Memory per call is therefore bounded by operator output chunking, not
+per edge. The queue-capacity and backpressure rules of
+[the operator emission boundary](#the-operator-emission-boundary) apply to
+runners and streams, not sessions. An oversized input batch is a validation
+error; an oversized internal message fails the session.
+
+**Checkpoints.** `StreamSession::new` retains the original in-memory behavior:
+its job context has checkpointing disabled, every checkpoint field of
+`StreamRuntimeConfig` is ignored, including `checkpointing = true`, and nothing
+is durable. `StreamSession::new_with_checkpoints` and `StreamSession::restore`
+instead require `checkpointing = true` and `ManagedCheckpointRuntime` storage.
+Fresh construction rejects a lineage that already contains a manifest. Restore
+selects the highest complete v4 session epoch, requires `job_kind="session"`,
+and validates the plan recovery fingerprint. Runner recovery uses manifest v4
+with `job_kind="runner"` and its own connector and history participants.
+
+On success, `StreamSession::checkpoint()` synchronously persists every
+operator's opaque snapshot plus the next input sequence and watermark progress,
+publishes the manifest, and returns its `Epoch`; checkpoint timing fields do not
+schedule automatic session captures. Restore opens no connectors and replays no
+earlier input or output. The caller resumes by pushing later batches from the
+restored sequence and watermark state. An error after epoch capture begins
+fails the live session. If publication already completed, that error does not
+invalidate the complete epoch, which remains available to `restore`. Sessions
+also publish no status or metrics. See the
+[Rust reference](rust-api.md#caller-driven-stream-sessions).
+
+**Failure.** Validation errors leave the session unchanged; the source
+sequence, generated-watermark state, and watermark commit only after a
+successful drain. Any later error fails the session and discards rows emitted
+earlier in that call. Panics in operator dispatch and finalization are
+contained and returned as `CalcFlowError::Operator { node_id, message }`, with
+`message` set to `panicked: ` followed by the same bounded panic text that task
+capture uses, at most 1,024 bytes. There is no task, so
+`CalcFlowError::TaskPanicked` is not used. Session errors are ordinary
+`CalcFlowError` values, like batch execution errors. They are not redacted
+through the runner's payload-safe `StreamingError` projection, because the
+caller is in-process and owns the data. Dropping a session cancels its job
+token and releases every operator.
 
 ## Status and metrics
 
@@ -895,8 +984,8 @@ state. Its string copies and hash-table storage grow with resident entities and
 are not included in the logical state charge. Both routes check the entity that
 last followed the previous row's entity
 before hashing a key. Only touched entities prepare transactional kernel state;
-numerical state needed by the released West/M2/refold
-behavior is retained even for mean-only outputs. Plans whose one or two
+the shared compensated numeric accumulator is retained even for mean-only
+outputs. Plans whose one or two
 row-window numeric groups feed only one or two Float64 mean or
 mean-difference outputs run a fixed-arity loop over that same state; other
 shapes use the generic typed kernel. Retained-history tails reuse each
@@ -917,13 +1006,13 @@ representation.
 Ordered typed plans can assign whole entities to owned CPU lanes when every
 group supports the same independent owned transition and every output is
 Float64. This includes Rows, Duration and mixed windows, multiple groups and
-readouts, and both numerical profiles. The workers preserve the plan's profile
-and NaN policy. Scan groups and Count, integer or Float32 outputs use the serial
-path. Cold and restored state can use lanes after reconstruction from the
-authoritative history. A finalized batch has at least 64,000 rows and two
-touched entities. The lane count is the minimum of available CPU capacity, the
-batch's 16,000-row work units and touched entities; fewer than two lanes use the
-serial path. Routing uses incoming transitions, groups, readouts and retained
+readouts under the single compensated numeric contract. The workers preserve
+the plan's numeric contract and NaN policy. Scan groups and Count, integer or
+Float32 outputs use the serial path. Cold and restored state can use lanes after
+reconstruction from the authoritative history. A finalized batch has at least
+64,000 rows and two touched entities. The lane count is the minimum of available
+CPU capacity, the batch's 16,000-row work units and touched entities; fewer than
+two lanes use the serial path. Routing uses incoming transitions, groups, readouts and retained
 work to estimate lane balance; no lane may own more than 5/8 of that estimate.
 This estimate is a scheduling heuristic, not a work quota. Unsupported shapes,
 small or skewed batches and unavailable admission use the original serial loop.
@@ -1127,33 +1216,53 @@ configuration fingerprints before source open. Supported aggregates are
 matrix; decimal, session,
 early-trigger, allowed-lateness, update, and retract forms remain unavailable.
 
-Execution owns incremental accumulators in deterministic
-`(window_start, window_end, G1 group key)` order. Null event times are dropped
-and counted separately. A row-window assignment is late only when
-`window_end <= WM_in`; a hopping row can therefore update open assignments
-while dropping closed ones. Watermark and end handlers emit one final value
-per non-empty window before runtime-owned control forwarding, chunk outputs to
-the effective edge budget, and preserve checked operator-owned sequences
-across snapshot/restore.
+Execution retains deterministic per-window accumulators in
+`(window_start, window_end, G1 group key)` order for both tumbling and hopping
+windows. `count` ignores null operands and uses checked `u64` addition. `min`
+and `max` ignore nulls and apply the existing scalar total comparison,
+preserving exact floating values and bits for NaNs, infinities, and signed zero
+as well as the supported string and temporal types. A valid group row creates
+window state even when all aggregate operands are null, so that group still
+emits count zero and null extrema. No empty window is invented.
 
-Floating `sum` and `avg` use compensated accumulation. Window checkpoint
-segments use a version 2 physical layout with separate sum and correction
-columns; the public operator state capability remains version 1. Recovery
-accepts existing version 1 segments, initializes their missing correction to
-zero, and rewrites live windows as a version 2 base at the next checkpoint.
+Null event times are dropped and counted separately. A row-window assignment
+is late only when `window_end <= WM_in`; a hopping row can therefore update open
+assignments while dropping its closed assignments, with unchanged late metrics.
+Watermark and end handlers emit one final value per non-empty window before
+runtime-owned control forwarding, chunk outputs to the effective edge budget,
+and preserve checked operator-owned sequences across snapshot/restore.
 
-The public state surface consists of immutable `StateHandle` values,
-lineage-exclusive `StateBackend` sessions, `LocalStateBackend`, and the strict
-canonical `CheckpointManifest` v3 data model. The local backend stages,
-syncs, re-reads, checksum-validates, and atomically publishes segments before
-a manifest can reference them. Manifest selection is the sole recovery truth;
-cleanup is reachability-based and fails closed on links or unexpected files.
-The continuous runtime uses this backend and manifest as its production
-checkpoint transaction and durable recovery truth.
+`StateBudget.rows` counts logical open `(window bounds, group)` pairs, and
+`StateBudget.bytes` covers retained accumulator and key storage. Input and close
+prepare isolated candidates and check logical and physical usage before
+committing; a budget failure installs no partial state. A rejected close leaves
+accumulators, progress, metrics, terminal state, and the output sequence at
+their exact pre-call values. Output already accepted downstream before a failed
+send cannot be retracted.
+
+Floating `sum` and `avg` use compensated accumulation. Their checkpoint
+segments use physical layout 2 with separate sum and correction columns;
+recovery accepts existing layout 1 segments, initializes their missing
+correction to zero, and rewrites live windows as a layout 2 base at the next
+checkpoint. Compatible continuation after restore is bit-identical to
+uninterrupted execution, including subsequent output and checkpoint bytes. The
+withdrawn experimental pane layout 3 is not supported; new snapshots always use
+per-window layouts 1 and 2. The public operator state capability remains version
+1, and project and manifest formats are unchanged.
+
+The public state surface consists of immutable `StateHandle` values, native
+v4 `SourceHistorySegmentHandle` references, lineage-exclusive `StateBackend`
+sessions, `LocalStateBackend`, and the strict canonical `CheckpointManifest`
+data model. The local backend stages, syncs, re-reads, checksum-validates, and
+atomically publishes segments before a manifest can reference them. Runner
+checkpoints instead use internal manifest v4 and native v4 object storage as
+their durable recovery truth; legacy v3 runner manifests are rejected. Cleanup
+is reachability-based and fails closed on links or unexpected files.
 
 ## Public and private surfaces
 
-Public: `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, source
+Public: `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`,
+`StreamSession`, `SessionWatermark`, `SessionOutput`, source
 and sink connector/binding types, status/outcome projections, the
 `StreamMessage` handle and `StreamMessageKind`, the typed
 `EventTime` and `Epoch` values, `StreamJobContext` and
@@ -1172,12 +1281,14 @@ the compiled-operator representation, the late-row recorder, internal source
 cursor/binding representations, the channel-backed operator collector,
 source/operator/sink tasks and progress snapshots, scoped task contexts,
 whole-job preflight, the task supervisor, checkpoint coordinator/transaction
-internals, raw status and metrics, and the runner-scoped reaper.
+internals, raw status and metrics, the runner-scoped reaper, and the session
+edge queues and caller-driven operator drivers.
 
 Runtime-owned control-message and transaction internals do not appear in
-project-v3 documents. Python binds the public continuous facade. The public
-v3 manifest model and state backend remain the runtime's durable recovery
-truth.
+project-v3 documents. Python binds the public continuous facade and
+`StreamSession`. Runners and durable sessions use internal manifest v4 through
+`ManagedCheckpointRuntime`; native source history exposes
+`SourceHistorySegmentHandle` while its storage protocol remains internal.
 
 
 See [verification](verification.md#streaming-stress-and-soak-checks) for the

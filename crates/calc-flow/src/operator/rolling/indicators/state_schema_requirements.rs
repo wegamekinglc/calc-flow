@@ -38,7 +38,7 @@ impl<'a> Metadata<'a> {
             ("calc_flow.operator_configuration_hash", self.configuration),
             ("calc_flow.state_schema_fingerprint", self.state_schema),
             ("calc_flow.rolling_kernel_fingerprint", self.kernel),
-            ("calc_flow.numerical_profile", self.numerical),
+            ("calc_flow.numeric_contract", self.numerical),
         ]
     }
 }

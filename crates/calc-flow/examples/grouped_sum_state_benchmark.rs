@@ -9,8 +9,9 @@ mod support;
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchMetadata, Cursor, DataFusionConfig, DataFusionParallelismMode, ExecutionOptions,
-    PipelineBuilder, SinkBinding, SourceBinding, SourceCapabilities, SourceEvent, StateBudget,
-    StreamRuntimeConfig, StreamSink, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
+    PipelineBuilder, SinkBinding, SourceBinding, SourceCapabilities, SourceEvent,
+    SqlAggregateOutputMode, StateBudget, StreamRuntimeConfig, StreamSink, StreamSource,
+    StreamingRunner, UdfRegistry, WatermarkPolicy,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array, StringArray},
@@ -19,7 +20,13 @@ use datafusion::arrow::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::Cursor as IoCursor, path::Path, sync::Arc, time::Instant};
+use std::{
+    collections::BTreeMap,
+    io::Cursor as IoCursor,
+    path::Path,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use stock_account_data::{DemoSource, Options, trade_schema};
 use support::ExampleResult;
 use tokio::sync::Mutex;
@@ -183,16 +190,40 @@ impl StreamSink for SnapshotSink {
     }
 }
 
-fn graph(partitions: usize) -> calc_flow::Result<PipelineBuilder> {
+fn graph(partitions: usize, changelog: bool) -> calc_flow::Result<PipelineBuilder> {
     let config = DataFusionConfig {
         target_partitions: partitions,
         min_rows_per_partition: 1,
         parallelism_mode: DataFusionParallelismMode::Fixed,
         ..DataFusionConfig::default()
     };
-    support::connect_all(PipelineBuilder::new("sum-state-evidence")?.with_datafusion_config(config)
-        .add_node("deltas",support::expression("deltas","",&["account","stock","CASE WHEN side = 'buy' THEN quantity ELSE -quantity END AS delta"],Some("flow_type = 'trade'"))?)?
-        .add_node("positions",support::sql("positions","SELECT account, stock, SUM(delta) AS position FROM input GROUP BY account, stock",&["input"])?)?,&[("deltas","output","positions","input")])
+    let mut positions = support::sql(
+        "positions",
+        "SELECT account, stock, SUM(delta) AS position FROM input GROUP BY account, stock",
+        &["input"],
+    )?;
+    if changelog {
+        positions.set_aggregate_output_mode(SqlAggregateOutputMode::Changelog)?;
+    }
+    support::connect_all(
+        PipelineBuilder::new("sum-state-evidence")?
+            .with_datafusion_config(config)
+            .add_node(
+                "deltas",
+                support::expression(
+                    "deltas",
+                    "",
+                    &[
+                        "account",
+                        "stock",
+                        "CASE WHEN side = 'buy' THEN quantity ELSE -quantity END AS delta",
+                    ],
+                    Some("flow_type = 'trade'"),
+                )?,
+            )?
+            .add_node("positions", positions)?,
+        &[("deltas", "output", "positions", "input")],
+    )
 }
 
 fn update_reference(expected: &mut Positions, batch: &Batch) -> ExampleResult {
@@ -319,6 +350,7 @@ fn stream_runner(
     batches: &Arc<[Batch]>,
     state: &Snapshots,
     partitions: usize,
+    changelog: bool,
 ) -> ExampleResult<StreamingRunner> {
     let source = Preloaded {
         batches: Arc::clone(batches),
@@ -327,7 +359,7 @@ fn stream_runner(
     };
     let config = stream_config()?;
     let runner = StreamingRunner::without_checkpoints(
-        support::best_effort_plan(graph(partitions)?)?,
+        support::best_effort_plan(graph(partitions, changelog)?)?,
         BTreeMap::from([(
             "input".into(),
             SourceBinding::new(source)
@@ -347,9 +379,12 @@ fn stream_runner(
 async fn execute_stream(
     batches: &Arc<[Batch]>,
     partitions: usize,
+    changelog: bool,
 ) -> ExampleResult<(Vec<Batch>, Value)> {
     let state: Snapshots = Arc::default();
-    let job = stream_runner(batches, &state, partitions)?.start().await?;
+    let job = stream_runner(batches, &state, partitions, changelog)?
+        .start()
+        .await?;
     let outcome = job.wait().await;
     assert_eq!(outcome.state, calc_flow::JobState::Completed, "{outcome:?}");
     let status = job.status();
@@ -370,7 +405,7 @@ fn batch_input(batches: &[Batch]) -> calc_flow::Result<Batch> {
 
 async fn execute_batch(batches: &[Batch], partitions: usize) -> ExampleResult<(Vec<Batch>, Value)> {
     let input = batch_input(batches)?;
-    let run = graph(partitions)?
+    let run = graph(partitions, false)?
         .compile_batch(&UdfRegistry::new().snapshot())?
         .execute(
             BTreeMap::from([("input".into(), input)]),
@@ -387,9 +422,10 @@ async fn execute_sample(
     batches: &Arc<[Batch]>,
     mode: &str,
     partitions: usize,
+    changelog: bool,
 ) -> ExampleResult<(Vec<Batch>, Value)> {
     if mode == "stream" {
-        execute_stream(batches, partitions).await
+        execute_stream(batches, partitions, changelog).await
     } else {
         execute_batch(batches, partitions).await
     }
@@ -417,6 +453,75 @@ fn validate_stream_snapshots(
     Ok(validated)
 }
 
+fn validate_changelog_output(
+    batch: &Batch,
+    expected: &Positions,
+    actual: &mut Positions,
+) -> ExampleResult<(String, String)> {
+    let table = batch.table_payload()?;
+    assert_eq!(
+        table
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| (field.name().as_str(), field.data_type().clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("account", DataType::Utf8),
+            ("stock", DataType::Utf8),
+            ("position", DataType::Int64),
+            ("_cf_op", DataType::Utf8),
+        ]
+    );
+    for record in table.batches() {
+        let strings = |index| {
+            record
+                .column(index)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+        };
+        let accounts = strings(0);
+        let stocks = strings(1);
+        let values = record
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let operations = strings(3);
+        for row in 0..record.num_rows() {
+            assert!(record.columns().iter().all(|array| !array.is_null(row)));
+            let key = (accounts.value(row).to_owned(), stocks.value(row).to_owned());
+            match operations.value(row) {
+                "retract" => assert_eq!(actual.remove(&key), Some(values.value(row))),
+                "upsert" => {
+                    actual.insert(key, values.value(row));
+                }
+                operation => panic!("unknown changelog operation {operation}"),
+            }
+        }
+    }
+    assert_eq!(actual, expected, "complete reconstructed positions");
+    Ok((position_hash(actual)?, schema_hash(table.schema())))
+}
+
+fn validate_stream_changelog(
+    batches: &[Batch],
+    output: &[Batch],
+) -> ExampleResult<ValidatedSnapshots> {
+    assert_eq!(output.len(), batches.len());
+    let mut expected = Positions::new();
+    let mut actual = Positions::new();
+    let mut validated = ValidatedSnapshots::default();
+    for (input, changes) in batches.iter().zip(output) {
+        update_reference(&mut expected, input)?;
+        let (digest, schema) = validate_changelog_output(changes, &expected, &mut actual)?;
+        validated.sha256.push(digest);
+        validated.schema_sha256.push(schema);
+    }
+    Ok(validated)
+}
+
 fn validate_batch_snapshot(
     batches: &[Batch],
     output: &[Batch],
@@ -436,11 +541,13 @@ fn validate_snapshots(
     batches: &[Batch],
     output: &[Batch],
     mode: &str,
+    changelog: bool,
 ) -> ExampleResult<ValidatedSnapshots> {
-    if mode == "stream" {
-        validate_stream_snapshots(batches, output)
-    } else {
-        validate_batch_snapshot(batches, output)
+    match (mode, changelog) {
+        ("stream", true) => validate_stream_changelog(batches, output),
+        ("stream", false) => validate_stream_snapshots(batches, output),
+        ("batch", false) => validate_batch_snapshot(batches, output),
+        _ => Err("changelog requires stream mode".into()),
     }
 }
 
@@ -450,24 +557,27 @@ async fn sample(
     mode: &str,
     partitions: usize,
     index: usize,
+    changelog: bool,
 ) -> ExampleResult<Value> {
     let cpu_start = clock_ns(true);
     let start_ns = clock_ns(false);
     let started = Instant::now();
-    let (output, diagnostics) = execute_sample(&batches, mode, partitions).await?;
+    let (output, diagnostics) = execute_sample(&batches, mode, partitions, changelog).await?;
     let seconds = started.elapsed().as_secs_f64();
     let end_ns = clock_ns(false);
     let cpu_ns = clock_ns(true) - cpu_start;
-    let validated = validate_snapshots(&batches, &output, mode)?;
+    let validated = validate_snapshots(&batches, &output, mode, changelog)?;
     Ok(json!({
         "process_observations": calc_flow::benchmark_internals::process_observations()?,
         "schema": "calc-flow.sum-state.v1",
         "mode": mode,
+        "aggregate_output": if changelog { "changelog" } else { "snapshot" },
         "partitions": partitions,
         "sample": index,
         "pid": std::process::id(),
         "seconds": seconds,
         "process_cpu_ns": cpu_ns,
+        "keyed_sum_stage_ns": calc_flow::benchmark_internals::keyed_sum_stage_ns(),
         "start_ns": start_ns,
         "end_ns": end_ns,
         "input_sha256": input_hash,
@@ -480,6 +590,159 @@ async fn sample(
         "validated_all_snapshots": true,
         "diagnostics": diagnostics,
     }))
+}
+
+fn validate_paired_sample(sample: &Value, changelog: bool) {
+    assert_eq!(sample["schema"], "calc-flow.sum-state.v1");
+    assert_eq!(sample["mode"], "stream");
+    assert_eq!(
+        sample["aggregate_output"],
+        if changelog { "changelog" } else { "snapshot" }
+    );
+    assert_eq!(sample["validated_all_snapshots"], true);
+    assert!(sample["seconds"].as_f64().is_some_and(|value| value > 0.0));
+    assert!(
+        sample["process_cpu_ns"]
+            .as_i64()
+            .is_some_and(|value| value > 0)
+    );
+    assert_eq!(
+        sample["process_observations"]["observed_cpu_affinity"],
+        json!([0])
+    );
+    for (key, value) in sample["process_observations"]["observed_thread_environment"]
+        .as_object()
+        .expect("thread environment")
+    {
+        assert_eq!(value, "1", "unexpected thread setting {key}");
+    }
+    let diagnostics = &sample["diagnostics"];
+    assert_eq!(diagnostics["state"], "completed");
+    assert_eq!(diagnostics["terminal_cause"], "natural_end");
+    assert_eq!(diagnostics["task_count"], 0);
+    assert_eq!(diagnostics["task_errors"], 0);
+    assert_eq!(diagnostics["metrics_overflowed"], false);
+    for group in ["sources", "operators", "sinks"] {
+        for actor in diagnostics[group]
+            .as_object()
+            .expect("actor group")
+            .values()
+        {
+            assert_eq!(actor["errors"], 0);
+            assert_eq!(actor["ended"], true);
+        }
+    }
+}
+
+fn compare_paired_samples(left: &Value, right: &Value) {
+    for field in [
+        "input_sha256",
+        "input_schema_sha256",
+        "input_rows",
+        "batch_rows",
+        "snapshot_sha256",
+    ] {
+        assert_eq!(left[field], right[field], "cross-mode {field} mismatch");
+    }
+}
+
+async fn paired_changelog_case(
+    id: &str,
+    input: &LoadedInput,
+    check: bool,
+    deadline: Instant,
+) -> ExampleResult<Value> {
+    let execute = |changelog, index| {
+        sample(
+            Arc::clone(&input.batches),
+            &input.sha256,
+            "stream",
+            1,
+            index,
+            changelog,
+        )
+    };
+    if check {
+        let baseline = execute(false, 0).await?;
+        let candidate = execute(true, 0).await?;
+        validate_paired_sample(&baseline, false);
+        validate_paired_sample(&candidate, true);
+        compare_paired_samples(&baseline, &candidate);
+        return Ok(json!({"id":id,"correctness":true}));
+    }
+    let mut baseline = Vec::new();
+    let mut candidate = Vec::new();
+    let mut observations = Vec::new();
+    for round in 0..2 {
+        let baseline_warmup = execute(false, round).await?;
+        let candidate_warmup = execute(true, round).await?;
+        validate_paired_sample(&baseline_warmup, false);
+        validate_paired_sample(&candidate_warmup, true);
+        compare_paired_samples(&baseline_warmup, &candidate_warmup);
+        if Instant::now() >= deadline {
+            return Err("measurement deadline exhausted".into());
+        }
+        let mut baseline_round = Vec::new();
+        let mut candidate_round = Vec::new();
+        for pair in 0..10 {
+            for changelog in if pair % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let observation = execute(changelog, pair).await?;
+                validate_paired_sample(&observation, changelog);
+                if Instant::now() >= deadline {
+                    return Err("measurement deadline exhausted".into());
+                }
+                if changelog {
+                    candidate_round.push(observation["seconds"].as_f64().unwrap());
+                } else {
+                    baseline_round.push(observation["seconds"].as_f64().unwrap());
+                }
+                observations.push(json!({
+                    "round":round + 1,
+                    "pair":pair + 1,
+                    "side":if changelog {"candidate"} else {"baseline"},
+                    "row":observation,
+                }));
+            }
+        }
+        baseline.push(baseline_round);
+        candidate.push(candidate_round);
+    }
+    Ok(json!({
+        "id":id,
+        "rows":input.batches.iter().map(Batch::num_rows).sum::<usize>(),
+        "comparison":"interleaved",
+        "correctness":true,
+        "baseline":baseline,
+        "candidate":candidate,
+        "observations":observations,
+    }))
+}
+
+async fn paired_changelog(stock: &str, sparse: &str, output: &str, check: bool) -> ExampleResult {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(600);
+    let stock = load_input(stock).await?;
+    let sparse = load_input(sparse).await?;
+    let mut cases = Vec::new();
+    for (id, input) in [("stock-stream-1cpu", stock), ("sparse-stream-1cpu", sparse)] {
+        cases.push(paired_changelog_case(id, &input, check, deadline).await?);
+    }
+    if started.elapsed() >= Duration::from_secs(600) {
+        return Err("measurement deadline exhausted".into());
+    }
+    let report = json!({
+        "schema":"calc-flow.sum-state-changelog.v1",
+        "scope":"fresh-stream-plan-execution-retained-output-and-cleanup",
+        "status":if check {"checked"} else {"completed"},
+        "elapsed_seconds":started.elapsed().as_secs_f64(),
+        "cases":cases,
+    });
+    tokio::fs::write(output, serde_json::to_vec_pretty(&report)?).await?;
+    Ok(())
 }
 
 struct SampleRequest<'a> {
@@ -533,7 +796,8 @@ async fn run_samples(request: SampleRequest<'_>) -> ExampleResult {
                 &input.sha256,
                 request.mode,
                 request.partitions,
-                index
+                index,
+                false
             )
             .await?
         );
@@ -544,6 +808,12 @@ async fn run_samples(request: SampleRequest<'_>) -> ExampleResult {
 #[tokio::main]
 async fn main() -> ExampleResult {
     let args = support::arguments()?;
+    if args.first().map(String::as_str) == Some("--paired-changelog") {
+        if !(args.len() == 4 || args.len() == 5 && args[4] == "--check") {
+            return Err("--paired-changelog STOCK.arrow SPARSE.arrow OUTPUT.json [--check]".into());
+        }
+        return paired_changelog(&args[1], &args[2], &args[3], args.len() == 5).await;
+    }
     if args.first().map(String::as_str) == Some("--prepare") {
         return prepare(Path::new(args.get(1).ok_or("--prepare directory")?)).await;
     }
@@ -591,6 +861,20 @@ mod tests {
         assert_eq!(
             report["snapshot_schema_sha256"],
             schema_hash(&position_schema())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_changelog_reconstructs_the_same_complete_snapshots() {
+        let batches: Arc<[Batch]> = generated(options(10, 1, 100)).await.unwrap().into();
+        let (changes, _) = execute_stream(&batches, 1, true).await.unwrap();
+        let (snapshots, _) = execute_stream(&batches, 1, false).await.unwrap();
+        let expected = validate_stream_snapshots(&batches, &snapshots).unwrap();
+        let actual = validate_stream_changelog(&batches, &changes).unwrap();
+        assert_eq!(actual.sha256, expected.sha256);
+        assert!(
+            changes.iter().map(Batch::num_rows).sum::<usize>()
+                < snapshots.iter().map(Batch::num_rows).sum::<usize>()
         );
     }
 

@@ -167,6 +167,38 @@ pub(crate) struct SinkCheckpointAck {
     pub(crate) output_id: String,
     pub(crate) epoch: Epoch,
     pub(crate) sinks: BTreeMap<String, SinkManifestEntry>,
+    pub(crate) captured_segments: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+    pub(crate) reservations: Vec<crate::state::v4::V4CaptureReservation>,
+}
+
+struct PreparedSinkCheckpoint {
+    entries: BTreeMap<String, SinkManifestEntry>,
+    captured_segments: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+    reservations: Vec<crate::state::v4::V4CaptureReservation>,
+}
+
+impl PreparedSinkCheckpoint {
+    fn empty() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            captured_segments: BTreeMap::new(),
+            reservations: Vec::new(),
+        }
+    }
+}
+
+fn prepared_checkpoint_ack(
+    output_id: &str,
+    epoch: Epoch,
+    prepared: &mut PreparedSinkCheckpoint,
+) -> SinkCheckpointAck {
+    SinkCheckpointAck {
+        output_id: output_id.into(),
+        epoch,
+        sinks: prepared.entries.clone(),
+        captured_segments: std::mem::take(&mut prepared.captured_segments),
+        reservations: prepared.reservations.clone(),
+    }
 }
 
 pub(crate) struct SinkFinalizeAck {
@@ -383,7 +415,7 @@ async fn run_sink_task(
             && let Err(abort_error) = abort_and_settle(
                 &mut inputs,
                 epoch,
-                &BTreeMap::new(),
+                &PreparedSinkCheckpoint::empty(),
                 failure_signal.task_id(),
             )
             .await
@@ -404,7 +436,7 @@ async fn run_sink_task(
         && let Err(abort_error) = abort_and_settle(
             &mut inputs,
             epoch,
-            &BTreeMap::new(),
+            &PreparedSinkCheckpoint::empty(),
             failure_signal.task_id(),
         )
         .await
@@ -678,7 +710,7 @@ async fn process_checkpoint_barrier(
             },
         };
     }
-    let prepared = match pre_commit_all(inputs, epoch, task_id).await {
+    let mut prepared = match pre_commit_all(inputs, epoch, task_id).await {
         Ok(prepared) => prepared,
         Err((sink_id, error, prepared)) => {
             if let Err(error) = abort_and_settle(inputs, epoch, &prepared, task_id).await {
@@ -693,11 +725,7 @@ async fn process_checkpoint_barrier(
             };
         }
     };
-    let ack = SinkCheckpointAck {
-        output_id: inputs.output_id.clone(),
-        epoch,
-        sinks: prepared.clone(),
-    };
+    let ack = prepared_checkpoint_ack(&inputs.output_id, epoch, &mut prepared);
     let checkpoint = inputs
         .checkpoint
         .as_mut()
@@ -785,7 +813,7 @@ async fn process_terminal_checkpoint(inputs: &mut SinkTaskInputs, task_id: TaskI
             },
         };
     }
-    let prepared = match pre_commit_all(inputs, epoch, task_id).await {
+    let mut prepared = match pre_commit_all(inputs, epoch, task_id).await {
         Ok(prepared) => prepared,
         Err((sink_id, error, prepared)) => {
             if let Err(error) = abort_and_settle(inputs, epoch, &prepared, task_id).await {
@@ -800,11 +828,7 @@ async fn process_terminal_checkpoint(inputs: &mut SinkTaskInputs, task_id: TaskI
             };
         }
     };
-    let ack = SinkCheckpointAck {
-        output_id: inputs.output_id.clone(),
-        epoch,
-        sinks: prepared.clone(),
-    };
+    let ack = prepared_checkpoint_ack(&inputs.output_id, epoch, &mut prepared);
     let sent = {
         let checkpoint = inputs
             .checkpoint
@@ -855,7 +879,7 @@ fn checkpoint_send_failure<T>(
 async fn apply_checkpoint_command(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     command: Option<SinkCheckpointCommand>,
     task_id: TaskId,
     terminal: bool,
@@ -923,7 +947,7 @@ fn unknown_checkpoint_command(inputs: &mut SinkTaskInputs, epoch: Epoch) -> Sink
 async fn finalize_if_terminal_mode(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     task_id: TaskId,
     terminal: bool,
     expected_terminal: bool,
@@ -956,7 +980,7 @@ const fn sink_command_epoch(command: &SinkCheckpointCommand) -> Epoch {
 async fn fail_checkpoint_command(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     task_id: TaskId,
 ) -> SinkLoopStep {
     if let Err(error) = abort_and_settle(inputs, epoch, prepared, task_id).await {
@@ -992,7 +1016,7 @@ fn fail_preserved_checkpoint_command(inputs: &SinkTaskInputs, epoch: Epoch) -> S
 async fn finalize_checkpoint(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     task_id: TaskId,
     terminal: bool,
 ) -> SinkLoopStep {
@@ -1014,7 +1038,7 @@ async fn finalize_checkpoint(
 async fn commit_checkpoint_sinks(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     task_id: TaskId,
 ) -> std::result::Result<(), SinkLoopStep> {
     commit_all(inputs, epoch, prepared, task_id)
@@ -1149,20 +1173,17 @@ async fn pre_commit_all(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
     task_id: TaskId,
-) -> std::result::Result<
-    BTreeMap<String, SinkManifestEntry>,
-    (String, CalcFlowError, BTreeMap<String, SinkManifestEntry>),
-> {
-    let transaction = inputs
-        .checkpoint
-        .as_ref()
-        .and_then(|checkpoint| checkpoint.transaction.clone());
+) -> std::result::Result<PreparedSinkCheckpoint, (String, CalcFlowError, PreparedSinkCheckpoint)> {
     let cancellation = inputs.context.job().cancellation().clone();
     let job_id = inputs.context.job().job_id();
-    let mut prepared = BTreeMap::new();
+    let mut prepared = PreparedSinkCheckpoint {
+        entries: BTreeMap::new(),
+        captured_segments: BTreeMap::new(),
+        reservations: Vec::new(),
+    };
     for sink in &mut inputs.sinks {
         if sink.binding.is_ordinary() {
-            prepared.insert(
+            prepared.entries.insert(
                 sink.sink_id.to_string(),
                 SinkManifestEntry {
                     delivery: SinkDeliveryManifest::Ordinary,
@@ -1231,41 +1252,64 @@ async fn pre_commit_all(
                 ));
             }
         };
-        let segments = if segment_bytes.is_empty() {
-            Vec::new()
-        } else {
-            let Some(transaction) = transaction.as_ref() else {
-                return Err((
-                    sink.sink_id.to_string(),
-                    CalcFlowError::Internal {
-                        message: "sink state segments require a checkpoint transaction".into(),
-                    },
-                    prepared,
-                ));
-            };
-            match transaction
-                .stage_sink_segments_cancellable(
-                    sink.sink_id.as_str(),
-                    epoch,
-                    segment_bytes,
-                    &cancellation,
-                )
-                .await
-            {
-                Ok(segments) => segments,
-                Err(error) => return Err((sink.sink_id.to_string(), error, prepared)),
-            }
+        let reservation_bytes = match sink_capture_reservation(&metadata, &segment_bytes) {
+            Ok(bytes) => bytes,
+            Err(error) => return Err((sink.sink_id.to_string(), error, prepared)),
         };
-        prepared.insert(
+        let reservation = match inputs
+            .context
+            .job()
+            .checkpoint_budget()
+            .reserve(reservation_bytes)
+        {
+            Ok(reservation) => reservation,
+            Err(error) => return Err((sink.sink_id.to_string(), error, prepared)),
+        };
+        prepared.reservations.push(reservation);
+        prepared
+            .captured_segments
+            .insert(sink.sink_id.to_string(), segment_bytes);
+        prepared.entries.insert(
             sink.sink_id.to_string(),
             SinkManifestEntry {
                 delivery: sink.binding.capability().into_manifest(),
                 pre_commit: Some(metadata),
-                segments,
+                segments: Vec::new(),
             },
         );
     }
     Ok(prepared)
+}
+
+fn sink_capture_reservation(
+    metadata: &JsonMap,
+    segments: &BTreeMap<String, Vec<u8>>,
+) -> Result<u64> {
+    let metadata = serde_json::Value::Object(
+        metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect(),
+    );
+    let metadata_bytes = canonical_json(&metadata)?.len() as u64;
+    let segment_bytes = segments.iter().try_fold(0_u64, |total, (id, bytes)| {
+        let bytes = (bytes.len() as u64)
+            .checked_add(id.len() as u64)
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "sink checkpoint reservation overflow".into(),
+            })?;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                message: "sink checkpoint reservation overflow".into(),
+            })
+    })?;
+    metadata_bytes
+        .checked_add(segment_bytes)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+            message: "sink checkpoint reservation overflow".into(),
+        })
 }
 
 fn validate_pre_commit_metadata(sink_id: &str, metadata: &JsonMap) -> Result<()> {
@@ -1288,7 +1332,7 @@ fn validate_pre_commit_metadata(sink_id: &str, metadata: &JsonMap) -> Result<()>
 async fn commit_all(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     task_id: TaskId,
 ) -> std::result::Result<(), (String, CalcFlowError)> {
     #[cfg(not(test))]
@@ -1307,7 +1351,7 @@ async fn commit_all(
         if sink.binding.is_ordinary() {
             continue;
         }
-        let state = prepared[sink.sink_id.as_str()]
+        let state = prepared.entries[sink.sink_id.as_str()]
             .pre_commit
             .as_ref()
             .expect("transactional pre-commit metadata is present");
@@ -1365,7 +1409,7 @@ async fn commit_all(
 async fn abort_and_settle(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     task_id: TaskId,
 ) -> Result<()> {
     if abort_all(inputs, epoch, prepared, task_id).await {
@@ -1388,7 +1432,7 @@ async fn abort_and_settle(
 async fn abort_all(
     inputs: &mut SinkTaskInputs,
     epoch: Epoch,
-    prepared: &BTreeMap<String, SinkManifestEntry>,
+    prepared: &PreparedSinkCheckpoint,
     _task_id: TaskId,
 ) -> bool {
     let output_id = inputs.output_id.clone();
@@ -1400,6 +1444,7 @@ async fn abort_all(
             continue;
         }
         let state = prepared
+            .entries
             .get(sink.sink_id.as_str())
             .and_then(|entry| entry.pre_commit.as_ref());
         let result = await_lifecycle(
@@ -1501,6 +1546,83 @@ async fn recover_transactional_sinks_inner(
                     sink.sink_id.as_str(),
                     manifest.epoch().as_u64()
                 ),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn recover_transactional_sinks_v4(
+    sinks: &mut [ValidatedOrdinarySink],
+    checkpoint: &super::checkpoint_runtime::OpenedCheckpointRuntime,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    let manifest = &checkpoint
+        .selected_v4
+        .as_ref()
+        .expect("v4 sink recovery requires a selected manifest")
+        .manifest;
+    let terminal = manifest.sources.values().all(|source| source.ended)
+        && manifest.operators.values().all(|operator| {
+            operator
+                .progress()
+                .values()
+                .all(|progress| progress.state == crate::ManifestIngressState::Ended)
+        });
+    for sink in sinks {
+        let entry = manifest.sinks.get(sink.sink_id.as_str()).ok_or_else(|| {
+            CalcFlowError::CheckpointMismatch {
+                message: format!("v4 manifest is missing sink {:?}", sink.sink_id.as_str()),
+            }
+        })?;
+        let expected_delivery = sink.binding.capability().into_manifest();
+        if entry.delivery != expected_delivery {
+            return Err(CalcFlowError::CheckpointMismatch {
+                message: format!(
+                    "v4 sink {:?} delivery does not match",
+                    sink.sink_id.as_str()
+                ),
+            });
+        }
+        if matches!(expected_delivery, SinkDeliveryManifest::Ordinary) {
+            if entry.pre_commit.is_some() || !entry.blocks.is_empty() {
+                return Err(CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "ordinary v4 sink {:?} carries transactional state",
+                        sink.sink_id.as_str()
+                    ),
+                });
+            }
+            continue;
+        }
+        let pre_commit =
+            entry
+                .pre_commit
+                .clone()
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: format!(
+                        "v4 sink {:?} is not a prepared transaction",
+                        sink.sink_id.as_str()
+                    ),
+                })?;
+        let segments = super::runner::checkpoint_v4::load_sink_segments(checkpoint, entry).await?;
+        let recovery = crate::SinkRecovery::from_parts(
+            Epoch::new(manifest.epoch).expect("v4 manifest epoch is nonzero"),
+            terminal,
+            sink.binding.capability().into(),
+            pre_commit,
+        )
+        .with_segments(segments);
+        let result = await_lifecycle(
+            catch_sensitive_sink_unwind(sink.binding.recover_scoped(recovery)),
+            SINK_RECOVERY_TIMEOUT,
+            Some(cancellation),
+        )
+        .await;
+        if !matches!(result, Ok(Ok(Ok(())))) {
+            return Err(CalcFlowError::RecoveryRequired {
+                pipeline_name: manifest.pipeline_name.clone(),
+                message: format!("v4 sink {:?} did not recover", sink.sink_id.as_str()),
             });
         }
     }
@@ -1700,6 +1822,7 @@ mod tests {
         id: String,
         log: Arc<Mutex<Vec<String>>>,
         closes: Arc<AtomicUsize>,
+        segments: BTreeMap<String, Vec<u8>>,
     }
 
     #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1930,6 +2053,13 @@ mod tests {
             )]))
         }
 
+        async fn pre_commit_segments(
+            &mut self,
+            _epoch: crate::Epoch,
+        ) -> Result<BTreeMap<String, Vec<u8>>> {
+            Ok(self.segments.clone())
+        }
+
         async fn commit(&mut self, epoch: crate::Epoch, state: &JsonMap) -> Result<()> {
             assert_eq!(state["prepared"], serde_json::json!(epoch.as_u64()));
             self.log
@@ -2053,6 +2183,7 @@ mod tests {
                 id: id.into(),
                 log: Arc::clone(log),
                 closes: Arc::clone(closes),
+                segments: BTreeMap::new(),
             })),
         }
     }
@@ -2069,6 +2200,7 @@ mod tests {
                     id: id.into(),
                     log: Arc::clone(log),
                     closes: Arc::clone(closes),
+                    segments: BTreeMap::new(),
                 }),
                 "epoch-ledger",
                 RetentionClass::Unbounded,
@@ -2308,6 +2440,8 @@ mod tests {
                     output_id: "occupied".into(),
                     epoch: crate::Epoch::INITIAL,
                     sinks: BTreeMap::new(),
+                    captured_segments: BTreeMap::new(),
+                    reservations: Vec::new(),
                 })
                 .is_ok()
         );
@@ -2666,6 +2800,58 @@ mod tests {
         harness.cancellation.cancel();
         assert!(harness.supervisor.join_all().await.errors.is_empty());
         assert_eq!(closes.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn precommit_ack_carries_raw_connector_blocks_without_legacy_handles() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let closes = Arc::new(AtomicUsize::new(0));
+        let (ack_tx, mut ack_rx) = mpsc::channel(1);
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (finalize_tx, mut finalize_rx) = mpsc::channel(1);
+        let sink = ValidatedOrdinarySink {
+            sink_id: "tx".into(),
+            binding: OrdinarySinkBinding::new_transactional(Box::new(RecordingTransactionalSink {
+                id: "tx".into(),
+                log: Arc::clone(&log),
+                closes: Arc::clone(&closes),
+                segments: BTreeMap::from([("connector".into(), b"prepared".to_vec())]),
+            })),
+        };
+        let mut harness = harness_with_checkpoint(
+            vec![sink],
+            Some(SinkCheckpointPort {
+                initial_epoch: crate::Epoch::INITIAL,
+                acks: ack_tx,
+                commands: command_rx,
+                finalizations: finalize_tx,
+                terminal_ready: None,
+                transaction: None,
+            }),
+        );
+        harness.data.send(true).unwrap();
+        harness
+            .sender
+            .send(StreamMessage::barrier(crate::Epoch::INITIAL))
+            .await
+            .unwrap();
+
+        let ack = ack_rx.recv().await.unwrap();
+        assert!(ack.sinks["tx"].segments.is_empty());
+        assert_eq!(
+            ack.captured_segments["tx"]["connector"],
+            b"prepared".to_vec()
+        );
+
+        command_tx
+            .send(SinkCheckpointCommand::ManifestDurable(
+                crate::Epoch::INITIAL,
+            ))
+            .await
+            .unwrap();
+        finalize_rx.recv().await.unwrap();
+        harness.cancellation.cancel();
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
     }
 
     #[tokio::test]

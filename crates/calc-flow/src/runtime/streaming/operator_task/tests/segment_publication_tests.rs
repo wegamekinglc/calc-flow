@@ -70,97 +70,61 @@ impl StateLineageBackend for GatedPublication {
 }
 
 #[tokio::test]
-async fn multi_segment_publication_must_finish_before_operator_ack_or_barrier() {
-    assert_pending_preparation_cancels_before_staging().await;
-    for (gate_staging, fail, cancel, complete_with_eof) in [
-        (true, false, true, false),
-        (true, false, true, true),
-        (false, false, true, false),
-        (false, false, true, true),
-        (true, false, false, false),
-        (true, true, false, false),
-        (false, false, false, false),
-        (false, true, false, false),
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let backend = LocalStateBackend::new(directory.path().join("state"))
+async fn opaque_multi_segment_capture_forwards_without_legacy_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = LocalStateBackend::new(directory.path().join("state"))
+        .await
+        .unwrap();
+    let key = StateLineageKey::new("orders", &"a".repeat(64)).unwrap();
+    let (entered, mut admitted) = tokio::sync::oneshot::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let staged = Arc::new(AtomicUsize::new(0));
+    let lineage: Arc<dyn StateLineageBackend> = Arc::new(GatedPublication {
+        inner: backend.open_lineage(&key).await.unwrap(),
+        entered: Mutex::new(Some(entered)),
+        release,
+        fail: false,
+        gate_staging: true,
+        staged: staged.clone(),
+    });
+    let transaction = Arc::new(
+        ManifestTransaction::open(lineage, &key, directory.path().join("manifests"), 2)
             .await
-            .unwrap();
-        let key = StateLineageKey::new("orders", &"a".repeat(64)).unwrap();
-        let (entered, admitted) = tokio::sync::oneshot::channel();
-        let release = Arc::new(tokio::sync::Notify::new());
-        let staged = Arc::new(AtomicUsize::new(0));
-        let lineage: Arc<dyn StateLineageBackend> = Arc::new(GatedPublication {
-            inner: backend.open_lineage(&key).await.unwrap(),
-            entered: Mutex::new(Some(entered)),
-            release: release.clone(),
-            fail,
-            gate_staging,
-            staged: staged.clone(),
-        });
-        let transaction = Arc::new(
-            ManifestTransaction::open(lineage.clone(), &key, directory.path().join("manifests"), 2)
-                .await
-                .unwrap(),
-        );
-        let aligned = Arc::new(tokio::sync::Notify::new());
-        let (mut harness, mut checkpoint_rx) = checkpoint_harness(
-            transaction,
-            aligned.clone(),
-            Behavior::StatefulMany,
-            Arc::default(),
-        );
-        start(&mut harness).await;
-        align_checkpoint(&mut harness, &aligned, complete_with_eof).await;
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(5), admitted)
-                .await
-                .unwrap()
-                .unwrap(),
-            2
-        );
-        assert!(matches!(
-            checkpoint_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), harness.outputs[0].recv())
-                .await
-                .is_err()
-        );
-        if cancel {
-            assert_cancelled_staging_settles(&mut harness, &mut checkpoint_rx, &release).await;
-            assert_eq!(staged.load(Ordering::SeqCst), 2);
-            continue;
-        }
-        release.notify_one();
-        if fail {
-            let report = harness.supervisor.join_all().await;
-            assert_eq!(report.errors.len(), 1);
-            assert!(checkpoint_rx.recv().await.is_none());
-            assert!(harness.outputs[0].recv().await.unwrap().is_none());
-        } else {
-            let ack = tokio::time::timeout(Duration::from_secs(5), checkpoint_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(ack.state.segments.len(), 2);
-            for handle in &ack.state.segments {
-                assert!(!lineage.load_segment(handle).await.unwrap().is_empty());
-            }
-            assert_eq!(
-                harness.outputs[0]
-                    .recv()
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .as_barrier(),
-                Some(Epoch::INITIAL)
-            );
-            harness.cancellation.cancel();
-            assert!(harness.supervisor.join_all().await.errors.is_empty());
-        }
-    }
+            .unwrap(),
+    );
+    let aligned = Arc::new(tokio::sync::Notify::new());
+    let (mut harness, mut checkpoint_rx) = checkpoint_harness(
+        transaction,
+        aligned.clone(),
+        Behavior::StatefulMany,
+        Arc::default(),
+    );
+    start(&mut harness).await;
+    align_checkpoint(&mut harness, &aligned, false).await;
+
+    let ack = tokio::time::timeout(Duration::from_secs(5), checkpoint_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ack.snapshot.segments.len(), 2);
+    assert!(ack.state.segments.is_empty());
+    assert_eq!(
+        harness.outputs[0]
+            .recv()
+            .await
+            .unwrap()
+            .unwrap()
+            .as_barrier(),
+        Some(Epoch::INITIAL)
+    );
+    assert!(matches!(
+        admitted.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    assert_eq!(staged.load(Ordering::SeqCst), 0);
+
+    harness.cancellation.cancel();
+    assert!(harness.supervisor.join_all().await.errors.is_empty());
 }
 
 fn checkpoint_harness(
@@ -201,56 +165,6 @@ fn checkpoint_harness(
     (harness, checkpoint_rx)
 }
 
-async fn assert_pending_preparation_cancels_before_staging() {
-    let directory = tempfile::tempdir().unwrap();
-    let backend = LocalStateBackend::new(directory.path().join("state"))
-        .await
-        .unwrap();
-    let key = StateLineageKey::new("orders", &"a".repeat(64)).unwrap();
-    let (entered, mut admitted) = tokio::sync::oneshot::channel();
-    let lineage: Arc<dyn StateLineageBackend> = Arc::new(GatedPublication {
-        inner: backend.open_lineage(&key).await.unwrap(),
-        entered: Mutex::new(Some(entered)),
-        release: Arc::default(),
-        fail: false,
-        gate_staging: true,
-        staged: Arc::default(),
-    });
-    let transaction = Arc::new(
-        ManifestTransaction::open(lineage.clone(), &key, directory.path().join("manifests"), 2)
-            .await
-            .unwrap(),
-    );
-    let aligned = Arc::new(tokio::sync::Notify::new());
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let (mut harness, mut checkpoint) = checkpoint_harness(
-        transaction,
-        aligned.clone(),
-        Behavior::PreparePending,
-        observed.clone(),
-    );
-    start(&mut harness).await;
-    align_checkpoint(&mut harness, &aligned, false).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while observed.lock().is_empty() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    harness.cancellation.cancel();
-    let report = tokio::time::timeout(Duration::from_secs(5), harness.supervisor.join_all())
-        .await
-        .unwrap();
-    assert!(report.errors.is_empty());
-    assert!(matches!(
-        admitted.try_recv(),
-        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-    ));
-    assert!(checkpoint.recv().await.is_none());
-    assert!(harness.outputs[0].recv().await.unwrap().is_none());
-}
-
 async fn align_checkpoint(
     harness: &mut Harness,
     aligned: &tokio::sync::Notify,
@@ -277,29 +191,4 @@ async fn align_checkpoint(
         })
         .await
         .unwrap();
-}
-
-async fn assert_cancelled_staging_settles(
-    harness: &mut Harness,
-    checkpoint: &mut mpsc::Receiver<OperatorCheckpointAck>,
-    release: &tokio::sync::Notify,
-) {
-    harness.cancellation.cancel();
-    {
-        let completion = harness.supervisor.join_all();
-        tokio::pin!(completion);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut completion)
-                .await
-                .is_err()
-        );
-        assert!(matches!(
-            checkpoint.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        release.notify_one();
-        assert!(completion.await.errors.is_empty());
-    }
-    assert!(checkpoint.recv().await.is_none());
-    assert!(harness.outputs[0].recv().await.unwrap().is_none());
 }

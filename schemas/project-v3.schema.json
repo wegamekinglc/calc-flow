@@ -1609,6 +1609,9 @@
         {
           "additionalProperties": false,
           "properties": {
+            "aggregate_output": {
+              "$ref": "#/$defs/SqlAggregateOutputMode"
+            },
             "aliases": {
               "items": {
                 "type": "string"
@@ -2460,21 +2463,6 @@
             "micros"
           ],
           "type": "object"
-        }
-      ]
-    },
-    "RollingNumericalProfile": {
-      "description": "Versioned floating-point behavior for rolling numeric transitions.\n\n`StableV1` remains the default and preserves the released operation order.\n`StableV2Preview` is an explicit opt-in experiment whose serialized name is\n`stable_v2`; it may not replace the default without a separate migration.",
-      "oneOf": [
-        {
-          "const": "stable_v1",
-          "description": "Released West/Welford add/remove behavior.",
-          "type": "string"
-        },
-        {
-          "const": "stable_v2",
-          "description": "Deterministically rebased, shifted-sum preview behavior.",
-          "type": "string"
         }
       ]
     },
@@ -3706,10 +3694,6 @@
           "$ref": "#/$defs/LatePolicySpec",
           "description": "Late-row policy."
         },
-        "numerical_profile": {
-          "$ref": "#/$defs/RollingNumericalProfile",
-          "description": "Versioned floating-point behavior. `stable_v1` is omitted from the\ncanonical configuration so existing project and checkpoint hashes stay\ncompatible; `stable_v2` is an explicit preview opt-in."
-        },
         "outputs": {
           "description": "Rolling outputs in semantic declaration order.",
           "items": {
@@ -3732,7 +3716,7 @@
           "type": "array"
         },
         "state_layout_version": {
-          "description": "Durable state-layout version. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require\n[`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`]; MACD components require\n[`ROLLING_MACD_STATE_LAYOUT_VERSION`].",
+          "description": "Project-document declaration level for the rolling feature set. This is\ndistinct from the durable checkpoint encoding. Existing primitives use\n[`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires\n[`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance\nrequire [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require\n[`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`]; MACD components require\n[`ROLLING_MACD_STATE_LAYOUT_VERSION`].",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
@@ -4144,6 +4128,21 @@
             "columns"
           ],
           "type": "object"
+        }
+      ]
+    },
+    "SqlAggregateOutputMode": {
+      "description": "Selects the visible relation emitted by a compact streaming SQL aggregate.",
+      "oneOf": [
+        {
+          "const": "snapshot",
+          "description": "Emit the complete cumulative visible relation after every input batch.",
+          "type": "string"
+        },
+        {
+          "const": "changelog",
+          "description": "Emit only retract/upsert changes from the last committed visible relation.",
+          "type": "string"
         }
       ]
     },

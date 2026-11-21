@@ -106,6 +106,9 @@ impl TransactionalStreamSink for Sink {
     async fn recover(&mut self, manifest: &CheckpointManifest) -> Result<()> {
         self.inner.recover(manifest).await
     }
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.inner.recover_scoped(recovery).await
+    }
     async fn close(&mut self) -> Result<()> {
         self.inner.close().await?;
         self.probe.sink_closes.fetch_add(1, Ordering::SeqCst);
@@ -250,7 +253,7 @@ async fn pending_checkpoint(
     root: &Path,
     job_id: u64,
     source_arrays: usize,
-) -> CheckpointManifest {
+) -> crate::state::v4::V4Manifest {
     let probe = Arc::new(Probe::default());
     let (spec, resources) = chain_spec(scenario, job_id, &probe);
     let fingerprint = spec.plan.fingerprint().to_owned();
@@ -309,29 +312,29 @@ async fn pending_checkpoint(
     let captured = captured.expect("dual barriers did not publish checkpoint");
     assert_eq!(
         captured
-            .operators()
+            .operators
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
         ["match", "project1", "project2"]
     );
     assert_eq!(
-        captured.sources()["left"].cursor.as_ref().unwrap().order,
+        captured.sources["left"].cursor.as_ref().unwrap().order,
         "0000000000000001"
     );
     assert_eq!(
-        captured.sources()["right"].cursor.as_ref().unwrap().order,
+        captured.sources["right"].cursor.as_ref().unwrap().order,
         "0000000000000001"
     );
     assert_eq!(
-        captured.operators()["match"]
-            .progress
+        captured.operators["match"]
+            .progress()
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>(),
         ["left", "right"]
     );
-    assert!(!captured.operators()["match"].segments.is_empty());
+    assert!(!captured.operators["match"].opaque_metadata().unwrap().1);
     assert_eq!(chain_plan().fingerprint(), fingerprint);
     captured
 }
@@ -386,20 +389,19 @@ async fn a13_three_member_asof_managed_dual_barriers_restore_every_logical_parti
         source.paused.store(false, Ordering::SeqCst);
     }
     let second = pending_checkpoint(&scenario, directory.path(), 102, 0).await;
-    assert_eq!(first.epoch(), Epoch::INITIAL);
-    assert_eq!(second.epoch(), Epoch::INITIAL.next().unwrap());
-    assert_eq!(
-        first.operators()["match"]
-            .segments
+    assert_eq!(first.epoch, 1);
+    assert_eq!(second.epoch, 2);
+    let hashes = |manifest: &crate::state::v4::V4Manifest| {
+        let crate::state::v4::OperatorV4::Opaque { blocks, .. } = &manifest.operators["match"]
+        else {
+            panic!("expected opaque ASOF state")
+        };
+        blocks
             .iter()
-            .map(crate::StateHandle::sha256)
-            .collect::<Vec<_>>(),
-        second.operators()["match"]
-            .segments
-            .iter()
-            .map(crate::StateHandle::sha256)
+            .map(|block| block.sha256.clone())
             .collect::<Vec<_>>()
-    );
+    };
+    assert_eq!(hashes(&first), hashes(&second));
     scenario.pauses = [None, None];
     let probe = Arc::new(Probe::default());
     let (spec, resources) = chain_spec(&scenario, 103, &probe);
@@ -443,10 +445,14 @@ async fn a13_three_member_asof_managed_dual_barriers_restore_every_logical_parti
     );
     assert_resources(&probe, &resources);
     assert_eq!(probe.arrays.lock().len(), 24);
-    let terminal = manifest(directory.path(), second.epoch().next().unwrap()).await;
-    assert!(terminal.operators().values().all(|entry| {
+    let terminal = manifest(
+        directory.path(),
+        Epoch::new(second.epoch).unwrap().next().unwrap(),
+    )
+    .await;
+    assert!(terminal.operators.values().all(|entry| {
         entry
-            .progress
+            .progress()
             .values()
             .all(|ingress| ingress.state == crate::ManifestIngressState::Ended)
     }));

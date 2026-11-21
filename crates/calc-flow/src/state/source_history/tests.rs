@@ -1,62 +1,24 @@
 use super::*;
-use crate::{LocalStateBackend, StateBackend, StateLineageKey};
 use futures::FutureExt;
-use std::collections::BTreeSet;
 
-async fn transaction(root: &Path) -> Arc<ManifestTransaction> {
-    let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
-    let key = StateLineageKey::new("history", &"0123456789abcdef".repeat(4)).unwrap();
-    Arc::new(
-        ManifestTransaction::open(
-            Arc::from(backend.open_lineage(&key).await.unwrap()),
-            &key,
-            root.join("manifests"),
-            1,
-        )
-        .await
-        .unwrap(),
-    )
-}
-
-async fn context(
-    transaction: Arc<ManifestTransaction>,
-    limits: SourceHistoryLimits,
-) -> SourceHistoryContext {
+fn context(root: &Path, limits: SourceHistoryLimits) -> SourceHistoryContext {
     SourceHistoryContext::new(
-        transaction,
+        root.join("manifests/lineage"),
         "source",
         Epoch::INITIAL,
         SourceHistorySpec::new("test_files_v1", limits).unwrap(),
         None,
     )
-    .await
     .unwrap()
-}
-
-fn identity() -> super::super::PreparedManifestIdentity {
-    super::super::PreparedManifestIdentity {
-        pipeline_name: "history".into(),
-        pipeline_fingerprint: "0123456789abcdef".repeat(4),
-        runtime_config_hash: "abcdef0123456789".repeat(4),
-        source_ids: BTreeSet::new(),
-        operator_ids: BTreeSet::new(),
-        sink_ids: BTreeSet::new(),
-        static_inputs: BTreeMap::new(),
-    }
 }
 
 #[tokio::test]
 async fn archive_buffers_refund_and_read_owner_protects_bytes() {
     let root = tempfile::tempdir().unwrap();
-    let transaction = transaction(root.path()).await;
     let path = root.path().join("data.json");
     std::fs::write(&path, b"AB").unwrap();
-    let context = context(
-        transaction.clone(),
-        SourceHistoryLimits::new(1, 2, 4).unwrap(),
-    )
-    .await;
-    let handle = context.archive_file("file-0", &path, 2).await.unwrap();
+    let context = context(root.path(), SourceHistoryLimits::new(1, 2, 4).unwrap());
+    context.archive_file("file-0", &path, 2).await.unwrap();
     context.seal(BTreeMap::new()).unwrap();
     let bytes = context.load("file-0").await.unwrap();
     assert_eq!(bytes.bytes(), b"AB");
@@ -67,40 +29,16 @@ async fn archive_buffers_refund_and_read_owner_protects_bytes() {
     let bytes = context.load("file-0").await.unwrap();
     assert!(context.drain().await.is_empty());
     drop(context);
-    assert_eq!(
-        transaction
-            .retain(&identity(), None)
-            .await
-            .unwrap()
-            .removed_orphan_segments,
-        0
-    );
     assert_eq!(bytes.bytes(), b"AB");
     drop(bytes);
-    assert_eq!(
-        transaction
-            .retain(&identity(), None)
-            .await
-            .unwrap()
-            .removed_orphan_segments,
-        1
-    );
-    assert!(
-        !root
-            .path()
-            .join("state")
-            .join(handle.relative_path())
-            .exists()
-    );
 }
 
 #[tokio::test]
 async fn failed_acquisition_refunds_storage_and_segment_limits() {
     let root = tempfile::tempdir().unwrap();
-    let transaction = transaction(root.path()).await;
     let path = root.path().join("data.json");
     std::fs::write(&path, b"AB").unwrap();
-    let context = context(transaction, SourceHistoryLimits::new(1, 4, 4).unwrap()).await;
+    let context = context(root.path(), SourceHistoryLimits::new(1, 4, 4).unwrap());
     assert!(
         matches!(context.archive_file("file-0", &path, 1).await, Err(CalcFlowError::InvalidArgument { field, .. }) if field == "source_history.max_file_bytes")
     );
@@ -124,17 +62,12 @@ async fn discovery_and_total_history_bytes_are_bounded() {
     std::fs::create_dir(&input).unwrap();
     std::fs::write(input.join("02.json"), b"CD").unwrap();
     std::fs::write(input.join("01.json"), b"AB").unwrap();
-    let transaction = transaction(root.path()).await;
-    let one = context(
-        transaction.clone(),
-        SourceHistoryLimits::new(1, 4, 4).unwrap(),
-    )
-    .await;
+    let one = context(root.path(), SourceHistoryLimits::new(1, 4, 4).unwrap());
     assert!(
         matches!(one.discover_files(&input, "json").await, Err(CalcFlowError::InvalidArgument { field, .. }) if field == "source_history.max_segments")
     );
     assert!(one.drain().await.is_empty());
-    let two = context(transaction, SourceHistoryLimits::new(2, 3, 4).unwrap()).await;
+    let two = context(root.path(), SourceHistoryLimits::new(2, 3, 4).unwrap());
     let paths = two.discover_files(&input, "json").await.unwrap();
     assert_eq!(paths, [input.join("01.json"), input.join("02.json")]);
     two.archive_file("file-0", &paths[0], 2).await.unwrap();
@@ -145,16 +78,46 @@ async fn discovery_and_total_history_bytes_are_bounded() {
 }
 
 #[tokio::test]
+async fn native_v4_history_restore_preserves_handle_and_bytes_after_source_delete() {
+    let root = tempfile::tempdir().unwrap();
+    let lineage = root.path().join("manifests/lineage");
+    let input = root.path().join("input.json");
+    std::fs::write(&input, b"AB").unwrap();
+    let limits = SourceHistoryLimits::new(1, 2, 4).unwrap();
+    let original = SourceHistoryContext::new(
+        &lineage,
+        "source",
+        Epoch::INITIAL,
+        SourceHistorySpec::new("test_files_v1", limits).unwrap(),
+        None,
+    )
+    .unwrap();
+    let handle = original.archive_file("file-0", &input, 2).await.unwrap();
+    original.seal(BTreeMap::new()).unwrap();
+    let saved = original.manifest().unwrap();
+    drop(original);
+    std::fs::remove_file(input).unwrap();
+
+    let restored = SourceHistoryContext::new(
+        &lineage,
+        "source",
+        Epoch::INITIAL,
+        SourceHistorySpec::new("test_files_v1", SourceHistoryLimits::new(1, 2, 4).unwrap())
+            .unwrap(),
+        Some(saved.clone()),
+    )
+    .unwrap();
+    assert_eq!(restored.manifest(), Some(saved));
+    assert_eq!(restored.manifest().unwrap().segments[0], handle);
+    assert_eq!(restored.load("file-0").await.unwrap().bytes(), b"AB");
+}
+
+#[tokio::test]
 async fn restored_history_ignores_origins_and_rejects_corrupt_bytes() {
     let root = tempfile::tempdir().unwrap();
-    let transaction = transaction(root.path()).await;
     let path = root.path().join("data.json");
     std::fs::write(&path, b"AB").unwrap();
-    let original = context(
-        transaction.clone(),
-        SourceHistoryLimits::new(1, 2, 4).unwrap(),
-    )
-    .await;
+    let original = context(root.path(), SourceHistoryLimits::new(1, 2, 4).unwrap());
     let handle = original.archive_file("file-0", &path, 2).await.unwrap();
     original.seal(BTreeMap::new()).unwrap();
     let saved = original.manifest().unwrap();
@@ -162,19 +125,18 @@ async fn restored_history_ignores_origins_and_rejects_corrupt_bytes() {
     drop(original);
     std::fs::remove_file(&path).unwrap();
     let restored = SourceHistoryContext::new(
-        transaction.clone(),
+        root.path().join("manifests/lineage"),
         "source",
         Epoch::INITIAL.next().unwrap(),
         SourceHistorySpec::new("test_files_v1", SourceHistoryLimits::new(1, 2, 4).unwrap())
             .unwrap(),
         Some(saved.clone()),
     )
-    .await
     .unwrap();
     assert_eq!(restored.manifest(), Some(saved));
     assert_eq!(restored.load("file-0").await.unwrap().bytes(), b"AB");
     std::fs::write(
-        root.path().join("state").join(handle.relative_path()),
+        root.path().join("manifests").join(&handle.relative_path),
         b"CD",
     )
     .unwrap();
@@ -189,11 +151,7 @@ async fn restored_history_ignores_origins_and_rejects_corrupt_bytes() {
 #[tokio::test]
 async fn abandoned_history_operation_drains_actual_native_work() {
     let root = tempfile::tempdir().unwrap();
-    let context = context(
-        transaction(root.path()).await,
-        SourceHistoryLimits::new(1, 2, 4).unwrap(),
-    )
-    .await;
+    let context = context(root.path(), SourceHistoryLimits::new(1, 2, 4).unwrap());
     let credit = context.0.ledger.buffer(2).unwrap();
     let (started, entered) = tokio::sync::oneshot::channel();
     let (release, blocked) = std::sync::mpsc::channel();

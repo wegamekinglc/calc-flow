@@ -5,12 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::super::{StateSegment, incremental, sql_state_error};
-use crate::{DataFusionConfig, DataFusionRuntime, JsonMap, Result};
+use crate::{DataFusionConfig, DataFusionRuntime, JsonMap, Result, SqlAggregateOutputMode};
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CompactIdentity {
     pub query_sha256: String,
+    pub aggregate_output: SqlAggregateOutputMode,
     pub input_alias: String,
     pub runtime_config: DataFusionConfig,
     pub logical_schema_sha256: String,

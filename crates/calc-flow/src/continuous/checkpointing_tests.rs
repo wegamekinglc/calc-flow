@@ -111,6 +111,14 @@ fn test_checkpointing_hash_records_disabled_mode_without_changing_the_plan() {
         "fd02188bac4dfdca45ddd37267c08da51ea4a47c562edb06236b59b056f6e4bb"
     );
     assert_ne!(enabled, disabled);
+    let bounded_inflight = runner
+        .plan
+        .runtime_config_hash(&StreamRuntimeConfig {
+            checkpoint_inflight_max_bytes: 4_096,
+            ..historical
+        })
+        .unwrap();
+    assert_ne!(enabled, bounded_inflight);
     assert_ne!(
         enabled,
         runner

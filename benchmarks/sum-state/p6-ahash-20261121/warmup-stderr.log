@@ -1,0 +1,6 @@
+
+thread 'main' (94438) panicked at crates/calc-flow/examples/grouped_sum_state_benchmark.rs:354:5:
+assertion `left == right` failed: JobOutcome { state: Failed, cause: Failure, completed_epoch: None, errors: [StreamingError { category: Operator, reason_code: None, message: "operator \"positions\" execution failed", job_id: Some(1), epoch: None, checkpoint_phase: None, component_kind: Some(Operator), component_id: Some("positions"), diagnostic_id: None, position: 0 }] }
+  left: Failed
+ right: Completed
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

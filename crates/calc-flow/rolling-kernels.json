@@ -6,16 +6,16 @@
       "batch": true,
       "stream": true,
       "datafusion": false,
-      "typed_transition": null,
-      "complexity": "general"
+      "typed_transition": "lag",
+      "complexity": "amortized_constant"
     },
     {
       "primitive": "delta",
       "batch": true,
       "stream": true,
       "datafusion": false,
-      "typed_transition": null,
-      "complexity": "general"
+      "typed_transition": "lag",
+      "complexity": "amortized_constant"
     },
     {
       "primitive": "count",
@@ -155,6 +155,22 @@
     },
     {
       "primitive": "argmin",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "scan",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "rank",
+      "batch": true,
+      "stream": true,
+      "datafusion": false,
+      "typed_transition": "scan",
+      "complexity": "amortized_constant"
+    },
+    {
+      "primitive": "quantile",
       "batch": true,
       "stream": true,
       "datafusion": false,

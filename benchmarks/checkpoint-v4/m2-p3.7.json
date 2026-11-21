@@ -1,0 +1,120 @@
+{
+  "schema": "calc-flow.checkpoint-v4-direct-report.v1",
+  "configuration": {
+    "case": "6400x64-dual",
+    "history_rows": 4096,
+    "recorder": "absent",
+    "rounds": 2,
+    "pairs": 10,
+    "dispatches": 30,
+    "budget_seconds": 50.0
+  },
+  "binary": {
+    "side": "checkpoint-v4",
+    "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/checkpoint-v4/checkpoint-v4-evidence",
+    "sha256": "0d714b8b0ae057730d924905e80bd29a5f4d3e70aae1cda5e7f6778e29261e31"
+  },
+  "raw_rounds": [
+    {
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/benchmarks/checkpoint-v4/m2-raw/round-1.json",
+      "sha256": "6dfe39d9b1eb5fe13b2817f5a5b2461fea75ff592018b9da33896ef5dc9f0db9"
+    },
+    {
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/benchmarks/checkpoint-v4/m2-raw/round-2.json",
+      "sha256": "7f2d0b253e17a3d8771308ed380b1c27d251343d4702bf2a1f6ca13b8b47b739"
+    }
+  ],
+  "statistics": {
+    "gate": 0.03,
+    "metric": "median(on_median_30 / off_median_30 - 1)",
+    "per_round": [
+      {
+        "round": 1,
+        "on_off_median": 0.012494192048328134,
+        "on_off_ci95": [
+          -0.011942431456038904,
+          0.024126952590484585
+        ],
+        "summary": {
+          "baseline": {
+            "p50_seconds": 0.0005169585,
+            "p95_seconds": 0.0005268387,
+            "cv": 0.016110277122369218,
+            "rows_per_second": 19343.912519090023
+          },
+          "candidate": {
+            "p50_seconds": 0.0005130785,
+            "p95_seconds": 0.00051820405,
+            "cv": 0.009133753677559186,
+            "rows_per_second": 19490.194970165383
+          },
+          "paired_speedup_median": 1.0124941920483281,
+          "paired_speedup_ci95": [
+            0.9880575685439611,
+            1.0241269525904846
+          ],
+          "bootstrap_resamples": 20000
+        }
+      },
+      {
+        "round": 2,
+        "on_off_median": 0.011631987204285377,
+        "on_off_ci95": [
+          -0.00039425620953525975,
+          0.02724573367637828
+        ],
+        "summary": {
+          "baseline": {
+            "p50_seconds": 0.000525728,
+            "p95_seconds": 0.000538256325,
+            "cv": 0.013847217128073634,
+            "rows_per_second": 19021.24292409763
+          },
+          "candidate": {
+            "p50_seconds": 0.0005233274999999999,
+            "p95_seconds": 0.00052939815,
+            "cv": 0.01643424906912941,
+            "rows_per_second": 19108.4932475362
+          },
+          "paired_speedup_median": 1.0116319872042854,
+          "paired_speedup_ci95": [
+            0.9996057437904647,
+            1.0272457336763783
+          ],
+          "bootstrap_resamples": 20000
+        }
+      }
+    ],
+    "pooled": {
+      "on_off_median": 0.01164957025659663,
+      "on_off_ci95": [
+        -0.0008202084534632004,
+        0.023687135521503144
+      ],
+      "summary": {
+        "baseline": {
+          "p50_seconds": 0.0005230105,
+          "p95_seconds": 0.0005346155750000001,
+          "cv": 0.017481847519292507,
+          "rows_per_second": 38240.150054348815
+        },
+        "candidate": {
+          "p50_seconds": 0.00051606625,
+          "p95_seconds": 0.00052877665,
+          "cv": 0.015179859143734459,
+          "rows_per_second": 38754.714147650615
+        },
+        "paired_speedup_median": 1.0116495702565966,
+        "paired_speedup_ci95": [
+          0.9991797915465368,
+          1.0236871355215031
+        ],
+        "bootstrap_resamples": 20000
+      }
+    },
+    "verdict": "passed"
+  },
+  "wall_seconds": 1.0863628939841874,
+  "within_budget": true,
+  "error": null
+}

@@ -1,0 +1,33 @@
+{
+  "schema": "calc-flow.sum-state-changelog-performance-plan.v1",
+  "created_at": "2026-11-21",
+  "baseline": {
+    "implementation": "existing complete cumulative 10,000-group snapshot after each input batch",
+    "aggregate_output": "snapshot"
+  },
+  "candidate": {
+    "implementation": "existing compact retract/upsert changes after each input batch",
+    "aggregate_output": "changelog"
+  },
+  "execution": {
+    "driver": "grouped_sum_state_benchmark --paired-changelog with one sealed release binary and the same stock/sparse Arrow fixtures",
+    "cpus": [0],
+    "partitions": 1,
+    "rounds": 2,
+    "ab_ba_pairs_per_round": 10,
+    "warmups_per_arm_per_round": 1,
+    "comparison": "interleaved AB/BA with maintained paired statistics",
+    "timing_scope": "fresh native graph plan, source/operator/sink execution, retained outputs and cleanup; fixture preload and subsequent reconstruction oracle are outside the primary timer and inside the total budget",
+    "correctness": "apply every retract/upsert and compare the complete reconstructed positions against an independent trades oracle after every input batch; require matching snapshot state digests across arms and clean lifecycle",
+    "schema_difference": "changelog adds _cf_op and emits changed rows instead of complete snapshots; schema and output-row counts are reported separately rather than forced equal",
+    "total_budget_seconds": 600,
+    "builds_timed_separately": true,
+    "no_retries_or_case_expansion": true,
+    "retention_rule": "recommend changelog only for scenarios with actual measured benefit; do not change the snapshot default from this focused result"
+  },
+  "cases": [
+    {"id": "stock-stream-1cpu", "fixture": "stock", "input_rows": 2010000, "connection": "21 complete 10,000-group snapshots versus changed groups only"},
+    {"id": "sparse-stream-1cpu", "fixture": "sparse", "input_rows": 12000, "connection": "small-batch control with 10,000 retained groups and 100 updated groups"}
+  ],
+  "unmeasured": "finite mode, eight-worker execution, other key types, changelog consumers, checkpoint-on execution and the full aggregate acceptance matrix"
+}

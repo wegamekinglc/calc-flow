@@ -1,0 +1,351 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-21T14:02:18+08:00",
+    "baseline": {
+      "kind": "previous_sealed_candidate",
+      "revision": "1bd3b3ce",
+      "evidence": "benchmarks/join-asof/p5-band-output-batch-20261121/result.json and benchmarks/join-asof/p5-fused-projection-20261121/result.json",
+      "join_p50_ms": 17.047102000000002,
+      "interval_p50_ms": 282.3963435,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "d6e49ddc",
+      "required_tracked_source_clean_before_build": true,
+      "build_budget": "separate from the 600-second acquisition budget",
+      "change": "Retain hot history for live continuation and non-terminal recovery, but release it instead of rebuilding run state for terminal checkpoints; preserve the single-pair fast path and fused output."
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "static Join then interval; both paths share the modified hot core",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "external_backstop": "timeout --kill-after=30s 600s",
+      "state_root_policy": "new empty root for every warmup and measured observation"
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "Verify that retaining hot history and the continuation guard do not regress the passing single-pair static Join path.",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 17.047102000000002
+      },
+      {
+        "id": "interval-1m-single-cpu",
+        "scenario": "interval_join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "Verify that the same continuation and native-checkpoint migration changes do not regress the passing single-pair BandJoin path.",
+        "threshold_p50_ms": 350,
+        "baseline_p50_ms": 282.3963435
+      }
+    ],
+    "unmeasured": "No paired significance claim, multi-batch throughput, ASOF, other row counts/types/modes, partitioned execution, or remaining acceptance matrix. Multi-batch and durable correctness are covered separately by native disk round-trip unit tests."
+  },
+  "candidate": {
+    "wheel": "target/p5-hot-multi-wheel-0c7b4ee7/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "150967d22ab53e9b1ac384dc54aafaf73b475a8a8d1e5e73f96f48d7be80324f",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-join-venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "455872602bb0a0a7ce375c7fb6ac9df0a98750e359daeb29a2d3992a643b0a86",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "cpu0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Verify that retaining hot history and the continuation guard do not regress the passing single-pair static Join path.",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 17.047102000000002,
+      "samples": [
+        {
+          "seconds": 0.016645959,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016091728,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.015030064,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016698336,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016029427,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016311736,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.015625188,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016626403,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016522392,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.016628773,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 16.417064000000003,
+      "p95_ms": 16.674766350000002,
+      "threshold_pass": true,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Verify that the same continuation and native-checkpoint migration changes do not regress the passing single-pair BandJoin path.",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 282.3963435,
+      "samples": [
+        {
+          "seconds": 0.31368898,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.28629943,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.293406866,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.292595714,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.301821417,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.315154357,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.2932394,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.335414966,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.314302663,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.317222426,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 307.7551985,
+      "p95_ms": 327.22832299999993,
+      "threshold_pass": true,
+      "output_rows": 10998080,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 27.405600260011852,
+  "within_budget": true,
+  "error": null
+}

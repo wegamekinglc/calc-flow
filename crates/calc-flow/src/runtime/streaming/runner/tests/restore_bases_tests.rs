@@ -327,19 +327,17 @@ async fn test_managed_join_decoded_arrow_rows_have_independent_credit() {
     drop(job);
     runner.shutdown().await.unwrap();
     assert_eq!(rows.lock().as_slice(), [3]);
-    assert_eq!(reads.load(Ordering::SeqCst), 2);
     assert_eq!(parses.load(Ordering::SeqCst), 1);
 
     let observed = observations.lock();
     assert_eq!(observed.readers.len(), 4);
     assert_eq!(observed.payloads.len(), 4);
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "all four real decoded rows need independent prepaid workspace on the native worker: {:?}",

@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
     path::{Component, Path},
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
@@ -57,6 +58,25 @@ pub(crate) fn invalid(message: impl Into<String>) -> CalcFlowError {
         field: "benchmark_fixture".into(),
         message: message.into(),
     }
+}
+
+static KEYED_SUM_ROUTE_NS: AtomicU64 = AtomicU64::new(0);
+static KEYED_SUM_APPLY_NS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn note_keyed_sum_route_ns(value: u64) {
+    KEYED_SUM_ROUTE_NS.fetch_add(value, Ordering::Relaxed);
+}
+
+pub(crate) fn note_keyed_sum_apply_ns(value: u64) {
+    KEYED_SUM_APPLY_NS.fetch_add(value, Ordering::Relaxed);
+}
+
+/// Returns cumulative keyed SUM routing and apply nanoseconds in this process.
+pub fn keyed_sum_stage_ns() -> (u64, u64) {
+    (
+        KEYED_SUM_ROUTE_NS.load(Ordering::Relaxed),
+        KEYED_SUM_APPLY_NS.load(Ordering::Relaxed),
+    )
 }
 
 /// Observes the running benchmark process's affinity and thread settings.
@@ -122,45 +142,24 @@ pub(crate) fn with_process_observations(mut observation: Value) -> Result<Value>
     Ok(observation)
 }
 
-/// Closes and awaits every gather task owned by a direct benchmark job.
+/// Closes and awaits every compute task owned by a direct benchmark job.
 ///
 /// # Errors
 /// Returns an error if any owned task fails while draining.
 pub async fn settle_job(job: &crate::StreamJobContext) -> Result<()> {
-    let failures = job.gather_owner().close_and_drain().await;
+    let owner = job.managed_morsel_owner();
+    owner
+        .close_and_drain()
+        .await
+        .map_err(|error| invalid(format!("owned compute cleanup failed: {error}")))?;
+    let failures = owner.drain_failures().await;
     if failures.is_empty() {
         Ok(())
     } else {
         Err(invalid(format!(
-            "owned gather cleanup failures: {failures:?}"
+            "owned compute cleanup failures: {failures:?}"
         )))
     }
-}
-
-/// Checks retained Join rows after a genuine optional dictionary grant refusal.
-///
-/// This fixed three-row control reports correctness and owned cleanup evidence.
-/// It does not collect performance measurements.
-///
-/// # Errors
-/// Returns an error if construction, production admission, validation or owned
-/// gather cleanup fails.
-pub async fn join_dictionary_refusal_retention_evidence() -> Result<Value> {
-    crate::StreamJoinOperator::benchmark_dictionary_refusal_retention().await
-}
-
-/// Checks the fixed retained Join checkpoint lifecycle with four million quotes.
-///
-/// This correctness-only diagnostic observes reservations and refunds in the
-/// default unbounded runtime pool. It does not report performance measurements.
-/// Enable it with the `benchmark-checkpoint-diagnostic` feature.
-///
-/// # Errors
-/// Returns an error if the diagnostic fixture cannot be constructed. Lifecycle
-/// failures are retained in the returned data together with cleanup evidence.
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-pub async fn join_checkpoint_history_4m() -> Result<Value> {
-    crate::operator::run_checkpoint_history_diagnostic().await
 }
 
 /// Reads a sealed fixture and verifies its project before native compilation.

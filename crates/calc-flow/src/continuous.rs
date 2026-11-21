@@ -343,6 +343,12 @@ pub enum WatermarkPolicy {
     #[default]
     SourceProvided,
     /// Generate watermarks from an event-time column and a bounded delay.
+    ///
+    /// A positive `emit_interval` emits on a phase-anchored runtime timer. A
+    /// zero `emit_interval` arms no watermark timer and instead emits after
+    /// every data batch that advances the observed event-time maximum, ordered
+    /// behind that batch. `max_out_of_orderness` and any `idle_timeout` must be
+    /// positive.
     BoundedOutOfOrderness {
         event_time_column: String,
         max_out_of_orderness: Duration,
@@ -813,6 +819,9 @@ impl<S: TransactionalStreamSink> InternalTransactionalStreamSink for Transaction
         };
         self.sink.recover(&recovery).await
     }
+    async fn recover_scoped(&mut self, recovery: SinkRecovery) -> Result<()> {
+        self.sink.recover(&recovery).await
+    }
     async fn close(&mut self) -> Result<()> {
         self.sink.close().await
     }
@@ -950,6 +959,13 @@ impl ManagedCheckpointRuntime {
                 fault: None,
             })
             .map_err(safe_error)
+    }
+
+    pub(crate) async fn open(
+        self,
+        cancellation: &CancellationToken,
+    ) -> Result<crate::runtime::streaming::checkpoint::OpenedManagedCheckpointRuntime> {
+        self.inner.open(cancellation).await
     }
 
     #[cfg(test)]
@@ -1581,7 +1597,7 @@ fn invalid_shape_id(kind: ComponentKind, message: &str) -> CalcFlowError {
     CalcFlowError::Streaming(projection::validation_error(kind, None, message.into()))
 }
 
-fn allocate_job_id() -> Result<u64> {
+pub(crate) fn allocate_job_id() -> Result<u64> {
     NEXT_JOB_ID
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)

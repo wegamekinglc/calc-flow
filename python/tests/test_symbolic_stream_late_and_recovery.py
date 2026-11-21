@@ -459,7 +459,8 @@ def test_one_join_digest_owns_one_physical_checkpoint_entry(tmp_path: Path) -> N
 
     asyncio.run(exercise())
 
-    manifests = sorted((tmp_path / "manifests").glob("manifest-*.json"))
+    manifest_root = tmp_path / "manifests" / "lineage" / "manifests"
+    manifests = sorted(manifest_root.glob("epoch-*.json"))
     assert len(manifests) == 1
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     operators = manifest["operators"]
@@ -477,19 +478,19 @@ def test_one_join_digest_owns_one_physical_checkpoint_entry(tmp_path: Path) -> N
         ("right", 1),
     ]
     segment_owners = {
-        operator_id: len(entry["segments"])
+        operator_id: len(entry["blocks"])
         for operator_id, entry in operators.items()
-        if entry["segments"]
+        if entry["blocks"]
     }
     assert segment_owners == {join_id: 4}
-    segment_ids = {segment["segment_id"] for segment in join_entry["segments"]}
+    segment_ids = {segment["object_id"] for segment in join_entry["blocks"]}
     assert segment_ids == {"left-base", "right-base"} | {
         f"{payload['side']}-payload-{payload['sha256']}" for payload in payloads
     }
     # Fan-out branches and the join's output frontier record no durable
     # segment of their own.
     assert all(
-        not entry["segments"]
+        not entry["blocks"]
         for operator_id, entry in operators.items()
         if operator_id != join_id
     )

@@ -13,6 +13,7 @@ use datafusion::arrow::{
 
 use super::{entity_parallel::*, *};
 use crate::CalcFlowError;
+use crate::runtime::streaming::morsel_pool::{MorselCost, MorselPool, MorselPoolConfig};
 
 mod capabilities;
 mod cpu_scaling;
@@ -25,16 +26,19 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
             TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Rows(5),
+                dispersion: true,
             },
             TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Rows(20),
+                dispersion: true,
             },
         ]
     } else {
         vec![TypedGroupPlan::Numeric {
             input_index: 3,
             frame: TypedFrame::Rows(20),
+            dispersion: true,
         }]
     };
     let mean = |group| TypedFloatReadout {
@@ -46,7 +50,6 @@ fn lane_plan(dual: bool) -> RollingKernelPlan {
     let mut plan = RollingKernelPlan {
         version: ROLLING_KERNEL_PLAN_VERSION,
         state_layout_version: 3,
-        numerical_profile: RollingNumericalProfile::StableV1,
         selection: KernelSelection::OrderedPrimitive,
         complexity: KernelComplexity::AmortizedConstant,
         event_time_index: 0,
@@ -305,12 +308,14 @@ fn entity_parallel_qualification_checks_frame_profile_columns_and_actual_queues(
                 plan.groups[0] = TypedGroupPlan::Numeric {
                     input_index: 3,
                     frame: TypedFrame::Rows(21),
+                    dispersion: true,
                 }
             }
             "duration" => {
                 plan.groups[0] = TypedGroupPlan::Numeric {
                     input_index: 3,
                     frame: TypedFrame::Duration(20),
+                    dispersion: true,
                 }
             }
             "wrong_state" => {
@@ -383,6 +388,60 @@ fn entity_parallel_cancelled_lane_is_separate_and_does_not_count_unattempted_row
     let actual = exit(request, &token);
     assert!(matches!(actual.outcome, NumericLaneOutcome::Cancelled));
     assert_eq!(actual.work.numeric_rows, 0);
+}
+
+#[test]
+fn entity_parallel_morsel_lease_cancellation_stops_lane() {
+    let (_, [request, _], scratch) = entity_parallel_test_pair();
+    let bytes = scratch.accounted_bytes().unwrap();
+    let mut pool = MorselPool::new(
+        "rolling-lease-cancel",
+        MorselPoolConfig {
+            workers: 1,
+            max_morsels: 1,
+            max_rows: 64_000,
+            max_bytes: bytes,
+            inline_rows: 0,
+        },
+    )
+    .unwrap();
+    let client = pool.client();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let ticket = client
+        .submit(
+            request,
+            MorselCost {
+                rows: 64_000,
+                scratch_bytes: bytes,
+                output_bytes: 0,
+            },
+            move |request, lease| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                let mut progress = LaneProgress::default();
+                let outcome = match run_numeric_lane(request, lease, &mut progress) {
+                    Ok(result) => NumericLaneOutcome::Complete(result),
+                    Err(NumericLaneStop::Ordinary(error)) => {
+                        NumericLaneOutcome::OrdinaryError(error)
+                    }
+                    Err(NumericLaneStop::Cancelled) => NumericLaneOutcome::Cancelled,
+                };
+                Ok(NumericLaneExit {
+                    outcome,
+                    work: progress.work,
+                })
+            },
+        )
+        .unwrap();
+    entered_rx.recv().unwrap();
+
+    pool.cancellation().cancel();
+    release_tx.send(()).unwrap();
+    let actual = ticket.join().unwrap();
+    assert!(matches!(actual.outcome, NumericLaneOutcome::Cancelled));
+    assert_eq!(actual.work.numeric_rows, 0);
+    pool.close_and_join().unwrap();
 }
 
 #[test]
@@ -667,6 +726,7 @@ fn entity_parallel_group_error_is_not_erased_by_the_post_cancel_check() {
         unreachable!()
     };
     numeric.accumulator.valid_count = u64::MAX;
+    numeric.samples.values.clear();
     let token = Arc::new(AtomicBool::new(false));
     let cancel = Arc::clone(&token);
     request.test_hook = Some(Arc::new(move |point| {
@@ -1926,6 +1986,10 @@ fn entity_parallel_difference_readout_keeps_minimum_and_builder_error_order() {
 }
 
 #[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the test deliberately converts an integral float mean to an exact sum"
+)]
 fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
     let plan = lane_plan(true);
     let readout = |group, min_periods| TypedFloatReadout {
@@ -1948,6 +2012,7 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                     TypedGroupPlan::Signed {
                         input_index: 3,
                         frame: TypedFrame::Rows(20),
+                        dispersion: true,
                     }
                 } else {
                     plan.groups[0]
@@ -1959,8 +2024,20 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                 TypedWindowState::Exact(state) => &mut state.accumulator,
                 _ => unreachable!(),
             };
-            accumulator.valid_count = 1;
-            accumulator.mean = mean;
+            if exact {
+                accumulator.sum = Some(SumState::Signed(mean as i128));
+                accumulator.valid_count = 1;
+            } else {
+                accumulator.numeric.restore_mean_parts(
+                    1,
+                    u64::from(mean.is_finite()),
+                    u64::from(mean.is_nan()),
+                    u64::from(mean == f64::INFINITY),
+                    u64::from(mean == f64::NEG_INFINITY),
+                    mean,
+                    0.0,
+                );
+            }
             let before = format!("{states:?}");
             for min_periods in [0, 1, 2] {
                 let mut expected = DerivedBuilder::new(plan.outputs[0], 1);
@@ -1977,7 +2054,7 @@ fn entity_parallel_mean_only_difference_keeps_exact_fallback_and_float_bits() {
                 let actual = actual.as_any().downcast_ref::<Float64Array>().unwrap();
                 assert_eq!(actual.nulls(), expected.nulls());
                 assert_eq!(actual.value(0).to_bits(), expected.value(0).to_bits());
-                if min_periods <= 1 && !mean.is_finite() {
+                if !exact && min_periods <= 1 && !mean.is_finite() {
                     assert!(
                         actual.value(0).is_nan(),
                         "same-group nonfinite difference is not zero"
@@ -2041,6 +2118,7 @@ fn readout_shape_plan(group_count: usize, difference: bool) -> RollingKernelPlan
         plan.groups[1] = TypedGroupPlan::Numeric {
             input_index: 4,
             frame: TypedFrame::Rows(20),
+            dispersion: true,
         };
     }
     let readout = |group| TypedFloatReadout {
@@ -2234,6 +2312,7 @@ fn entity_parallel_readout_compatibility_non_numeric_state_preserves_first_error
                 TypedGroupPlan::Signed {
                     input_index: 3,
                     frame: TypedFrame::Rows(5),
+                    dispersion: true,
                 }
             } else {
                 TypedGroupPlan::Extrema {
@@ -2353,6 +2432,7 @@ fn private_readout_input(
                 TypedGroupPlan::Signed {
                     input_index: 3,
                     frame: TypedFrame::Rows(20),
+                    dispersion: true,
                 },
                 1_000,
             );
@@ -2361,9 +2441,7 @@ fn private_readout_input(
     } else {
         for entity in &mut request.entities {
             let mut extra = Float64NumericState::new(TypedFrame::Rows(5), 20);
-            extra
-                .update(-1, Some(73.0), RollingNumericalProfile::StableV1, 1, "r")
-                .unwrap();
+            extra.update(-1, Some(73.0), "r").unwrap();
             Arc::make_mut(&mut entity.state)
                 .groups
                 .push(TypedWindowState::Numeric(extra));

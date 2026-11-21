@@ -1,6 +1,6 @@
 pub(crate) mod streaming;
 
 pub use streaming::{
-    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, StreamJobContext, StreamMessage,
-    StreamMessageKind, edge_channel,
+    ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, SessionOutput, SessionWatermark,
+    StreamJobContext, StreamMessage, StreamMessageKind, StreamSession, edge_channel,
 };

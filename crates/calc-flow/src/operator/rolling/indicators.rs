@@ -22,7 +22,7 @@ pub(super) mod materialize;
 mod native;
 mod numeric_diagnostic;
 pub(super) use numeric_diagnostic::Coordinate;
-use numeric_diagnostic::numeric_error;
+pub(super) use numeric_diagnostic::numeric_error;
 mod prefix;
 mod resources;
 mod scalar_materialization_plan;
@@ -37,7 +37,7 @@ pub(super) fn initial_state(
     compiled: &super::CompiledRollingSpec,
     node: &str,
 ) -> Result<(StateOwner, Option<Resources>)> {
-    if compiled.indicator_groups.is_empty() {
+    if compiled.indicator_groups.is_empty() || compiled.kernel_plan.supports_slab() {
         return Ok((
             StateOwner::new(super::RollingStreamState::default(), false),
             None,

@@ -1,20 +1,19 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+use crate::runtime::streaming::morsel_pool::JobMorselOwner;
 
 use super::*;
 
 #[tokio::test]
-async fn test_capability_parallel_stable_v2_mixed_rebases_across_restore() {
+async fn test_capability_parallel_compensated_mixed_rebuilds_across_restore() {
     let mut deviation = duration_output("stddev", "price", "time_stddev", 8_192);
     deviation["ddof"] = json!(1);
-    let mut spec = kernel_spec(json!([
+    let spec = kernel_spec(json!([
         aggregate_output("mean", "price", "row_mean", 37),
         duration_output("sum", "price", "time_sum", 4_096),
         ddof_output("variance", "price", "row_variance", 73, 1),
         deviation,
     ]));
-    spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
     let names = entity_names();
     let inputs = (0..3)
         .map(|batch| {
@@ -163,18 +162,14 @@ async fn parallel_batch(
     input: RecordBatch,
 ) -> RecordBatch {
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
-    let context = StreamOperatorContext::new(job, "rolling", operator.state.last_input_watermark)
-        .with_entity_work(task.context_client().unwrap());
+    let job = job.clone().with_morsel_owner(owner.clone());
+    let context = StreamOperatorContext::new(&job, "rolling", operator.state.last_input_watermark)
+        .with_task_id(Some(crate::runtime::streaming::gather_work::TaskId::new(0)));
     let output = capability_parallel::close(operator, &context, input).await;
-    scope.settle_abandoned().await;
     drop(context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
     assert_eq!(launches.load(Ordering::SeqCst), 2);
     output
 }

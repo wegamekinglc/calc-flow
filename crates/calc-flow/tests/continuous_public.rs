@@ -286,7 +286,7 @@ impl DurableCursorAcknowledger for ManifestInspectingAcknowledger {
         if cursor.order() != 1_u64.to_be_bytes()
             || !self
                 .manifest_root
-                .join("manifest-00000000000000000001.json")
+                .join("lineage/manifests/epoch-1.json")
                 .is_file()
         {
             return Err(CalcFlowError::Internal {

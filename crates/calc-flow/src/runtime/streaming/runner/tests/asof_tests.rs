@@ -1,6 +1,8 @@
 mod fusion_controls;
 mod recovery_cut;
 
+use sha2::{Digest, Sha256};
+
 use super::{
     ContinuousJobSpec, ContinuousJobState, ContinuousRunner, Cursor, M2DeliveryMode,
     NamedSinkBinding, NamedSourceBinding, OrdinarySinkBinding, OrdinaryStreamSink, SourceBinding,
@@ -262,6 +264,9 @@ impl TransactionalStreamSink for TransactionalSink {
         let state = manifest.sinks()["result"].pre_commit.as_ref().unwrap();
         self.commit(manifest.epoch(), state).await
     }
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.commit(recovery.epoch(), recovery.pre_commit()).await
+    }
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
@@ -426,11 +431,11 @@ async fn wait_until(condition: impl Fn() -> bool) {
     .expect("ASOF runtime condition must become observable");
 }
 
-async fn manifest(root: &Path, epoch: Epoch) -> CheckpointManifest {
+async fn manifest(root: &Path, epoch: Epoch) -> crate::state::v4::V4Manifest {
     let path = root
-        .join("manifests")
-        .join(format!("manifest-{:020}.json", epoch.as_u64()));
-    CheckpointManifest::from_bytes(&tokio::fs::read(path).await.unwrap()).unwrap()
+        .join("manifests/lineage/manifests")
+        .join(format!("epoch-{}.json", epoch.as_u64()));
+    crate::state::v4::V4Manifest::from_bytes(&tokio::fs::read(path).await.unwrap()).unwrap()
 }
 
 fn expected() -> Vec<Match> {
@@ -485,7 +490,11 @@ async fn complete(scenario: &Scenario, root: &Path, job_id: u64) {
     assert_eq!(runner.registry_counts(), (0, 0));
 }
 
-async fn publish_pending_cut(scenario: &Scenario, root: &Path, job_id: u64) -> CheckpointManifest {
+async fn publish_pending_cut(
+    scenario: &Scenario,
+    root: &Path,
+    job_id: u64,
+) -> crate::state::v4::V4Manifest {
     for probe in &scenario.probes {
         probe.paused.store(false, Ordering::SeqCst);
     }
@@ -506,7 +515,7 @@ async fn publish_pending_cut(scenario: &Scenario, root: &Path, job_id: u64) -> C
         .unwrap()
         .unwrap();
     let captured = manifest(root, epoch).await;
-    assert!(!captured.operators()["match"].segments.is_empty());
+    assert!(!captured.operators["match"].opaque_metadata().unwrap().1);
     assert!(scenario.state.lock().records.is_empty());
     assert_eq!(job.cancel().await.state, ContinuousJobState::Cancelled);
     drop(job);
@@ -522,20 +531,23 @@ async fn test_asof_managed_restore_preserves_pending_left_without_or_with_candid
         scenario.pauses = [Some(1), Some(usize::from(candidate))];
         let first = publish_pending_cut(&scenario, directory.path(), 1).await;
         let second = publish_pending_cut(&scenario, directory.path(), 2).await;
-        assert_eq!(first.epoch(), Epoch::INITIAL);
-        assert_eq!(second.epoch(), Epoch::new(2).unwrap());
+        assert_eq!(first.epoch, 1);
+        assert_eq!(second.epoch, 2);
         for captured in [&first, &second] {
             assert_eq!(
-                captured.sources()["left"].cursor.as_ref().unwrap().order,
+                captured.sources["left"].cursor.as_ref().unwrap().order,
                 "0000000000000001"
             );
-            assert_eq!(captured.sources()["right"].cursor.is_some(), candidate);
+            assert_eq!(captured.sources["right"].cursor.is_some(), candidate);
         }
-        let hashes = |captured: &CheckpointManifest| {
-            captured.operators()["match"]
-                .segments
+        let hashes = |captured: &crate::state::v4::V4Manifest| {
+            let crate::state::v4::OperatorV4::Opaque { blocks, .. } = &captured.operators["match"]
+            else {
+                panic!("expected opaque ASOF state")
+            };
+            blocks
                 .iter()
-                .map(|segment| segment.sha256().to_owned())
+                .map(|block| block.sha256.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(hashes(&first), hashes(&second));
@@ -591,7 +603,7 @@ async fn test_asof_managed_faults_recover_exactly_once_before_and_after_publicat
         let published = tokio::fs::try_exists(
             directory
                 .path()
-                .join("manifests/manifest-00000000000000000001.json"),
+                .join("manifests/lineage/manifests/epoch-1.json"),
         )
         .await
         .unwrap();
@@ -838,8 +850,14 @@ async fn test_asof_managed_recovery_rejects_missing_and_corrupted_state_before_s
         let mut scenario = Scenario::new(true);
         scenario.pauses = [Some(1), Some(1)];
         let captured = publish_pending_cut(&scenario, directory.path(), 50).await;
-        let handle = &captured.operators()["match"].segments[0];
-        let path = directory.path().join("state").join(handle.relative_path());
+        let crate::state::v4::OperatorV4::Opaque { blocks, .. } = &captured.operators["match"]
+        else {
+            panic!("expected opaque ASOF state")
+        };
+        let path = directory
+            .path()
+            .join("manifests")
+            .join(&blocks[0].relative_path);
         if missing {
             tokio::fs::remove_file(path).await.unwrap();
         } else {
@@ -857,11 +875,20 @@ async fn test_asof_managed_recovery_rejects_missing_and_corrupted_state_before_s
             .start_checkpointed(scenario.spec(51), checkpoint(directory.path()))
             .await
             .expect_err("invalid ASOF state must fail managed recovery");
-        assert!(
-            matches!(failure.primary.error, CalcFlowError::CheckpointMismatch { ref message }
-            if message == "checkpoint lineage contains an invalid manifest candidate"),
-            "unexpected managed recovery error: {failure:?}"
-        );
+        if missing {
+            assert!(
+                matches!(failure.primary.error, CalcFlowError::Internal { .. }),
+                "{failure:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    failure.primary.error,
+                    CalcFlowError::CheckpointMismatch { .. }
+                ),
+                "{failure:?}"
+            );
+        }
         runner.shutdown().await.unwrap();
         assert_eq!(runner.registry_counts(), (0, 0));
         assert_eq!(
@@ -883,29 +910,28 @@ async fn test_asof_terminal_manifest_valid_checksum_still_validates_native_state
     let scenario = Scenario::new(true);
     complete(&scenario, directory.path(), 60).await;
     let captured = manifest(directory.path(), Epoch::INITIAL).await;
-    assert!(captured.sources().values().all(|entry| entry.ended));
-    let mut operators = captured.operators().clone();
-    let metadata = &mut operators.get_mut("match").unwrap().inline_metadata;
-    metadata.get_mut("metrics").unwrap()["matched_rows"] = serde_json::json!(99);
-    let damaged = CheckpointManifest::new(crate::CheckpointManifestFields {
-        pipeline_name: captured.pipeline_name().into(),
-        pipeline_fingerprint: captured.pipeline_fingerprint().into(),
-        runtime_config_hash: captured.runtime_config_hash().into(),
-        epoch: captured.epoch(),
-        created_at: captured.created_at(),
-        recovery_status: captured.recovery_status(),
-        sources: captured.sources().clone(),
-        operators,
-        sinks: captured.sinks().clone(),
-        static_inputs: captured.static_inputs().clone(),
-    })
-    .unwrap();
+    assert!(captured.sources.values().all(|entry| entry.ended));
+    let mut damaged = captured.clone();
+    let crate::state::v4::OperatorV4::Opaque {
+        inline_metadata,
+        state_fingerprint,
+        ..
+    } = damaged.operators.get_mut("match").unwrap()
+    else {
+        panic!("expected opaque ASOF state")
+    };
+    inline_metadata.get_mut("metrics").unwrap()["matched_rows"] = serde_json::json!(99);
+    let metadata = serde_json::to_value(&*inline_metadata).unwrap();
+    *state_fingerprint = hex::encode(Sha256::digest(
+        crate::canonical_json(&metadata).unwrap().as_bytes(),
+    ));
+    damaged.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&damaged).unwrap();
     let bytes = damaged.canonical_bytes().unwrap();
-    assert!(CheckpointManifest::from_bytes(&bytes).is_ok());
+    assert!(crate::state::v4::V4Manifest::from_bytes(&bytes).is_ok());
     tokio::fs::write(
         directory
             .path()
-            .join("manifests/manifest-00000000000000000001.json"),
+            .join("manifests/lineage/manifests/epoch-1.json"),
         bytes,
     )
     .await
@@ -922,8 +948,8 @@ async fn test_asof_terminal_manifest_valid_checksum_still_validates_native_state
         .await
         .expect_err("terminal recovery must validate the ASOF counters before sink recovery");
     assert!(
-        matches!(error.primary.error, CalcFlowError::Internal { ref message }
-        if message == "managed checkpoint recovery failed"),
+        matches!(error.primary.error, CalcFlowError::CheckpointMismatch { ref message }
+        if message == "checkpoint lineage contains invalid recovery data"),
         "{error:?}"
     );
     runner.shutdown().await.unwrap();

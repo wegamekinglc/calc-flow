@@ -195,18 +195,28 @@ exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
 Other multi-alias append SQL is rejected before any source opens, even if
 aliases share a root. Stream SQL with an
 ordinary aggregate or `GROUP BY` emits the full cumulative result after every
-batch. Eligible queries, including admitted grouped ordered `LAST_VALUE`,
-update compact state; unsupported aggregate shapes rerun over retained input.
-There is no fixed SQL state cap by default. `sql_state_budget` limits cumulative
-accepted input; `sql_compact_state_budget` requires compact execution and limits
-each aggregate node's live groups and owned bytes. See
+batch by default. Eligible queries, including admitted grouped ordered
+`LAST_VALUE`, update compact state; unsupported aggregate shapes rerun over
+retained input. There is no fixed SQL state cap by default. `sql_state_budget`
+limits cumulative accepted input; `sql_compact_state_budget` requires compact
+execution and limits each aggregate node's live groups and owned bytes.
+
+`cf.changelog_sql(query, /, **tables)` and `TableExpr.changelog_sql(query, /)`
+explicitly select retract/upsert output for one compact single-alias stream
+aggregate. The result appends non-null Utf8 `_cf_op` to the projected fields.
+Every `GROUP BY` expression must remain visible exactly once in the projection,
+and outer `ORDER BY`/`LIMIT` is rejected. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for the diff, ordering and recovery contract.
+
+Other SQL stays batch-local. In default mode, `ORDER BY` and `LIMIT` apply to
+the current snapshot; SQL window functions alone remain batch-local. Default
+aggregate snapshots repeat unchanged groups, so downstream operators receive
+them as new rows. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
-for admission, ordering, budget and recovery contracts. Other SQL stays
-batch-local. `ORDER BY` and `LIMIT` apply to the current
-snapshot; SQL window functions alone remain batch-local. These aggregate
-snapshots repeat unchanged groups, so downstream operators receive them as new
-rows. Native rolling, event windows, and bounded stream joins have their
-separately declared cross-batch semantics. Use
+for admission, ordering, budget and recovery contracts. Native rolling, event
+windows, and bounded stream joins have their separately declared cross-batch
+semantics. Use
 [SQL composition](../examples/32_sql_expression_pipeline.py),
 [named SQL inputs](../examples/02_sql_join.py), and the
 [rolling-to-SQL stream](../examples/33_streaming_pipeline.py) as executable examples.
@@ -480,13 +490,17 @@ fail before any source opens, with field paths such as
 `outputs.minute.window_tumbling.aggregates[0].column`; unsupported field
 types append `.dtype` to the field path.
 
-The native window owns accumulators, output sequence, and checkpoint layout
-`1`. Bind sources and sinks through `StreamingRunner` and use
-`ManagedCheckpointRuntime` for the existing aligned checkpoint and recovery
-protocol. Recovering an open window restores that native state. There is no
-Python row executor or separate Python window buffer. Session windows, local
-calendar windows, offsets, early triggers, update/retraction outputs, custom
-aggregates, and extra allowed-lateness semantics are unsupported.
+The native window owns accumulators, output sequence, and versioned checkpoint
+state. Per-window snapshots use physical layouts 1 and 2; compatible restore
+preserves subsequent output and checkpoint bits. Bind
+sources and sinks through `StreamingRunner` and use `ManagedCheckpointRuntime`
+for the existing aligned checkpoint and recovery protocol. Recovering an open
+window restores that native state. There is no Python row executor or separate
+Python window buffer. See
+[window state and storage](runtime-envelope.md#window-state-and-storage).
+Session windows, local calendar windows, offsets, early triggers,
+update/retraction outputs, custom aggregates, and extra allowed-lateness
+semantics are unsupported.
 
 ## Symbolic bounded stream joins
 
@@ -608,13 +622,13 @@ publishing a prepared result. See the [native numerical
 semantics](python-api.md#native-arrays) for eager use, zero rules and the
 specified float64 underflow result.
 
-These primitives use rolling `primitive_version=1` and state layout 5. A mixed
-stage containing RSI/ATR uses layout 5 for its other rolling outputs too;
-old-only declarations retain their existing layout selection and semantics.
-Indicator-containing Rust RollingOperator nodes use their selected StateBudget
-byte limit for participating state, candidate, output, scratch and retained
-checkpoint storage. Python adds no rolling-budget option. Existing `ts.ema`
-and `ts.macd` retain their declarations and numerical contracts.
+These primitives use rolling `primitive_version=1` and declaration layout 5.
+Pure indicator stages and stages combining indicators with Float64 Rows numeric
+outputs persist layout-7 state-table recurrence columns. Stages mixing
+indicators with other rolling families retain the legacy layout-5 resource path
+until those families migrate. Old-only declarations retain their existing
+layout selection and semantics. Python adds no rolling-budget option. Existing
+`ts.ema` and `ts.macd` retain their declarations and numerical contracts.
 
 ## MACD components
 
@@ -651,9 +665,10 @@ identify one MACD owner across a Program's named outputs, before branches
 fork. Only consumed columns are emitted; all three recurrences remain active
 when only histogram or line is consumed. An unused container creates no live
 state. The declaration uses `macd_component@1` with a `line`, `signal` or
-`histogram` selector, and a stage containing MACD selects rolling layout 6;
-RSI/ATR-only stages retain layout 5. Explanation reports shared groups and
-the general-path fallback until a typed MACD kernel exists.
+`histogram` selector, and a stage containing MACD selects declaration layout 6;
+RSI/ATR-only stages retain declaration layout 5. Supported indicator/numeric
+stages persist layout-7 recurrence columns, and explanation reports their typed
+scan or indicator groups without a general-path fallback.
 
 When components are consumed on both sides of a native array attachment or a
 projection, the compiler forwards private component columns through proven
@@ -862,8 +877,9 @@ options; event-window programs apply the option checks described above.
 Cumulative sum/min/max/variance require declaration and writer
 `state_layout_version` 4, persisting exact summaries and progress. Other
 declarations use version 1, or version 2 when they include EWMA/cumulative mean,
-and retain writer layout 3. Existing checkpoint identities remain unchanged;
-see [native rolling state](symbolic-design.md#native-rolling-state).
+and retain writer layout 3. Restore validates the compensated numeric contract
+and rejects checkpoints carrying prior rolling-kernel identities instead of
+migrating them; see [native rolling state](symbolic-design.md#native-rolling-state).
 
 `cs.rank`, `cs.percentile`, `cs.demean`, `cs.mean`, `cs.zscore`, `cs.winsorize`,
 `cs.top`, `cs.bottom`, `cs.top_quantile`, `cs.bottom_quantile`, and
@@ -918,8 +934,9 @@ including declaration-only `window_tumbling@1`/`window_hopping@1` nodes and
 `linalg`/`parameter` uses that do not form the exact symbolic matrix compilation
 shape above — fail with `unknown_primitive_version` rooted at the output or
 `static_inputs.<name>`, in both batch and stream modes. Native stateful
-operators retain their declared finality; explicit stream SQL uses the snapshot
-or batch-local semantics described in [SQL composition](#sql-composition). Standalone array outputs fail
+operators retain their declared finality; explicit stream SQL uses the snapshot,
+changelog, or batch-local semantics described in
+[SQL composition](#sql-composition). Standalone array outputs fail
 with `unknown_primitive_version` in batch mode; stream mode rejects them
 earlier, at the analysis phase, with `unbounded_state` rooted at
 `outputs.<name>` — the stream-safety rule for an array output with row-axis

@@ -105,8 +105,8 @@ pub struct SourceHistoryManifestEntry {
     pub contract: String,
     /// Bounded connector metadata describing the history segments.
     pub inline_metadata: JsonMap,
-    /// Canonically ordered immutable handles owned by the source binding.
-    pub segments: Vec<StateHandle>,
+    /// Canonically ordered native v4 handles owned by the source binding.
+    pub segments: Vec<super::v4::SourceHistorySegmentHandle>,
 }
 
 /// Persisted operator progress and immutable state handles.
@@ -654,8 +654,7 @@ fn validate_source_history(
         &history.inline_metadata,
         &format!("sources.{source_id}.history.inline_metadata"),
     )?;
-    validate_handles(
-        "source",
+    validate_history_handles(
         source_id,
         &history.segments,
         manifest_epoch,
@@ -690,6 +689,41 @@ fn validate_operators(
 fn validate_ingress_ids(operator: &OperatorManifestEntry) -> Result<()> {
     for ingress_id in operator.progress.keys() {
         validate_portable_identifier("operators.progress.id", ingress_id)?;
+    }
+    Ok(())
+}
+
+fn validate_history_handles(
+    source_id: &str,
+    handles: &[super::v4::SourceHistorySegmentHandle],
+    manifest_epoch: Epoch,
+    identities: &mut BTreeSet<(String, Epoch, String)>,
+    paths: &mut BTreeSet<String>,
+) -> Result<()> {
+    let mut previous = None;
+    for handle in handles {
+        handle.validate(manifest_epoch.as_u64())?;
+        if handle.owner != source_id {
+            return Err(format_error(format!(
+                "sources.{source_id}.history segment owner does not match its source"
+            )));
+        }
+        if previous.is_some_and(|previous| previous >= handle.segment_id()) {
+            return Err(format_error(format!(
+                "sources.{source_id}.history segments are not in canonical order"
+            )));
+        }
+        if !identities.insert((
+            handle.owner.clone(),
+            Epoch::new(handle.epoch).expect("v4 history epoch is nonzero"),
+            handle.segment_id().into(),
+        )) || !paths.insert(handle.relative_path.clone())
+        {
+            return Err(format_error(format!(
+                "sources.{source_id}.history contains duplicate segment identity or path"
+            )));
+        }
+        previous = Some(handle.segment_id());
     }
     Ok(())
 }

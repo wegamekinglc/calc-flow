@@ -15,6 +15,13 @@ async fn main() -> ExampleResult {
     let job = configured_runner(options, &last)?.start().await?;
     let outcome = job.wait().await;
     assert_eq!(outcome.state, calc_flow::JobState::Completed, "{outcome:?}");
+    #[cfg(feature = "benchmark-internals")]
+    println!("stream status: {:?}", job.status());
+    #[cfg(feature = "benchmark-internals")]
+    println!(
+        "keyed SUM stage ns: {:?}",
+        calc_flow::benchmark_internals::keyed_sum_stage_ns()
+    );
     let last = last.lock().await;
     let result = last
         .as_ref()

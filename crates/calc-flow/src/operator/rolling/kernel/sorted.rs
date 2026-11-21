@@ -81,8 +81,10 @@ impl RollingKernelPlan {
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(*output, input.num_rows()))
-            .collect::<Vec<_>>();
+            .map(|output| {
+                DerivedBuilder::new_with_inputs(*output, input.num_rows(), &inputs.groups)
+            })
+            .collect::<Result<Vec<_>>>()?;
         let mut entity = state.take_continuing_entity(&partitions);
         let started = Instant::now();
         self.fill_sorted_ranges(
@@ -216,7 +218,6 @@ impl RollingKernelPlan {
             inputs.event_times.value(row_index),
             current,
             row_index,
-            self.numerical_profile,
             self.nan_as_value,
             node_id,
         )?;

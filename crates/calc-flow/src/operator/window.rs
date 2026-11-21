@@ -40,6 +40,9 @@ use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, stat
 use super::{
     LateMetricDelta, OperatorMetadata, StateBudget, accumulate_late_metrics, validate_operator_name,
 };
+use crate::runtime::streaming::morsel_pool::{
+    ManagedMorsel, MorselCost, MorselLease, execute_managed,
+};
 
 /// Maximum number of concrete hopping-window assignments for one input row.
 pub const MAX_WINDOW_OVERLAP: u64 = 1_024;
@@ -438,6 +441,29 @@ struct StateOperationRow {
     key: WindowKey,
     entry: AccumulatorRow,
     tombstone: bool,
+}
+
+struct WindowEncodingWork {
+    operations: Vec<StateOperationRow>,
+    spec: WindowSpec,
+    compiled: CompiledWindowSpec,
+    pipeline_fingerprint: String,
+    operator_id: String,
+}
+
+impl WindowEncodingWork {
+    fn run(self, lease: &MorselLease) -> Result<Option<Vec<u8>>> {
+        lease.check()?;
+        let bytes = encode_state_segment(
+            &self.operations,
+            &self.spec,
+            &self.compiled,
+            &self.pipeline_fingerprint,
+            &self.operator_id,
+        )?;
+        lease.check()?;
+        Ok(Some(bytes))
+    }
 }
 
 struct PreparedStateSegment {
@@ -1591,26 +1617,45 @@ impl WindowAggregateOperator {
     async fn encode_operations(
         &self,
         operations: Vec<StateOperationRow>,
+        context: &StreamOperatorContext<'_>,
     ) -> Result<Option<Vec<u8>>> {
         if operations.is_empty() {
             return Ok(None);
         }
-        let spec = self.spec.clone();
-        let compiled = self.compiled.clone();
-        let pipeline_fingerprint = self.state_pipeline_fingerprint()?.to_owned();
-        let operator_id = self.state_operator_id()?.to_owned();
-        tokio::task::spawn_blocking(move || {
-            encode_state_segment(
-                &operations,
-                &spec,
-                &compiled,
-                &pipeline_fingerprint,
-                &operator_id,
-            )
-        })
+        let work = WindowEncodingWork {
+            spec: self.spec.clone(),
+            compiled: self.compiled.clone(),
+            pipeline_fingerprint: self.state_pipeline_fingerprint()?.to_owned(),
+            operator_id: self.state_operator_id()?.to_owned(),
+            operations,
+        };
+        let rows = work.operations.len();
+        execute_managed(
+            context.job(),
+            context.operator_id(),
+            context.task_id(),
+            ManagedMorsel::new(
+                work,
+                MorselCost {
+                    rows,
+                    scratch_bytes: 0,
+                    output_bytes: 0,
+                },
+                WindowEncodingWork::run,
+            ),
+            |error| match error {
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if matches!(
+                        field.as_str(),
+                        "morsel.rows" | "morsel.bytes" | "morsel.count"
+                    ) =>
+                {
+                    internal_error(format!("window state encoder admission failed: {error}"))
+                }
+                error => error,
+            },
+        )
         .await
-        .map_err(|error| internal_error(format!("window state encoder task failed: {error}")))?
-        .map(Some)
     }
 
     fn encode_operations_sync(&self, operations: &[StateOperationRow]) -> Result<Vec<u8>> {
@@ -2080,7 +2125,7 @@ impl StreamOperator for WindowAggregateOperator {
         let bytes = match encoding {
             PendingEncoding::EmptyBase => None,
             PendingEncoding::Delta(operations) | PendingEncoding::Base(operations) => {
-                self.encode_operations(operations).await?
+                self.encode_operations(operations, context).await?
             }
         };
         self.finish_pending_encoding(kind, bytes);
@@ -4679,6 +4724,22 @@ mod tests {
             None,
             crate::CancellationToken::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_window_encoding_requires_an_open_job_morsel_pool() {
+        let mut operator = checkpoint_segment_operator();
+        let job = budget_test_job();
+        let context = StreamOperatorContext::new(&job, "window", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("input", budget_test_batch(&[0, 1]), &context, &mut output)
+            .await
+            .unwrap();
+        job.managed_morsel_owner().close_and_drain().await.unwrap();
+
+        let result = operator.prepare_checkpoint_async(&context).await;
+        assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
     }
 
     struct RejectOutput;

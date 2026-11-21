@@ -75,8 +75,9 @@ binding metadata with collection. On context entry, it creates one fresh owning
 native plan and runner. Iterable sources are consumed once; bounded queue sinks
 produce Arrow tables or named `StreamOutput` events. State remains in the native
 job across batches. Each convenience owner controls its queue and observation
-tasks, source closure, and temporary checkpoint cleanup. It does not reuse a
-cached batch plan, replay a Python pipeline per batch, or serialize callables.
+tasks, source closure, and any opt-in temporary checkpoint cleanup. It does not
+reuse a cached batch plan, replay a Python pipeline per batch, or serialize
+callables.
 
 The [iterable input adapter](../python/calc_flow/_stream_inputs.py) uses the
 declared event-time column to validate nondecreasing arrival times across the
@@ -174,13 +175,16 @@ checks this separately from the ordering proof used for rolling and
 cross-section state; nullable time and ungrouped event windows are valid.
 
 The native window owns accumulation, late-assignment and null-time counters,
-watermark closure, output order, and checkpoint state layout `1`. Tumbling and
-hopping close at `watermark >= end` or end-of-input and append final results.
-An aligned checkpoint preserves open windows using the existing manifest and
-state protocol. Python adds no runtime accumulator or window buffer. Active
-window/group counts remain data-dependent; the 1024 hopping-overlap limit is
-an assignment bound, not a total memory bound. See the
-[event-window API](symbolic-api.md#symbolic-event-time-window-aggregation)
+watermark closure, output order, and checkpoint state. Tumbling and hopping
+close at `watermark >= end` or end-of-input and append final results. All
+declarations retain per-window accumulators. An aligned checkpoint preserves
+open windows using the existing manifest and state protocol: per-window
+snapshots use physical layouts 1 and 2 and continue bit-identically after
+compatible restore. Python adds no runtime
+accumulator or window buffer. Active window/group counts remain data-dependent;
+the 1024 hopping-overlap limit is an assignment bound, not a total memory bound.
+See [window state and storage](runtime-envelope.md#window-state-and-storage) and
+the [event-window API](symbolic-api.md#symbolic-event-time-window-aggregation)
 for the type matrix, composition limits, and lateness-option ownership.
 
 ## Native rolling state
@@ -201,26 +205,30 @@ reference path. Retained history remains authoritative for recovery; see the
 Project declarations carry the validated configuration and declaration layout
 versions. Operators without cumulative sum/min/max/variance write columnar state layout `3`, with
 an entity dictionary, projected history, a reorder buffer, recurrence state,
-and kernel/numerical fingerprints. Restore also supports the declaration's
+and kernel/numeric-contract fingerprints. Restore also supports the declaration's
 layout `1` or `2` state. Writer layout is distinct from the declaration fields.
 Cumulative sum/min/max/variance use declaration and writer layout `4`, adding
 complete per-entity/per-group summaries. Counts, exact integer totals, extrema,
 the variance origin/mean/M2 IEEE bits and infinity classification survive
 recovery without replaying prefix history. Layout `4` requires an entity
-processed-row count for both numerical profiles, distinguishing cumulative
+processed-row count for the cumulative layout, distinguishing cumulative
 prefixes from entities with only pending rows; snapshots without this evidence
 fail closed. Missing, duplicate, malformed or mismatched summaries fail closed
 before state installation. Primitive numeric cumulative outputs use the typed
 Arrow transition and ordered columnar buffering, including stages shared with
 cumulative mean or supported rolling outputs. Other shapes retain the general
-fallback. Both paths update the same constant summaries; checkpoint encodings
-and kernel identities remain compatible with earlier layout `4` snapshots.
+fallback. Both paths update the same constant summaries. Restore validates the
+compensated numeric contract and rejects snapshots carrying prior kernel
+identities instead of migrating them.
 The [columnar state implementation](../crates/calc-flow/src/operator/rolling/state_v3.rs)
 owns this encoding.
 
-The default numerical profile is `stable_v1`. Explicit `stable_v2` enables
-shifted compensated sums with periodic rebasing. Profile identity contributes
-to configuration and kernel fingerprints and is checked on recovery.
+Sliding floating sum and mean use compensated sums, with division at readout.
+Variance, standard deviation, covariance and correlation use shifted compensated
+moments and co-moments. Scheduled rebuilds and family-local overflow rebuilds
+fold retained finite samples oldest-to-newest. Integer sums and unchanged
+recurrences keep their existing behavior. The `compensated-sliding-1` numeric
+contract contributes to kernel and checkpoint fingerprints.
 The [Rust runtime reference](rust-api.md#rolling-windows) specifies types, null/NaN handling,
 infinity classification, numerical limits, and late-row behavior.
 

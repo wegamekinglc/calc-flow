@@ -1,0 +1,47 @@
+{
+  "schema": "calc-flow.join-p5-performance-plan.v1",
+  "created_at": "2026-11-21T03:23:55+08:00",
+  "baseline": {
+    "kind": "previous_sealed_candidate",
+    "revision": "5e7c22db",
+    "evidence": "benchmarks/join-asof/p5-fused-projection-20261121/result.json",
+    "join_p50_ms": 17.047102000000002,
+    "interval_p50_ms": 355.0669025,
+    "paired_comparison": false
+  },
+  "candidate": {
+    "kind": "sealed_default_feature_release_wheel",
+    "revision": "1bd3b3ce",
+    "required_tracked_source_clean_before_build": true,
+    "build_budget": "separate from the 600-second acquisition budget",
+    "change": "native BandJoin uses 65,536-row output batches instead of the DataFusion default 8,192 rows"
+  },
+  "execution": {
+    "cpu_affinity": 0,
+    "tokio_worker_threads": 1,
+    "blas_openmp_workers": 1,
+    "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+    "timing_scope": "ready-source enqueue through Arrow output",
+    "warmups_per_case": 2,
+    "measured_samples_per_case": 10,
+    "sample_order": "interval only; static Join is unchanged and retains its passing evidence",
+    "correctness": "maintained EngineCase full-output oracle on every sample",
+    "total_budget_seconds": 600,
+    "acquisition_stop_seconds": 570,
+    "owned_cleanup_reserve_seconds": 30,
+    "external_backstop": "timeout --kill-after=30s 600s",
+    "state_root_policy": "new empty root for every warmup and measured observation"
+  },
+  "cases": [
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "larger native output batches reduce per-batch identity projection, edge and Arrow sink overhead for 10,998,080 rows",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 355.0669025
+    }
+  ],
+  "unmeasured": "static Join, ASOF, multi-batch hot-path inputs, durable hot-path restore, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+}

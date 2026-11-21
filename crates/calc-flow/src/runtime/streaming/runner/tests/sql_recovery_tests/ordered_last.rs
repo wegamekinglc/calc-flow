@@ -66,19 +66,19 @@ async fn seed_checkpoint(root: &Path, source: &str) -> Vec<u8> {
     drop(job);
     runner.shutdown().await.unwrap();
     assert_eq!(runner.registry_counts(), (0, 0));
-    tokio::fs::read(root.join("manifests/manifest-00000000000000000001.json"))
+    tokio::fs::read(root.join("manifests/lineage/manifests/epoch-1.json"))
         .await
         .unwrap()
 }
 
 async fn assert_saved_winner(root: &Path, saved: &[u8]) {
-    let current = tokio::fs::read(root.join("manifests/manifest-00000000000000000001.json"))
+    let current = tokio::fs::read(root.join("manifests/lineage/manifests/epoch-1.json"))
         .await
         .unwrap();
     assert_eq!(current, saved);
-    let manifest = crate::CheckpointManifest::from_bytes(&current).unwrap();
+    let manifest = crate::state::v4::V4Manifest::from_bytes(&current).unwrap();
     assert_eq!(
-        manifest.operators()[NODE].inline_metadata["state_layout"],
+        manifest.operators[NODE].opaque_metadata().unwrap().0["state_layout"],
         serde_json::json!(5)
     );
     let mut op = ordered().await;
@@ -157,7 +157,7 @@ async fn storage_failure(
     assert!(
         !directory
             .path()
-            .join("manifests/manifest-00000000000000000002.json")
+            .join("manifests/lineage/manifests/epoch-2.json")
             .exists()
     );
     assert_saved_winner(directory.path(), &saved).await;

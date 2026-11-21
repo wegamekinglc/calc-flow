@@ -10,13 +10,13 @@ use super::{
     Field, FileReader, FileWriter, Float64Array, HashMap, IpcSchemaEncoder, KeyValue,
     ROLLING_COLUMNAR_STATE_LAYOUT_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
-    ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelState,
-    RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RollingWork, RollingWorkBatch,
-    RowIdentity, ScalarValue, Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory,
-    StateRowOrderKey, SumClass, TableBatch, UInt8Array, UInt64Array, Value, WindowState,
-    checkpoint_mismatch, concat_batches, ewma_entity_values, float_sample, format_error,
-    fresh_windows, history_event_time, internal_error, is_valid_sample, kernel, new_null_array,
-    operator_error, spec_uses_stable_v2, state_format, state_v3,
+    ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result, RollingHistories, RollingKernelPlan,
+    RollingKernelState, RollingMetricsRecorder, RollingSnapshotMetadata, RollingStage, RollingWork,
+    RollingWorkBatch, RowIdentity, ScalarValue, Schema, SchemaRef, SegmentDescriptor, Sha256,
+    StateInventory, StateRowOrderKey, TableBatch, UInt8Array, UInt64Array, Value, WindowState,
+    checkpoint_mismatch, concat_batches, ewma_entity_values, format_error, fresh_windows,
+    history_event_time, internal_error, is_valid_sample, kernel, new_null_array, operator_error,
+    state_format, state_v3,
 };
 use kernel::{StreamKernelUpdate, TypedStreamTransition};
 
@@ -129,8 +129,8 @@ pub(super) fn state_schema(
             compiled.kernel_plan.fingerprint().to_owned(),
         );
         metadata.insert(
-            "calc_flow.numerical_profile".into(),
-            compiled.kernel_plan.numerical_profile().to_owned(),
+            "calc_flow.numeric_contract".into(),
+            RollingKernelPlan::numeric_contract().to_owned(),
         );
     }
     Schema::new_with_metadata(
@@ -453,8 +453,8 @@ pub(super) fn validate_segment_schema_metadata(
                 snapshot.kernel_fingerprint.clone().unwrap_or_default(),
             ),
             (
-                "calc_flow.numerical_profile",
-                snapshot.numerical_profile.clone().unwrap_or_default(),
+                "calc_flow.numeric_contract",
+                "compensated-sliding-1".to_owned(),
             ),
         ]);
     }
@@ -747,7 +747,15 @@ pub(super) fn parse_snapshot_metadata(
     serde_json::from_value::<RollingSnapshotMetadata>(Value::Object(
         snapshot.inline_metadata.clone().into_iter().collect(),
     ))
-    .map_err(|error| format_error(&error))
+    .map_err(|error| {
+        if error.to_string().contains("numerical_profile") {
+            checkpoint_mismatch(
+                "rolling numerical_profile is no longer supported; start a new lineage",
+            )
+        } else {
+            format_error(&error)
+        }
+    })
 }
 
 pub(super) fn validate_snapshot_metadata(
@@ -774,19 +782,7 @@ pub(super) fn validate_metadata_header(
     metadata: &RollingSnapshotMetadata,
     compiled: &CompiledRollingSpec,
 ) -> Result<()> {
-    let expected_schema_fingerprint =
-        if metadata.state_layout_version == compiled.state_layout_version {
-            &compiled.state_schema_fingerprint
-        } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
-            &compiled.legacy_state_schema_fingerprint
-        } else {
-            return Err(checkpoint_mismatch(format!(
-                "rolling state layout version {} does not match current {} or declared legacy {}",
-                metadata.state_layout_version,
-                compiled.state_layout_version,
-                compiled.legacy_state_layout_version
-            )));
-        };
+    let expected_schema_fingerprint = expected_schema_fingerprint(metadata, compiled)?;
     if metadata.configuration_hash != compiled.configuration_hash {
         return Err(checkpoint_mismatch(
             "rolling operator configuration hash does not match the compiled operator",
@@ -797,17 +793,45 @@ pub(super) fn validate_metadata_header(
             "rolling state schema fingerprint does not match the compiled operator",
         ));
     }
+    validate_kernel_fingerprint(metadata, compiled)
+}
+
+fn expected_schema_fingerprint<'a>(
+    metadata: &RollingSnapshotMetadata,
+    compiled: &'a CompiledRollingSpec,
+) -> Result<&'a String> {
+    if (compiled.kernel_plan.supports_slab()
+        && metadata.state_layout_version == super::ROLLING_STATE_TABLE_LAYOUT_VERSION)
+        || metadata.state_layout_version == compiled.state_layout_version
+    {
+        Ok(&compiled.state_schema_fingerprint)
+    } else if metadata.state_layout_version == compiled.legacy_state_layout_version {
+        Ok(&compiled.legacy_state_schema_fingerprint)
+    } else {
+        Err(checkpoint_mismatch(format!(
+            "rolling state layout version {} does not match current {} or declared legacy {}; start a new lineage",
+            metadata.state_layout_version,
+            compiled.state_layout_version,
+            compiled.legacy_state_layout_version
+        )))
+    }
+}
+
+fn validate_kernel_fingerprint(
+    metadata: &RollingSnapshotMetadata,
+    compiled: &CompiledRollingSpec,
+) -> Result<()> {
     if matches!(
         metadata.state_layout_version,
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
             | ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
             | ROLLING_INDICATOR_STATE_LAYOUT_VERSION
             | ROLLING_MACD_STATE_LAYOUT_VERSION
-    ) && (metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
-        || metadata.numerical_profile.as_deref() != Some(compiled.kernel_plan.numerical_profile()))
+            | super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+    ) && metadata.kernel_fingerprint.as_deref() != Some(compiled.kernel_plan.fingerprint())
     {
         return Err(checkpoint_mismatch(
-            "rolling kernel fingerprint or numerical profile does not match the compiled operator",
+            "rolling kernel fingerprint or numeric contract does not match the compiled operator",
         ));
     }
     Ok(())

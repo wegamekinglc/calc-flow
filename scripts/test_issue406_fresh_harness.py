@@ -124,14 +124,12 @@ class FreshAcceptanceHarnessTests(unittest.TestCase):
                     _plan_build_harnesses(plan_v3(), side), (HARNESS, HARNESS)
                 )
 
-    def test_fresh_overlay_uses_identical_helpers_and_opt_in_diagnostic(self):
+    def test_fresh_overlay_uses_identical_helpers_without_forced_diagnostic(self):
         with TemporaryDirectory() as raw:
             root = Path(raw)
             baseline, candidate = fixtures(root)
             cargo = candidate / CARGO_PATH
-            cargo.write_text(
-                cargo.read_text() + harness.INSERTIONS[CARGO_PATH] + DIAGNOSTIC_FEATURE
-            )
+            cargo.write_text(cargo.read_text() + harness.INSERTIONS[CARGO_PATH])
             commit(candidate)
             revision = command_output(["git", "rev-parse", "HEAD"], cwd=candidate)
             original = {
@@ -151,9 +149,6 @@ class FreshAcceptanceHarnessTests(unittest.TestCase):
                             {
                                 "benchmark-internals": ["dep:nix"],
                                 "benchmark-checkpoint-off": ["benchmark-internals"],
-                                "benchmark-checkpoint-diagnostic": [
-                                    "benchmark-internals"
-                                ],
                             },
                         )
                         for relative in harness.COPIED_FILES:

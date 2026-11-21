@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pyarrow as pa
 import pytest
@@ -79,5 +79,94 @@ def test_stream_entrypoints_forward_explicit_progress_before_eof(named):
         await asyncio.wait_for(consume(), 5)
         assert closed.is_set()
         assert results.job.status()["task_count"] == 0
+
+    asyncio.run(run())
+
+
+class _PausedSource:
+    def __init__(self, data: pa.Table) -> None:
+        self._data = data
+        self._sent = False
+        self.paused = asyncio.Event()
+
+    def capabilities(self) -> cf.SourceCapabilities:
+        return cf.SourceCapabilities(
+            cf.ReplayPositioning.UNSUPPORTED,
+            cf.SourceDeliveryCapability.LOSSY,
+            max_batch_rows=self._data.num_rows,
+            max_batch_bytes=1 << 20,
+            schema=self._data.schema,
+            native_watermarks=cf.NativeWatermarkCapability.NEVER_EMITS,
+        )
+
+    async def open(self, cursor: cf.Cursor | None) -> None:
+        self._sent = False
+
+    async def next(self) -> cf.Data | None:
+        if self._sent:
+            self.paused.set()
+            await asyncio.Event().wait()
+        self._sent = True
+        return cf.Data(cf.Batch.from_pyarrow(self._data), cf.Cursor(b"1", {}))
+
+    async def close(self) -> None:
+        pass
+
+
+class _RowSink:
+    def __init__(self) -> None:
+        self.previous: list[float | None] = []
+        self.written = asyncio.Event()
+
+    async def open(self) -> None:
+        pass
+
+    async def write(self, batch: cf.Batch) -> None:
+        self.previous.extend(batch.to_pyarrow()["previous"].to_pylist())
+        if self.previous:
+            self.written.set()
+
+    async def close(self) -> None:
+        pass
+
+
+def test_explicit_runner_accepts_per_batch_generated_watermarks():
+    data = _data()
+    source = cf.table_input(
+        "quotes",
+        schema=data.schema,
+        entity_by=("symbol",),
+        event_time="ts",
+        sequence_by=("ts",),
+    )
+    program = cf.Program(
+        "lag",
+        engine="streaming",
+        outputs={"lag": source.select(previous=cf.ts.lag(source["price"]))},
+    )
+    policy = cf.BoundedOutOfOrderness("ts", timedelta(microseconds=1), timedelta(0))
+
+    async def run():
+        plan = program.compile_stream(cf.Runtime())
+        feed, sink = _PausedSource(data), _RowSink()
+        job = await cf.StreamingRunner(
+            plan,
+            {
+                plan.source_binding_ids[0]: cf.SourceBinding(
+                    feed, watermark_policy=policy
+                )
+            },
+            {plan.sink_binding_ids[0]: [cf.SinkBinding.ordinary("rows", sink)]},
+            config=cf.StreamRuntimeConfig(checkpointing=False),
+        ).start_async()
+        try:
+            await asyncio.wait_for(sink.written.wait(), 5)
+            # The paused source never ends; only the per-batch watermark finalizes ts 1.
+            assert sink.previous == [None]
+            assert job.status()["watermark_micros"] == 1
+        finally:
+            await job.cancel_async()
+        assert (await job.wait_async()).state == "cancelled"
+        assert job.status()["task_count"] == 0
 
     asyncio.run(run())

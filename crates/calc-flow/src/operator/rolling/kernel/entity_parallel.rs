@@ -15,12 +15,13 @@ use super::{
     Array, ArrayRef, DataType, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, Float64Array,
     Float64Builder, KernelSelection, OutputStorage, PreparedTypedFill, RecordBatch,
     RollingKernelExecution, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
-    RollingNumericalProfile, RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate,
-    TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind,
-    TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
-    TypedWindowState, append_numeric_float64, internal_error, operator_error, read_typed_float,
-    typed_output_mismatch, valid_float64, with_float64_builder,
+    RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray,
+    TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput,
+    TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState, append_numeric_float64,
+    internal_error, operator_error, read_typed_float, typed_output_mismatch, valid_float64,
+    with_float64_builder,
 };
+use crate::runtime::streaming::morsel_pool::MorselLease;
 use crate::{CalcFlowError, Result};
 
 mod route;
@@ -125,7 +126,6 @@ struct PreparedNumericInput {
     event_times: TimestampMicrosecondArray,
     outputs: Vec<TypedOutputPlan>,
     numeric_groups: Option<NumericGroups>,
-    numerical_profile: RollingNumericalProfile,
     nan_as_value: bool,
     node_id: String,
 }
@@ -148,6 +148,12 @@ pub(crate) struct NumericLaneRequest {
     pub(super) entities: Vec<OwnedLaneEntity>,
     #[cfg(test)]
     pub(super) test_hook: Option<Arc<dyn Fn(NumericTestPoint) + Send + Sync>>,
+}
+
+impl NumericLaneRequest {
+    pub(crate) const fn row_count(&self) -> usize {
+        self.row_count
+    }
 }
 
 impl fmt::Debug for NumericLaneRequest {
@@ -552,6 +558,7 @@ impl<'a> PreparedOrderedKernel<'a> {
             .map(|execution| StreamKernelUpdate {
                 execution,
                 in_place: None,
+                slab: None,
             })
     }
 
@@ -641,7 +648,6 @@ impl<'a> EligibleOrderedKernel<'a> {
             event_times,
             outputs: prepared.plan.outputs.clone(),
             numeric_groups: NumericGroups::compile(prepared.plan),
-            numerical_profile: prepared.plan.numerical_profile,
             nan_as_value: prepared.plan.nan_as_value,
             node_id: prepared.node_id.to_owned(),
         });
@@ -866,7 +872,20 @@ fn retained_group_work(state: &TypedWindowState) -> Option<usize> {
         TypedWindowState::Extrema(state) => state.values.len().checked_add(state.candidates.len()),
         TypedWindowState::Pair(state) => state.samples.len().checked_mul(2),
         TypedWindowState::Ewma(_) | TypedWindowState::Cumulative(_) => Some(1),
-        TypedWindowState::Decay(_) | TypedWindowState::Scan(_) => None,
+        _ => retained_aux_group_work(state),
+    }
+}
+
+fn retained_aux_group_work(state: &TypedWindowState) -> Option<usize> {
+    match state {
+        TypedWindowState::Count(state) => Some(state.samples.len()),
+        TypedWindowState::ValueExtrema(state) => Some(state.values.len()),
+        TypedWindowState::Scan(state) => Some(state.recent.len()),
+        TypedWindowState::ValueScan(state) => Some(state.values.len()),
+        TypedWindowState::Lag(state) => Some(state.history.len()),
+        TypedWindowState::Utf8Lag(state) => Some(state.history.len()),
+        TypedWindowState::ValueLag(state) => Some(state.history.len()),
+        _ => None,
     }
 }
 
@@ -879,21 +898,43 @@ pub(super) enum NumericTestPoint {
     Finish,
 }
 
-fn check_cancelled(
-    token: &AtomicBool,
+pub(crate) trait NumericLaneCancellation {
+    fn is_cancelled(&self) -> bool;
+}
+
+impl NumericLaneCancellation for AtomicBool {
+    fn is_cancelled(&self) -> bool {
+        self.load(Ordering::SeqCst)
+    }
+}
+
+impl<T: NumericLaneCancellation + ?Sized> NumericLaneCancellation for Arc<T> {
+    fn is_cancelled(&self) -> bool {
+        self.as_ref().is_cancelled()
+    }
+}
+
+impl NumericLaneCancellation for MorselLease {
+    fn is_cancelled(&self) -> bool {
+        self.check().is_err()
+    }
+}
+
+fn check_cancelled<C: NumericLaneCancellation + ?Sized>(
+    token: &C,
     progress: &mut LaneProgress,
 ) -> std::result::Result<(), NumericLaneStop> {
     progress.active_site = None;
-    if token.load(Ordering::SeqCst) {
+    if token.is_cancelled() {
         Err(NumericLaneStop::Cancelled)
     } else {
         Ok(())
     }
 }
 
-pub(crate) fn run_numeric_lane(
+pub(crate) fn run_numeric_lane<C: NumericLaneCancellation + ?Sized>(
     request: NumericLaneRequest,
-    cancellation: &AtomicBool,
+    cancellation: &C,
     progress: &mut LaneProgress,
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     check_cancelled(cancellation, progress)?;
@@ -918,15 +959,25 @@ pub(crate) fn run_numeric_lane(
     let builders = input
         .outputs
         .iter()
-        .map(|output| DerivedBuilder::new(*output, request.row_count))
-        .collect();
+        .map(|output| DerivedBuilder::new_with_inputs(*output, request.row_count, &input.columns))
+        .collect::<Result<Vec<_>>>()
+        .map_err(|error| {
+            NumericLaneStop::Ordinary(TaggedNumericError {
+                site: NumericSite {
+                    row: 0,
+                    phase: NumericPhase::Output,
+                    ordinal: 0,
+                },
+                error,
+            })
+        })?;
     run_numeric_lane_with_builders(request, builders, cancellation, progress)
 }
 
-fn run_numeric_lane_with_builders<B: NumericLaneBuilder>(
+fn run_numeric_lane_with_builders<B: NumericLaneBuilder, C: NumericLaneCancellation + ?Sized>(
     request: NumericLaneRequest,
     builders: Vec<B>,
-    cancellation: &AtomicBool,
+    cancellation: &C,
     progress: &mut LaneProgress,
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     let input = &request.input;
@@ -944,14 +995,18 @@ fn run_numeric_lane_with_builders<B: NumericLaneBuilder>(
     };
     match (input.columns.len(), compiled_output) {
         (1, Some(output)) => {
-            run_compiled_numeric_lane::<1, _>(request, builders, output, cancellation, progress)
+            run_compiled_numeric_lane::<1, _, _>(request, builders, output, cancellation, progress)
         }
         (2, Some(output)) => {
-            run_compiled_numeric_lane::<2, _>(request, builders, output, cancellation, progress)
+            run_compiled_numeric_lane::<2, _, _>(request, builders, output, cancellation, progress)
         }
-        _ => {
-            run_prepared_numeric_lane::<0, _>(request, builders, cancellation, progress, B::append)
-        }
+        _ => run_prepared_numeric_lane::<0, _, _>(
+            request,
+            builders,
+            cancellation,
+            progress,
+            B::append,
+        ),
     }
 }
 
@@ -975,15 +1030,19 @@ struct LaneMeanReadout {
 // The Mean-only capture remains covered by the original, conservative allowance.
 const _: () = assert!(size_of::<[LaneMeanReadout; 2]>() <= size_of::<[TypedFloatReadout; 2]>());
 
-fn run_compiled_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
+fn run_compiled_numeric_lane<
+    const GROUPS: usize,
+    B: NumericLaneBuilder,
+    C: NumericLaneCancellation + ?Sized,
+>(
     request: NumericLaneRequest,
     builders: Vec<B>,
     output: TypedOutputPlan,
-    cancellation: &AtomicBool,
+    cancellation: &C,
     progress: &mut LaneProgress,
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     match output.kind {
-        TypedOutputKind::Statistic(Statistic::Mean) => run_prepared_numeric_lane::<GROUPS, _>(
+        TypedOutputKind::Statistic(Statistic::Mean) => run_prepared_numeric_lane::<GROUPS, _, _>(
             request,
             builders,
             cancellation,
@@ -1002,7 +1061,7 @@ fn run_compiled_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
                 group: right.group,
                 min_periods: right.min_periods,
             };
-            run_prepared_numeric_lane::<GROUPS, _>(
+            run_prepared_numeric_lane::<GROUPS, _, _>(
                 request,
                 builders,
                 cancellation,
@@ -1010,9 +1069,13 @@ fn run_compiled_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
                 move |builder, states, _, _| builder.append_mean_difference(states, left, right),
             )
         }
-        _ => {
-            run_prepared_numeric_lane::<0, _>(request, builders, cancellation, progress, B::append)
-        }
+        _ => run_prepared_numeric_lane::<0, _, _>(
+            request,
+            builders,
+            cancellation,
+            progress,
+            B::append,
+        ),
     }
 }
 
@@ -1126,7 +1189,7 @@ pub(super) fn run_generic_numeric_lane_for_test(
         .iter()
         .map(|output| DerivedBuilder::new(*output, request.row_count))
         .collect();
-    run_prepared_numeric_lane::<0, _>(
+    run_prepared_numeric_lane::<0, _, _>(
         request,
         builders,
         cancellation,
@@ -1229,25 +1292,28 @@ impl NumericLaneBuilder for Float64Builder {
     }
 }
 
-struct NumericLaneContext<'a, const GROUPS: usize> {
+struct NumericLaneContext<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized> {
     input: &'a PreparedNumericInput,
     fixed_columns: [(&'a Float64Array, &'a TypedGroupInput); GROUPS],
     group_count: usize,
     output_count: usize,
-    cancellation: &'a AtomicBool,
+    cancellation: &'a C,
     #[cfg(test)]
     test_hook: Option<&'a Arc<dyn Fn(NumericTestPoint) + Send + Sync>>,
 }
 
 // Borrowed helpers fit the existing two-lane fixed allowance without new heap storage.
-const _: () =
-    assert!(2 * size_of::<NumericLaneContext<'_, 2>>() <= COMPILED_LANE_READOUT_METADATA_BYTES);
+const _: () = assert!(
+    2 * size_of::<NumericLaneContext<'_, 2, AtomicBool>>() <= COMPILED_LANE_READOUT_METADATA_BYTES
+);
 
-impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
+impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
+    NumericLaneContext<'a, GROUPS, C>
+{
     fn new(
         input: &'a PreparedNumericInput,
         builder_count: usize,
-        cancellation: &'a AtomicBool,
+        cancellation: &'a C,
         #[cfg(test)] test_hook: Option<&'a Arc<dyn Fn(NumericTestPoint) + Send + Sync>>,
     ) -> Self {
         let fixed_columns = std::array::from_fn(|ordinal| {
@@ -1397,11 +1463,9 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
             return entity.update_shared_group(
                 site.ordinal,
                 valid_float64(values, site.row as usize, self.input.nan_as_value),
-                self.input.numerical_profile,
                 &self.input.node_id,
             );
         }
-        let transition_count = entity.transition_count;
         let state = &mut entity.groups[site.ordinal];
         // Expiration and numerical repair use the serial transition unchanged.
         let event_time = self.input.event_times.value(site.row as usize);
@@ -1410,17 +1474,13 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
                 state,
                 event_time,
                 valid_float64(values, site.row as usize, self.input.nan_as_value),
-                self.input.numerical_profile,
-                transition_count,
                 &self.input.node_id,
             ),
             (state, _) => state.update(
                 event_time,
                 column,
                 site.row as usize,
-                self.input.numerical_profile,
                 self.input.nan_as_value,
-                transition_count,
                 &self.input.node_id,
             ),
         }
@@ -1451,15 +1511,19 @@ impl<'a, const GROUPS: usize> NumericLaneContext<'a, GROUPS> {
     }
 }
 
-fn run_prepared_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
+fn run_prepared_numeric_lane<
+    const GROUPS: usize,
+    B: NumericLaneBuilder,
+    C: NumericLaneCancellation + ?Sized,
+>(
     mut request: NumericLaneRequest,
     mut builders: Vec<B>,
-    cancellation: &AtomicBool,
+    cancellation: &C,
     progress: &mut LaneProgress,
     mut append: impl FnMut(&mut B, &[TypedWindowState], &TypedOutputPlan, &str) -> Result<()>,
 ) -> std::result::Result<NumericLaneResult, NumericLaneStop> {
     // Borrow only the immutable input and hook, leaving owned row/state buffers mutable.
-    let context = NumericLaneContext::<GROUPS>::new(
+    let context = NumericLaneContext::<GROUPS, C>::new(
         &request.input,
         builders.len(),
         cancellation,
@@ -1513,9 +1577,9 @@ fn run_prepared_numeric_lane<const GROUPS: usize, B: NumericLaneBuilder>(
     })
 }
 
-fn next_lane_row(
+fn next_lane_row<C: NumericLaneCancellation + ?Sized>(
     cursor: &mut RouteCursor<'_>,
-    cancellation: &AtomicBool,
+    cancellation: &C,
     progress: &mut LaneProgress,
 ) -> std::result::Result<Option<LaneRow>, NumericLaneStop> {
     while let Some(step) = cursor.next_step() {
@@ -1986,6 +2050,7 @@ pub(crate) fn merge_numeric_results(
     Ok(StreamKernelUpdate {
         execution: seed.execution,
         in_place: None,
+        slab: None,
     })
 }
 

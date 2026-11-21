@@ -1,9 +1,6 @@
 use super::{
     super::invalid,
-    ir::{
-        Assertion, Binary, DType, Execution, Input, Node, Output, Profile, Program, Reduce, Unary,
-        one,
-    },
+    ir::{Assertion, Binary, DType, Execution, Input, Node, Output, Program, Reduce, Unary, one},
 };
 use crate::{JsonMap, Result};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -124,8 +121,6 @@ enum NodeV1 {
         window: u64,
         #[serde(default = "one")]
         min_periods: u64,
-        #[serde(default)]
-        numerical_profile: Profile,
     },
     Ewma {
         id: String,
@@ -196,13 +191,11 @@ fn stateful(node: NodeV1) -> Node {
             input,
             window,
             min_periods,
-            numerical_profile,
         } => Node::RollingMean {
             id,
             input,
             window,
             min_periods,
-            numerical_profile,
         },
         NodeV1::Ewma {
             id,

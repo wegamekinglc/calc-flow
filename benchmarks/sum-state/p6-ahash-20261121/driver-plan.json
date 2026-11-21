@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "baseline": [],
+      "candidate": [],
+      "comparison": "interleaved",
+      "correctness": true,
+      "cpus": [
+        0
+      ],
+      "fixture": "stock",
+      "id": "stock-stream-1cpu",
+      "mode": "stream",
+      "observations": [],
+      "partitions": 1,
+      "reason": "principal changed integer SUM state path",
+      "rows": 2010000
+    }
+  ],
+  "cumulative_measurement_seconds": 5.610903324966785,
+  "deadline": 454273.6482194,
+  "elapsed_seconds": 5.610903324966785,
+  "failure": "RuntimeError('command failed (101): /home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p6-ahash-measurement-7f61738b/timings/stock-stream-1cpu/round-1/warmup-candidate')",
+  "prior_measurement_seconds": 0,
+  "profiles": [],
+  "started_monotonic": 453673.6482194,
+  "status": "stopped"
+}

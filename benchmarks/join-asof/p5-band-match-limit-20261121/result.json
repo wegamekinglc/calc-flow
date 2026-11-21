@@ -1,0 +1,65 @@
+{
+  "schema": "calc-flow.join-band-resource-result.v1",
+  "runtime_revision": "58d7b26f",
+  "case": "hot-band-high-duplicate-match-limit",
+  "status": "passed",
+  "timing_or_throughput_verdict": null,
+  "correctness": {
+    "left_rows": 1,
+    "right_rows": 100000,
+    "max_matches_per_input_batch": 1,
+    "output_batches_read": 1,
+    "output_rows_read": 65536,
+    "error_contains": "input batch match limit exceeded",
+    "match_limit_failures": 1
+  },
+  "peak_guard": {
+    "selected_after_observation": 0,
+    "bytes_max_exclusive": 16777216,
+    "rationale": "The first diagnostic peaked at 11,756,549 bytes. A 16 MiB guard retains headroom for the planner and one 65,536-row output batch while rejecting a return to unbounded duplicate-output collection. It was not relaxed after a failure."
+  },
+  "observations": [
+    {
+      "context": "focused resource diagnostic before the final row-count assertion",
+      "output_batches_read": 1,
+      "count_total": 2438,
+      "count_current": 856,
+      "count_max": 1544,
+      "bytes_total": 19856579,
+      "bytes_current": 60628,
+      "bytes_max": 11756549
+    },
+    {
+      "context": "complete Join regression running with the test harness's normal parallelism",
+      "output_batches_read": 1,
+      "count_total": 1507,
+      "count_current": 2,
+      "count_max": 693,
+      "bytes_total": 19787629,
+      "bytes_current": 46,
+      "bytes_max": 11695967
+    },
+    {
+      "context": "final focused resource regression with output_rows_read=65536 assertion",
+      "output_batches_read": 1,
+      "output_rows_read": 65536,
+      "count_total": 2438,
+      "count_current": 856,
+      "count_max": 1544,
+      "bytes_total": 19856579,
+      "bytes_current": 60628,
+      "bytes_max": 11756549
+    }
+  ],
+  "verification": {
+    "join_tests_passed": 592,
+    "final_focused_tests_passed": 1,
+    "all_feature_clippy": "passed"
+  },
+  "limitations": [
+    "allocation_counter measures allocator activity in a debug test process, not RSS or retained Join workspace",
+    "the complete-regression observation may include concurrent harness allocations",
+    "the eager-collect predecessor was rejected by the small correctness regression; no before/after memory ratio was measured",
+    "no latency, throughput, ASOF, multi-batch hot-path input, or durable hot-path restore verdict is established"
+  ]
+}

@@ -23,9 +23,10 @@ pub(crate) use compile::{
     CompiledNode, NodeDefinition, TablePlanResources, build_nodes, compile_graph, external_names,
 };
 pub(crate) use stream::{
-    CompiledStreamOperator, OUTPUT_FRONTIER_METADATA_KEY_V1, OperatorCheckpointCapability,
-    RuntimeConsumer, RuntimeEdgeKind, RuntimeProducer, RuntimeSinkRoute, RuntimeSourceRoute,
-    RuntimeStreamNode, StableOperatorId, StreamRuntimePlanParts,
+    CompiledStreamOperator, OPERATOR_STATE_VERSION_KEY, OUTPUT_FRONTIER_METADATA_KEY_V1,
+    OperatorCheckpointCapability, RuntimeConsumer, RuntimeEdge, RuntimeEdgeKind, RuntimeProducer,
+    RuntimeSinkRoute, RuntimeSourceRoute, RuntimeStreamNode, StableOperatorId,
+    StreamRuntimePlanParts,
 };
 
 use std::collections::BTreeMap;

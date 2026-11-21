@@ -7,9 +7,9 @@ fn test_work_invariant_lanes_reuse_const_core_and_direct_float_writer() {
     mean_plan.groups[0] = TypedGroupPlan::Numeric {
         input_index: 3,
         frame: TypedFrame::Rows(37),
+        dispersion: true,
     };
     mean_plan.outputs[0].min_periods = 3;
-    mean_plan.numerical_profile = RollingNumericalProfile::StableV2Preview;
     mean_plan.nan_as_value = true;
     let mean = assert_parity(&mean_plan, &batch);
 
@@ -18,6 +18,7 @@ fn test_work_invariant_lanes_reuse_const_core_and_direct_float_writer() {
     sum_plan.groups[0] = TypedGroupPlan::Numeric {
         input_index: 3,
         frame: TypedFrame::Duration(2_048),
+        dispersion: true,
     };
     sum_plan.outputs[0].kind = TypedOutputKind::Statistic(Statistic::Sum);
     let sum = assert_parity(&sum_plan, &finite);
@@ -29,15 +30,15 @@ fn test_work_invariant_lanes_reuse_const_core_and_direct_float_writer() {
 }
 
 #[test]
-fn test_capability_parallel_shared_rows_preserve_v2_rebase_and_nan_policy() {
+fn test_capability_parallel_shared_rows_preserve_rebuilds_and_nan_policy() {
     let batch = input(64_000, 64, true);
     let mut plan = lane_plan(true);
-    plan.numerical_profile = RollingNumericalProfile::StableV2Preview;
     plan.nan_as_value = true;
     for (group, width) in plan.groups.iter_mut().zip([37, 71]) {
         *group = TypedGroupPlan::Numeric {
             input_index: 3,
             frame: TypedFrame::Rows(width),
+            dispersion: true,
         };
     }
     plan.shared_rows = plan.shared_rows_shape();
@@ -54,10 +55,12 @@ fn test_capability_parallel_executes_arbitrary_groups_and_f64_readouts() {
         TypedGroupPlan::Numeric {
             input_index: 3,
             frame: TypedFrame::Duration(2_048),
+            dispersion: true,
         },
         TypedGroupPlan::Numeric {
             input_index: 3,
             frame: TypedFrame::Rows(37),
+            dispersion: true,
         },
         TypedGroupPlan::Ewma {
             input_index: 3,
@@ -106,6 +109,7 @@ fn test_capability_parallel_keeps_unprepared_decay_and_non_f64_output_serial() {
         input_index: 3,
         kind: ScanKind::Decay,
         window: 37,
+        storage: OutputStorage::Float64,
     });
     assert!(
         !plan.supports_entity_parallel(&batch),
@@ -129,6 +133,7 @@ fn test_capability_parallel_skew_uses_existing_duration_work() {
     plan.groups[0] = TypedGroupPlan::Numeric {
         input_index: 3,
         frame: TypedFrame::Duration(1_000_000),
+        dispersion: true,
     };
     let mut state = warm(&plan, &batch);
     let entity = Arc::make_mut(&mut state.states[0]);
@@ -258,11 +263,13 @@ fn exact_fixture(signed: bool) -> (RollingKernelPlan, RecordBatch) {
         TypedGroupPlan::Signed {
             input_index: 3,
             frame: TypedFrame::Rows(37),
+            dispersion: true,
         }
     } else {
         TypedGroupPlan::Unsigned {
             input_index: 3,
             frame: TypedFrame::Rows(37),
+            dispersion: true,
         }
     };
     (plan, batch)

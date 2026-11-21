@@ -2,8 +2,8 @@ use super::{FileFormat, FileSource, FileSourceConfig};
 use async_trait::async_trait;
 use calc_flow::{
     Cursor, Result, SourceCapabilities, SourceEvent, SourceHistoryContext, SourceHistoryLimits,
-    SourceHistoryManifestEntry, SourceHistoryReplayFactory, SourceHistorySpec, StateHandle,
-    StreamSource,
+    SourceHistoryManifestEntry, SourceHistoryReplayFactory, SourceHistorySegmentHandle,
+    SourceHistorySpec, StreamSource,
 };
 use serde_json::{Value, json};
 use std::{
@@ -118,7 +118,7 @@ impl FrozenFileSource {
         &self,
         file: &Value,
         index: usize,
-        handle: &StateHandle,
+        handle: &SourceHistorySegmentHandle,
         previous: Option<&Path>,
     ) -> Result<PathBuf> {
         let name = file.as_str().ok_or_else(invalid_history)?;

@@ -991,7 +991,7 @@ class _Analyzer:
                     "capability_mismatch",
                     "event window outputs require deterministic row-local SQL",
                 )
-        if node.op.name == "sql":
+        if node.op.name == "sql" and node.attr("aggregate_output") is None:
             native = self._sql_native_relation(node, path)
             if native is not None:
                 return native
@@ -1183,6 +1183,11 @@ class _Analyzer:
         return None
 
     def _sql_mode_rejected(self, node, path):
+        if node.attr("aggregate_output") is not None and self._mode != "stream":
+            self.issue(
+                path, "unsupported_mode", "changelog_sql requires streaming engine"
+            )
+            return True
         if node.op.name == "snapshot_sql" and self._mode != "stream":
             self.issue(path, "unsupported_mode", "snapshot_sql requires stream mode")
             return True
@@ -1216,6 +1221,7 @@ class _Analyzer:
             self._runtime._infer_symbolic_sql_schema(
                 _cstr_or_none(node.attr("query")),
                 self._sql_input_schemas(node, inputs, path),
+                _cstr_or_none(node.attr("aggregate_output")),
             )
         )
 

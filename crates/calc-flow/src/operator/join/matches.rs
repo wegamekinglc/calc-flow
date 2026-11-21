@@ -18,6 +18,7 @@ pub(in crate::operator::join) fn pair_pushes() -> usize {
     PAIR_PUSHES.get()
 }
 
+#[cfg(test)]
 pub(super) trait Matches: Sync {
     fn view(&self) -> View<'_>;
     fn len(&self) -> usize {
@@ -28,6 +29,7 @@ pub(super) trait Matches: Sync {
     }
 }
 
+#[cfg(test)]
 impl dyn Matches + '_ {
     pub(super) fn is_empty(&self) -> bool {
         self.len() == 0
@@ -46,6 +48,7 @@ impl dyn Matches + '_ {
 /// Borrowed pairs; runs and intervals start with the run containing `base`.
 #[derive(Clone, Copy)]
 pub(super) enum View<'a> {
+    #[cfg(test)]
     Pairs(&'a [MatchedPair]),
     Identity {
         start: usize,
@@ -66,14 +69,17 @@ pub(super) enum View<'a> {
 impl<'a> View<'a> {
     pub(super) fn len(&self) -> usize {
         match self {
+            #[cfg(test)]
             Self::Pairs(pairs) => pairs.len(),
             Self::Identity { opposite, .. } | Self::Runs { opposite, .. } => opposite.len(),
             Self::Intervals { len, .. } => *len,
         }
     }
 
+    #[cfg(test)]
     pub(super) fn pair(&self, index: usize) -> MatchedPair {
         match self {
+            #[cfg(test)]
             Self::Pairs(pairs) => pairs[index],
             Self::Identity { start, opposite } => MatchedPair {
                 pos: start + index,
@@ -99,8 +105,10 @@ impl<'a> View<'a> {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn slice(self, range: Range<usize>) -> Self {
         match self {
+            #[cfg(test)]
             Self::Pairs(pairs) => Self::Pairs(&pairs[range]),
             Self::Identity { start, opposite } => Self::Identity {
                 start: start + range.start,
@@ -154,18 +162,21 @@ impl<'a> View<'a> {
     }
 }
 
+#[cfg(test)]
 impl Matches for View<'_> {
     fn view(&self) -> View<'_> {
         *self
     }
 }
 
+#[cfg(test)]
 fn run_containing(runs: &[(usize, usize)], index: usize) -> usize {
     #[cfg(test)]
     tests::RUN_SEARCHES.with(|count| count.set(count.get() + 1));
     runs.partition_point(|(first, _)| *first <= index) - 1
 }
 
+#[cfg(test)]
 fn run_containing_ranges(ranges: &[RangeMatch], index: usize) -> usize {
     ranges.partition_point(|matched| matched.first <= index) - 1
 }
@@ -211,6 +222,7 @@ impl Iterator for Cursor<'_> {
     fn next(&mut self) -> Option<MatchedPair> {
         let index = self.index;
         let pair = match &self.view {
+            #[cfg(test)]
             View::Pairs(pairs) => *pairs.get(index)?,
             View::Identity { start, opposite } => MatchedPair {
                 pos: start + index,
@@ -279,10 +291,12 @@ impl Opposite {
         }
     }
 
+    #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    #[cfg(test)]
     fn push_index(&mut self, position: usize, index: usize) {
         let first = self.len();
         match self {
@@ -378,6 +392,7 @@ impl Selection {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn push(&mut self, pair: MatchedPair) {
         #[cfg(test)]
         PAIR_PUSHES.set(PAIR_PUSHES.get() + 1);
@@ -423,6 +438,7 @@ impl Selection {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn append_interval(&mut self, position: usize, range: Range<usize>) {
         if range.is_empty() {
             return;
@@ -432,6 +448,7 @@ impl Selection {
         self.opposite.push_range(position, range);
     }
 
+    #[cfg(test)]
     fn append_pairs(&mut self, mut pairs: &[MatchedPair]) {
         while let Some(first) = pairs.first() {
             let count = pairs
@@ -446,6 +463,7 @@ impl Selection {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn append_view(&mut self, view: View<'_>) {
         if view.len() == 0 {
             return;
@@ -489,6 +507,7 @@ impl Selection {
         }
     }
 
+    #[cfg(test)]
     fn append_runs(&mut self, runs: &[(usize, usize)], base: usize, opposite: &[usize]) {
         let offset = self.opposite.len();
         let end = base + opposite.len();
@@ -505,17 +524,20 @@ impl Selection {
                 runs[run_containing(runs, base + index - offset)].1
             });
     }
+    #[cfg(test)]
     pub(super) fn extend(&mut self, pairs: impl IntoIterator<Item = MatchedPair>) {
         for pair in pairs {
             self.push(pair);
         }
     }
+    #[cfg(test)]
     pub(super) fn incoming_capacity(&self) -> usize {
         self.incoming_capacity
     }
     pub(super) fn len(&self) -> usize {
         self.opposite.len()
     }
+    #[cfg(test)]
     pub(super) fn is_empty(&self) -> bool {
         self.opposite.is_empty()
     }
@@ -524,7 +546,7 @@ impl Selection {
     }
 }
 
-impl Matches for Selection {
+impl Selection {
     fn view(&self) -> View<'_> {
         match &self.opposite {
             Opposite::Ranges { ranges, len } => View::Intervals {
@@ -547,6 +569,14 @@ impl Matches for Selection {
     }
 }
 
+#[cfg(test)]
+impl Matches for Selection {
+    fn view(&self) -> View<'_> {
+        Self::view(self)
+    }
+}
+
+#[cfg(test)]
 impl From<Vec<MatchedPair>> for Selection {
     fn from(pairs: Vec<MatchedPair>) -> Self {
         let mut result = Self::with_capacity(pairs.len(), pairs.len());
@@ -555,11 +585,13 @@ impl From<Vec<MatchedPair>> for Selection {
     }
 }
 
+#[cfg(test)]
 impl Matches for Vec<MatchedPair> {
     fn view(&self) -> View<'_> {
         View::Pairs(self)
     }
 }
+#[cfg(test)]
 impl<const N: usize> Matches for [MatchedPair; N] {
     fn view(&self) -> View<'_> {
         View::Pairs(self)

@@ -188,16 +188,14 @@ def rolling_mean(
     *,
     window: int,
     min_periods: int = 1,
-    numerical_profile: str = "stable_v1",
     execution: ArrayExecutionOptions | None = None,
 ) -> NativeArray:
-    """Return aligned float64 row-window means with the native table profile."""
+    """Return aligned float64 row-window means with compensated sliding sums."""
     limits = _execution(execution)
     return _native._native_array_rolling_mean(
         array,
         _integer(window, "options.window"),
         _integer(min_periods, "options.min_periods"),
-        numerical_profile,
         limits.max_elements,
         limits.max_allocation_bytes,
     )

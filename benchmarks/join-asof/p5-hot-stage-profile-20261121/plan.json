@@ -1,0 +1,38 @@
+{
+  "schema": "calc-flow.join-stage-profile-plan.v1",
+  "created_at": "2026-11-21T00:18:51+08:00",
+  "baseline": {
+    "revision": "186adde0",
+    "evidence": "benchmarks/join-asof/p5-hot-whole-batch-20261120/result.json",
+    "join_p50_ms": 486.16329449999995,
+    "interval_p50_ms": 1222.780396
+  },
+  "candidate": {
+    "revision": "7662c6fe",
+    "features": ["default", "benchmark-internals"],
+    "change": "diagnostic hot_execute and hot_emit spans around the existing whole-batch physical Join and downstream emission"
+  },
+  "execution": {
+    "cases": [
+      {
+        "scenario": "join",
+        "rows": 1000000,
+        "samples": 1,
+        "purpose": "verify hot-path activation and separate physical execution from source/runner/emission cost; not a P50 or acceptance sample"
+      },
+      {
+        "scenario": "interval_join",
+        "rows": 1000000,
+        "samples": 1,
+        "purpose": "locate full-column BandJoin materialization and downstream output cost; not a P50 or acceptance sample"
+      }
+    ],
+    "cpu_affinity": 0,
+    "tokio_worker_threads": 1,
+    "total_budget_seconds": 600,
+    "correctness": "complete maintained EngineCase output oracle and completed lifecycle",
+    "checkpoint": "enabled with a 24-hour interval and independent sample roots",
+    "no_retries": true
+  },
+  "build_budget": "separate from the 600-second diagnostic budget"
+}

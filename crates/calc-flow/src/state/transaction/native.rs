@@ -200,11 +200,6 @@ impl ManifestTransaction {
         manifest: &CheckpointManifest,
     ) -> Vec<StateHandle> {
         let mut handles = Vec::new();
-        for source in manifest.sources().values() {
-            if let Some(history) = &source.history {
-                handles.extend(history.segments.iter().cloned());
-            }
-        }
         for (node, entry) in manifest.operators() {
             if !self
                 .native

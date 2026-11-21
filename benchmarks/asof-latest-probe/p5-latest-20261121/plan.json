@@ -1,0 +1,33 @@
+{
+  "schema": "calc-flow.asof-latest-probe-performance-plan.v1",
+  "created_at": "2026-11-21",
+  "baseline": {
+    "implementation": "existing per-row binary search over the per-key right locator column",
+    "selector": "benchmark-only legacy flag on the same StreamAsofJoinOperator"
+  },
+  "candidate": {
+    "implementation": "use the final locator directly when its right timestamp is visible, otherwise retain the original binary search; tolerance and sequence ordering are unchanged",
+    "selector": "default fast path on the same StreamAsofJoinOperator"
+  },
+  "execution": {
+    "harness": "stream_asof_perf with focused paired mode and one sealed release binary",
+    "rounds": 2,
+    "ab_ba_pairs_per_round": 10,
+    "warmups_per_arm_per_round": 1,
+    "comparison": "interleaved AB/BA with maintained paired statistics",
+    "comparison_integrity": "the legacy arm exits before reading the latest locator or timestamp and then follows the original binary search; an initial build that charged it an extra latest lookup was stopped before any measurement",
+    "correctness": "existing complete per-row value oracle on every warmup, output counts/status/chunks on every observation, independent right-row selection and recovery where configured",
+    "total_budget_seconds": 600,
+    "builds_timed_separately": true,
+    "no_retries_or_case_expansion": true,
+    "retention_rule": "retain only an actual end-to-end improvement under the maintained rule; otherwise revert the fast path"
+  },
+  "cases": [
+    {"id": "balanced_8192", "pending": 8192, "retained": 8192, "connection": "32 keys with all right timestamps visible before the left rows"},
+    {"id": "fixed128_right8192", "pending": 128, "retained": 8192, "connection": "small output with many retained right rows per key"},
+    {"id": "skew_8192", "pending": 8192, "retained": 8192, "connection": "deep dominant-key locator column and maximal avoided searches"},
+    {"id": "restored_skew_8192", "pending": 8192, "retained": 8192, "connection": "same fast path after native checkpoint restore"}
+  ],
+  "preexisting_harness_failure": "strict_frontiers_cancel_restore_check hangs in its cancellation call on both the legacy and candidate algorithms; the owned debug process was stopped. This independent check is excluded from paired mode and is not claimed as passing; ordinary mode is unchanged.",
+  "unmeasured": "other key types, admission cost, future-right fallback outside the focused regression, full runner scheduling and complete ASOF acceptance inventory"
+}

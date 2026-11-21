@@ -1,0 +1,52 @@
+{
+  "schema": "calc-flow.sum-state-performance-plan.v1",
+  "created_at": "2026-11-21T04:21:46+08:00",
+  "baseline": {
+    "revision": "2ac1af5f",
+    "receipt": "target/p6-dense-build/baseline-current/build.json",
+    "evidence": "fresh paired baseline; historical values are not treated as this revision's sealed result",
+    "implementation": "pre-dense keyed SUM state path"
+  },
+  "candidate": {
+    "revision": "aa63c80c",
+    "receipt": "target/p6-dense-build/candidate/build.json",
+    "implementation": "borrowed UTF-8 pair lookup, dense Int64 accumulation and per-group undo/output commit"
+  },
+  "execution": {
+    "driver": "uv run python -m scripts.benchmark_suite.sum_state",
+    "rounds": 2,
+    "ab_ba_pairs_per_round": 10,
+    "comparison": "interleaved AB/BA",
+    "correctness": "full snapshot and lifecycle oracle on every observation",
+    "total_budget_seconds": 600,
+    "no_retries_or_case_expansion": true,
+    "physical_gate": "stock-stream-8cpu candidate P50 speedup >=3x over baseline; eight logical CPU IDs represent four physical cores on this host"
+  },
+  "cases": [
+    {
+      "id": "stock-stream-1cpu",
+      "rows": 2010000,
+      "archived_reference_p50_ms": 199.879117,
+      "connection": "principal dense two-UTF-8-key Int64 SUM path"
+    },
+    {
+      "id": "stock-stream-8cpu",
+      "rows": 2010000,
+      "archived_reference_p50_ms": 136.1946685,
+      "connection": "same dense path with eight logical workers and the four-physical-core speedup gate"
+    },
+    {
+      "id": "sparse-stream-1cpu",
+      "rows": 12000,
+      "archived_reference_p50_ms": 20.8515495,
+      "connection": "100 updated groups among 10k retained groups; small-batch control"
+    },
+    {
+      "id": "stock-batch-8cpu",
+      "rows": 2010000,
+      "archived_reference_p50_ms": 53.8201685,
+      "connection": "finite execution control, not the parallel-state acceptance path"
+    }
+  ],
+  "unmeasured": "P4 separate 10M single-CPU absolute gate, other key types, multi-batch hot Join inputs and remaining acceptance matrix"
+}

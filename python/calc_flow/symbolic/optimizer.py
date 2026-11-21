@@ -481,6 +481,8 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
         return "extrema", kind, output.get("input"), *frame
     if kind in {"covariance", "correlation"}:
         return "pair", output.get("left"), output.get("right"), *frame
+    if kind in {"lag", "delta"}:
+        return "lag", output.get("input")
     if kind in {
         "cumulative_sum",
         "cumulative_min",
@@ -490,7 +492,7 @@ def _rolling_group_key(output: dict[str, object], /) -> tuple[object, ...] | Non
         return "cumulative", kind, output.get("input")
     if kind in {"ewma", "cumulative_mean"}:
         return "ewma", output.get("input"), output.get("span", 0)
-    if kind in {"argmax", "argmin", "unique_count", "decay"}:
+    if kind in {"argmax", "argmin", "rank", "quantile", "unique_count", "decay"}:
         return "scan", kind, output.get("input"), *frame
     return _indicator_group_key(output)
 
@@ -629,7 +631,6 @@ def _rolling_kernel_line(node: dict[str, object], /) -> str | None:
     fallback = _first_rolling_fallback(outputs, _rolling_field_types(node))
     selected = "ordered_primitive" if fallback is None and groups else "general"
     complexity = "amortized_constant" if selected == "ordered_primitive" else "general"
-    profile = spec.get("numerical_profile", "stable_v1")
     decay_cost = (
         "\n    decay cost: certified arithmetic O(1)/row;"
         " guard/reference O(W)/row; cache copy O(W)/entity/batch"
@@ -639,7 +640,7 @@ def _rolling_kernel_line(node: dict[str, object], /) -> str | None:
     )
     return (
         f"    rolling kernel {node['id']} selected={selected}"
-        f" profile={profile} complexity={complexity} order={_rolling_order(spec)}"
+        f" complexity={complexity} order={_rolling_order(spec)}"
         f" shared_state_groups={len(groups)} fallback={fallback or 'none'}"
         f"{decay_cost}"
     )

@@ -401,6 +401,7 @@ fn fixture_identity(
     native_descriptor: Value,
 ) -> CompactIdentity {
     CompactIdentity {
+        aggregate_output: crate::SqlAggregateOutputMode::Snapshot,
         query_sha256: operator.query_digest(),
         input_alias: "events".into(),
         runtime_config: config,
@@ -931,7 +932,7 @@ fn input_json(input: &NativeAggregateInput) -> Value {
 }
 
 fn native_json(descriptor: &NativeStateDescriptor) -> Value {
-    json!({"policy": descriptor.policy, "keys": fields_json(&descriptor.key_fields),
+    let mut value = json!({"policy": descriptor.policy, "keys": fields_json(&descriptor.key_fields),
         "key_inputs": descriptor.key_inputs.iter().map(input_json).collect::<Vec<_>>(),
         "input_checks": descriptor.input_checks.iter().map(input_json).collect::<Vec<_>>(),
         "aggregates": descriptor.aggregate_names.iter().enumerate().map(|(slot, function)| json!({
@@ -946,5 +947,9 @@ fn native_json(descriptor: &NativeStateDescriptor) -> Value {
                 "input":input_json(input),"descending":descending,"nulls_first":nulls_first,
             })).collect::<Vec<_>>(),"skip":order.skip,"fetch":order.fetch,
         })),
-        "wire_schema_sha256": schema_digest(&descriptor.wire_schema), "output_schema_sha256": schema_digest(&descriptor.output_schema)})
+        "wire_schema_sha256": schema_digest(&descriptor.wire_schema), "output_schema_sha256": schema_digest(&descriptor.output_schema)});
+    if let Some(key_layout) = &descriptor.key_layout {
+        value["key_layout"] = json!(key_layout);
+    }
+    value
 }

@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use super::super::{AdmittedBatch, SidePlan, SqlKeyOwners, StreamJoinOperator, decode_key_pairs};
+#[cfg(test)]
+use super::super::{AdmittedBatch, SidePlan, decode_key_pairs};
+use super::super::{SqlKeyOwners, StreamJoinOperator};
 use super::ContainerFunding;
-use crate::Result;
-use crate::datafusion::owned;
+#[cfg(test)]
+use crate::{Result, datafusion::owned};
 
 pub(in crate::operator::join) struct V2SqlOwners {
     inner: SqlKeyOwners,
@@ -11,6 +13,7 @@ pub(in crate::operator::join) struct V2SqlOwners {
 }
 
 impl V2SqlOwners {
+    #[cfg(test)]
     pub(in crate::operator::join) fn new(
         inner: SqlKeyOwners,
         containers: Arc<ContainerFunding>,
@@ -21,6 +24,7 @@ impl V2SqlOwners {
         }
     }
 
+    #[cfg(test)]
     fn finish(self) -> AdmittedBatch {
         let Self {
             inner,
@@ -33,6 +37,7 @@ impl V2SqlOwners {
 }
 
 impl StreamJoinOperator {
+    #[cfg(test)]
     pub(in crate::operator::join) async fn run_v2_owned_key_query(
         &mut self,
         plan: &SidePlan,
@@ -58,6 +63,7 @@ impl StreamJoinOperator {
         }
     }
 
+    #[cfg(test)]
     fn finish_v2_owned_key_failure(
         &mut self,
         failure: owned::Failure<V2SqlOwners>,

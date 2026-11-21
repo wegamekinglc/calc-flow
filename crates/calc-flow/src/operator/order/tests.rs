@@ -36,6 +36,28 @@ fn raw(op: &BoundedOrderOperator) -> Batch {
     )
     .unwrap()
 }
+
+#[tokio::test]
+async fn test_stream_finalize_uses_morsels_after_gather_admission_closes() {
+    let mut op = operator(8 << 20);
+    let job = StreamJobContext::new(1, "order", JsonMap::new(), None, CancellationToken::new());
+    job.gather_owner().close_admission();
+    let context = StreamOperatorContext::new(&job, "order", None);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+
+    op.process_data("input", raw(&op), &context, &mut output)
+        .await
+        .unwrap();
+    op.on_end(&context, &mut output).await.unwrap();
+    let emitted = output.drain("output");
+    assert_eq!(emitted.len(), 1);
+    assert_eq!(emitted[0].as_data().unwrap().num_rows(), 1);
+
+    drop((op, output, context));
+    assert!(job.gather_owner().close_and_drain().await.is_empty());
+    drop(job);
+}
+
 #[tokio::test]
 async fn test_order_retained_candidate_container_stays_charged() {
     let mut op = operator(8 << 20);
@@ -244,17 +266,4 @@ async fn test_retiring_finite_work_keeps_its_quota_until_the_owner_drops() {
     );
     drop(work);
     assert_eq!(old_pool.reserved(), 0);
-}
-
-#[test]
-fn test_gather_name_keeps_its_declaration_lease_after_operator_drop() {
-    let op = operator(8 << 20);
-    let pool = op.pool.clone();
-    let charged = pool.reserved();
-    let identity = crate::runtime::streaming::gather_work::GatherOperatorId::new(op.name.clone())
-        .with_reservation_owner(op.declaration.clone());
-    drop(op);
-    assert_eq!(pool.reserved(), charged);
-    drop(identity);
-    assert_eq!(pool.reserved(), 0);
 }

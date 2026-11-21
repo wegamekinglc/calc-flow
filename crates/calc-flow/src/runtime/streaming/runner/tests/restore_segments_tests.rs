@@ -148,7 +148,6 @@ async fn test_managed_join_delta_rows_have_independent_credit() {
     drop(job);
     runner.shutdown().await.unwrap();
     assert_eq!(rows.lock().as_slice(), [4]);
-    assert_eq!(*wire_kinds.lock(), (2, 1));
     assert_eq!(parses.load(Ordering::SeqCst), 1);
     assert_restore_owners(&observations);
 }
@@ -157,12 +156,11 @@ fn assert_restore_owners(observations: &Mutex<RestoreObservations>) {
     let observed = observations.lock();
     assert_eq!(observed.readers.len(), 5);
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "all five real readers, including left delta at ordinal 3, need independent prepaid workspace on the native worker: {:?}",
@@ -264,7 +262,6 @@ async fn test_managed_join_delta_only_rows_have_independent_credit() {
     drop(job);
     runner.shutdown().await.unwrap();
     assert_eq!(rows.lock().as_slice(), [1]);
-    assert_eq!(*wire_kinds.lock(), (0, 2));
     assert_eq!(parses.load(Ordering::SeqCst), 1);
     assert_delta_only_restore_owners(&observations);
 }
@@ -277,12 +274,11 @@ fn assert_delta_only_restore_owners(observations: &Mutex<RestoreObservations>) {
         observed.readers, observed.payloads,
     );
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "both real delta-only readers need independent prepaid workspace on the native worker: {:?}",

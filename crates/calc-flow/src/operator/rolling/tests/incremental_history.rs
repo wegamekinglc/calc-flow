@@ -365,106 +365,97 @@ async fn incremental_history_rejected_emission_keeps_history_for_manual_retry() 
 
 #[tokio::test]
 async fn incremental_history_matches_batch_and_checkpoint_across_mixed_boundaries() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        for (row_window, layout) in [(2, 1), (5, 1), (2, 3), (5, 3)] {
-            let mut spec = kernel_spec(json!([
-                duration_output("mean", "price", "time_mean", 3),
-                aggregate_output("min", "price", "row_min", row_window),
-                duration_output("max", "price", "time_max", 3),
-                pair_output(
-                    "covariance",
-                    "price",
-                    "volume",
-                    "cov",
-                    json!({"kind": "duration", "micros": 3}),
-                    1
-                ),
-            ]));
-            spec.numerical_profile = profile;
-            let input = float64_pair_record(&[
-                (0, "a", 1, Some(1.0), Some(2.0)),
-                (1, "b", 1, Some(10.0), Some(20.0)),
-                (2, "a", 2, Some(3.0), Some(6.0)),
-                (3, "a", 3, Some(5.0), Some(10.0)),
-                (4, "b", 2, Some(20.0), Some(40.0)),
-                (6, "a", 4, Some(7.0), Some(14.0)),
-                (7, "a", 5, Some(11.0), Some(22.0)),
-                (8, "a", 6, Some(13.0), Some(26.0)),
-            ]);
-            let mut operator =
-                RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
-            let (expected_record, mut expected_histories, rows) =
-                batch_reference(&operator, &input);
-            let (job, mut output) = job_output(&operator);
-            let mut emitted =
-                finalize_record(&mut operator, &job, &mut output, input.slice(0, 4), 3).await;
-            assert_live_charge(&operator);
-            let snapshot = checkpoint_with_layout(&mut operator, layout);
-            let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
-            StreamOperator::restore(&mut restored, &snapshot).unwrap();
-            let restored_count = first_history(&restored).transition_count;
-            emitted.extend(
-                finalize_record(&mut restored, &job, &mut output, input.slice(4, 4), 8).await,
-            );
-            checkpoint_for_comparison(&mut restored);
-            let actual = concat_batches(&expected_record.schema(), &emitted).unwrap();
-            assert_eq!(actual, expected_record);
-            let history = restored
-                .state
-                .histories
-                .by_entity
-                .get(&vec![Some(KeyValue::String("a".into()))])
-                .unwrap();
-            assert_eq!(history.transition_count, restored_count + 3);
-            let times = history
-                .rows
-                .iter()
-                .map(|row| history_event_time(row, &restored.compiled))
-                .collect::<Vec<_>>();
-            assert_eq!(
-                times,
-                if row_window == 2 {
-                    vec![6, 7, 8]
-                } else {
-                    vec![2, 3, 6, 7, 8]
-                }
-            );
-            if layout == ROLLING_STATE_LAYOUT_VERSION {
-                // Legacy captures omit transition counts before the checkpoint.
-                for row in &rows[..4] {
-                    expected_histories
-                        .by_entity
-                        .get_mut(&row.identity.entity)
-                        .unwrap()
-                        .transition_count -= 1;
-                }
+    for (row_window, layout) in [(2, 1), (5, 1), (2, 3), (5, 3)] {
+        let spec = kernel_spec(json!([
+            duration_output("mean", "price", "time_mean", 3),
+            aggregate_output("min", "price", "row_min", row_window),
+            duration_output("max", "price", "time_max", 3),
+            pair_output(
+                "covariance",
+                "price",
+                "volume",
+                "cov",
+                json!({"kind": "duration", "micros": 3}),
+                1
+            ),
+        ]));
+        let input = float64_pair_record(&[
+            (0, "a", 1, Some(1.0), Some(2.0)),
+            (1, "b", 1, Some(10.0), Some(20.0)),
+            (2, "a", 2, Some(3.0), Some(6.0)),
+            (3, "a", 3, Some(5.0), Some(10.0)),
+            (4, "b", 2, Some(20.0), Some(40.0)),
+            (6, "a", 4, Some(7.0), Some(14.0)),
+            (7, "a", 5, Some(11.0), Some(22.0)),
+            (8, "a", 6, Some(13.0), Some(26.0)),
+        ]);
+        let mut operator = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+        let (expected_record, mut expected_histories, rows) = batch_reference(&operator, &input);
+        let (job, mut output) = job_output(&operator);
+        let mut emitted =
+            finalize_record(&mut operator, &job, &mut output, input.slice(0, 4), 3).await;
+        assert_live_charge(&operator);
+        let snapshot = checkpoint_with_layout(&mut operator, layout);
+        let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let restored_count = first_history(&restored).transition_count;
+        emitted
+            .extend(finalize_record(&mut restored, &job, &mut output, input.slice(4, 4), 8).await);
+        checkpoint_for_comparison(&mut restored);
+        let actual = concat_batches(&expected_record.schema(), &emitted).unwrap();
+        assert_eq!(actual, expected_record);
+        let history = restored
+            .state
+            .histories
+            .by_entity
+            .get(&vec![Some(KeyValue::String("a".into()))])
+            .unwrap();
+        assert_eq!(history.transition_count, restored_count + 3);
+        let times = history
+            .rows
+            .iter()
+            .map(|row| history_event_time(row, &restored.compiled))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            times,
+            if row_window == 2 {
+                vec![6, 7, 8]
+            } else {
+                vec![2, 3, 6, 7, 8]
             }
-            let expected_state = encode_state_segment(
-                &expected_histories,
-                &BTreeMap::new(),
-                input.schema().as_ref(),
-                &restored.compiled,
-                TEST_FINGERPRINT,
-                "rolling",
-            )
-            .unwrap();
-            let actual_state = encode_state_segment(
-                &restored.state.histories,
-                &restored.state.buffer,
-                input.schema().as_ref(),
-                &restored.compiled,
-                TEST_FINGERPRINT,
-                "rolling",
-            )
-            .unwrap();
-            assert_eq!(
-                actual_state, expected_state,
-                "retained state encoding must remain canonical: {profile:?}, rows={row_window}, layout={layout}"
-            );
+        );
+        if layout == ROLLING_STATE_LAYOUT_VERSION {
+            // Legacy captures omit transition counts before the checkpoint.
+            for row in &rows[..4] {
+                expected_histories
+                    .by_entity
+                    .get_mut(&row.identity.entity)
+                    .unwrap()
+                    .transition_count -= 1;
+            }
         }
+        let expected_state = encode_state_segment(
+            &expected_histories,
+            &BTreeMap::new(),
+            input.schema().as_ref(),
+            &restored.compiled,
+            TEST_FINGERPRINT,
+            "rolling",
+        )
+        .unwrap();
+        let actual_state = encode_state_segment(
+            &restored.state.histories,
+            &restored.state.buffer,
+            input.schema().as_ref(),
+            &restored.compiled,
+            TEST_FINGERPRINT,
+            "rolling",
+        )
+        .unwrap();
+        assert_eq!(
+            actual_state, expected_state,
+            "retained state encoding must remain canonical: rows={row_window}, layout={layout}"
+        );
     }
 }
 

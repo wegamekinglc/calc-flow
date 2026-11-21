@@ -59,13 +59,12 @@ use super::{
 };
 use crate::{
     AggregateFunction, Batch, BatchKind, BatchMetadata, CalcFlowError, CancellationToken,
-    CheckpointManifest as BenchmarkCheckpointManifest, CheckpointManifestFields,
     CheckpointPhase as PublicCheckpointPhase, ComponentKind as PublicComponentKind,
     Cursor as PublicCursor, CursorManifestEntry, Edge, EdgeBudget, Epoch, EventTime,
     JobState as PublicJobState, JsonMap, LocalStateBackend,
     ManagedCheckpointRuntime as PublicManagedCheckpointRuntime,
-    NativeWatermarkCapability as PublicNativeWatermarkCapability, OperatorManifestEntry,
-    OperatorMetadata, OperatorStateSnapshot, PipelineBuilder, Port, PortEndpoint, RecoveryStatus,
+    NativeWatermarkCapability as PublicNativeWatermarkCapability, OperatorMetadata,
+    OperatorStateSnapshot, PipelineBuilder, Port, PortEndpoint,
     ReplayPositioning as PublicReplayPositioning, Result, SinkBinding as PublicSinkBinding,
     SinkRecovery as PublicSinkRecovery, SourceBinding as PublicSourceBinding,
     SourceCapabilities as PublicSourceCapabilities,
@@ -77,7 +76,7 @@ use crate::{
     StreamingJob as PublicStreamingJob, StreamingRunner as PublicStreamingRunner,
     TerminalCause as PublicTerminalCause, TransactionalStreamSink as PublicTransactionalStreamSink,
     UdfRegistry, UnionOperator, WindowAggregateOperator, WindowSpec,
-    state::{ManifestTransaction, PreparedEpochManifest, PreparedManifestIdentity},
+    state::{ManifestTransaction, PreparedManifestIdentity},
 };
 
 const SMOKE_SINK_DELAY: Duration = Duration::from_millis(5);
@@ -1497,6 +1496,15 @@ impl TransactionalStreamSink for CheckpointMatrixSink {
         Ok(())
     }
 
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.commit_prepared(recovery.epoch(), recovery.pre_commit())
+            .await?;
+        self.lifecycle
+            .transactional_recovers
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
     async fn close(&mut self) -> Result<()> {
         self.settle_prepared_write().await?;
         self.closed.fetch_add(1, Ordering::SeqCst);
@@ -2063,9 +2071,8 @@ const fn checkpoint_fault_expected_phase(point: CheckpointFaultPoint) -> PublicC
         CheckpointFaultPoint::SourceAdmission | CheckpointFaultPoint::SourceCut => {
             PublicCheckpointPhase::Requested
         }
-        CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage => {
-            PublicCheckpointPhase::SourcesCut
-        }
+        CheckpointFaultPoint::PartialAlignment => PublicCheckpointPhase::SourcesCut,
+        CheckpointFaultPoint::StateStage => PublicCheckpointPhase::Requested,
         CheckpointFaultPoint::SinkPreCommit => PublicCheckpointPhase::OperatorsSnapshotted,
         CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestRename => {
             PublicCheckpointPhase::SinksPrecommitted
@@ -2235,12 +2242,12 @@ fn private_checkpoint_benchmark_target_root() -> PathBuf {
 }
 
 fn checkpoint_manifest_count(root: &Path) -> usize {
-    match std::fs::read_dir(root) {
+    match std::fs::read_dir(root.join("lineage/manifests")) {
         Ok(entries) => entries
             .filter_map(std::result::Result::ok)
             .filter(|entry| {
                 entry.file_name().to_str().is_some_and(|name| {
-                    name.starts_with("manifest-")
+                    name.starts_with("epoch-")
                         && Path::new(name)
                             .extension()
                             .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
@@ -2452,25 +2459,6 @@ fn private_benchmark_identity(operator_ids: BTreeSet<String>) -> PreparedManifes
     }
 }
 
-fn private_benchmark_manifest(
-    epoch: Epoch,
-    operators: BTreeMap<String, OperatorManifestEntry>,
-) -> BenchmarkCheckpointManifest {
-    BenchmarkCheckpointManifest::new(CheckpointManifestFields {
-        pipeline_name: "m5-private-benchmark".into(),
-        pipeline_fingerprint: PRIVATE_BENCHMARK_PIPELINE_FINGERPRINT.into(),
-        runtime_config_hash: PRIVATE_BENCHMARK_RUNTIME_HASH.into(),
-        epoch,
-        created_at: Utc.with_ymd_and_hms(2026, 8, 9, 8, 0, 0).unwrap(),
-        recovery_status: RecoveryStatus::Final,
-        sources: BTreeMap::new(),
-        operators,
-        sinks: BTreeMap::new(),
-        static_inputs: BTreeMap::new(),
-    })
-    .unwrap()
-}
-
 async fn private_benchmark_transaction(
     operator_ids: BTreeSet<String>,
 ) -> (
@@ -2629,82 +2617,86 @@ impl PrivateAlignmentFixture {
 
 struct PrivateStateStageFixture {
     _directory: tempfile::TempDir,
-    transaction: ManifestTransaction,
+    store: crate::state::v4::V4Store,
     snapshot: OperatorStateSnapshot,
 }
 
 async fn prepare_private_state_stage_benchmark() -> PrivateStateStageFixture {
-    let (directory, transaction, _identity) =
-        private_benchmark_transaction(BTreeSet::from(["window".into()])).await;
+    let directory = tempfile::tempdir().unwrap();
+    let store = crate::state::v4::V4Store::new(directory.path().join("manifests/lineage"));
     let snapshot = private_dirty_window_snapshot(Epoch::INITIAL).await;
     PrivateStateStageFixture {
         _directory: directory,
-        transaction,
+        store,
         snapshot,
     }
 }
 
 impl PrivateStateStageFixture {
-    async fn measure(self) -> usize {
-        self.transaction
-            .stage_operator_state("window", Epoch::INITIAL, self.snapshot)
+    async fn measure(mut self) -> usize {
+        crate::state::v4::V4OpaqueAdapter::from_snapshot("window", &self.snapshot)
+            .persist(&mut self.store, 1)
             .await
             .unwrap()
-            .segments
+            .1
             .len()
     }
 }
 
 struct PrivateManifestPublicationFixture {
     directory: tempfile::TempDir,
-    transaction: ManifestTransaction,
-    prepared: PreparedEpochManifest,
+    store: crate::state::v4::V4Store,
+    manifest: crate::state::v4::V4Manifest,
 }
 
 async fn prepare_private_manifest_publication_benchmark() -> PrivateManifestPublicationFixture {
-    let (directory, transaction, _identity) =
-        private_benchmark_transaction(BTreeSet::from(["window".into()])).await;
-    let staged = transaction
-        .stage_operator_state(
-            "window",
-            Epoch::INITIAL,
-            private_dirty_window_snapshot(Epoch::INITIAL).await,
-        )
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = crate::state::v4::V4Store::new(directory.path().join("manifests/lineage"));
+    let snapshot = private_dirty_window_snapshot(Epoch::INITIAL).await;
+    let (operator, _) = crate::state::v4::V4OpaqueAdapter::from_snapshot("window", &snapshot)
+        .persist(&mut store, 1)
         .await
         .unwrap();
-    let prepared = PreparedEpochManifest {
-        manifest: private_benchmark_manifest(
-            Epoch::INITIAL,
-            BTreeMap::from([(
-                "window".into(),
-                OperatorManifestEntry {
-                    progress: BTreeMap::new(),
-                    inline_metadata: staged.inline_metadata,
-                    segments: staged.segments,
-                },
-            )]),
-        ),
-        staged_segments: BTreeMap::new(),
+    let mut manifest = crate::state::v4::V4Manifest {
+        format_version: 4,
+        pipeline_name: "m5-private-benchmark".into(),
+        pipeline_fingerprint: PRIVATE_BENCHMARK_PIPELINE_FINGERPRINT.into(),
+        runtime_config_hash: PRIVATE_BENCHMARK_RUNTIME_HASH.into(),
+        epoch: 1,
+        created_at: Utc.with_ymd_and_hms(2026, 8, 9, 8, 0, 0).unwrap(),
+        recovery_status: "final".into(),
+        job_kind: crate::state::v4::JobKind::Session,
+        recovery_fingerprint: PRIVATE_BENCHMARK_PIPELINE_FINGERPRINT.into(),
+        sources: BTreeMap::from([(
+            "source".into(),
+            crate::state::v4::SourceV4 {
+                cursor: None,
+                identity_hash: "benchmark".into(),
+                next_sequence: 0,
+                ended: false,
+                watermark_policy: SourceWatermarkManifestState::Disabled { idle: false },
+                history: None,
+            },
+        )]),
+        operators: BTreeMap::from([("window".into(), operator)]),
+        sinks: BTreeMap::new(),
+        static_inputs: BTreeMap::new(),
+        manifest_fingerprint: String::new(),
     };
+    manifest.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&manifest).unwrap();
     PrivateManifestPublicationFixture {
         directory,
-        transaction,
-        prepared,
+        store,
+        manifest,
     }
 }
 
 impl PrivateManifestPublicationFixture {
-    async fn measure(self) -> usize {
-        self.transaction.publish(self.prepared).await.unwrap();
-        let manifest_path = self.directory.path().join("manifests");
-        let bytes = std::fs::read_dir(&manifest_path)
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .find(|entry| is_canonical_checkpoint_manifest(&entry.path()))
-            .map(|entry| std::fs::read(entry.path()).unwrap())
-            .unwrap();
+    fn measure(mut self) -> usize {
+        let path = self.store.publish_manifest(&self.manifest).unwrap();
+        let bytes = std::fs::read(path).unwrap();
         assert!(bytes.len() > 2);
-        checkpoint_manifest_count(&manifest_path)
+        checkpoint_manifest_count(&self.directory.path().join("manifests"))
     }
 }
 
@@ -2868,8 +2860,7 @@ async fn run_private_checkpoint_path_benchmark_smoke() -> BTreeMap<&'static str,
             M5_PRIVATE_BENCHMARK_CASES[5],
             prepare_private_manifest_publication_benchmark()
                 .await
-                .measure()
-                .await,
+                .measure(),
         ),
         (
             M5_PRIVATE_BENCHMARK_CASES[6],
@@ -3227,8 +3218,10 @@ async fn run_checkpoint_restart_fault_case(
     let checkpoint_status_matches = first_status.checkpoint.current_epoch == Some(Epoch::INITIAL)
         && first_status.checkpoint.phase == Some(expected_phase);
     let deterministic_terminal_error = match (point, mode) {
-        (CheckpointFaultPoint::ManifestRename, _)
-        | (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Io) => {
+        (
+            CheckpointFaultPoint::ManifestRename | CheckpointFaultPoint::ManifestParentSync,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Cancel | CheckpointFaultMode::Restart,
+        ) => {
             first_outcome.state == PublicJobState::RecoveryRequired
                 && first_outcome.cause
                     == if mode == CheckpointFaultMode::Cancel {
@@ -3296,6 +3289,55 @@ async fn run_checkpoint_restart_fault_case(
                     None,
                 )
         }
+        (
+            CheckpointFaultPoint::ManifestWrite
+            | CheckpointFaultPoint::ManifestRename
+            | CheckpointFaultPoint::ManifestParentSync,
+            CheckpointFaultMode::Panic,
+        ) => {
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && first_status.checkpoint.phase == Some(PublicCheckpointPhase::SinksPrecommitted)
+                && exact_error(
+                    PublicStreamingErrorCategory::TaskPanicked,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
+        (
+            CheckpointFaultPoint::CompletedCommit,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Restart,
+        ) => {
+            first_outcome.state == PublicJobState::RecoveryRequired
+                && first_outcome.cause == PublicTerminalCause::Failure
+                && checkpoint_status_matches
+                && exact_error(
+                    PublicStreamingErrorCategory::Internal,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+        }
+        (
+            CheckpointFaultPoint::Retention | CheckpointFaultPoint::Compaction,
+            CheckpointFaultMode::Cancel,
+        ) => {
+            first_outcome.state == PublicJobState::Cancelled
+                && first_outcome.cause == PublicTerminalCause::ExplicitCancel
+                && first_status.checkpoint.phase == Some(PublicCheckpointPhase::SinksCommitted)
+                && first_status.checkpoint.failure_category
+                    == Some(PublicStreamingErrorCategory::Internal)
+                && exact_error(
+                    PublicStreamingErrorCategory::Internal,
+                    Some(Epoch::INITIAL),
+                    Some(PublicCheckpointPhase::SinksCommitted),
+                    Some(PublicComponentKind::Checkpoint),
+                    None,
+                )
+        }
         (_, CheckpointFaultMode::Cancel) => {
             let cancel_phase = match point {
                 CheckpointFaultPoint::PartialAlignment => PublicCheckpointPhase::Requested,
@@ -3311,12 +3353,13 @@ async fn run_checkpoint_restart_fault_case(
                     == Some(PublicStreamingErrorCategory::Internal)
                 && first_probe.cancellation_triggers == 1
         }
-        (CheckpointFaultPoint::StateStage, CheckpointFaultMode::Panic) => {
+        (
+            CheckpointFaultPoint::StateStage | CheckpointFaultPoint::PartialAlignment,
+            CheckpointFaultMode::Panic,
+        ) => {
             first_outcome.state == PublicJobState::Failed
                 && first_outcome.cause == PublicTerminalCause::Failure
                 && checkpoint_status_matches
-                && first_status.checkpoint.failure_category
-                    == Some(PublicStreamingErrorCategory::Internal)
                 && exact_error(
                     PublicStreamingErrorCategory::TaskPanicked,
                     None,
@@ -3326,29 +3369,21 @@ async fn run_checkpoint_restart_fault_case(
                 )
         }
         (CheckpointFaultPoint::StateStage, _) => {
+            let category = if mode == CheckpointFaultMode::Io {
+                PublicStreamingErrorCategory::Io
+            } else {
+                PublicStreamingErrorCategory::Internal
+            };
             first_outcome.state == PublicJobState::Failed
                 && first_outcome.cause == PublicTerminalCause::Failure
                 && checkpoint_status_matches
-                && first_status.checkpoint.failure_category
-                    == Some(PublicStreamingErrorCategory::Internal)
+                && first_status.checkpoint.failure_category == Some(category)
                 && first_outcome.errors.len() == 1
                 && exact_error(
-                    PublicStreamingErrorCategory::Operator,
-                    None,
-                    None,
-                    Some(PublicComponentKind::Operator),
-                    Some("window"),
-                )
-        }
-        (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Panic) => {
-            first_outcome.state == PublicJobState::Failed
-                && first_outcome.cause == PublicTerminalCause::Failure
-                && checkpoint_status_matches
-                && exact_error(
-                    PublicStreamingErrorCategory::TaskPanicked,
-                    None,
-                    None,
-                    None,
+                    category,
+                    Some(Epoch::INITIAL),
+                    Some(PublicCheckpointPhase::Requested),
+                    Some(PublicComponentKind::Checkpoint),
                     None,
                 )
         }
@@ -3367,10 +3402,9 @@ async fn run_checkpoint_restart_fault_case(
                     Some("merge"),
                 )
         }
-        (CheckpointFaultPoint::Compaction, CheckpointFaultMode::Io)
-        | (
-            CheckpointFaultPoint::ManifestWrite | CheckpointFaultPoint::ManifestParentSync,
-            CheckpointFaultMode::Panic,
+        (
+            CheckpointFaultPoint::Compaction | CheckpointFaultPoint::Retention,
+            CheckpointFaultMode::Io,
         )
         | (_, CheckpointFaultMode::Restart) => {
             first_outcome.state == PublicJobState::Failed
@@ -3419,24 +3453,26 @@ async fn run_checkpoint_restart_fault_case(
         "fault case {point:?}/{mode:?} had an unexpected public terminal oracle: outcome={first_outcome:?}, status={first_status:?}, fault_triggers={}, cancellation_triggers={}",
         first_probe.checkpoint_fault_triggers, first_probe.cancellation_triggers,
     );
-    let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
+    let manifest_path = manifest_root.join("lineage/manifests/epoch-1.json");
     let selected_before_restart_manifest = if manifest_path.exists() {
         Some(
-            crate::CheckpointManifest::from_bytes(&tokio::fs::read(&manifest_path).await.unwrap())
-                .unwrap(),
+            crate::state::v4::V4Manifest::from_bytes(
+                &tokio::fs::read(&manifest_path).await.unwrap(),
+            )
+            .unwrap(),
         )
     } else {
         None
     };
     let selected_before_restart = selected_before_restart_manifest
         .as_ref()
-        .map(crate::CheckpointManifest::epoch);
+        .map(|manifest| Epoch::new(manifest.epoch).unwrap());
     // The window operator encodes net per-epoch deltas, so its entry may
     // carry zero segments when every window opened and closed inside the
     // epoch; the entry itself proves the window's epoch metadata persisted.
     let window_checkpoint_persisted = selected_before_restart_manifest
         .as_ref()
-        .and_then(|manifest| manifest.operators().get("window"))
+        .and_then(|manifest| manifest.operators.get("window"))
         .is_some();
     drop(first_job);
     assert_eq!(first_source_closed.load(Ordering::SeqCst), 2);
@@ -3820,7 +3856,7 @@ async fn wait_for_completed_checkpoints(job: &PublicStreamingJob, expected: u64)
 }
 
 fn checkpoint_soak_manifest_cursors(
-    manifest: &crate::CheckpointManifest,
+    manifest: &crate::state::v4::V4Manifest,
 ) -> BTreeMap<String, String> {
     manifest
         .sources()
@@ -3845,23 +3881,23 @@ fn checkpoint_soak_open_cursors(
 }
 
 fn checkpoint_soak_restore_evidence(
-    selected: Option<&crate::CheckpointManifest>,
+    selected: Option<&crate::state::v4::V4Manifest>,
 ) -> (bool, bool, bool) {
     let Some(manifest) = selected else {
         return (false, false, false);
     };
     let window = manifest.operators().get("window");
-    let window_state = window.is_some_and(|entry| !entry.segments.is_empty());
+    let window_state = window.is_some_and(|entry| !entry.opaque_metadata().unwrap().1);
     let watermarks = window.is_some_and(|entry| {
-        !entry.progress.is_empty()
+        !entry.progress().is_empty()
             && entry
-                .progress
+                .progress()
                 .values()
                 .all(|progress| progress.watermark.is_some())
     });
     let progress = manifest.sources().values().all(|entry| {
         entry.cursor.is_some()
-            && entry.sequence > 0
+            && entry.next_sequence > 0
             && matches!(
                 entry.watermark_policy,
                 SourceWatermarkManifestState::SourceProvided {
@@ -4046,22 +4082,23 @@ async fn settle_checkpoint_soak_process(
     })
 }
 
-async fn checkpoint_manifest_documents(root: &Path) -> Vec<crate::CheckpointManifest> {
+async fn checkpoint_manifest_documents(root: &Path) -> Vec<crate::state::v4::V4Manifest> {
     let mut manifests = Vec::new();
-    let mut entries = match tokio::fs::read_dir(root).await {
+    let mut entries = match tokio::fs::read_dir(root.join("lineage/manifests")).await {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return manifests,
         Err(error) => panic!("checkpoint soak could not scan manifests: {error}"),
     };
     while let Some(entry) = entries.next_entry().await.unwrap() {
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with("manifest-")
-            && let Some(manifest) = read_checkpoint_manifest_document(&entry.path()).await
+        if name.to_string_lossy().starts_with("epoch-")
+            && let Ok(bytes) = tokio::fs::read(entry.path()).await
+            && let Ok(manifest) = crate::state::v4::V4Manifest::from_bytes(&bytes)
         {
             manifests.push(manifest);
         }
     }
-    manifests.sort_by_key(crate::CheckpointManifest::epoch);
+    manifests.sort_by_key(|manifest| manifest.epoch);
     manifests
 }
 
@@ -4080,7 +4117,7 @@ async fn run_checkpoint_soak_child(
     let sink_root = plan.run_root.join("sinks");
     let before = checkpoint_manifest_documents(&manifest_root).await;
     let selected = before.last();
-    let restored_epoch = selected.map(|manifest| manifest.epoch().as_u64());
+    let restored_epoch = selected.map(|manifest| manifest.epoch);
     diagnostics::restored(restored_epoch);
     let restored_cursor_orders = selected.map_or_else(
         || BTreeMap::from([("left".into(), None), ("right".into(), None)]),
@@ -4102,6 +4139,7 @@ async fn run_checkpoint_soak_child(
         checkpoint_interval: Duration::from_millis(plan.checkpoint_interval_millis),
         checkpoint_timeout: Duration::from_millis(plan.checkpoint_timeout_millis),
         retained_epochs: plan.retained_epochs,
+        checkpoint_inflight_max_bytes: 1 << 30,
         edge_budget: EdgeBudget {
             max_rows: 8,
             max_bytes: 1 << 20,
@@ -4206,7 +4244,8 @@ async fn run_checkpoint_soak_child(
         .map(|sample| sample.state_bytes)
         .max()
         .unwrap_or(0)
-        .max(directory_regular_file_bytes(&state_root).await);
+        .max(directory_regular_file_bytes(&state_root).await)
+        .max(directory_regular_file_bytes(&manifest_root.join("lineage")).await);
     let visible = read_checkpoint_matrix_visible(&sink_root).await;
     let observed = visible.values().flatten().cloned().collect::<Vec<_>>();
     let unique = observed.iter().cloned().collect::<BTreeSet<_>>();
@@ -4420,11 +4459,11 @@ async fn run_checkpoint_soak_processes_with_retention(
     ))
 }
 
-fn manifest_has_compacted_window(manifest: &crate::CheckpointManifest) -> bool {
+fn manifest_has_compacted_window(manifest: &crate::state::v4::V4Manifest) -> bool {
     manifest
         .operators()
         .get("window")
-        .and_then(|entry| entry.inline_metadata.get("segment_inventory"))
+        .and_then(|entry| entry.opaque_metadata().unwrap().0.get("segment_inventory"))
         .and_then(serde_json::Value::as_array)
         .is_some_and(|inventory| {
             inventory
@@ -4460,7 +4499,7 @@ async fn directory_regular_file_bytes(root: &Path) -> u64 {
     total
 }
 
-fn checkpoint_soak_expected_records(manifest: &crate::CheckpointManifest) -> BTreeSet<String> {
+fn checkpoint_soak_expected_records(manifest: &crate::state::v4::V4Manifest) -> BTreeSet<String> {
     let cursors = manifest
         .sources()
         .iter()
@@ -5141,6 +5180,7 @@ async fn checkpoint_soak_cancel_window_preserves_clean_terminal_metrics() {
         checkpoint_interval: Duration::from_secs(2),
         checkpoint_timeout: Duration::from_secs(10),
         retained_epochs: CHECKPOINT_SOAK_RETAINED_EPOCHS,
+        checkpoint_inflight_max_bytes: 1 << 30,
         edge_budget: EdgeBudget {
             max_rows: 8,
             max_bytes: 1 << 20,
@@ -5384,7 +5424,7 @@ async fn late_periodic_cut_promotes_the_same_epoch_to_terminal() {
     assert!(manifest.sources().values().all(|source| source.ended));
     assert!(manifest.operators().values().all(|operator| {
         operator
-            .progress
+            .progress()
             .values()
             .all(|ingress| matches!(ingress.state, crate::ManifestIngressState::Ended))
     }));
@@ -5540,7 +5580,7 @@ fn private_m5_epoch_checkpoint_absolute_benchmark() {
     criterion.bench_function(M5_PRIVATE_BENCHMARK_CASES[5], |bencher| {
         bencher.iter_batched(
             || runtime.block_on(prepare_private_manifest_publication_benchmark()),
-            |fixture| black_box(runtime.block_on(fixture.measure())),
+            |fixture| black_box(fixture.measure()),
             BatchSize::SmallInput,
         );
     });
@@ -5728,7 +5768,7 @@ async fn public_parent_directory_sync_os_failure_requires_recovery() {
             1,
             "the public recovery result must be caused by a real parent-directory sync OS failure"
         );
-        let manifest_path = manifest_root.join("manifest-00000000000000000001.json");
+        let manifest_path = manifest_root.join("lineage/manifests/epoch-1.json");
         assert!(manifest_path.is_file());
         assert_eq!(output_probe.transactional_commits.load(Ordering::SeqCst), 0);
         assert_eq!(output_probe.transactional_aborts.load(Ordering::SeqCst), 0);
@@ -5845,7 +5885,10 @@ async fn assert_named_checkpoint_fault_case(
             | CheckpointFaultPoint::Compaction
     );
     let expected_manual = match (point, mode) {
-        (CheckpointFaultPoint::ManifestRename, _)
+        (
+            CheckpointFaultPoint::ManifestRename,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Cancel | CheckpointFaultMode::Restart,
+        )
         | (CheckpointFaultPoint::ManifestParentSync, CheckpointFaultMode::Io) => {
             CheckpointManualObservation::Failed {
                 category: PublicStreamingErrorCategory::CheckpointPublicationUnknown,
@@ -5855,53 +5898,15 @@ async fn assert_named_checkpoint_fault_case(
                 component_id: None,
             }
         }
-        (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel) => {
-            CheckpointManualObservation::Failed {
-                category: PublicStreamingErrorCategory::Internal,
-                epoch: None,
-                phase: None,
-                component_kind: Some(PublicComponentKind::Checkpoint),
-                component_id: None,
-            }
-        }
-        (CheckpointFaultPoint::PartialSinkCommit, _) => CheckpointManualObservation::Failed {
-            category: PublicStreamingErrorCategory::Connector,
-            epoch: Some(Epoch::INITIAL),
-            phase: Some(PublicCheckpointPhase::ManifestDurable),
-            component_kind: Some(PublicComponentKind::Sink),
-            component_id: Some("sink-a".into()),
-        },
-        (
-            CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage,
-            CheckpointFaultMode::Io | CheckpointFaultMode::Restart,
-        ) => CheckpointManualObservation::Failed {
-            category: PublicStreamingErrorCategory::Operator,
-            epoch: Some(Epoch::INITIAL),
-            phase: Some(PublicCheckpointPhase::SourcesCut),
-            component_kind: Some(PublicComponentKind::Operator),
-            component_id: Some(
-                if point == CheckpointFaultPoint::PartialAlignment {
-                    "merge"
-                } else {
-                    "window"
-                }
-                .into(),
-            ),
-        },
-        (
-            CheckpointFaultPoint::PartialAlignment | CheckpointFaultPoint::StateStage,
-            CheckpointFaultMode::Panic,
-        ) => CheckpointManualObservation::Failed {
-            category: PublicStreamingErrorCategory::TaskPanicked,
-            epoch: Some(Epoch::INITIAL),
-            phase: Some(PublicCheckpointPhase::SourcesCut),
-            component_kind: None,
-            component_id: None,
-        },
-        (
-            CheckpointFaultPoint::SourceAdmission
+        (CheckpointFaultPoint::PartialSinkCommit, CheckpointFaultMode::Cancel)
+        | (
+            CheckpointFaultPoint::StateStage
+            | CheckpointFaultPoint::SourceAdmission
             | CheckpointFaultPoint::SourceCut
-            | CheckpointFaultPoint::SinkPreCommit,
+            | CheckpointFaultPoint::SinkPreCommit
+            | CheckpointFaultPoint::ManifestParentSync
+            | CheckpointFaultPoint::ManifestWrite
+            | CheckpointFaultPoint::ManifestRename,
             CheckpointFaultMode::Panic,
         ) => CheckpointManualObservation::Failed {
             category: PublicStreamingErrorCategory::Internal,
@@ -5910,11 +5915,57 @@ async fn assert_named_checkpoint_fault_case(
             component_kind: Some(PublicComponentKind::Checkpoint),
             component_id: None,
         },
+        (CheckpointFaultPoint::PartialSinkCommit, _) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Connector,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::ManifestDurable),
+            component_kind: Some(PublicComponentKind::Sink),
+            component_id: Some("sink-a".into()),
+        },
+        (
+            CheckpointFaultPoint::PartialAlignment,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Restart,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::Operator,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::SourcesCut),
+            component_kind: Some(PublicComponentKind::Operator),
+            component_id: Some("merge".into()),
+        },
+        (
+            CheckpointFaultPoint::StateStage,
+            CheckpointFaultMode::Io | CheckpointFaultMode::Restart,
+        ) => CheckpointManualObservation::Failed {
+            category: if mode == CheckpointFaultMode::Io {
+                PublicStreamingErrorCategory::Io
+            } else {
+                PublicStreamingErrorCategory::Internal
+            },
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::Requested),
+            component_kind: Some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+        (CheckpointFaultPoint::PartialAlignment, CheckpointFaultMode::Panic) => {
+            CheckpointManualObservation::Failed {
+                category: PublicStreamingErrorCategory::TaskPanicked,
+                epoch: Some(Epoch::INITIAL),
+                phase: Some(PublicCheckpointPhase::SourcesCut),
+                component_kind: None,
+                component_id: None,
+            }
+        }
         (
             CheckpointFaultPoint::ManifestParentSync,
-            CheckpointFaultMode::Panic | CheckpointFaultMode::Cancel | CheckpointFaultMode::Restart,
-        )
-        | (
+            CheckpointFaultMode::Cancel | CheckpointFaultMode::Restart,
+        ) => CheckpointManualObservation::Failed {
+            category: PublicStreamingErrorCategory::CheckpointPublicationUnknown,
+            epoch: Some(Epoch::INITIAL),
+            phase: Some(PublicCheckpointPhase::ManifestInstalled),
+            component_kind: Some(PublicComponentKind::Checkpoint),
+            component_id: None,
+        },
+        (
             CheckpointFaultPoint::CompletedCommit
             | CheckpointFaultPoint::Retention
             | CheckpointFaultPoint::Compaction,
@@ -5966,8 +6017,15 @@ async fn assert_named_checkpoint_fault_case(
     assert_eq!(
         report.prepared_artifacts_after_failure,
         match point {
-            CheckpointFaultPoint::ManifestRename => 2,
-            CheckpointFaultPoint::ManifestParentSync if mode == CheckpointFaultMode::Io => 2,
+            point
+                if matches!(
+                    point,
+                    CheckpointFaultPoint::ManifestRename | CheckpointFaultPoint::ManifestParentSync
+                ) || (point == CheckpointFaultPoint::ManifestWrite
+                    && mode == CheckpointFaultMode::Panic) =>
+            {
+                2
+            }
             CheckpointFaultPoint::PartialSinkCommit => 1,
             CheckpointFaultPoint::SinkPreCommit
                 if mode == CheckpointFaultMode::Panic && report.prepared_output_preserved =>

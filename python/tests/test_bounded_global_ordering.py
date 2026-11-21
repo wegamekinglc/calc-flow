@@ -68,7 +68,9 @@ def test_unknown_source_rejected_before_iterator_and_temporary_root(monkeypatch)
         with pytest.raises(
             cf.StreamingRuntimeError, match="source_boundedness_unproved"
         ) as rejected:
-            async with program.stream({"events": Unknown()}):
+            async with program.stream(
+                {"events": Unknown()}, config=cf.StreamRuntimeConfig(checkpointing=True)
+            ):
                 pass
         assert rejected.value.component_id == "events"
 

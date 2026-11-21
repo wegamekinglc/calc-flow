@@ -40,7 +40,8 @@ impl crate::operator::LateMetricSink for RejectingIndicatorMetrics {
 #[tokio::test]
 async fn test_indicator_metric_failure_preserves_unaccepted_rows_and_charge() {
     let mut spec = kernel_spec(json!([
-        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1}
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1},
+        {"kind":"ewma", "primitive_version":1, "input":"price", "output":"ewma", "span":2, "min_periods":1}
     ]));
     spec.state_layout_version = 5;
     let mut operator = RollingOperator::new("features", Arc::new(kernel_schema()), spec).unwrap();
@@ -82,7 +83,8 @@ async fn test_indicator_metric_failure_preserves_unaccepted_rows_and_charge() {
 #[test]
 fn test_indicator_checkpoint_uses_the_same_worker_pool_as_its_resources() {
     let mut spec = kernel_spec(json!([
-        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1}
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1},
+        {"kind":"ewma", "primitive_version":1, "input":"price", "output":"ewma", "span":2, "min_periods":1}
     ]));
     spec.state_layout_version = 5;
     let operator = RollingOperator::new("features", Arc::new(kernel_schema()), spec).unwrap();
@@ -113,7 +115,8 @@ fn empty_indicator_charge(operator: &RollingOperator) -> StateCharge {
 
 async fn pending_indicator_fixture() -> (RollingOperator, crate::StreamJobContext) {
     let mut spec = kernel_spec(json!([
-        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1}
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1},
+        {"kind":"ewma", "primitive_version":1, "input":"price", "output":"ewma", "span":2, "min_periods":1}
     ]));
     spec.state_layout_version = 5;
     let mut operator = RollingOperator::new("features", Arc::new(kernel_schema()), spec).unwrap();
@@ -305,7 +308,8 @@ async fn occupy_indicator_workers(
 #[tokio::test]
 async fn test_indicator_input_preparation_waits_for_workers_and_abandoned_waiter_cannot_commit() {
     let mut spec = kernel_spec(json!([
-        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1}
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1},
+        {"kind":"ewma", "primitive_version":1, "input":"price", "output":"ewma", "span":2, "min_periods":1}
     ]));
     spec.state_layout_version = 5;
     let mut operator = RollingOperator::new("features", Arc::new(kernel_schema()), spec).unwrap();
@@ -465,7 +469,8 @@ async fn test_indicator_reset_drops_cache_but_keeps_external_capture_credit() {
 #[test]
 fn test_indicator_cells_are_controlled_before_arrow_materialization() {
     let mut spec = kernel_spec(json!([
-        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1}
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":1},
+        {"kind":"ewma", "primitive_version":1, "input":"price", "output":"ewma", "span":2, "min_periods":1}
     ]));
     spec.state_layout_version = 5;
     let operator = RollingOperator::new("features", Arc::new(kernel_schema()), spec).unwrap();

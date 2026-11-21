@@ -1,0 +1,15 @@
+{
+  "schema": "calc-flow.join-p5-build-receipt.v1",
+  "source_head": "1bd49dbac8c2ae944e02a1f88903264fee405dde",
+  "runtime_revision": "bf26a02f",
+  "tracked_source_clean_before_build": true,
+  "started_at": "2026-11-21T13:25:26+08:00",
+  "finished_at": "2026-11-21T13:36:12+08:00",
+  "wall_seconds": 646.275,
+  "command": "CARGO_TARGET_DIR=$PWD/target/p5-join-cargo uv run maturin build --release --locked --manifest-path crates/calc-flow-python/Cargo.toml --out target/p5-hot-multi-wheel-1bd49dba",
+  "wheel": "target/p5-hot-multi-wheel-1bd49dba/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+  "wheel_sha256": "309706522dd27f0401c5c921be5430dbae57f277e86bc93199cd0498de61555d",
+  "loaded_native_sha256": "e0b9b9366cf4d720106ca0e2822e8af28aa40a9ceb4d7d46be2aea7283b9811a",
+  "distribution_version": "2026.11.14",
+  "outcome": "build passed; first warmup failed with zero valid samples; see bf26a02f-failure.json"
+}

@@ -594,25 +594,19 @@ async fn test_deferred_shared_rows_keep_their_retained_row_charge() {
     close(&mut operator, &job, &store, &mut output, 4).await;
     assert_eq!(operator.state.charge.rows, 4);
     assert_eq!(
-        operator
-            .state
-            .typed_kernel_state
-            .as_deref()
-            .unwrap()
-            .shared_rows_count(),
-        1
+        RollingKernelPlan::slab_window_count_for_test(
+            operator.state.typed_kernel_state.as_deref().unwrap()
+        ),
+        Some(2)
     );
     assert_deferred_charge(&operator);
 }
 
 fn assert_deferred_charge(operator: &RollingOperator) {
-    let typed = operator
-        .state
-        .typed_kernel_state
-        .as_deref()
+    let typed_state = operator.state.typed_kernel_state.as_deref().unwrap();
+    let typed = RollingKernelPlan::slab_charge(typed_state, "rolling")
         .unwrap()
-        .total_charge_for_test("rolling")
-        .unwrap();
+        .unwrap_or_else(|| typed_state.total_charge_for_test("rolling").unwrap());
     let history = budget::full_state_charge(
         &operator.state.buffer,
         &operator.state.ordered,

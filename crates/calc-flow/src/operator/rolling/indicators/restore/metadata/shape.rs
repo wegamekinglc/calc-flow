@@ -31,7 +31,7 @@ pub(super) fn plan_entries<'a>(
 fn root(key: &str, value: &Value, facts: &mut Facts, check: Check<'_>) -> Result<()> {
     match key {
         "configuration_hash" | "state_schema_fingerprint" => text(value, facts),
-        "kernel_fingerprint" | "numerical_profile" | "pipeline_fingerprint" | "operator_id" => {
+        "kernel_fingerprint" | "pipeline_fingerprint" | "operator_id" => {
             optional_text(value, facts)
         }
         "state_layout_version" => u32_value(value),

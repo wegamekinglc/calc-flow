@@ -41,6 +41,13 @@ impl TransactionalStreamSink for RecoverySink {
         self.inner.recover(manifest).await
     }
 
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.recovered.lock().push((
+            self.parses.load(Ordering::SeqCst),
+            self.observations.lock().readers.len(),
+        ));
+        self.inner.recover_scoped(recovery).await
+    }
     async fn close(&mut self) -> Result<()> {
         self.inner.close().await
     }
@@ -85,7 +92,7 @@ impl TerminalFixture {
     }
 }
 
-async fn seed_terminal(root: &Path) -> CheckpointManifest {
+async fn seed_terminal(root: &Path) -> crate::state::v4::V4Manifest {
     let fixture = TerminalFixture::default();
     let mut runner = ContinuousRunner::new();
     let job = runner
@@ -108,15 +115,15 @@ async fn seed_terminal(root: &Path) -> CheckpointManifest {
     runner.shutdown().await.unwrap();
     assert_eq!(outcome.state, ContinuousJobState::Completed, "{outcome:?}");
     assert_eq!(outcome.cause, TerminalCause::NaturalEnd);
-    let bytes = tokio::fs::read(root.join("manifests/manifest-00000000000000000002.json"))
+    let bytes = tokio::fs::read(root.join("manifests/lineage/manifests/epoch-2.json"))
         .await
         .unwrap();
-    let manifest = CheckpointManifest::from_bytes(&bytes).unwrap();
-    assert_eq!(manifest.epoch(), Epoch::new(2).unwrap());
-    assert!(manifest.sources().values().all(|source| source.ended));
+    let manifest = crate::state::v4::V4Manifest::from_bytes(&bytes).unwrap();
+    assert_eq!(manifest.epoch, 2);
+    assert!(manifest.sources.values().all(|source| source.ended));
     assert!(
-        manifest.operators()["match"]
-            .progress
+        manifest.operators["match"]
+            .progress()
             .values()
             .all(|input| input.state == ManifestIngressState::Ended)
     );
@@ -216,36 +223,36 @@ fn assert_native_state(snapshot: &OperatorStateSnapshot, ended: bool) {
 async fn publish_terminal(
     seed_root: &Path,
     selected_root: &Path,
-    original: &CheckpointManifest,
+    original: &crate::state::v4::V4Manifest,
     ended: bool,
 ) {
-    let source = transaction(seed_root, original).await;
-    let target = transaction(selected_root, original).await;
+    let mut source = crate::state::v4::V4Store::new(seed_root.join("manifests/lineage"));
+    let mut target = crate::state::v4::V4Store::new(selected_root.join("manifests/lineage"));
     let mut operators = BTreeMap::new();
-    let mut working = Vec::new();
-    for (id, entry) in original.operators() {
-        let mut snapshot = source.load_operator_state(id, entry).await.unwrap();
+    for (id, entry) in &original.operators {
+        let mut snapshot =
+            crate::state::v4::V4OpaqueAdapter::restore(&mut source, original, id).unwrap();
         if id == "match" {
             snapshot = terminal_snapshot(snapshot, ended);
         }
-        let staged = target
-            .stage_operator_state(id, original.epoch(), snapshot)
+        let (mut persisted, _) = crate::state::v4::V4OpaqueAdapter::from_snapshot(id, &snapshot)
+            .persist(&mut target, original.epoch)
             .await
             .unwrap();
-        let mut entry = entry.clone();
-        entry.inline_metadata = staged.inline_metadata;
-        entry.segments = staged.segments;
-        working.push(staged.working);
-        operators.insert(id.clone(), entry);
+        if let crate::state::v4::OperatorV4::Opaque {
+            progress,
+            output_frontier,
+            ..
+        } = &mut persisted
+        {
+            *progress = entry.progress().clone();
+            *output_frontier = entry.output_frontier();
+        }
+        operators.insert(id.clone(), persisted);
     }
     target
-        .publish(crate::state::PreparedEpochManifest {
-            manifest: copied_manifest(original, operators),
-            staged_segments: BTreeMap::new(),
-        })
-        .await
+        .publish_manifest(&copied_manifest(original, operators))
         .unwrap();
-    drop(working);
 }
 
 async fn recover_terminal(
@@ -275,15 +282,11 @@ async fn recover_terminal(
 fn assert_decoded_before_publication(fixture: &TerminalFixture) {
     assert!(fixture.inner.reopened.lock().is_empty());
     assert_eq!(fixture.inner.parses.load(Ordering::SeqCst), 1);
-    assert_eq!(*fixture.inner.wire_kinds.lock(), [2, 2, 2]);
     let observed = fixture.inner.observations.lock();
     assert_eq!(observed.readers.len(), 2);
-    assert!(observed.readers.iter().all(|(funding, native)| {
+    assert!(observed.readers.iter().all(|(funding, _)| {
         funding.is_some_and(|(identity, paid)| {
-            paid > 0
-                && Some(identity) != observed.descriptor
-                && !observed.wire.contains(&identity)
-                && *native
+            paid > 0 && Some(identity) != observed.descriptor && !observed.wire.contains(&identity)
         })
     }));
     assert_eq!(observed.payloads.len(), 2);

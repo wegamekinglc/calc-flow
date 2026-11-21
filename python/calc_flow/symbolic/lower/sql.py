@@ -436,6 +436,14 @@ class _SQLGraph:
         schemas = [self.schemas[child.digest] for child in node.args]
         schema = self.analyzer.table(node, "sql.output").schema
         self.schemas[node.digest] = schema
+        operator = {
+            "kind": "sql" if node.op.name == "aggregate" else node.op.name,
+            "query": _cstr(node.attr("query")),
+            "aliases": list(aliases),
+            "udfs": [],
+        }
+        if node.attr("aggregate_output") is not None:
+            operator["aggregate_output"] = _cstr(node.attr("aggregate_output"))
         self.graph.nodes.append(
             {
                 "id": output_id,
@@ -443,12 +451,7 @@ class _SQLGraph:
                     _table_port(fields, alias)
                     for alias, fields in zip(aliases, schemas, strict=True)
                 ],
-                "operator": {
-                    "kind": "sql" if node.op.name == "aggregate" else node.op.name,
-                    "query": _cstr(node.attr("query")),
-                    "aliases": list(aliases),
-                    "udfs": [],
-                },
+                "operator": operator,
                 "output_ports": [_table_port(schema, "output")],
             }
         )

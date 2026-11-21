@@ -13,21 +13,30 @@ pub(super) use super::history::ColumnarHistory;
 use super::history::{RetainedHistoryAppend, RetainedRows, RetentionPolicy};
 use super::kernel::{EntityRows, RecurrenceSeed, StreamKernelUpdate};
 use crate::operator::rolling_metrics::{
-    RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
+    NumericWorkLease, RollingMetricsRecorder, RollingStage, RollingWork, RollingWorkBatch,
 };
-use crate::runtime::streaming::entity_work::{ReservePair, SerialReason};
+use crate::operator::sync_operator::{Emitter, SyncContext};
+use crate::runtime::streaming::TaskId;
+#[cfg(test)]
+use crate::runtime::streaming::morsel_pool::MorselTestHooks;
+use crate::runtime::streaming::morsel_pool::{
+    JobMorselOwner, MorselCost, MorselLease, MorselTicket,
+};
+use parking_lot::Mutex;
 
 use super::{
-    Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EventTime, KeyValue,
-    RecordBatch, Result, RollingHistories, RollingOperator, RollingStreamState, RowIdentity,
-    ScalarValue, StreamCollector, StreamOperatorContext, TableBatch, VecDeque, chunk_output_record,
-    closing_coordinate, concat_batches, internal_error, operator_error, read_buffered_row,
-    reconstruct_typed_state,
+    ActualNumericWork, Arc, Array, BTreeMap, Batch, BufferedRow, CompiledRollingSpec, EventTime,
+    KeyValue, LaneProgress, LocatedPanic, NumericLaneExit, NumericLaneOutcome, NumericLaneRequest,
+    NumericLaneStop, RecordBatch, Result, RollingHistories, RollingOperator, RollingStreamState,
+    RowIdentity, ScalarValue, StreamCollector, StreamOperatorContext, TableBatch, VecDeque,
+    chunk_output_record, closing_coordinate, concat_batches, internal_error, merge_numeric_results,
+    operator_error, read_buffered_row, reconstruct_typed_state, run_numeric_lane,
 };
 
 #[derive(Clone, Default)]
 pub(super) struct OrderedStreamBuffer {
     records: VecDeque<RecordBatch>,
+    retry_records: Vec<RecordBatch>,
     last_identity: Option<Vec<u8>>,
 }
 
@@ -40,7 +49,7 @@ impl OrderedStreamBuffer {
         self.last_identity.clone()
     }
 
-    pub(super) fn restore_front(
+    pub(super) fn restore_pending(
         &mut self,
         records: Vec<RecordBatch>,
         last_identity: Option<Vec<u8>>,
@@ -51,8 +60,22 @@ impl OrderedStreamBuffer {
         self.last_identity = last_identity;
     }
 
+    pub(super) fn restore_front(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+    ) {
+        for record in &records {
+            if !self.retry_records.contains(record) {
+                self.retry_records.push(record.clone());
+            }
+        }
+        self.restore_pending(records, last_identity);
+    }
+
     pub(super) fn clear(&mut self) {
         self.records.clear();
+        self.retry_records.clear();
         self.last_identity = None;
     }
 
@@ -62,7 +85,12 @@ impl OrderedStreamBuffer {
 
     pub(super) fn take_all(&mut self) -> Vec<RecordBatch> {
         self.last_identity = None;
+        self.retry_records.clear();
         self.records.drain(..).collect()
+    }
+
+    pub(super) fn is_retry_record(&self, candidate: &RecordBatch) -> bool {
+        self.retry_records.iter().any(|record| record == candidate)
     }
 
     pub(super) fn take_closed(
@@ -95,6 +123,9 @@ impl OrderedStreamBuffer {
         }
         if self.records.is_empty() {
             self.last_identity = None;
+        }
+        if !closed.is_empty() {
+            self.retry_records.clear();
         }
         Ok(closed)
     }
@@ -214,6 +245,11 @@ impl RollingOperator {
             else {
                 return Ok(false);
             };
+            if self.state.ordered.is_retry_record(record) {
+                // A rejected emission restores its records for retry. Reoffering
+                // one of those exact records is idempotent; it is not new state.
+                continue;
+            }
             if last.as_ref().is_some_and(|previous| previous >= &first) {
                 return Ok(false);
             }
@@ -335,6 +371,9 @@ impl RollingOperator {
     }
 
     fn can_defer_ordered_history(&self, context: &StreamOperatorContext<'_>) -> bool {
+        if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
+            return true;
+        }
         self.state.typed_kernel_state.is_none()
             && self.state.histories.by_entity.is_empty()
             && !context.job().checkpointing()
@@ -406,23 +445,57 @@ impl RollingOperator {
         Some(update.map(|update| update.expect("in-place update was checked above")))
     }
 
-    async fn prepare_ordered_update(
+    fn prepare_slab_update(
         &mut self,
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
-        defer_history: bool,
-    ) -> Result<StreamKernelUpdate> {
-        if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
-            return update;
-        }
-        let observer = context.rolling_metrics();
+    ) -> Option<Result<StreamKernelUpdate>> {
         let plan = &self.compiled.kernel_plan;
         let prior = self
             .state
             .typed_kernel_state
             .as_deref()
             .expect("state initialized above");
-        let Some(client) = context.entity_work() else {
+        if !plan.can_use_slab(prior) {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(
+            plan.prepare_slab_ordered_stream(
+                state
+                    .typed_kernel_state
+                    .as_deref_mut()
+                    .expect("state initialized above"),
+                input,
+                context.operator_id(),
+                context.rolling_metrics(),
+            ),
+        )
+    }
+
+    async fn prepare_ordered_update(
+        &mut self,
+        input: &RecordBatch,
+        context: &StreamOperatorContext<'_>,
+        defer_history: bool,
+    ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        if let Some(update) = self.prepare_slab_update(input, context) {
+            return update;
+        }
+        if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
+            return update;
+        }
+        let plan = &self.compiled.kernel_plan;
+        let prior = self
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .expect("state initialized above");
+        let Some(owner) = context.job().morsel_owner() else {
             return self.serial_ordered_update(
                 input,
                 context,
@@ -432,9 +505,7 @@ impl RollingOperator {
         if let Some(reason) = plan.entity_parallel_fallback(input) {
             return self.serial_ordered_update(input, context, reason);
         }
-        let cpus = context.job().gather_owner().parallelism();
-        #[cfg(test)]
-        let cpus = client.parallelism(cpus);
+        let cpus = owner.parallelism(context.job().morsel_worker_count());
         if cpus < 2 {
             return self.serial_ordered_update(
                 input,
@@ -453,46 +524,41 @@ impl RollingOperator {
                 return prepared.finish_serial(observer);
             }
         };
-        match client.try_reserve(prepared.scratch()) {
-            ReservePair::Reserved(launch) => match prepared.split() {
-                Ok((seed, requests)) => {
-                    let stage =
-                        observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-                    let mut ticket = launch.start(requests, observer.cloned());
-                    let joined = ticket.join().await;
-                    drop(stage);
-                    let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
-                    joined.merge(seed)
-                }
-                Err(prepared) => {
-                    drop(launch);
-                    if let Some(recorder) = observer {
-                        recorder.add(RollingWork::ParallelFallbackLanePartitionRejected, 1);
-                    }
-                    prepared.finish_serial(observer)
-                }
-            },
-            ReservePair::Serial(reason) => {
-                let work = match reason {
-                    SerialReason::Busy => RollingWork::ParallelFallbackOwnerBusy,
-                    SerialReason::AlreadyUsed => RollingWork::ParallelFallbackOwnerAlreadyUsed,
-                    SerialReason::GenerationExhausted => {
-                        RollingWork::ParallelFallbackGenerationExhausted
-                    }
-                    SerialReason::Unrepresentable => {
-                        RollingWork::ParallelFallbackScratchUnrepresentable
-                    }
+        let scratch = prepared.scratch();
+        let Some(bytes) = scratch
+            .accounted_bytes()
+            .filter(|bytes| owner.admits(input.num_rows(), *bytes))
+        else {
+            if let Some(recorder) = observer {
+                recorder.add(RollingWork::ParallelFallbackScratchUnrepresentable, 1);
+            }
+            return prepared.finish_serial(observer);
+        };
+        match prepared.split() {
+            Ok((seed, requests)) => {
+                let stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
+                let Some(task_id) = context.task_id() else {
+                    return Err(internal_error(
+                        "managed rolling morsels require a supervised task identity",
+                    ));
                 };
+                let task_name = format!("operator:{}", context.operator_id());
+                let mut exits =
+                    run_ordered_morsels(owner, requests, bytes, observer, task_id, task_name)
+                        .await?;
+                drop(stage);
+                let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+                merge_numeric_results(
+                    seed,
+                    exits.as_mut_slice(),
+                    &context.job().job_id().to_string(),
+                )
+            }
+            Err(prepared) => {
                 if let Some(recorder) = observer {
-                    recorder.add(work, 1);
+                    recorder.add(RollingWork::ParallelFallbackLanePartitionRejected, 1);
                 }
                 prepared.finish_serial(observer)
-            }
-            ReservePair::Stopped => {
-                context.check_cancelled()?;
-                Err(crate::CalcFlowError::Cancelled {
-                    run_id: context.job().job_id().to_string(),
-                })
             }
         }
     }
@@ -521,6 +587,282 @@ impl RollingOperator {
             )
     }
 
+    fn prepare_slab_update_sync(
+        &mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        let plan = &self.compiled.kernel_plan;
+        let prior = self
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .expect("state initialized above");
+        if !plan.can_use_slab(prior) {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        Some(
+            plan.prepare_slab_ordered_stream(
+                state
+                    .typed_kernel_state
+                    .as_deref_mut()
+                    .expect("state initialized above"),
+                input,
+                context.operator_id(),
+                context.rolling_metrics(),
+            ),
+        )
+    }
+
+    fn prepare_ordered_update_in_place_sync(
+        &mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+        defer_history: bool,
+    ) -> Option<Result<StreamKernelUpdate>> {
+        let observer = context.rolling_metrics();
+        let plan = &self.compiled.kernel_plan;
+        if !defer_history || context.checkpointing() || !plan.supports_inplace_ordered_stream(input)
+        {
+            return None;
+        }
+        let state = match self.state.owned_mut() {
+            Ok(state) => state,
+            Err(error) => return Some(Err(error)),
+        };
+        let update = plan.prepare_ordered_stream_in_place(
+            state
+                .typed_kernel_state
+                .as_deref_mut()
+                .expect("state initialized above"),
+            input,
+            context.operator_id(),
+            observer,
+        );
+        if matches!(&update, Ok(None)) {
+            return None;
+        }
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(RollingWork::ParallelFallbackSmallBatch, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        drop(work);
+        Some(update.map(|update| update.expect("in-place update was checked above")))
+    }
+
+    fn serial_ordered_update_sync(
+        &self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+        reason: RollingWork,
+    ) -> Result<StreamKernelUpdate> {
+        let observer = context.rolling_metrics();
+        let mut work = RollingWorkBatch::new(observer);
+        work.add(reason, 1);
+        work.add(RollingWork::NumericSerialCalls, 1);
+        self.compiled
+            .kernel_plan
+            .prepare_ordered_stream_with_history(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
+                input,
+                Some(&self.state.histories),
+                context.operator_id(),
+                observer,
+            )
+    }
+
+    fn prepare_ordered_update_sync(
+        &mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+        defer_history: bool,
+    ) -> Result<StreamKernelUpdate> {
+        if let Some(update) = self.prepare_slab_update_sync(input, context) {
+            return update;
+        }
+        if let Some(update) =
+            self.prepare_ordered_update_in_place_sync(input, context, defer_history)
+        {
+            return update;
+        }
+        self.serial_ordered_update_sync(input, context, RollingWork::ParallelFallbackNoWorkClient)
+    }
+
+    fn can_defer_ordered_history_sync(&self, context: &SyncContext<'_>) -> bool {
+        if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
+            return true;
+        }
+        self.state.typed_kernel_state.is_none()
+            && self.state.histories.by_entity.is_empty()
+            && !context.checkpointing()
+            && self.compiled.kernel_plan.supports_deferred_history()
+    }
+
+    fn prepare_ordered_output_sync<'a>(
+        &'a mut self,
+        input: &RecordBatch,
+        context: &SyncContext<'_>,
+    ) -> Result<PreparedOrderedOutput<'a>> {
+        let observer = context.rolling_metrics();
+        let can_defer = self.can_defer_ordered_history_sync(context);
+        self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
+        let defer_history = self.state.deferred_history || can_defer;
+        let update = self.prepare_ordered_update_sync(input, context, defer_history)?;
+        let mut prepared =
+            PreparedOrderedOutput::new(update, self.state.owned_mut()?, defer_history);
+        prepared.prepare_history_sync(input, &self.compiled, context)?;
+        let sequence = prepared.state.next_output_sequence;
+        let (batches, next_sequence) = Self::ordered_output_chunks_sync(
+            input,
+            prepared.update_mut(),
+            context,
+            &self.output_ports,
+            sequence,
+        )?;
+        prepared.batches = batches;
+        prepared.next_sequence = next_sequence;
+        Ok(prepared)
+    }
+
+    fn ordered_output_chunks_sync(
+        input: &RecordBatch,
+        update: &mut StreamKernelUpdate,
+        context: &SyncContext<'_>,
+        output_ports: &[super::Port],
+        sequence: u64,
+    ) -> Result<(Vec<Batch>, u64)> {
+        let observer = context.rolling_metrics();
+        let arrow_stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+        let schema = output_ports[0]
+            .schema()
+            .expect("rolling output has an exact schema");
+        let columns = input
+            .columns()
+            .iter()
+            .cloned()
+            .chain(update.take_columns())
+            .collect();
+        let record = RecordBatch::try_new(Arc::clone(schema), columns)
+            .map_err(|error| operator_error(context.operator_id(), &error.to_string()))?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
+        }
+        drop(arrow_stage);
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
+        let batches = chunk_output_record(
+            &record,
+            context.operator_id(),
+            sequence,
+            context.output_budget(),
+        )?;
+        let count = u64::try_from(batches.len())
+            .map_err(|_| operator_error(context.operator_id(), "output chunk count overflowed"))?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
+        }
+        let next_sequence = sequence
+            .checked_add(count)
+            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
+        Ok((batches, next_sequence))
+    }
+
+    pub(super) fn emit_ordered_sync(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        let removed = self.ordered_buffer_removal_charge(&records, context.operator_id())?;
+        self.emit_ordered_with_removed_charge_sync(records, last_identity, removed, context, output)
+    }
+
+    fn emit_ordered_with_removed_charge_sync(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        removed: super::budget::StateCharge,
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        let original_charge = self.state.charge;
+        let observer = context.rolling_metrics();
+        match self.emit_ordered_inner_sync(&records, removed, context, output) {
+            Ok(()) => Ok(()),
+            Err(failure) if failure.restore => self.restore_ordered_failure(
+                records,
+                last_identity,
+                original_charge,
+                failure.error,
+                context.operator_id(),
+                observer,
+            ),
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    fn emit_ordered_inner_sync(
+        &mut self,
+        records: &[RecordBatch],
+        removed: super::budget::StateCharge,
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> std::result::Result<(), OrderedEmitError> {
+        let observer = context.rolling_metrics();
+        let input = {
+            let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
+            combine_ordered_records(records, context.operator_id())?
+        };
+        let Some(input) = input else {
+            return Ok(());
+        };
+        let state_budget = self.state_budget;
+        let mut prepared = self.prepare_ordered_output_sync(&input, context)?;
+        let (current_charge, next_charge) =
+            prepared.projected_charge(removed, &state_budget, context.operator_id(), observer)?;
+        prepared.state.charge = current_charge;
+        let defer_history = prepared.defer_history || prepared.state.deferred_history;
+        if let Err(error) = Self::deliver_ordered_batches_sync(&mut prepared, output) {
+            return Err(OrderedEmitError {
+                error,
+                restore: defer_history,
+            });
+        }
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        prepared.commit(next_charge);
+        Ok(())
+    }
+
+    fn deliver_ordered_batches_sync(
+        prepared: &mut PreparedOrderedOutput<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        for batch in std::mem::take(&mut prepared.batches) {
+            output.emit(0, batch)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn emit_slab_rows_sync(
+        &mut self,
+        rows: &[BufferedRow],
+        context: &SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let record = self.slab_input_record(rows, context.operator_id())?;
+        let removed = super::budget::buffered_charge(rows.iter(), context.operator_id())?;
+        self.emit_ordered_with_removed_charge_sync(vec![record], None, removed, context, output)
+    }
+
     fn ordered_buffer_removal_charge(
         &self,
         records: &[RecordBatch],
@@ -530,6 +872,36 @@ impl RollingOperator {
             .ok_or_else(|| internal_error("ordered rolling state has unsupported state charge"))
     }
 
+    pub(super) async fn emit_slab_rows(
+        &mut self,
+        rows: Vec<BufferedRow>,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let record = self.slab_input_record(&rows, context.operator_id())?;
+        let removed = super::budget::buffered_charge(rows.iter(), context.operator_id())?;
+        self.emit_ordered_with_removed_charge(vec![record], None, removed, context, output)
+            .await
+    }
+
+    pub(super) fn slab_input_record(
+        &self,
+        rows: &[BufferedRow],
+        node_id: &str,
+    ) -> Result<RecordBatch> {
+        let schema = self.input_ports[0]
+            .schema()
+            .expect("rolling input has an exact schema");
+        let columns = (0..rows[0].values.len())
+            .map(|index| {
+                ScalarValue::iter_to_array(rows.iter().map(|row| row.values[index].clone()))
+                    .map_err(|error| operator_error(node_id, &error.to_string()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        RecordBatch::try_new(Arc::clone(schema), columns)
+            .map_err(|error| operator_error(node_id, &error.to_string()))
+    }
+
     pub(super) async fn emit_ordered(
         &mut self,
         records: Vec<RecordBatch>,
@@ -537,9 +909,25 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let removed = self.ordered_buffer_removal_charge(&records, context.operator_id())?;
+        self.emit_ordered_with_removed_charge(records, last_identity, removed, context, output)
+            .await
+    }
+
+    async fn emit_ordered_with_removed_charge(
+        &mut self,
+        records: Vec<RecordBatch>,
+        last_identity: Option<Vec<u8>>,
+        removed: super::budget::StateCharge,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
         let original_charge = self.state.charge;
         let observer = context.rolling_metrics();
-        match self.emit_ordered_inner(&records, context, output).await {
+        match self
+            .emit_ordered_inner(&records, removed, context, output)
+            .await
+        {
             Ok(()) => Ok(()),
             Err(failure) if failure.restore => self.restore_ordered_failure(
                 records,
@@ -556,11 +944,11 @@ impl RollingOperator {
     async fn emit_ordered_inner(
         &mut self,
         records: &[RecordBatch],
+        removed: super::budget::StateCharge,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> std::result::Result<(), OrderedEmitError> {
         let observer = context.rolling_metrics();
-        let removed = self.ordered_buffer_removal_charge(records, context.operator_id())?;
         let input = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
             combine_ordered_records(records, context.operator_id())?
@@ -594,6 +982,367 @@ impl RollingOperator {
         }
         Ok(())
     }
+}
+
+struct NumericMorselMetrics {
+    state: Mutex<NumericMorselMetricState>,
+}
+
+struct NumericMorselMetricState {
+    lease: Option<NumericWorkLease>,
+    remaining: usize,
+    launched: usize,
+    sealed: bool,
+    rows: u64,
+    overflowed: bool,
+}
+
+impl NumericMorselMetrics {
+    fn new(observer: Option<&RollingMetricsRecorder>, remaining: usize) -> Self {
+        Self {
+            state: Mutex::new(NumericMorselMetricState {
+                lease: observer.and_then(|recorder| recorder.numeric_lease(1)),
+                remaining,
+                launched: 0,
+                sealed: false,
+                rows: 0,
+                overflowed: false,
+            }),
+        }
+    }
+
+    fn launched(&self) {
+        let mut state = self.state.lock();
+        if let Some(launched) = state.launched.checked_add(1) {
+            state.launched = launched;
+        } else {
+            state.overflowed = true;
+        }
+    }
+
+    fn complete(&self, work: ActualNumericWork) {
+        let mut state = self.state.lock();
+        assert!(state.remaining > 0, "numeric morsel settled twice");
+        state.remaining -= 1;
+        if let Some(rows) = state.rows.checked_add(work.numeric_rows) {
+            state.rows = rows;
+        } else {
+            state.rows = 0;
+            state.overflowed = true;
+        }
+        state.overflowed |= work.overflowed;
+        Self::settle(&mut state);
+    }
+
+    fn seal(&self) {
+        let mut state = self.state.lock();
+        state.sealed = true;
+        Self::settle(&mut state);
+    }
+
+    fn settle(state: &mut NumericMorselMetricState) {
+        if !state.sealed || state.remaining != 0 {
+            return;
+        }
+        let Some(lease) = state.lease.take() else {
+            return;
+        };
+        let lanes = u64::try_from(state.launched).ok();
+        state.overflowed |= lanes.is_none();
+        lease.settle(state.rows, lanes.unwrap_or(0), state.overflowed);
+    }
+}
+
+struct NumericMorselInput {
+    request: Option<NumericLaneRequest>,
+    cost: MorselCost,
+    metrics: Arc<NumericMorselMetrics>,
+    completed: bool,
+    #[cfg(test)]
+    lane: usize,
+    #[cfg(test)]
+    hooks: MorselTestHooks,
+}
+
+impl NumericMorselInput {
+    fn execute(mut self, lease: &MorselLease) -> NumericLaneExit {
+        let request = self
+            .request
+            .take()
+            .expect("numeric morsel owns one request");
+        let mut progress = LaneProgress::default();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            #[cfg(test)]
+            if let Some(hook) = &self.hooks.before_run {
+                hook(self.lane);
+            }
+            let result = run_numeric_lane(request, lease, &mut progress);
+            #[cfg(test)]
+            if let Some(hook) = &self.hooks.after_run {
+                hook(self.lane);
+            }
+            result
+        }));
+        let outcome = match result {
+            Ok(Ok(result)) => NumericLaneOutcome::Complete(result),
+            Ok(Err(NumericLaneStop::Ordinary(error))) => NumericLaneOutcome::OrdinaryError(error),
+            Ok(Err(NumericLaneStop::Cancelled)) => NumericLaneOutcome::Cancelled,
+            Err(payload) => NumericLaneOutcome::Panicked(LocatedPanic {
+                site: progress.active_site,
+                payload,
+            }),
+        };
+        let exit = NumericLaneExit {
+            outcome,
+            work: progress.work,
+        };
+        self.completed = true;
+        self.metrics.complete(exit.work);
+        exit
+    }
+}
+
+impl Drop for NumericMorselInput {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.completed = true;
+            self.metrics.complete(ActualNumericWork::default());
+        }
+    }
+}
+
+struct NumericMorselGroup {
+    pending: VecDeque<NumericMorselInput>,
+    tickets: VecDeque<MorselTicket<NumericLaneExit>>,
+    cancellations: VecDeque<MorselTicket<NumericLaneExit>>,
+    consumed: Vec<Result<NumericLaneExit>>,
+    metrics: Arc<NumericMorselMetrics>,
+    owner: JobMorselOwner,
+    task_id: TaskId,
+    task_name: String,
+    observed: bool,
+}
+
+impl NumericMorselGroup {
+    fn new(
+        requests: Vec<NumericLaneRequest>,
+        bytes: usize,
+        observer: Option<&RollingMetricsRecorder>,
+        owner: &JobMorselOwner,
+        task_id: TaskId,
+        task_name: String,
+        #[cfg(test)] hooks: &MorselTestHooks,
+    ) -> Self {
+        let lanes = requests.len();
+        let metrics = Arc::new(NumericMorselMetrics::new(observer, lanes));
+        let base = bytes / lanes;
+        let remainder = bytes % lanes;
+        let pending = requests
+            .into_iter()
+            .enumerate()
+            .map(|(lane, request)| NumericMorselInput {
+                cost: MorselCost {
+                    rows: request.row_count(),
+                    scratch_bytes: base + usize::from(lane < remainder),
+                    output_bytes: 0,
+                },
+                request: Some(request),
+                metrics: Arc::clone(&metrics),
+                completed: false,
+                #[cfg(test)]
+                lane,
+                #[cfg(test)]
+                hooks: hooks.clone(),
+            })
+            .collect();
+        Self {
+            pending,
+            tickets: VecDeque::with_capacity(lanes),
+            cancellations: VecDeque::with_capacity(lanes),
+            consumed: Vec::with_capacity(lanes),
+            metrics,
+            owner: owner.clone(),
+            task_id,
+            task_name,
+            observed: false,
+        }
+    }
+
+    fn cancel(&self) {
+        for ticket in &self.cancellations {
+            ticket.cancel();
+        }
+    }
+
+    async fn join_next(&mut self) -> Result<bool> {
+        let Some(ticket) = self.tickets.pop_front() else {
+            return Ok(false);
+        };
+        match ticket.join_async().await {
+            Ok(exit) => {
+                self.cancellations.pop_front();
+                self.consumed.push(Ok(exit));
+                Ok(true)
+            }
+            Err(error) => {
+                self.cancellations.pop_front();
+                let primary = self.consumed.len();
+                self.consumed.push(Err(error));
+                for ticket in std::mem::take(&mut self.tickets) {
+                    ticket.cancel();
+                    let result = ticket.join_async().await;
+                    self.cancellations.pop_front();
+                    self.consumed.push(result);
+                }
+                self.cancellations.clear();
+                self.observed = true;
+                let Err(error) = self.consumed.remove(primary) else {
+                    unreachable!("the primary ticket error remains owned until return")
+                };
+                Err(error)
+            }
+        }
+    }
+
+    async fn join(&mut self) -> Result<NumericMorselExits> {
+        self.metrics.seal();
+        while self.join_next().await? {}
+        self.observed = true;
+        Ok(NumericMorselExits {
+            exits: self
+                .consumed
+                .drain(..)
+                .map(|result| result.expect("a successful join contains no ticket error"))
+                .collect(),
+            owner: self.owner.clone(),
+            task_id: self.task_id,
+            task_name: self.task_name.clone(),
+        })
+    }
+}
+
+impl Drop for NumericMorselGroup {
+    fn drop(&mut self) {
+        self.cancel();
+        self.metrics.seal();
+        let task_id = self.task_id;
+        let consumed = std::mem::take(&mut self.consumed);
+        self.owner
+            .retain_results(consumed, task_id, self.task_name.as_str(), move |result| {
+                abandoned_lane_failure(result, task_id)
+            });
+        if self.observed {
+            return;
+        }
+        let tickets = std::mem::take(&mut self.cancellations);
+        self.tickets.clear();
+        self.owner.retain_abandoned(
+            tickets.into(),
+            task_id,
+            self.task_name.clone(),
+            move |result| abandoned_lane_failure(result, task_id),
+        );
+    }
+}
+
+struct NumericMorselExits {
+    exits: Vec<NumericLaneExit>,
+    owner: JobMorselOwner,
+    task_id: TaskId,
+    task_name: String,
+}
+
+impl NumericMorselExits {
+    fn as_mut_slice(&mut self) -> &mut [NumericLaneExit] {
+        &mut self.exits
+    }
+}
+
+impl Drop for NumericMorselExits {
+    fn drop(&mut self) {
+        let exits = std::mem::take(&mut self.exits);
+        let task_id = self.task_id;
+        self.owner.retain_results(
+            exits.into_iter().map(Ok).collect(),
+            task_id,
+            self.task_name.as_str(),
+            move |result| abandoned_lane_failure(result, task_id),
+        );
+    }
+}
+
+fn abandoned_lane_failure(
+    result: Result<NumericLaneExit>,
+    task_id: TaskId,
+) -> Option<super::CalcFlowError> {
+    let error = match result {
+        Ok(exit) => match exit.outcome {
+            NumericLaneOutcome::OrdinaryError(error) => error.error,
+            NumericLaneOutcome::Panicked(panic) => super::CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message: crate::runtime::streaming::failure::panic_message(panic.payload.as_ref()),
+            },
+            NumericLaneOutcome::Complete(_)
+            | NumericLaneOutcome::Cancelled
+            | NumericLaneOutcome::Consumed => return None,
+        },
+        Err(super::CalcFlowError::Cancelled { .. }) => return None,
+        Err(super::CalcFlowError::TaskPanicked { message, .. }) => {
+            super::CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message,
+            }
+        }
+        Err(error) => error,
+    };
+    Some(error)
+}
+
+async fn run_ordered_morsels(
+    owner: &JobMorselOwner,
+    requests: Vec<NumericLaneRequest>,
+    bytes: usize,
+    observer: Option<&RollingMetricsRecorder>,
+    task_id: TaskId,
+    task_name: String,
+) -> Result<NumericMorselExits> {
+    let client = owner.client()?;
+    let mut group = NumericMorselGroup::new(
+        requests,
+        bytes,
+        observer,
+        owner,
+        task_id,
+        task_name,
+        #[cfg(test)]
+        &owner.hooks(),
+    );
+    while let Some(input) = group.pending.pop_front() {
+        #[cfg(test)]
+        assert!(
+            input.lane != 1 || !input.hooks.panic_before_second_launch,
+            "injected partial numeric launch"
+        );
+        let cost = input.cost;
+        match client
+            .submit_async(input, cost, |input, lease| Ok(input.execute(lease)))
+            .await
+        {
+            Ok(ticket) => {
+                #[cfg(test)]
+                owner.record_launch();
+                group.metrics.launched();
+                group.cancellations.push_back(ticket.clone());
+                group.tickets.push_back(ticket);
+            }
+            Err(error) => {
+                group.cancel();
+                let _ = group.join().await;
+                return Err(error);
+            }
+        }
+    }
+    group.join().await
 }
 
 struct OrderedEmitError {
@@ -690,6 +1439,36 @@ impl<'a> PreparedOrderedOutput<'a> {
         Ok(())
     }
 
+    fn prepare_history_sync(
+        &mut self,
+        input: &RecordBatch,
+        compiled: &CompiledRollingSpec,
+        context: &SyncContext<'_>,
+    ) -> Result<()> {
+        let observer = context.rolling_metrics();
+        if self.defer_history {
+            let charge = self.update().charge_change(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .expect("state initialized above"),
+                context.operator_id(),
+            )?;
+            self.deferred_charge = Some(charge);
+            return Ok(());
+        }
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        self.touched = retained_histories(
+            input,
+            self.update(),
+            &self.state.histories,
+            compiled,
+            context.operator_id(),
+            observer,
+        )?;
+        Ok(())
+    }
+
     fn projected_charge(
         &mut self,
         removed: super::budget::StateCharge,
@@ -712,7 +1491,12 @@ impl<'a> PreparedOrderedOutput<'a> {
             }
             current.checked_sub(old)?.checked_add(new, node)?
         };
-        if !budget.allows(next.rows, next.bytes) {
+        let projected = if self.deferred_charge.is_some() {
+            next.checked_add(removed, node)?
+        } else {
+            next
+        };
+        if !budget.allows(projected.rows, projected.bytes) {
             return Err(operator_error(node, "rolling state budget exceeded"));
         }
         Ok((current, next))
@@ -1183,5 +1967,380 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn abandoned_morsel_panic_is_secondary_and_settles_actual_work_once() {
+        use std::{
+            sync::{Arc, atomic::AtomicU64},
+            time::Duration,
+        };
+
+        use crate::runtime::streaming::morsel_pool::{JobMorselOwner, MorselTestHooks};
+
+        let launches = Arc::new(AtomicU64::new(0));
+        let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
+        owner.set_worker_limit_for_test(2);
+        owner.set_hooks(MorselTestHooks {
+            after_run: Some(Arc::new(|lane| {
+                assert!(lane != 0, "abandoned numeric lane panic");
+            })),
+            ..MorselTestHooks::default()
+        });
+        let (_seed, requests, scratch) =
+            crate::operator::rolling::kernel::entity_parallel_tests::entity_parallel_test_pair();
+        let client = owner.client().unwrap();
+        let task_id = super::TaskId::new(11);
+        let mut group = super::NumericMorselGroup::new(
+            requests.into(),
+            scratch.accounted_bytes().unwrap(),
+            None,
+            &owner,
+            task_id,
+            "operator:rolling".into(),
+            &owner.hooks(),
+        );
+        while let Some(input) = group.pending.pop_front() {
+            let cost = input.cost;
+            let ticket = client
+                .submit_async(input, cost, |input, lease| Ok(input.execute(lease)))
+                .await
+                .unwrap();
+            group.cancellations.push_back(ticket.clone());
+            group.tickets.push_back(ticket);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while group.metrics.state.lock().remaining != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(group);
+        owner.close_and_drain().await.unwrap();
+        let failures = owner.drain_failures().await;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].task_id, task_id);
+        assert_eq!(failures[0].task_name, "operator:rolling");
+        assert!(matches!(
+            failures[0].error,
+            crate::CalcFlowError::TaskPanicked { task_id: 11, ref message }
+                if message == "abandoned numeric lane panic"
+        ));
+        assert!(owner.drain_failures().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn abandoned_partial_join_only_drains_unobserved_failures() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicU64, Ordering},
+            },
+            time::Duration,
+        };
+
+        use crate::runtime::streaming::morsel_pool::{JobMorselOwner, MorselTestHooks};
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let owner = JobMorselOwner::new(7, 2, Arc::new(AtomicU64::new(0)));
+        owner.set_worker_limit_for_test(2);
+        owner.set_hooks(MorselTestHooks {
+            before_run: Some({
+                let entered = entered.clone();
+                let release = release.clone();
+                Arc::new(move |lane| {
+                    if lane == 1 {
+                        entered.store(true, Ordering::SeqCst);
+                        while !release.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                    }
+                })
+            }),
+            after_run: Some(Arc::new(|lane| {
+                assert!(lane != 1, "abandoned partial lane panic");
+            })),
+            ..MorselTestHooks::default()
+        });
+        let (_seed, requests, scratch) =
+            crate::operator::rolling::kernel::entity_parallel_tests::entity_parallel_test_pair();
+        let client = owner.client().unwrap();
+        let task_id = super::TaskId::new(12);
+        let mut group = super::NumericMorselGroup::new(
+            requests.into(),
+            scratch.accounted_bytes().unwrap(),
+            None,
+            &owner,
+            task_id,
+            "operator:rolling".into(),
+            &owner.hooks(),
+        );
+        while let Some(input) = group.pending.pop_front() {
+            let cost = input.cost;
+            let ticket = client
+                .submit_async(input, cost, |input, lease| Ok(input.execute(lease)))
+                .await
+                .unwrap();
+            group.cancellations.push_back(ticket.clone());
+            group.tickets.push_back(ticket);
+        }
+        let first_ticket = group.cancellations[0].clone();
+        let mut join = Box::pin(group.join());
+        while !first_ticket.is_consumed() {
+            assert!(futures::poll!(&mut join).is_pending());
+            tokio::task::yield_now().await;
+        }
+        while !entered.load(Ordering::SeqCst) {
+            assert!(futures::poll!(&mut join).is_pending());
+            tokio::task::yield_now().await;
+        }
+        drop(join);
+        drop(group);
+        release.store(true, Ordering::SeqCst);
+        let failures = tokio::time::timeout(Duration::from_secs(2), async {
+            owner.close_and_drain().await.unwrap();
+            owner.drain_failures().await
+        })
+        .await
+        .expect("partial abandonment must settle within a bounded teardown");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].task_id, task_id);
+        assert!(matches!(
+            failures[0].error,
+            crate::CalcFlowError::TaskPanicked { task_id: 12, ref message }
+                if message == "abandoned partial lane panic"
+        ));
+        assert_eq!(owner.active_bytes(), 0);
+        assert!(owner.drain_failures().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn abandoned_partial_join_retains_consumed_lane_failure() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicU64, Ordering},
+            },
+            time::Duration,
+        };
+
+        use crate::runtime::streaming::morsel_pool::{JobMorselOwner, MorselTestHooks};
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let owner = JobMorselOwner::new(7, 2, Arc::new(AtomicU64::new(0)));
+        owner.set_worker_limit_for_test(2);
+        owner.set_hooks(MorselTestHooks {
+            before_run: Some({
+                let entered = entered.clone();
+                let release = release.clone();
+                Arc::new(move |lane| {
+                    if lane == 1 {
+                        entered.store(true, Ordering::SeqCst);
+                        while !release.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                    }
+                })
+            }),
+            after_run: Some(Arc::new(|lane| {
+                assert!(lane != 0, "abandoned first lane panic");
+            })),
+            ..MorselTestHooks::default()
+        });
+        let (_seed, requests, scratch) =
+            crate::operator::rolling::kernel::entity_parallel_tests::entity_parallel_test_pair();
+        let client = owner.client().unwrap();
+        let task_id = super::TaskId::new(13);
+        let mut group = super::NumericMorselGroup::new(
+            requests.into(),
+            scratch.accounted_bytes().unwrap(),
+            None,
+            &owner,
+            task_id,
+            "operator:rolling".into(),
+            &owner.hooks(),
+        );
+        while let Some(input) = group.pending.pop_front() {
+            let cost = input.cost;
+            let ticket = client
+                .submit_async(input, cost, |input, lease| Ok(input.execute(lease)))
+                .await
+                .unwrap();
+            group.cancellations.push_back(ticket.clone());
+            group.tickets.push_back(ticket);
+        }
+        let first_ticket = group.cancellations[0].clone();
+        let mut join = Box::pin(group.join());
+        while !first_ticket.is_consumed() {
+            assert!(futures::poll!(&mut join).is_pending());
+            tokio::task::yield_now().await;
+        }
+        drop(join);
+        drop(group);
+        release.store(true, Ordering::SeqCst);
+        let failures = tokio::time::timeout(Duration::from_secs(2), async {
+            owner.close_and_drain().await.unwrap();
+            owner.drain_failures().await
+        })
+        .await
+        .expect("consumed-lane abandonment must settle within a bounded teardown");
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].task_id, task_id);
+        assert!(matches!(
+            failures[0].error,
+            crate::CalcFlowError::TaskPanicked { task_id: 13, ref message }
+                if message == "abandoned first lane panic"
+        ));
+        assert_eq!(owner.active_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn merge_retains_unselected_lane_failures_as_secondary() {
+        use std::{
+            panic::{AssertUnwindSafe, catch_unwind},
+            sync::{Arc, atomic::AtomicU64},
+        };
+
+        use crate::runtime::streaming::morsel_pool::JobMorselOwner;
+
+        let owner = JobMorselOwner::new(7, 2, Arc::new(AtomicU64::new(0)));
+        owner.set_worker_limit_for_test(2);
+        owner.set_hooks(super::MorselTestHooks {
+            after_run: Some(Arc::new(|lane| {
+                panic!("abandoned merge lane {lane} panic");
+            })),
+            ..super::MorselTestHooks::default()
+        });
+        let (seed, requests, scratch) =
+            crate::operator::rolling::kernel::entity_parallel_tests::entity_parallel_test_pair();
+        let task_id = super::TaskId::new(14);
+        let mut exits = super::run_ordered_morsels(
+            &owner,
+            requests.into(),
+            scratch.accounted_bytes().unwrap(),
+            None,
+            task_id,
+            "operator:rolling".into(),
+        )
+        .await
+        .unwrap();
+        let merged = catch_unwind(AssertUnwindSafe(|| {
+            super::merge_numeric_results(seed, exits.as_mut_slice(), "7")
+        }));
+        assert!(merged.is_err());
+        drop(exits);
+        owner.close_and_drain().await.unwrap();
+        let failures = owner.drain_failures().await;
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].task_id, task_id);
+        assert_eq!(failures[0].task_name, "operator:rolling");
+        assert!(matches!(
+            failures[0].error,
+            crate::CalcFlowError::TaskPanicked { task_id: 14, ref message }
+                if message == "abandoned merge lane 1 panic"
+        ));
+        assert_eq!(owner.active_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn abandoned_error_cleanup_retains_consumed_and_pending_failures() {
+        use std::{
+            sync::{
+                Arc,
+                atomic::{AtomicBool, AtomicU64, Ordering},
+            },
+            time::Duration,
+        };
+
+        use crate::runtime::streaming::morsel_pool::{JobMorselOwner, MorselTestHooks};
+
+        let entered = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let owner = JobMorselOwner::new(7, 3, Arc::new(AtomicU64::new(0)));
+        owner.set_worker_limit_for_test(3);
+        owner.set_hooks(MorselTestHooks {
+            before_run: Some({
+                let entered = entered.clone();
+                let release = release.clone();
+                Arc::new(move |lane| {
+                    if lane == 2 {
+                        entered.store(true, Ordering::SeqCst);
+                        while !release.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                    }
+                })
+            }),
+            after_run: Some(Arc::new(|lane| {
+                assert!(lane != 2, "abandoned cleanup lane panic");
+            })),
+            ..MorselTestHooks::default()
+        });
+        let (_seed, requests, scratch) =
+            crate::operator::rolling::kernel::entity_parallel_tests::entity_parallel_test_work(3);
+        let client = owner.client().unwrap();
+        let task_id = super::TaskId::new(15);
+        let mut group = super::NumericMorselGroup::new(
+            requests,
+            scratch.accounted_bytes().unwrap(),
+            None,
+            &owner,
+            task_id,
+            "operator:rolling".into(),
+            &owner.hooks(),
+        );
+        while let Some(input) = group.pending.pop_front() {
+            let cost = input.cost;
+            #[cfg(test)]
+            let lane = input.lane;
+            let entered = entered.clone();
+            let ticket = client
+                .submit_async(input, cost, move |input, lease| {
+                    if lane == 0 {
+                        while !entered.load(Ordering::SeqCst) {
+                            std::thread::yield_now();
+                        }
+                        return Err(crate::CalcFlowError::Internal {
+                            message: "primary ticket failure".into(),
+                        });
+                    }
+                    Ok(input.execute(lease))
+                })
+                .await
+                .unwrap();
+            group.cancellations.push_back(ticket.clone());
+            group.tickets.push_back(ticket);
+        }
+        let second_ticket = group.cancellations[1].clone();
+        let mut join = Box::pin(group.join_next());
+        while !second_ticket.is_consumed() {
+            assert!(futures::poll!(&mut join).is_pending());
+            tokio::task::yield_now().await;
+        }
+        drop(join);
+        drop(group);
+        release.store(true, Ordering::SeqCst);
+        let failures = tokio::time::timeout(Duration::from_secs(2), async {
+            owner.close_and_drain().await.unwrap();
+            owner.drain_failures().await
+        })
+        .await
+        .expect("abandoned error cleanup must settle within a bounded teardown");
+        assert_eq!(failures.len(), 2);
+        assert!(matches!(
+            failures[0].error,
+            crate::CalcFlowError::Internal { ref message }
+                if message == "primary ticket failure"
+        ));
+        assert!(matches!(
+            failures[1].error,
+            crate::CalcFlowError::TaskPanicked { task_id: 15, ref message }
+                if message == "abandoned cleanup lane panic"
+        ));
+        assert!(failures.iter().all(|failure| failure.task_id == task_id));
+        assert_eq!(owner.active_bytes(), 0);
     }
 }

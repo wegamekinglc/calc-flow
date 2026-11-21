@@ -3,7 +3,8 @@
 Calc Flow is a Python calculation library for Arrow tables and stateful streams.
 The application API under `python/calc_flow/` exposes immutable expressions,
 `compute`/`compute_async`, SQL and `pipe` composition, reusable `Program`
-collection, owned async stream results, and integrations. The
+collection, owned async stream results, synchronous stream sessions, and
+integrations. The
 `calc-flow` crate is the internal runtime and owns immutable `Batch` values,
 graph compilation, DataFusion execution, projects, stores, checkpoints, and
 runners. PyO3 and Python lowering connect the API to that single table runtime. `calc-flow-connectors` delivers connector implementations behind
@@ -140,6 +141,11 @@ Ordinary feature work must not rewrite either team definition.
   values. Defensively copy before passing data to libraries that mutate.
 - Keep pure CPU-local transforms synchronous. Await file, stream, process, and
   network I/O; blocking convenience methods must reject a running event loop.
+  Calls on an existing `StreamSession` (`push`, `advance`, `finish`, `close`)
+  are synchronous caller-thread engine calls with no I/O or cross-thread waits
+  and may run inside an event loop. Session construction, including restore,
+  and `checkpoint()` follow the blocking rule and reject a running event loop;
+  checkpoint has no async alternative.
 - Do not add compatibility shims for the removed Python v1 implementation.
 
 For Markdown tables, align columns with pipes and pad separator rows so their
@@ -160,10 +166,20 @@ dashes span the full column width, including cell spaces.
   control-injection API. The crate-root public `StreamingRunner` consumes a
   `StreamExecutionPlan` and returns an owning `StreamingJob` with whole-job
   preflight, bounded source/operator/sink tasks, job-scoped event-time progress,
-  aligned epoch checkpoints, managed v3 manifest recovery for durable restart,
-  per-output delivery proof, and deterministic metrics. Control construction,
+  aligned epoch checkpoints, managed v4 manifest recovery for durable restart,
+  per-output delivery proof, and deterministic metrics. Admitted single-source
+  Rolling, Expression, and native array-sequence chains run inline in the source
+  task without checkpoint or restore, retaining logical task identities and
+  bounded sink backpressure; other graphs keep separate operator tasks. Control construction,
   task/coordinator/supervisor internals, and reaper ownership remain
-  crate-private. See `docs/runtime-envelope.md`.
+  crate-private. The crate-root `StreamSession` instead drives an admitted
+  plan (one dynamic input; rolling, expression, union, and native array-sequence
+  nodes) synchronously
+  on the caller's thread over session edges, with no tasks or queue
+  backpressure. `StreamSession::new` retains the in-memory behavior;
+  `new_with_checkpoints`, `restore`, and `checkpoint` add opt-in managed
+  durable snapshots using v4 manifests with `job_kind=session`. See
+  `docs/runtime-envelope.md`.
 - `Port` declares name, `BatchKind`, required flag, and optional exact Arrow
   schema.
 - `OperatorMetadata` owns shared graph metadata. `BatchOperator` and
@@ -191,9 +207,10 @@ dashes span the full column width, including cell spaces.
   `UdfRegistrySnapshot` is captured at compile time; configurations contain
   only `UdfReference` values.
 - `StateBackend` opens lineage-exclusive state sessions.
-  `LocalStateBackend` publishes immutable, checksum-verified segments, while
-  `CheckpointManifest` is the strict v3 state-manifest contract and the managed
-  continuous runtime's durable recovery truth.
+  `LocalStateBackend` publishes immutable, checksum-verified segments.
+  `CheckpointManifest` remains the strict v3 contract for direct legacy state
+  transactions; managed runners and durable sessions use strict v4 manifests
+  as their durable recovery truth.
 - The old v2 `Source`/`Sink`, `MicroBatchRunner`, formed-batch push runner, and
   public `FileCheckpointStore` are removed. `FileProjectStore` remains the
   bounded atomic project-document store.
@@ -218,7 +235,9 @@ selectors.
   Batch SQL supports multiple aliases; append stream SQL accepts one alias or
   the exact-schema multi-alias subset that appends rows without deduplication.
   Ordinary and grouped SQL aggregates emit a full cumulative snapshot after each
-  batch.
+  batch by default. Rust `SqlOperator::set_aggregate_output_mode` and Python
+  `changelog_sql` can instead select retract/upsert changes for a compact
+  single-alias stream aggregate; project-v3 calls this `aggregate_output`.
   Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
   state; unsupported aggregate shapes retain input and rerun over history.
   Other SQL runs per batch. SQL state has no fixed default cap;
@@ -241,12 +260,29 @@ selectors.
   or named `StreamOutput` events. Native state persists across batches, with
   bounded backpressure and awaited lifecycle cleanup. Event-time iterables default
   to validated nondecreasing arrival times and native watermarks at
-  `max_seen - 1 microsecond`. `watermarks` selects existing policies by logical
+  `max_seen - 1 microsecond`, published after every advancing batch (zero
+  emission interval). `watermarks` selects existing policies by logical
   input name; supplied `SourceBinding` policies cannot be overridden. Inputs
   without event time retain per-batch output, except SQL aggregates with
-  cumulative snapshots. Ordinary iterables have
-  no replay; temporary checkpoints do not provide durable restart or exactly-once
-  application delivery.
+  cumulative snapshots. `StreamRuntimeConfig.checkpointing=None` resolves to
+  off for convenience streams and on for `StreamingRunner`. Ordinary iterables
+  have no replay; opt-in temporary checkpoints do not provide durable restart or
+  exactly-once application delivery.
+- `python/calc_flow/session.py` implements `StreamSession` behind
+  `TableExpr.session` and `Program.session`. Each session compiles one native
+  plan with one dynamic input and maps watermark policies onto session
+  watermarks; synchronous caller-thread `push`, `advance`, and `finish` return
+  Arrow tables (programs: every declared output name), and `close` releases
+  state without flushing. `checkpoints=None` retains in-memory behavior and
+  ignores checkpoint configuration. Supplying the public
+  `ManagedCheckpointRuntime` wrapper, unwrapped at the native boundary, enables
+  durable v4 capture with effective `checkpointing=True`; `restore=True`
+  requires storage and selects the highest complete session epoch, and
+  `checkpoint() -> int` captures synchronously. Construction, restore, and
+  checkpoint reject a running event loop; ordinary session calls retain their
+  caller-thread contract. The PyO3 `_StreamSession` binding releases the global
+  interpreter lock (GIL) per call and raises `RuntimeError` for busy, closed,
+  finished, or failed sessions. See `docs/python-api.md`.
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the
   lifecycle at construction; legacy `engine="sql"|"streaming"` is an exclusive
   alias. Exactly one selector is required. Immutable `with_input` and `output`
@@ -292,14 +328,21 @@ selectors.
 
 ## Release invariants
 
-- Workspace crate and Python core versions move together as calendar versions
-  (`YYYY.M.D` release dates, for example `2026.9.22`). The binding's Rust
+- Workspace crate and Python distribution versions move together as calendar
+  versions (`YYYY.M.D` release dates, for example `2026.9.22`). The binding's Rust
   dependency is exact, and release tags are annotated
   `calc-flow-python-v<version>` at the current `main` head.
-- Core wheels contain only `calc_flow`, native module, metadata/SBOM, and
-  license.
-- Source distributions contain essential Rust/Python build sources but never
-  frozen `src/calc_flow`, fixtures, or guidance directories.
+- `calc-flow-python` is the portable default. `calc-flow-python-v3` is a separate,
+  explicitly installed, mutually exclusive distribution with the same version
+  and `calc_flow` import package; install exactly one in a clean environment.
+- Portable and v3 wheels contain only `calc_flow`, exactly one native module,
+  metadata/SBOM, and license, with no runtime native-module selector.
+- V3 wheels cover Linux, macOS, and Windows x86-64 with the same six Python tags
+  and two abi3 tiers as portable wheels. Only v3 jobs set
+  `target-cpu=x86-64-v3`; portable x86-64 and AArch64 builds remain unchanged.
+  No v3 source distribution is published.
+- Portable source distributions contain essential Rust/Python build sources but
+  never frozen `src/calc_flow`, fixtures, or guidance directories.
 - The published crate includes license/source/examples/benches and excludes
   repository-only integration tests.
 - Preserve pinned workflow actions, Maturin/Rust versions, audit policies, and
@@ -367,8 +410,9 @@ snapshot. Do not wait, watch, poll, or sleep/retry unless the user or acceptance
 criteria explicitly require the final CI result. Pending or absent CI can be
 reported in a completed handoff; it is not green or merge-ready. Report failed,
 cancelled, and inconclusive checks accurately. Required test, coverage, and
-cross-platform checks block merge when failed or unresolved. The Python package
-release requires its artifact verification and post-build unit tests to pass.
+cross-platform checks block merge when failed or unresolved. Each Python package
+distribution requires its artifact verification and respective installed-wheel
+unit tests or clean-install smoke to pass before publication.
 The final specialist review remains required; merging also requires explicit
 authority and green required checks.
 
@@ -379,8 +423,10 @@ git diff --exit-code -- schemas/project-v3.schema.json
 git diff --check
 ```
 
-The Python release workflow builds and verifies the core wheels and source
-distribution, tests installed Linux wheels across supported Python versions,
-and publishes only the core package on release tags. Benchmarks, soaks, audits,
-crate packaging, and documentation checks do not run in that workflow.
+The Python release workflow builds and verifies the portable core wheels and
+source distribution plus the separate v3 wheel matrix. It tests installed
+portable Linux wheels across supported Python versions, checks v3 numeric vector
+instructions and a clean v3 installation, and independently publishes the two
+distributions on release tags after their respective gates. Benchmarks, soaks,
+audits, crate packaging, and documentation checks do not run in that workflow.
 Select local release verification under the same scope and exception rules above.

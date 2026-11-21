@@ -157,23 +157,24 @@ fn assert_released_capture(gate: &CaptureGate) {
     assert_eq!(witness.pool.as_ref().unwrap().reserved(), 0);
 }
 
-async fn current_manifest(root: &Path) -> crate::CheckpointManifest {
-    let bytes = tokio::fs::read(root.join("manifests/manifest-00000000000000000001.json"))
+async fn current_manifest(root: &Path) -> crate::state::v4::V4Manifest {
+    let bytes = tokio::fs::read(root.join("manifests/lineage/manifests/epoch-1.json"))
         .await
         .unwrap();
-    let manifest = crate::CheckpointManifest::from_bytes(&bytes).unwrap();
-    let entry = &manifest.operators()[NODE];
-    assert_eq!(entry.inline_metadata["state_layout"], serde_json::json!(3));
-    assert_eq!(
-        entry.inline_metadata["state_accounting"],
-        serde_json::json!(3)
-    );
-    assert_eq!(entry.inline_metadata["rows"], serde_json::json!(2));
-    assert_eq!(entry.segments.len(), 4);
+    let manifest = crate::state::v4::V4Manifest::from_bytes(&bytes).unwrap();
+    let metadata = manifest.operators[NODE].opaque_metadata().unwrap().0;
+    assert_eq!(metadata["state_layout"], serde_json::json!(3));
+    assert_eq!(metadata["state_accounting"], serde_json::json!(3));
+    assert_eq!(metadata["rows"], serde_json::json!(2));
+    assert!(!manifest.operators[NODE].opaque_metadata().unwrap().1);
     manifest
 }
 
-async fn assert_current_restore(root: &Path, manifest: &crate::CheckpointManifest, source: &str) {
+async fn assert_current_restore(
+    root: &Path,
+    manifest: &crate::state::v4::V4Manifest,
+    source: &str,
+) {
     let captured = snapshot(root, manifest).await;
     let mut restored = sql().await;
     restored.restore(&captured).unwrap();
@@ -346,7 +347,7 @@ async fn assert_capture_result(
     if stop == Stop::None {
         assert_eq!(result.unwrap(), Epoch::INITIAL);
         let manifest = current_manifest(root).await;
-        assert!(!manifest.sources()["events"].ended);
+        assert!(!manifest.sources["events"].ended);
         assert_current_restore(root, &manifest, source).await;
         assert_eq!(counts[1].load(Ordering::SeqCst), 1);
     } else {
@@ -513,7 +514,7 @@ async fn successful_capture(source: &str, terminal: bool) {
     runner.shutdown().await.unwrap();
     assert_eq!(runner.registry_counts(), (0, 0));
     let manifest = current_manifest(directory.path()).await;
-    assert_eq!(manifest.sources()["events"].ended, terminal);
+    assert_eq!(manifest.sources["events"].ended, terminal);
     assert_current_restore(directory.path(), &manifest, source).await;
     assert_capture_output(
         &probe,

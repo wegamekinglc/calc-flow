@@ -1,0 +1,25 @@
+{
+  "schema": "calc-flow.checkpoint-v4-build-receipt.v1",
+  "runtime_revision": "7d0b4169",
+  "plan_revision": "7ec456e8",
+  "binary": "target/checkpoint-v4/checkpoint-v4-evidence",
+  "binary_sha256": "0d714b8b0ae057730d924905e80bd29a5f4d3e70aae1cda5e7f6778e29261e31",
+  "cargo_test_executable": "target/release/deps/calc_flow-743237e01bd8b2c0",
+  "command": "cargo test --release --locked -p calc-flow --lib --features benchmark-internals --no-run --message-format=json",
+  "compiler_log_sha256": "c3887a04a0b3695b2b3b86d544b2e810065258b890e845af4fc215f2682bf9be",
+  "attempts": [
+    {
+      "started_at": "2026-11-21T14:57:15+08:00",
+      "ended_at": "2026-11-21T15:17:15+08:00",
+      "wall_seconds": 1200,
+      "outcome": "tool timeout after dependency compilation and while compiling calc-flow; no executable was produced"
+    },
+    {
+      "started_at": "2026-11-21T15:17:46+08:00",
+      "ended_at": "2026-11-21T15:39:35+08:00",
+      "wall_seconds": 1309.23,
+      "outcome": "same incremental build continued without a timeout and produced the sealed executable"
+    }
+  ],
+  "notes": "Build timing is separate from the M1/M2 acquisition budgets. The timeout is not a performance verdict. JSON compiler messages from both attempts are appended in target/checkpoint-v4-build.jsonl."
+}

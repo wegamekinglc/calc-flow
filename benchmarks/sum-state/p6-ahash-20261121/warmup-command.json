@@ -1,0 +1,22 @@
+{
+  "argv": [
+    "/usr/bin/taskset",
+    "-c",
+    "0",
+    "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p6-ahash-build/candidate/grouped_sum_state_benchmark",
+    "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p6-ahash-measurement-7f61738b/fixture/stock.arrow",
+    "stream",
+    "1",
+    "1"
+  ],
+  "environment": {
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "POLARS_MAX_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "TOKIO_WORKER_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1"
+  }
+}

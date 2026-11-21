@@ -92,6 +92,14 @@ impl StreamMessage {
         }
     }
 
+    /// Takes the data payload, when this is a data message.
+    pub(crate) fn into_data(self) -> Option<Batch> {
+        match self.0 {
+            MessageKind::Data(batch) => Some(batch),
+            _ => None,
+        }
+    }
+
     /// Returns the watermark value, when this is a watermark message.
     pub const fn as_watermark(&self) -> Option<EventTime> {
         match &self.0 {

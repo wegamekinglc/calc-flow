@@ -22,6 +22,7 @@ use crate::{
             codec::{self, SequenceSpec, SequenceState},
         },
     },
+    operator::sync_operator::{Emitter, PrepareContext, SyncContext, SyncStreamOperator},
 };
 
 mod checkpoint;
@@ -106,7 +107,7 @@ fn ports(ports: &[Port], name: &str, field: &str) -> Result<()> {
     Ok(())
 }
 
-struct NativeStreamOperator {
+pub(crate) struct NativeStreamOperator {
     configured: Arc<options::Options>,
     workers: Arc<Workers>,
     pending: Pending,
@@ -117,6 +118,18 @@ struct NativeStreamOperator {
     inputs: Vec<Port>,
     outputs: Vec<Port>,
     options: JsonMap,
+}
+
+pub(crate) fn into_native_sequence(
+    operator: Box<dyn StreamOperator>,
+) -> std::result::Result<NativeStreamOperator, Box<dyn StreamOperator>> {
+    if Any::type_id(operator.as_ref()) != TypeId::of::<NativeStreamOperator>() {
+        return Err(operator);
+    }
+    let operator: Box<dyn Any> = operator;
+    Ok(*operator
+        .downcast::<NativeStreamOperator>()
+        .expect("intrinsic NativeArray operator identity was checked"))
 }
 
 struct Capture {
@@ -295,6 +308,89 @@ impl NativeStreamOperator {
             segment: restored.segment,
         });
         self.reset_pending = false;
+    }
+}
+
+#[async_trait]
+impl SyncStreamOperator for NativeStreamOperator {
+    async fn prepare(&mut self, context: &PrepareContext<'_>) -> Result<()> {
+        context.check_cancelled()
+    }
+
+    fn on_data(
+        &mut self,
+        ingress: usize,
+        batch: Batch,
+        context: &mut SyncContext<'_>,
+        output: &mut Emitter,
+    ) -> Result<()> {
+        if ingress != 0 {
+            return Err(invalid(
+                "inputs.input",
+                "requires exactly one dynamic ingress named input",
+            ));
+        }
+        let pending = self.pending.try_enter()?;
+        self.apply_reset();
+        let prepared = prepare(
+            &self.state,
+            &batch,
+            &self.configured,
+            self.captures.bytes(),
+            pending,
+            &mut || context.check_cancelled(),
+        )?;
+        context.check_cancelled()?;
+        output.emit(0, prepared.output)?;
+        if let Some(candidate) = prepared.candidate {
+            self.state = candidate;
+            self.capture = None;
+        }
+        Ok(())
+    }
+
+    fn on_watermark(
+        &mut self,
+        _watermark: EventTime,
+        context: &mut SyncContext<'_>,
+        _output: &mut Emitter,
+    ) -> Result<()> {
+        context.check_cancelled()
+    }
+
+    fn on_end(&mut self, context: &mut SyncContext<'_>, _output: &mut Emitter) -> Result<()> {
+        context.check_cancelled()
+    }
+
+    fn checkpoint(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
+        let pending = self.pending.try_enter()?;
+        self.apply_reset();
+        let current = self
+            .capture
+            .as_ref()
+            .is_some_and(|capture| capture.is_current(&self.state));
+        if !current {
+            let segment = self.captures.capture(
+                &self.configured.spec,
+                &self.state,
+                &self.configured.execution,
+                &mut || Ok(()),
+            )?;
+            self.capture = Some(Capture {
+                state: Arc::downgrade(&self.state),
+                segment,
+            });
+        }
+        drop(pending);
+        StreamOperator::checkpoint(self, epoch)
+    }
+
+    fn restore(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
+        StreamOperator::restore(self, snapshot)
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        StreamOperator::reset(self)
     }
 }
 

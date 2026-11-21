@@ -1,28 +1,38 @@
 #[cfg(test)]
 use super::AdmittedRow;
 #[cfg(test)]
+use super::CompiledJoin;
+use super::JoinTimeBounds;
+#[cfg(test)]
 use super::StoredRow;
 #[cfg(test)]
 use super::borrowed_key::KeyHashState;
 #[cfg(test)]
 use super::borrowed_key::framed_hash;
+#[cfg(test)]
 use super::columnar::FramedKey;
 #[cfg(test)]
 use super::key_arena::{ArenaLayout, visit_key_frames, visit_string_values};
 #[cfg(test)]
 use super::native_dictionary::BASE_BYTES;
-pub(super) use super::native_dictionary::{AppendCredit, NativeIndex, WindowBounds, WindowCursor};
-use super::{
-    AdmittedRows, CompiledJoin, JoinTimeBounds, MatchedPair, SidePlan, StreamJoinOperator,
-    enforce_match_limit,
-};
-use crate::{CalcFlowError, EventTime, Result};
+#[cfg(test)]
+pub(super) use super::native_dictionary::{AppendCredit, NativeIndex};
+#[cfg(test)]
+pub(super) use super::native_dictionary::{WindowBounds, WindowCursor};
+#[cfg(test)]
+use super::{AdmittedRows, MatchedPair, SidePlan, StreamJoinOperator, enforce_match_limit};
+use crate::EventTime;
+#[cfg(test)]
+use crate::{CalcFlowError, Result};
+#[cfg(test)]
 use datafusion::arrow::datatypes::{DataType, Schema};
+#[cfg(test)]
 use datafusion::execution::memory_pool::MemoryReservation;
 #[cfg(test)]
 use hashbrown::HashTable;
 #[cfg(test)]
 use std::hash::BuildHasher;
+#[cfg(test)]
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -36,6 +46,7 @@ mod window_probe_tests;
 #[cfg(test)]
 pub(super) use super::native_dictionary::{reset_window_run_searches, window_run_searches};
 
+#[cfg(test)]
 pub(super) fn eligible(compiled: &CompiledJoin, left: &Schema) -> bool {
     compiled
         .left_key_indices
@@ -43,6 +54,7 @@ pub(super) fn eligible(compiled: &CompiledJoin, left: &Schema) -> bool {
         .all(|&index| native_type(left.field(index).data_type()))
 }
 
+#[cfg(test)]
 fn native_type(data_type: &DataType) -> bool {
     matches!(
         data_type,
@@ -67,11 +79,13 @@ pub(super) struct NativeMatches {
     pub(super) _credit: MemoryReservation,
 }
 
+#[cfg(test)]
 pub(super) struct NativePairs {
     pub(super) pairs: crate::operator::join::matches::Selection,
     pub(super) credit: MemoryReservation,
 }
 
+#[cfg(test)]
 pub(super) struct NativeKeys {
     pub(super) keys: Vec<Option<Arc<FramedKey>>>,
     pub(super) frequencies: Vec<usize>,
@@ -96,6 +110,7 @@ pub(super) fn key_id_reads() -> usize {
     KEY_ID_READS.get()
 }
 
+#[cfg(test)]
 impl NativeKeys {
     pub(super) fn id(&self, position: usize) -> u32 {
         #[cfg(test)]
@@ -118,6 +133,7 @@ impl NativeKeys {
 }
 
 // Opposite IDs cannot outlive the immutable index used by both window passes.
+#[cfg(test)]
 struct ProbeWindows<'a> {
     index: &'a NativeIndex,
     ids: &'a [u32],
@@ -125,6 +141,7 @@ struct ProbeWindows<'a> {
     cursors: Vec<Option<WindowCursor>>,
 }
 
+#[cfg(test)]
 impl<'a> ProbeWindows<'a> {
     fn new(index: &'a NativeIndex, keys: &'a NativeKeys) -> Self {
         let mut slots = Vec::with_capacity(keys.keys.len());
@@ -425,15 +442,8 @@ pub(super) fn colliding_probe_keys(
     interner.finish(shared, "collision-test")
 }
 
+#[cfg(test)]
 impl StreamJoinOperator {
-    pub(super) fn optional_credit(&mut self, bytes: usize) -> Result<Option<MemoryReservation>> {
-        let credit = self
-            .runtime
-            .runtime()?
-            .incremental_reservation("stream-join-native");
-        super::key_dictionary::grant(&credit, bytes, &self.name)
-    }
-
     #[cfg(test)]
     pub(super) fn native_matches(
         &mut self,
@@ -717,6 +727,7 @@ pub(super) fn probe_key_charge(admitted: &dyn AdmittedRows, indices: &[usize]) -
     })
 }
 
+#[cfg(test)]
 pub(super) fn scratch_error(name: &str) -> CalcFlowError {
     CalcFlowError::DataFusion {
         node_id: Some(name.to_owned()),
@@ -726,12 +737,14 @@ pub(super) fn scratch_error(name: &str) -> CalcFlowError {
 
 // Window cursors (one per distinct probe key) plus the per-row window bounds
 // stored by the counting pass and reused by the fill pass.
+#[cfg(test)]
 fn window_scratch_charge(keys: usize, rows: usize) -> Option<usize> {
     keys.checked_mul(size_of::<Option<WindowCursor>>())?
         .checked_add(rows.checked_mul(size_of::<WindowBounds>())?)?
         .checked_add(64)
 }
 
+#[cfg(test)]
 fn count_pairs(
     windows: &mut ProbeWindows<'_>,
     admitted: &dyn AdmittedRows,

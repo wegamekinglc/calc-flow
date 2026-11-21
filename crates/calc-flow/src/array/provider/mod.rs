@@ -22,6 +22,7 @@ pub(crate) use stream::inventory::{
     NativeCheckpointRecord, NativeIoCompletion, NativeSequenceFailure, NativeSequenceInventory,
     is_native_sequence_operator,
 };
+pub(crate) use stream::{NativeStreamOperator, into_native_sequence};
 mod shape;
 mod table;
 pub use table::NativeTableArrayFactory;

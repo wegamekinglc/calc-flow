@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Generic, Literal, TypeVar, Union, cast, overload
 
 import pyarrow as pa
 from typing_extensions import Concatenate, ParamSpec, Unpack
@@ -58,7 +58,12 @@ if TYPE_CHECKING:
     from calc_flow.asof_join_spec import AsofStateLimits
     from calc_flow.compute import TableData
     from calc_flow.pipeline import Runtime
-    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
+    from calc_flow.runtime import (
+        ManagedCheckpointRuntime,
+        StreamRuntimeConfig,
+        WatermarkPolicy,
+    )
+    from calc_flow.session import StreamSession
     from calc_flow.stream import StreamInput, StreamResults
     from calc_flow.symbolic.asof import _AsofJoinOptions
     from calc_flow.symbolic.distinct import DistinctSpec
@@ -711,6 +716,12 @@ class TableExpr(Expr[object]):
 
         return sql(query, input=self)
 
+    def changelog_sql(self, query: str, /) -> TableExpr:
+        """Declare a compact stream aggregate with retract/upsert output."""
+        from calc_flow.symbolic.sql import changelog_sql
+
+        return changelog_sql(query, input=self)
+
     def stream_asof_join(
         self,
         right: TableExpr,
@@ -749,6 +760,42 @@ class TableExpr(Expr[object]):
         from calc_flow.stream import _stream_table
 
         return _stream_table(self, inputs, runtime, config, watermarks)
+
+    def session(
+        self,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        checkpoints: ManagedCheckpointRuntime | None = None,
+        restore: bool = False,
+    ) -> StreamSession[pa.Table]:
+        """Compile once into a synchronous push session returning ``pa.Table``.
+
+        Construction compiles and rejects a running event loop; calls on the
+        session may run inside one. A declared event-time input defaults to
+        ordered watermarks (``max(event_time) - 1 µs`` after each push);
+        ``SourceProvidedWatermarks`` advances only through ``watermark=``,
+        ``BoundedOutOfOrderness`` ignores ``emit_interval``, and idle timeouts
+        must be ``None``. Static parameters and native array inputs are
+        rejected; ``config`` checkpoint fields are ignored.
+        """
+        from calc_flow.session import _open_session
+        from calc_flow.symbolic.program import Program
+
+        program = Program("session", engine="streaming", outputs={"result": self})
+        return cast(
+            "StreamSession[pa.Table]",
+            _open_session(
+                program,
+                runtime,
+                config,
+                watermarks,
+                table_output=True,
+                checkpoints=checkpoints,
+                restore=restore,
+            ),
+        )
 
     def collect(
         self,

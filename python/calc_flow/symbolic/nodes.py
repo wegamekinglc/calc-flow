@@ -348,7 +348,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "bounded_order": PrimitiveSpec(frozenset({"by", "fetch", "spec"}), CMap(())),
     "distinct": PrimitiveSpec(frozenset({"columns", "spec"}), CMap(())),
     "union_all": PrimitiveSpec(frozenset(), CMap(())),
-    "sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
+    "sql": PrimitiveSpec(frozenset({"query", "aliases", "aggregate_output"}), CMap(())),
     "snapshot_sql": PrimitiveSpec(frozenset({"query", "aliases"}), CMap(())),
     "late_output": PrimitiveSpec(
         frozenset({"allowed_lateness_micros", "schema_version", "metrics_version"}),

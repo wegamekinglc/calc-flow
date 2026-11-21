@@ -24,11 +24,11 @@ use crate::{
     RollingOperator, RollingSpec, SecretHandle, SecretReference, SecretResolver,
     SecretResolverKind, SinkBinding as RuntimeSinkBinding, SinkRecovery, SnapshotSqlOperator,
     SourceBinding as RuntimeSourceBinding, SourceCapabilities, SourceEvent, SourceSchema,
-    SqlOperator, StaticInputSpec, StreamAsofJoinSpec, StreamExecutionPlan, StreamJoinOperator,
-    StreamJoinSpec, StreamRequirements, StreamSink, StreamSource, TransactionSupport,
-    TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot, UnionOperator,
-    WatermarkPolicy, WindowAggregateOperator, WindowSpec, validate_delivery_guarantee,
-    validate_selected_udfs,
+    SqlAggregateOutputMode, SqlOperator, StaticInputSpec, StreamAsofJoinSpec, StreamExecutionPlan,
+    StreamJoinOperator, StreamJoinSpec, StreamRequirements, StreamSink, StreamSource,
+    TransactionSupport, TransactionalStreamSink, UdfKind, UdfReference, UdfRegistrySnapshot,
+    UnionOperator, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
+    validate_delivery_guarantee, validate_selected_udfs,
 };
 
 pub const PROJECT_FORMAT_VERSION: u32 = 3;
@@ -189,6 +189,8 @@ pub enum OperatorSpec {
         aliases: Vec<String>,
         #[serde(default)]
         udfs: Vec<UdfReference>,
+        #[serde(default, skip_serializing_if = "SqlAggregateOutputMode::is_snapshot")]
+        aggregate_output: SqlAggregateOutputMode,
     },
     /// Complete-relation replacement SQL for stream graphs.
     SnapshotSql {
@@ -1444,7 +1446,16 @@ fn project_node_operator(
             query,
             aliases,
             udfs: references,
-        } => sql_node(node, inputs, outputs, query, aliases, references),
+            aggregate_output,
+        } => sql_node(
+            node,
+            inputs,
+            outputs,
+            query,
+            aliases,
+            references,
+            *aggregate_output,
+        ),
         OperatorSpec::SnapshotSql {
             query,
             aliases,
@@ -1731,13 +1742,15 @@ fn sql_node(
     query: &str,
     aliases: &[String],
     references: &[UdfReference],
+    aggregate_output: SqlAggregateOutputMode,
 ) -> Result<NodeOperator> {
     let expected = aliases.iter().map(String::as_str).collect::<Vec<_>>();
     let (inputs, outputs) =
         builtin_ports(inputs, outputs, &expected, &["output"], BatchKind::Table)?;
+    let mut operator = SqlOperator::new(&node.id, query, aliases.to_vec(), references.to_vec())?;
+    operator.set_aggregate_output_mode(aggregate_output)?;
     Ok(NodeOperator::Sql(
-        SqlOperator::new(&node.id, query, aliases.to_vec(), references.to_vec())?
-            .with_ports(inputs, outputs.into_iter().next().unwrap())?,
+        operator.with_ports(inputs, outputs.into_iter().next().unwrap())?,
     ))
 }
 
@@ -2290,6 +2303,7 @@ fn validate_operator(
             query,
             aliases,
             udfs: references,
+            ..
         } => validate_sql_operator(query, aliases, references, &base, udfs, issues),
         OperatorSpec::SnapshotSql {
             query,

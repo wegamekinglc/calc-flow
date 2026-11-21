@@ -94,7 +94,7 @@ class RunExamplesTests(unittest.TestCase):
         stems = [Path(path).stem for path in run_examples.PYTHON_EXAMPLES]
         self.assertEqual(
             [stem.split("_", 1)[0] for stem in stems],
-            [f"{number:02d}" for number in range(1, 37)],
+            [f"{number:02d}" for number in range(1, 38)],
         )
         rust_names = {
             command[command.index("--example") + 1]
