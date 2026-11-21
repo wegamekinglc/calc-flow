@@ -359,7 +359,10 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   第二轮 G1 5.561 µs、G2 23.708 ns、G3 484.409 µs，主要用例均 inconclusive，G1 还略慢；
   small-run 回退消除了 tick 回退但无实质加速。证据见 `benchmarks/rolling-kernel-v2/p2-run-finite-result.*`
   和 `p2-run-finite-build.json`。按停止规则撤回整个 run-tier，不保留无效复杂度，下一步评估专用 dual-SMA
-  状态机与原语级输出路径。
+  状态机与原语级输出路径。专用 dual-SMA（`f52f0157`）也未达标：G1 5.554 µs、G2 28.781 ns、G3 522.565 µs，
+  6400x64 两臂均 slower，10 轮采集 2.866 秒且 digest 一致。证据见 `benchmarks/rolling-kernel-v2/p2-dual-sma-result.*`
+  和 `p2-dual-sma-build.json`。本机没有 perf、samply 或 valgrind，不能据此伪造函数级热点；撤回该实现，
+  下一阶段先解决已复现的高重复 BandJoin 内存失控，避免继续无效 rolling 实验。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
