@@ -1,6 +1,6 @@
 # Streaming core rearchitecture — closing review
 
-Status: **code re-review found no new blocking findings; Join performance gates failed and GitHub CI is pending**. This is not an approval or a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
+Status: **final specialist review passed; Join performance gates failed and GitHub CI is pending**. This is not a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
 
 ## Review history
 
@@ -66,6 +66,8 @@ The targeted checkpoint tests passed. The independent native Join ack regression
 ## Final specialist re-review
 
 The original reviewer inspected `6a2abc08` and found no new production blockers. Its initial zero-match fixture finding was withdrawn after checking the actual one-row right input, join time bounds and the recorded passing test. Final verdict: **no new blocking findings in production code or tests**. This source review does not establish performance or CI success.
+
+A subsequent focused review of `0e9ed0b8`, `0e2bf509`, `32fe3c11` and `fd62fc27` also returned **no new blocking findings**. It confirmed the durable source-ack contract, ASOF/Rolling/Join layout alignment, typed Rolling error projection and the diagnostic attribution limits. Code review passes; new GitHub checks and the absolute performance gates remain independent acceptance requirements.
 
 A separate documentation check caught an attempted release-rule exception introduced while addressing Codacy wording. The guidance now says release inspection rejects frozen `src/calc_flow`, fixtures and guidance directories, matching the existing inspector without an exception.
 
