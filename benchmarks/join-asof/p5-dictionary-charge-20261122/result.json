@@ -1,0 +1,361 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "status": "completed_thresholds_failed",
+  "build": {
+    "revision": "e860894e2330a0b461e9adb0da1c2e6fea685d1f",
+    "tree": "b6020ee8b313f56161f6628d7ed76e285abb96da",
+    "source_status_at_build_and_measurement": "clean",
+    "build_elapsed_seconds": 635.41,
+    "command": "maturin build --release --locked --manifest-path crates/calc-flow-python/Cargo.toml"
+  },
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-22T03:12:50+08:00",
+    "baseline": {
+      "kind": "previous_sealed_candidates",
+      "static_revision": "f327a88672b9b5e5cf031342af8ec5d12548b5a9",
+      "interval_revision": "6a2abc0876e20a8fb1883555b85bd5652b17b506",
+      "join_p50_ms": 518.78664,
+      "interval_p50_ms": 2058.2412295,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "e860894e2330a0b461e9adb0da1c2e6fea685d1f",
+      "tree": "b6020ee8b313f56161f6628d7ed76e285abb96da",
+      "required_tracked_source_clean_before_build": true,
+      "build_budget": "separate from the 600-second acquisition budget",
+      "change": "Dictionary-pack only non-null single-UTF8 hot keys in first-occurrence order before calling the same production KeyStore; preserve null, empty, non-UTF8 and mixed-retention fallbacks."
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "static Join then interval; both share the modified charge path",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "external_backstop": "timeout --signal=TERM --kill-after=30s 570s; normal completion writes the report, and forced termination is an inconclusive failed acquisition",
+      "state_root_policy": "new empty root for every warmup and measured observation",
+      "no_retries_or_case_expansion": true
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "Measure dictionary-packed charge on the static hot path after the transient admission fix; static baseline is the measured 518.78664 ms candidate.",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 518.78664
+      },
+      {
+        "id": "interval-1m-single-cpu",
+        "scenario": "interval_join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "Measure the same charge change on the interval hot path; interval baseline is the measured 2058.2412295 ms candidate.",
+        "threshold_p50_ms": 350,
+        "baseline_p50_ms": 2058.2412295
+      }
+    ],
+    "unmeasured": "No paired significance claim, multi-batch throughput, other row counts/types/modes, partitioned execution, or remaining acceptance matrix. Group identity equivalence is covered by direct full-routing comparisons and the 18-test hot group."
+  },
+  "candidate": {
+    "wheel": "target/p5-dictionary-charge-wheel-e860894e/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "2a73dfa2c95737b501882282656d090d1ccd491ad43bd91b13e35bee5d796f2e",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-dictionary-charge-venv-e860894e/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "a3b56d0b0dee66f3a91679634d8b853f480467b5296c5a39319d21662e40d267",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "taskset -c 0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Measure dictionary-packed charge on the static hot path after the transient admission fix; static baseline is the measured 518.78664 ms candidate.",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 518.78664,
+      "samples": [
+        {
+          "seconds": 0.495007908,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.499102215,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.49946218,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.505941582,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.497537955,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.494093898,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.490672859,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.491663013,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.495540194,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.502705362,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 496.5390745,
+      "p95_ms": 504.4852829999999,
+      "threshold_pass": false,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Measure the same charge change on the interval hot path; interval baseline is the measured 2058.2412295 ms candidate.",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 2058.2412295,
+      "samples": [
+        {
+          "seconds": 1.863608653,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.60254363,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.624247796,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.587114979,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.610526388,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.587024031,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.599416034,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.627040037,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.722501207,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 1.690949859,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 1617.387092,
+      "p95_ms": 1800.1103023,
+      "threshold_pass": false,
+      "output_rows": 10998080,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 48.37163644999964,
+  "within_budget": true,
+  "error": null
+}

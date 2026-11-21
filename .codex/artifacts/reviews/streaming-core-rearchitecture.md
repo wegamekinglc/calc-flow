@@ -1,6 +1,6 @@
 # Streaming core rearchitecture — closing review
 
-Status: **final specialist review passed; Join performance gates failed and GitHub CI is pending**. This is not a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
+Status: **CI repair review passed; Join performance gates failed; candidate review and GitHub CI are pending**. This is not a merge-ready claim. The overall P0–P7 architecture and absolute performance plan remains incomplete.
 
 ## Review history
 
@@ -85,6 +85,12 @@ One diagnostic observation per scenario used a sealed `benchmark-internals` whee
 
 Evidence: `benchmarks/join-asof/p5-review-fixes-20261122/diagnosis.json`.
 
+## Measured candidate outcomes and stop decision
+
+- The transient-admission candidate `f327a886` reduced static Join P50 from 619.785 to **518.787 ms**, still above the 30 ms gate. Its sealed build took 714.230 seconds and acquisition took 10.362 seconds. All ten output oracles passed. Evidence: `benchmarks/join-asof/p5-static-transient-20261122/result.json`.
+- The dictionary-charge candidate `e860894e` reduced static P50 to **496.539 ms** (−4.29% against the transient candidate) and interval P50 to **1,617.387 ms** (−21.42% against the earlier review candidate). Both absolute gates still fail. The separate build took 635.410 seconds and both acquisitions took 48.372 seconds. All 20 output oracles passed. Direct full-routing comparisons and 18 hot tests passed. Evidence: `benchmarks/join-asof/p5-dictionary-charge-20261122/result.json`.
+- These are real but insufficient improvements. No further charge tuning is planned. The narrow transient and dictionary changes are retained only with their equivalence and lifecycle tests, not as a gate recovery or merge-ready performance result.
+
 ## CI-driven follow-up
 
 - The final two Codacy findings were reduced without behavior changes; the Arroyo summary regenerated all eight historical entries identically and the NumPy binding suite passed 37 tests.
@@ -92,6 +98,7 @@ Evidence: `benchmarks/join-asof/p5-review-fixes-20261122/diagnosis.json`.
 - ASOF analysis and its tests now use the native layout 11 contract. Rolling layout 7 is covered by the real `ROLLING_STATE_TABLE_LAYOUT_VERSION` implementation. The related 215 Python tests passed, including the v4 native Join manifest assertions and all nine native-table indicator tests.
 - The typed Rolling batch path now projects invalid input data as an operator error with node context instead of a raw `ConfigError`. An ineffective TableOperator alternative was removed rather than retained.
 - M5 fault expectations now distinguish `CompletedCommit`, which precedes required durable source acknowledgement and therefore cannot return success, from Retention/Compaction maintenance failures after acknowledgement. All four CompletedCommit modes passed. This updates the outdated test contract rather than weakening the documented acknowledgement guarantee.
+- Source-history integration fixtures now serialize v4 `owner`/`epoch`/`object_id` handles instead of the legacy `operator_id` representation; all four source-history tests passed.
 - Full all-feature Clippy, Rust formatting, complexity ratchet, full Ruff lint, spec references, schema drift and full-PR whitespace checks passed after these changes.
 
 ## Open verification and acceptance
