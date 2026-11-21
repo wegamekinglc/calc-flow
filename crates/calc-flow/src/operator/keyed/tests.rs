@@ -1,7 +1,7 @@
 use super::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
 use crate::{CalcFlowError, DataFusionConfig, DataFusionRuntime};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, StringArray},
+    array::{Array, ArrayRef},
     datatypes::{DataType, Field, FieldRef, TimeUnit},
     record_batch::RecordBatch,
 };
@@ -333,7 +333,7 @@ fn test_keyed_layout_fingerprint_is_deterministic_and_schema_exact() {
 fn test_keyed_rejects_wrong_input_type_without_mutation() {
     let runtime = runtime();
     let mut store = store(&runtime, vec![field(DataType::Int64)]);
-    let wrong: ArrayRef = Arc::new(StringArray::from(vec!["1"]));
+    let wrong: ArrayRef = Arc::new(datafusion::arrow::array::StringArray::from(vec!["1"]));
     let result = store.route(&[wrong], &mut || Ok(()));
     assert!(result.is_err());
     assert_eq!(store.len(), 0);
@@ -384,23 +384,4 @@ fn test_keyed_restore_preserves_group_ids_and_rolls_back_duplicates() {
     assert!(rejected.restore(&duplicated).is_err());
     assert_eq!(rejected.len(), 0);
     assert_eq!(rejected.reserved_bytes(), 0);
-}
-
-#[test]
-fn test_short_string_routing_skips_repeated_cancellation_accounting() {
-    let runtime = runtime();
-    let mut store = store(&runtime, vec![field(DataType::Utf8)]);
-    let array: ArrayRef = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
-        "S00000000000000000000000000000000",
-        MORSEL_ROWS,
-    )));
-    let mut checks = 0;
-    let groups = store
-        .route(&[array], &mut || {
-            checks += 1;
-            Ok(())
-        })
-        .unwrap();
-    assert!(groups.iter().all(|group| group.index() == 0));
-    assert_eq!(checks, 1);
 }

@@ -392,6 +392,19 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   两轮中位数 +1.249%/+1.163%，区间均未跨门槛，pooled +1.165%，**通过**。两例各完成 2 轮×10 对×每臂 30 次
   dispatch，完整 oracle/digest 通过，采集 0.227/1.086 秒。原始样本、报告与 build receipt 均保存在
   `benchmarks/checkpoint-v4/`。M3/M4 持续 runner 测量尚未实现，P3 不能据此宣告全部完成。
+- 2026-11-21 短字符串 keyed route 候选 `bb788f0c` 未证明独立净收益，按停止规则撤回。对不超过 64 KiB 的 UTF-8 直接
+  hash/copy/compare 可让 32 字节×4,096 行回归的取消检查从 5 次降为 1 次，keyed 10 项及全 feature Clippy 通过；
+  但微观的回调计数不是端到端收益。与原基线 `2ac1af5f` 的组合测量得到 stock 单核 **143.281 ms**（−35.96%）、
+  八逻辑核 **101.928 ms**（−34.41%）、sparse **15.672 ms**（−32.27%），三项 improved、finite inconclusive；
+  这些数字包含此前 SUM 状态数组的收益，不能单独归因于短字符串路径。随后复用上一数组版 `e205b0bf` 的密封二进制
+  （SHA-256 `d905f4f0…cfa8925bae`，归档源码 seals 完全一致）做直接 A/B：stock 单核 156.966 → 149.728 ms
+  （−4.61%，no-confirmed-regression），八逻辑核 109.438 → 105.218 ms（−3.86%，no-confirmed-regression），
+  sparse 14.169 → 15.153 ms（+6.95%，inconclusive），finite 65.714 → 70.239 ms（+6.88%，inconclusive）。
+  直接比较没有任何 improved，故不把绝对中位数下降称为已证实升级，也不追加样本。两轮采集各完成 160 个正式观测，
+  全部 snapshot/lifecycle oracle 通过，合计 256.864 秒；候选 release 构建 836.029 秒另计。撤回仅针对短字符串
+  hash/canonical/equality 快路径及其专用回调计数测试，保留独立的 benchmark feature 编译边界修正。
+  原始两轮证据见 `benchmarks/sum-state/p6-short-string-route-20261121/`。下一阶段转向 window COUNT/MIN/MAX
+  pane 的真实对照，不继续微调同一取消检查路径。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
