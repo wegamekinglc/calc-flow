@@ -1192,6 +1192,13 @@ impl WindowAggregateOperator {
         })
     }
 
+    /// Selects pane or legacy execution for a freshly constructed benchmark operator.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "benchmark-internals"))]
+    pub fn set_pane_execution_for_benchmark(&mut self, enabled: bool) {
+        self.state.panes = enabled.then(panes::PaneState::default);
+    }
+
     /// The row-major reference path remains for aggregates whose dynamic
     /// bytes change per row (string min/max); tests can force it directly.
     fn use_rowwise_kernel(&self) -> bool {

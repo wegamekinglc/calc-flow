@@ -1,0 +1,45 @@
+{
+  "schema": "calc-flow.window-pane-performance-plan.v1",
+  "created_at": "2026-11-21",
+  "baseline": {
+    "implementation": "legacy per-window COUNT/MIN/MAX updates, selected only for the benchmark on a fresh operator",
+    "selector": "set_pane_execution_for_benchmark(false)"
+  },
+  "candidate": {
+    "implementation": "existing pane preaggregation and ordered merge, selected only for the benchmark on a fresh operator",
+    "selector": "set_pane_execution_for_benchmark(true)"
+  },
+  "execution": {
+    "binary": "one sealed release example containing both paths; no cross-binary comparison",
+    "example": "window_pane_benchmark",
+    "feature": "benchmark-internals",
+    "rounds": 2,
+    "ab_ba_pairs_per_round": 10,
+    "warmups_per_arm_per_round": 1,
+    "comparison": "interleaved AB/BA with maintained paired statistics",
+    "correctness": "independent COUNT/MIN/MAX value oracle and complete digest on every observation; checkpoint/restore on every warmup; matching digests across arms",
+    "total_budget_seconds": 600,
+    "builds_timed_separately": true,
+    "no_retries_or_case_expansion": true,
+    "retention_rule": "keep the existing pane path only if its actual direct benefit is established; otherwise withdraw it rather than retain unproven complexity"
+  },
+  "cases": [
+    {
+      "id": "integer-4-hopping-100-10",
+      "rows": 100000,
+      "groups": 4,
+      "window_micros": 100,
+      "slide_micros": 10,
+      "connection": "high-overlap panes reduce 100 legacy window assignments to one pane update per row"
+    },
+    {
+      "id": "integer-8192-hopping-100-10",
+      "rows": 100000,
+      "groups": 8192,
+      "window_micros": 100,
+      "slide_micros": 10,
+      "connection": "same algorithmic change with large retained keys and 81920 output rows"
+    }
+  ],
+  "unmeasured": "SUM/AVG panes remain blocked by the exact numerical contract; string/composite keys, partitioned dispatch, other window geometries and full runner orchestration are outside this focused comparison"
+}

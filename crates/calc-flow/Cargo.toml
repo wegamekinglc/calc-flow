@@ -120,3 +120,7 @@ required-features = ["benchmark-internals"]
 
 [[example]]
 name = "auto_rows_probe"
+
+[[example]]
+name = "window_pane_benchmark"
+required-features = ["benchmark-internals"]

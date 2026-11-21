@@ -149,6 +149,17 @@ fn pane_count_merge_checks_u64_overflow() {
     assert!(matches!(target, AccumulatorValue::Count(u64::MAX)));
 }
 
+#[test]
+fn benchmark_override_selects_legacy_or_pane_state() {
+    let (schema, _) = input(&[], &[], &[]);
+    let mut operator =
+        WindowAggregateOperator::new("window", schema, hopping_spec(100, 10)).unwrap();
+    operator.set_pane_execution_for_benchmark(false);
+    assert!(operator.state.panes.is_none());
+    operator.set_pane_execution_for_benchmark(true);
+    assert!(operator.state.panes.is_some());
+}
+
 #[tokio::test]
 async fn hopping_panes_preaggregate_and_merge_exact_extremes_in_window_order() {
     let (schema, batch) = input(
