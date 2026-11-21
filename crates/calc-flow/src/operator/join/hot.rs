@@ -768,6 +768,41 @@ mod tests {
         StreamOperatorContext::new(job, "hot", None)
     }
 
+    struct NoopLateMetrics;
+
+    impl crate::operator::LateMetricSink for NoopLateMetrics {
+        fn record(&self, _delta: crate::operator::LateMetricDelta) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn hot_ended_context(job: &StreamJobContext) -> StreamOperatorContext<'_> {
+        let progress = crate::IngressProgressSnapshot::new(BTreeMap::from([
+            (
+                "left".into(),
+                crate::IngressProgress::new(
+                    crate::IngressState::Ended,
+                    Some(crate::EventTime::from_micros(0)),
+                ),
+            ),
+            (
+                "right".into(),
+                crate::IngressProgress::new(
+                    crate::IngressState::Ended,
+                    Some(crate::EventTime::from_micros(0)),
+                ),
+            ),
+        ]));
+        StreamOperatorContext::for_task(
+            job,
+            "hot",
+            None,
+            progress,
+            crate::EdgeBudget::default(),
+            Arc::new(NoopLateMetrics),
+        )
+    }
+
     async fn native_snapshot(operator: &mut StreamJoinOperator) -> crate::OperatorStateSnapshot {
         let name = operator.name.clone();
         let capture = operator
@@ -1028,6 +1063,126 @@ mod tests {
             assert_eq!(restored.state.metrics.emitted_match_rows, 2);
             assert_eq!(restored.state.next_left_row_id, 2);
         }
+    }
+
+    fn large_static_inputs(rows: usize, dimensions: usize) -> (RecordBatch, RecordBatch) {
+        let symbols = (0..rows)
+            .map(|row| format!("S{:03}", row % dimensions))
+            .collect::<Vec<_>>();
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(0, rows))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(StringArray::from_iter_values(
+                    symbols.iter().map(String::as_str),
+                )),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, rows,
+                ))),
+            ],
+        )
+        .unwrap();
+        let right = RecordBatch::try_new(
+            dimension_schema(),
+            vec![
+                Arc::new(StringArray::from_iter_values(
+                    symbols[..dimensions].iter().map(String::as_str),
+                )),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, dimensions,
+                ))),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..dimensions).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(0, dimensions))
+                        .with_timezone("UTC"),
+                ),
+            ],
+        )
+        .unwrap();
+        (left, right)
+    }
+
+    #[tokio::test]
+    async fn hot_multi_native_checkpoint_accepts_large_static_history() {
+        let rows = 1_000_000usize;
+        let dimensions = 64usize;
+        let capacity = u64::try_from(dimensions + rows).unwrap();
+        let spec = StreamJoinSpec::inner(
+            ["symbol"],
+            ["symbol"],
+            "event_time",
+            "event_time",
+            JoinTimeBounds::new(Duration::from_secs(300), Duration::ZERO).unwrap(),
+            JoinStateLimits::new(capacity, 1 << 30, capacity).unwrap(),
+        )
+        .unwrap()
+        .with_prefixes("quote", "dimension")
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec).unwrap();
+        operator
+            .set_hot_projection(
+                HotProjection::Equi {
+                    sequence: 1,
+                    left_price: 3,
+                    right_price: 5,
+                },
+                Arc::new(Schema::new(vec![
+                    Field::new("sequence", DataType::UInt64, false),
+                    Field::new("value", DataType::Float64, false),
+                ])),
+            )
+            .unwrap();
+        operator.enable_native_checkpoint().unwrap();
+        let (left, right) = large_static_inputs(rows, dimensions);
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = hot_context(&job);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, record) in [("left", left), ("right", right)] {
+            operator
+                .process_data(
+                    side,
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            collector
+                .drain("output")
+                .iter()
+                .map(|message| message.as_data().unwrap().num_rows())
+                .sum::<usize>(),
+            rows
+        );
+        let ended = hot_ended_context(&job);
+        for side in ["left", "right"] {
+            operator.on_ingress_progress(side, &ended).await.unwrap();
+        }
+        operator.on_end(&ended, &mut collector).await.unwrap();
+        assert!(operator.state.ended);
+        drop(native_snapshot(&mut operator).await);
+        let core = operator.run_core.as_ref().unwrap();
+        assert_eq!(core.rows(JoinSide::Left), 0);
+        assert_eq!(core.rows(JoinSide::Right), 0);
+        assert_eq!(operator.state.metrics.left.retained_rows, 0);
+        assert_eq!(operator.state.metrics.right.retained_rows, 0);
     }
 
     #[tokio::test]

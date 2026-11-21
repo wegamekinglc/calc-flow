@@ -371,6 +371,13 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   原始协议和全部观测见 `benchmarks/join-asof/p5-band-match-limit-20261121/`。这些是 debug 测试进程分配计数而非 RSS，
   也没有测量已撤回的 eager-collect 对照，因此不宣称内存倍数、时延或吞吐提升；静态 Join/interval 的 17.047/282.396 ms
   既有门槛结论保持不变。多批热路径输入、durable 热路径恢复与 ASOF 性能仍未完成。
+- 2026-11-21 P5 多批 hot Join 候选 `bf26a02f` 已实现同侧/完成后续批、pending-side 与静态/BandJoin native 恢复，
+  覆盖 fused/non-fused 输出，并补齐静态 match cap；Join 598 项及全 feature Clippy 通过。首个密封 wheel（source `1bd49dba`）
+  构建 646.275 秒，但静态 Join 首个 warmup 在输出完整 1,000,000 行后的 EOF/checkpoint 阶段报 operator execution failed，
+  **0 个有效性能样本**，interval 未开始，原始错误与 build receipt 见 `benchmarks/join-asof/p5-hot-multi-recovery-20261121/bf26a02f-*`。
+  聚焦百万行回归进一步证明 terminal capture 会无谓重建并保留 1,000,000 行历史；新增“双源结束后不得重建历史”断言先以
+  `left=1000000/right=0` 失败，随后让 terminal capture 直接释放 hot 历史，非 terminal 恢复仍走原子迁移。修复后该回归及 Join
+  **599 项**及全 feature Clippy 通过；新 release wheel 验收另行记录，当前不把首次失败改写为性能结论。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；

@@ -196,7 +196,18 @@ impl RunCore {
         operator: &mut StreamJoinOperator,
         epoch: crate::Epoch,
     ) -> Result<Option<NativeCapture>> {
-        self.migrate_hot(operator)?;
+        let terminal = operator.state.ended
+            || ["left", "right"].into_iter().all(|ingress| {
+                operator
+                    .ingress_progress
+                    .get(ingress)
+                    .is_some_and(|progress| progress.state() == crate::IngressState::Ended)
+            });
+        if terminal {
+            self.hot = None;
+        } else {
+            self.migrate_hot(operator)?;
+        }
         let mut metrics = operator.state.metrics.clone();
         for side in [JoinSide::Left, JoinSide::Right] {
             let rows = u64::try_from(self.state.rows(side)).unwrap_or(u64::MAX);
