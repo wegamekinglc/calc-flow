@@ -463,30 +463,6 @@ impl RollingOperator {
             Ok(state) => state,
             Err(error) => return Some(Err(error)),
         };
-        if !context.job().checkpointing() {
-            match plan.prepare_dual_sma(
-                state
-                    .typed_kernel_state
-                    .as_deref_mut()
-                    .expect("state initialized above"),
-                input,
-                context.operator_id(),
-                context.rolling_metrics(),
-            ) {
-                Ok(Some(update)) => return Some(Ok(update)),
-                Ok(None) => {}
-                Err(error) => return Some(Err(error)),
-            }
-        } else if state
-            .typed_kernel_state
-            .as_ref()
-            .is_some_and(|state| state.dual_sma.is_some())
-        {
-            return Some(Err(operator_error(
-                context.operator_id(),
-                "checkpointing requires a new rolling lineage",
-            )));
-        }
         Some(
             plan.prepare_slab_ordered_stream(
                 state
@@ -629,30 +605,6 @@ impl RollingOperator {
             Ok(state) => state,
             Err(error) => return Some(Err(error)),
         };
-        if !context.checkpointing() {
-            match plan.prepare_dual_sma(
-                state
-                    .typed_kernel_state
-                    .as_deref_mut()
-                    .expect("state initialized above"),
-                input,
-                context.operator_id(),
-                context.rolling_metrics(),
-            ) {
-                Ok(Some(update)) => return Some(Ok(update)),
-                Ok(None) => {}
-                Err(error) => return Some(Err(error)),
-            }
-        } else if state
-            .typed_kernel_state
-            .as_ref()
-            .is_some_and(|state| state.dual_sma.is_some())
-        {
-            return Some(Err(operator_error(
-                context.operator_id(),
-                "checkpointing requires a new rolling lineage",
-            )));
-        }
         Some(
             plan.prepare_slab_ordered_stream(
                 state

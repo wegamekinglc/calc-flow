@@ -559,7 +559,6 @@ impl<'a> PreparedOrderedKernel<'a> {
                 execution,
                 in_place: None,
                 slab: None,
-                dual_sma: None,
             })
     }
 
@@ -2052,7 +2051,6 @@ pub(crate) fn merge_numeric_results(
         execution: seed.execution,
         in_place: None,
         slab: None,
-        dual_sma: None,
     })
 }
 
