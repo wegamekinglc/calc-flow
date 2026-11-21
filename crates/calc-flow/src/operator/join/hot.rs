@@ -265,6 +265,8 @@ impl HotJoinCore {
         while let Some(record) = stream.next().await {
             let record =
                 record.map_err(|error| operator_error(&operator.name, &error.to_string()))?;
+            #[cfg(test)]
+            limit_tests::note_output_batch(record.num_rows());
             matches = matches
                 .checked_add(record.num_rows())
                 .ok_or_else(|| counter_overflow(&operator.name, "match_count"))?;
@@ -847,7 +849,17 @@ mod limit_tests {
     use super::*;
     use crate::{JoinStateLimits, JoinTimeBounds, StreamJoinSpec};
     use datafusion::arrow::datatypes::{Field, Schema};
-    use std::time::Duration;
+    use std::{cell::Cell, time::Duration};
+
+    thread_local! {
+        static OUTPUT_BATCHES: Cell<usize> = const { Cell::new(0) };
+        static OUTPUT_ROWS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn note_output_batch(rows: usize) {
+        OUTPUT_BATCHES.with(|count| count.set(count.get() + 1));
+        OUTPUT_ROWS.with(|total| total.set(total.get() + rows));
+    }
 
     fn quote_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -877,7 +889,7 @@ mod limit_tests {
     }
 
     #[tokio::test]
-    async fn hot_band_rejects_excess_matches_before_materializing_output() {
+    async fn hot_band_rejects_excess_matches_without_collecting_all_output() {
         let left = RecordBatch::try_new(
             quote_schema(),
             vec![
@@ -918,5 +930,75 @@ mod limit_tests {
                 .contains("input batch match limit exceeded")
         );
         assert_eq!(operator.state.metrics.match_limit_failures, 1);
+    }
+
+    #[test]
+    fn hot_band_stops_after_first_oversized_output_batch() {
+        let left = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+                Arc::new(UInt64Array::from(vec![0])),
+                Arc::new(StringArray::from(vec!["S000"])),
+                Arc::new(Float64Array::from(vec![2.0])),
+            ],
+        )
+        .unwrap();
+        let rows = 100_000;
+        let right = RecordBatch::try_new(
+            quote_schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from_iter_values(std::iter::repeat_n(0, rows))
+                        .with_timezone("UTC"),
+                ),
+                Arc::new(UInt64Array::from_iter_values(
+                    (0..rows).map(|row| u64::try_from(row).unwrap()),
+                )),
+                Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+                    "S000", rows,
+                ))),
+                Arc::new(Float64Array::from_iter_values(std::iter::repeat_n(
+                    2.0, rows,
+                ))),
+            ],
+        )
+        .unwrap();
+        let mut spec = band_spec();
+        spec.limits.max_matches_per_input_batch = 1;
+        let mut operator =
+            StreamJoinOperator::new("hot-band-limit", quote_schema(), quote_schema(), spec)
+                .unwrap();
+        let core = HotJoinCore::new(&operator).unwrap();
+        let left = Batch::table(vec![left], BatchMetadata::default()).unwrap();
+        let right = Batch::table(vec![right], BatchMetadata::default()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        OUTPUT_BATCHES.with(|count| count.set(0));
+        OUTPUT_ROWS.with(|total| total.set(0));
+        let mut result = None;
+        let allocations = allocation_counter::measure(|| {
+            result = Some(runtime.block_on(core.execute_band(&mut operator, &left, &right)));
+        });
+        let error = result
+            .expect("the BandJoin measurement must run")
+            .expect_err("the first output batch must exceed the configured cap of one");
+        assert!(
+            error
+                .to_string()
+                .contains("input batch match limit exceeded")
+        );
+        assert_eq!(operator.state.metrics.match_limit_failures, 1);
+        assert_eq!(OUTPUT_BATCHES.with(Cell::get), 1);
+        assert_eq!(OUTPUT_ROWS.with(Cell::get), 65_536);
+        assert!(
+            allocations.bytes_max < 16 * 1024 * 1024,
+            "the first output batch and planning must remain below 16 MiB: {allocations:?}"
+        );
+        eprintln!(
+            "BandJoin limit resource: right_rows={rows}, output_batches=1, output_rows=65536, allocations={allocations:?}"
+        );
     }
 }

@@ -363,6 +363,14 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
   6400x64 两臂均 slower，10 轮采集 2.866 秒且 digest 一致。证据见 `benchmarks/rolling-kernel-v2/p2-dual-sma-result.*`
   和 `p2-dual-sma-build.json`。本机没有 perf、samply 或 valgrind，不能据此伪造函数级热点；撤回该实现，
   下一阶段先解决已复现的高重复 BandJoin 内存失控，避免继续无效 rolling 实验。
+- 2026-11-21 P5 高重复 BandJoin 修复（runtime `58d7b26f`）已将一次性 DataFusion `collect` 改为 `execute_stream`，
+  每个输出批次累计匹配数并执行 match cap，超限不再先收集完整结果。固定 1 个左行、100,000 个同键同时间戳右行、cap=1，
+  回归确认只读取 **1 个 65,536 行输出批次**，返回 match-limit 错误且失败指标为 1。首次诊断的分配计数为 2,438、
+  累计请求 19,856,579 字节、峰值 11,756,549 字节；随后设定 16 MiB 峰值回归上限，完整 Join 回归观测为 1,507 次、
+  19,787,629 字节累计和 11,695,967 字节峰值，最终聚焦行数断言复现首次计数。Join **592 项**与全 feature Clippy 通过。
+  原始协议和全部观测见 `benchmarks/join-asof/p5-band-match-limit-20261121/`。这些是 debug 测试进程分配计数而非 RSS，
+  也没有测量已撤回的 eager-collect 对照，因此不宣称内存倍数、时延或吞吐提升；静态 Join/interval 的 17.047/282.396 ms
+  既有门槛结论保持不变。多批热路径输入、durable 热路径恢复与 ASOF 性能仍未完成。
 - 2026-11-20 P7 SUM/AVG pane 准入被 FR21 数值契约阻止：对 `[-1e-12, 1e19, 100, -1e19, -100, 1e-13]`，普通
   compensated partial merge 与逐行求和的浮点位结果不同。`pane_sum_merge_reassociation_is_not_bit_exact` 已固化该反例，
   因此没有启用 SUM/AVG pane，也没有以近似相等或 async fallback 冒充完成。COUNT/MIN/MAX pane 保持现状；
