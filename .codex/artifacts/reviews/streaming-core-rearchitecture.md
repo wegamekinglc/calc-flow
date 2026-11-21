@@ -74,7 +74,25 @@ A separate documentation check caught an attempted release-rule exception introd
 - Sealed Join wheel, revision `6a2abc08`: static Join P50 **619.785 ms** against the 30 ms limit; interval Join P50 **2,058.241 ms** against the 350 ms limit. Both cases passed all 10 complete output oracles. Acquisition took 64.513 seconds and the separate release build took 837.820 seconds. Both absolute gates failed; semantic fixes are retained and no timing-driven samples were added. Evidence: `benchmarks/join-asof/p5-review-fixes-20261122/result.json`.
 - Sealed ASOF binary, revision `6a2abc08`: balanced **−17.30% (improved)**, fixed128 **−3.15% (no-confirmed-regression)**, skew **−18.69% (improved)** and restored-skew **−21.39% (improved)**. The fixed 160-observation protocol passed its maintained validators. Acquisition took 1.070 seconds and the separate build took 757.790 seconds. Evidence: `benchmarks/asof-latest-probe/p5-latest-20261121/outcome.json`.
 
+## Join regression diagnosis
+
+One diagnostic observation per scenario used a sealed `benchmark-internals` wheel and the same complete output oracle. These are not new P50 samples.
+
+- Static Join did not execute `hot_execute`; `run_route`, `run_materialize` and `run_probe` took 499.109, 111.669 and 33.798 ms. When the opposite ingress has ended, `retain_threshold` returns `i128::MAX` and every row becomes `retain=false`; requiring every row to be retained incorrectly rejects the hot path even though the current batch can still join.
+- Interval Join still executed the native BandJoin. `hot_execute`, `hot_emit` and shared admission took 775.573, 5.592 and 24.510 ms of a 2.908-second diagnostic observation. The remaining uncovered region includes the new production-KeyStore `hot_batch_charge` and other uninstrumented runtime work. No separate charge timer was present, so exact per-function attribution is not claimed.
+
+Evidence: `benchmarks/join-asof/p5-review-fixes-20261122/diagnosis.json`.
+
+## CI-driven follow-up
+
+- The final two Codacy findings were reduced without behavior changes; the Arroyo summary regenerated all eight historical entries identically and the NumPy binding suite passed 37 tests.
+- Manifest retention scans now ignore only files that disappear between enumeration and reading, while preserving other errors. The new helper regression and original runner test passed on Linux; this addresses the Windows/Linux `NotFound` race.
+- ASOF analysis and its tests now use the native layout 11 contract. Rolling layout 7 is covered by the real `ROLLING_STATE_TABLE_LAYOUT_VERSION` implementation. The related 215 Python tests passed, including the v4 native Join manifest assertions and all nine native-table indicator tests.
+- The typed Rolling batch path now projects invalid input data as an operator error with node context instead of a raw `ConfigError`. An ineffective TableOperator alternative was removed rather than retained.
+- M5 fault expectations now distinguish `CompletedCommit`, which precedes required durable source acknowledgement and therefore cannot return success, from Retention/Compaction maintenance failures after acknowledgement. All four CompletedCommit modes passed. This updates the outdated test contract rather than weakening the documented acknowledgement guarantee.
+- Full all-feature Clippy, Rust formatting, complexity ratchet, full Ruff lint, spec references, schema drift and full-PR whitespace checks passed after these changes.
+
 ## Open verification and acceptance
 
-- Required GitHub checks are pending on the evidence commit. Earlier failed checks are not treated as current-head results; Codacy must also be scanned again.
+- Required GitHub checks are pending on the repair commits. Earlier failed checks are not treated as current-head results; Codacy must also be scanned again.
 - Rolling G1–G3, Join absolute gates, P4 10M, P6 parallel scaling, P3 M3/M4, full ASOF inventory, Arroyo burst alignment and the complete P0–P7 plan remain unmet or unmeasured. No overall completion or merge-ready claim is made.
