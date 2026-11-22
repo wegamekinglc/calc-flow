@@ -736,6 +736,20 @@ fn expression_plan(
 }
 
 #[test]
+fn test_staging_an_explicit_watermark_requires_no_allocation() {
+    let plan = pass_through_plan(&input_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(plan, BTreeMap::new());
+    let mut staged = None;
+    let measured = allocation_counter::measure(|| {
+        staged = Some(session.input.stage_advance(&input, micros(10)).unwrap());
+    });
+    assert_eq!(measured.count_total, 0);
+    assert!(session.run(staged.unwrap()).unwrap().is_empty());
+    assert_eq!(session.watermark_for_test(), Some(micros(10)));
+}
+
+#[test]
 fn test_all_sync_expression_session_never_enters_async_drive() {
     let plan = pass_through_plan(&input_schema());
     let input = source_id(&plan);
