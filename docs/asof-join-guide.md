@@ -408,9 +408,12 @@ for separate settlement, allocation, and RSS diagnostics.
 | Inner Join into ASOF, or ASOF into inner Join            | Supported with complete valid ordering and schema evidence       |
 | ASOF into rolling/cross-section                          | Supported under the downstream operator's own type rules         |
 | ASOF into projection/filter or single-alias stream SQL   | Supported with the downstream projection, filter or query schema |
-| SQL into ASOF                                            | Row-local, single-input SQL preserving required identity fields  |
+| SQL into ASOF                                            | Direct row-local SELECT with proved temporal identity fields     |
 | Event window into ASOF, or ASOF into event window        | Rejected; independent window branches may coexist                |
 | Matrix attachment around ASOF                            | Unsupported                                                      |
+
+SQL projections feeding ASOF must satisfy the shared
+[temporal column requirements](relational-frontends.md#sql-projections-before-windows-and-joins).
 
 Optimization preserves ASOF's finality boundary and candidate set. Use
 `Program.analyze(mode="stream")` and `Program.explain(mode="stream")` to inspect

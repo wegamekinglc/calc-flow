@@ -101,9 +101,8 @@ See [query history and portability](query-history-portability.md).
 
 Schema and diagnostic errors identify logical input/output roles and stable
 codes. SQL schema errors identify the SQL node or alias; unavailable source spans
-are not invented. Ordinary SQL creates a new row lineage. A join can retain temporal identity
-through a proved row-local projection or rename of the required columns.
-`ORDER BY` alone does not establish that identity.
+are not invented. Ordinary SQL creates a new row lineage. For downstream windows
+and joins, see the [SQL projection requirements](#sql-projections-before-windows-and-joins).
 
 `to_project` returns the existing strict project-v3 data-only document. It carries
 schema placeholders and declarations, with no actual input rows, callbacks,
@@ -119,6 +118,22 @@ and the existing SQL relation surface. Eligible single-alias aggregates consume
 complete replacements with an explicit state budget, as described below. General
 joins, wider portable Arrow types, and comprehensive Polars compatibility remain
 outside this scope.
+
+### SQL projections before windows and joins
+
+A fixed event window needs proof that its time column comes from the input.
+A bounded inner or ASOF join needs the corresponding temporal identity
+fields, including event time and sequence. The proof accepts a row-local
+`SELECT` that reads the declared input alias directly. Each required field
+must pass through as a column, a pure rename, or part of a plain wildcard.
+For example, `SELECT e.ts AS time, e.g, e.q FROM input AS e` preserves
+`ts` as the window coordinate `time`.
+
+The proof excludes CTEs, derived tables, joins inside the projection,
+aggregates, ordering, limits, and unproved or volatile functions.
+`WITH p AS (SELECT * FROM input) SELECT * FROM p` therefore cannot supply
+a window's time column or a join's temporal identity, even though it returns
+the same fields. Casting or computing a required field also loses its proof.
 
 ## Explicit complete-history ordering
 
@@ -294,9 +309,9 @@ parameters are rejected by this dialect. Ordinary SQL retains its existing behav
 
 Geometry is epoch aligned with half-open bounds and mathematical floor for
 negative timestamps. Time accepts naive timestamp[ms] or naive/UTC timestamp[us].
-The time column may pass through or be renamed by deterministic single-input
-row-local SQL; arithmetic, casts and truncation are rejected. Window paths allow
-one window and row-local transformations. Shared window outputs and independent
+An upstream SQL stage must satisfy the
+[time-column projection requirements](#sql-projections-before-windows-and-joins).
+Window paths allow one window and row-local transformations. Shared window outputs and independent
 aggregate/union branches retain their own native owners.
 
 Boundaries are nonnullable timestamp[us, UTC]; group fields keep their types and
@@ -413,8 +428,9 @@ Nested joins require canonical pair identity: prefixed left keys, either join
 time, and complete left sequence followed by complete right sequence. Declare
 Rust `Some(JoinOutputOrdering { ... })`, Python's three `output_*` arguments,
 or SQL `output_ordering`. These fields name identity and do not sort rows.
-Fan-out shares one owner per unique join; row-local DataFrame/SQL transforms may
-preserve unchanged or renamed identity fields. Rewritten time loses proof.
+Fan-out shares one owner per unique join. Row-local DataFrame transforms
+can preserve unchanged or renamed identity fields. SQL inputs follow the
+[same column proof](#sql-projections-before-windows-and-joins).
 Join paths do not yet include union/window/aggregate combinations; those may
 remain independent output branches. Outer, semi, anti, cross and replacement
 joins are outside this contract.

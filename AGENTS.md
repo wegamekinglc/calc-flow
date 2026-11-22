@@ -214,10 +214,10 @@ selectors.
   callbacks or run a Python pipeline per batch. Arrow schemas, named outputs,
   and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
-  Ordinary SQL has a new row lineage. A supported row-local SQL projection
-  can pass temporal identity fields to a bounded join or its time column to
-  a fixed event window. Batch SQL supports multiple aliases. Ordinary stream
-  SQL uses one alias. Named SQL also lowers exact-schema UNION ALL and the
+  Ordinary SQL has a new row lineage. A direct row-local SQL projection can supply
+  the columns required by a bounded join or fixed event window when the
+  [temporal column proof](docs/relational-frontends.md#sql-projections-before-windows-and-joins) succeeds.
+  Batch SQL supports multiple aliases. Ordinary stream SQL uses one alias. Named SQL also lowers exact-schema UNION ALL and the
   two-input CF_INNER_JOIN and CF_ASOF_JOIN macros to native operators.
   Ordinary and grouped SQL aggregates emit a full cumulative snapshot after each
   batch.

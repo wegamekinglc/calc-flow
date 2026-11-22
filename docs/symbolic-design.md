@@ -67,9 +67,10 @@ The private `Runtime._infer_symbolic_sql_schema` bridge invokes native planning
 with named schema-only tables. It reads the resulting plan schema without
 executing rows or opening sources. Query aliases, input schemas, and runtime
 registration changes determine schema-cache validity. No Python SQL parser or
-second row-execution path is involved. Ordinary SQL output has its own row lineage. The join analyzer can recover
-entity, event-time, and sequence facts when single-input row-local SQL passes
-the identity columns through unchanged or purely renamed.
+second row-execution path is involved. Ordinary SQL output has its own row lineage.
+The join analyzer recovers entity, event-time, and sequence facts from SQL
+projections that satisfy
+the [temporal column proof](relational-frontends.md#sql-projections-before-windows-and-joins).
 
 The [stream adapter](../python/calc_flow/stream.py) shares logical-to-physical
 binding metadata with collection. On context entry, it creates one fresh owning
@@ -200,15 +201,20 @@ whole-job cost guarantee. Duration frames and other input types retain the
 reference path. Retained history remains authoritative for recovery; see the
 [decay kernel](../crates/calc-flow/src/operator/rolling/kernel/decay.rs).
 
-Project declarations carry the validated configuration and declaration layout
-versions. MACD components use writer layout 6. RSI/ATR stages without MACD
-components use layout 5. Among the remaining stages, operators without
-cumulative sum/min/max/variance write columnar state layout `3`, with
-an entity dictionary, projected history, a reorder buffer, recurrence state,
-and kernel/numerical fingerprints. Restore also supports the declaration's
-layout `1` or `2` state. Writer layout is distinct from the declaration fields.
-Without indicator outputs, cumulative sum/min/max/variance use layout `4`, adding
-complete per-entity/per-group summaries. Counts, exact integer totals, extrema,
+The [Python symbolic lowerer](../python/calc_flow/symbolic/lower/planners.py)
+selects a declaration layout in priority order. MACD components select 6,
+RSI/ATR select 5, cumulative sum/min/max/variance select 4, and EWMA or
+cumulative mean select 2. Other stages select 1. A difference that uses
+an EWMA readout also selects 2 when no higher-priority output is present.
+
+For an explicit Rust declaration, the compiler keeps a valid layout 5 or 6
+as the writer layout, including for a cumulative sum alone. For the remaining
+valid declarations it writes layout 4 for cumulative sum/min/max/variance
+and layout 3 otherwise. See [Rust rolling windows](rust-api.md#rolling-windows).
+Layout 3 stores an entity dictionary, projected history, a reorder buffer,
+recurrence state, and kernel/numerical fingerprints. Restore also supports
+the declaration's layout 1 or 2 state. Layout 4 adds complete
+per-entity/per-group summaries. Counts, exact integer totals, extrema,
 the variance origin/mean/M2 IEEE bits and infinity classification survive
 recovery without replaying prefix history. Layout `4` requires an entity
 processed-row count for both numerical profiles, distinguishing cumulative

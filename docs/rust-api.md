@@ -959,9 +959,10 @@ not output columns; the operator writes their nullable `float64` difference
 directly.
 Kinds `rsi` and `atr` use `primitive_version: 1`, a positive `period`,
 and nullable float64 output. RSI names one floating input; ATR names floating
-`high`, `low` and `close` inputs. They require
-`ROLLING_INDICATOR_STATE_LAYOUT_VERSION` (5). Identical operand/period groups
-share one recurrence per entity, independently of output aliases. They reuse
+`high`, `low` and `close` inputs. Both accept
+`ROLLING_INDICATOR_STATE_LAYOUT_VERSION` (5) or `ROLLING_MACD_STATE_LAYOUT_VERSION` (6).
+Identical operand/period groups share one recurrence per entity, independently
+of output aliases. They reuse
 the [native indicator numerical contract](#native-rsi-and-atr), including
 complete-segment warm-up and null/NaN resets. Indicator-containing mixed nodes
 currently use the general row fallback.
@@ -1000,12 +1001,16 @@ state budget, checkpoint preparation and managed recovery apply.
 [`native_table_macd.rs`](../crates/calc-flow/examples/native_table_macd.rs) shows
 all three components over nullable integer prices.
 
-
-For stages without RSI, ATR or MACD components, cumulative sum/min/max/variance
-use `ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in both declarations and
-writer state. Layout 4 extends the columnar layout with exact per-group summaries
-(including binary64 bits), alongside entity keys, history and pending rows.
-Other declarations keep their existing layout and checkpoint fingerprints.
+A Rust caller sets `RollingSpec.state_layout_version` explicitly. Valid
+declaration layouts are 1, 2, 4, 5 and 6, subject to the output requirements.
+Cumulative sum/min/max/variance require layout 4, 5 or 6.
+The compiler preserves a declared 5 or 6 as the checkpoint writer layout,
+even when the only output is `cumulative_sum`. For other valid declarations,
+it writes layout 4 when a cumulative sum/min/max/variance is present and
+layout 3 otherwise. Layout 4 adds exact per-group summaries (including
+binary64 bits) to the entity keys, history and pending rows.
+See the [layout 5 recovery test](../crates/calc-flow/tests/rolling_indicator_recovery.rs)
+for a cumulative sum declared and restored with layout 5.
 Recovery validates the layout, complete summary inventory, configuration,
 schema, kernel and numerical profile before installing state. Unknown versions
 and incompatible configurations fail closed.
@@ -1016,16 +1021,14 @@ the `size` rows through the current row of the entity total order — or
 open at the lower bound and closed at the upper bound, with equal-time rows
 ordered by `sequence_by`. `configuration_version` and `state_layout_version`
 use their validated declaration constants. `configuration_version` is
-`ROLLING_CONFIGURATION_VERSION` (1). Among stages without indicators or cumulative
-sum/min/max/variance, EWMA and cumulative mean use
-`ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). The other stages in that group use
-`ROLLING_STATE_LAYOUT_VERSION` (1). These values belong to project
-documents and configuration fingerprints. Old-only operators without cumulative
-summaries write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
-dictionary, projected retained history, a columnar reorder buffer, recurrence
-state, and kernel/numerical fingerprints. Restore continues to read the
-declaration's v1/v2 layout, while newly emitted descriptors and pipeline
-capabilities report writer layout v3. `allowed_lateness_micros` and a
+`ROLLING_CONFIGURATION_VERSION` (1). EWMA and cumulative mean accept declaration layout
+2, 4, 5 or 6. The [Python symbolic lowerer](symbolic-design.md#native-rolling-state)
+chooses a declaration layout from the stage's outputs. The declared value
+is part of the project document and configuration fingerprint.
+Writer layout 3 stores a deterministic entity dictionary, projected retained
+history, a columnar reorder buffer, recurrence state, and kernel/numerical
+fingerprints. For declarations using layout 1 or 2, restore also reads the
+corresponding legacy layout. `allowed_lateness_micros` and a
 `LatePolicySpec` of `Error` (envelope scope), `Drop` (metrics version 1), or
 stream-only `SideOutput` (metrics and schema version 1) classify late rows
 against the input watermark, and `RollingValuePolicy` is the frozen
@@ -1160,11 +1163,10 @@ envelope under `error`, dropping each late row and recording metrics under
 `drop`, or routing it to `late` under `side_output`. See the
 [late-row policy contract](#late-row-policy-contract) for diagnostic routing
 and recovery. Duplicate row identities are rejected. Rolling
-stream state checkpoints at the aligned epoch cut using columnar writer
-layout `3`, or layout `4` when cumulative sum/min/max/variance are present.
-It stores projected history, buffered rows, recurrence state, and any
-cumulative summaries and processed-row counts;
-restore validates the schema and fingerprints before rebuilding the kernel.
+stream state checkpoints at the aligned epoch cut using the writer layout
+selected at compilation. Columnar layouts 3 and 4 store projected history,
+buffered rows, recurrence state, and any cumulative summaries and processed-row counts.
+Restore validates the schema and fingerprints before rebuilding the kernel.
 See [symbolic compiler design](symbolic-design.md#native-rolling-state) for
 the distinction between declaration versions and checkpoint writer layout.
 Sliding arithmetic that becomes non-finite re-folds the current window,

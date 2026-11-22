@@ -275,9 +275,9 @@ UDFs or serialized callbacks.
 See the complete [SQL and Python pipeline](batch-guide.md#compose-sql-and-python-pipelines)
 and [multi-input SQL example](#multi-input-sql). Ordinary SQL starts a new row
 lineage. Row-local work can follow SQL, and rolling calculations can precede
-it. A fixed event window accepts deterministic single-input row-local SQL
-that preserves its time column unchanged or purely renamed. Program outputs
-for collection must be tables. The
+it. A fixed event window can use an upstream SQL projection when the
+[time-column proof](relational-frontends.md#sql-projections-before-windows-and-joins) succeeds.
+Program outputs for collection must be tables. The
 [composition reference](symbolic-api.md#sql-composition) gives the full boundary.
 
 Batch SQL accepts multiple aliases. In a stream, named `cf.sql` supports

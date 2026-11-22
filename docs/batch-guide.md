@@ -143,10 +143,9 @@ construction. Collection executes the entire graph in the native runtime.
 The SQL stage in this pipeline starts a new row lineage.
 Row-local transformations after SQL are supported. Compute rolling features
 before SQL, as in the [streaming pipeline](streaming-guide.md#first-python-continuous-job).
-A deterministic single-input row-local SQL result can feed a fixed UTC event
-window when the time column is passed through or renamed. See
-[finite event windows](relational-frontends.md#fixed-utc-event-windows). SQL results
-cannot become standalone array Program outputs. See the
+A SQL projection can feed a [fixed UTC event window](relational-frontends.md#fixed-utc-event-windows)
+when it satisfies the [time-column proof](relational-frontends.md#sql-projections-before-windows-and-joins).
+SQL results cannot become standalone array Program outputs. See the
 [SQL composition contract](symbolic-api.md#sql-composition) for exact boundaries.
 
 ## Reusable programs and named outputs

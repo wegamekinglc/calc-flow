@@ -137,9 +137,9 @@ retain input and rerun over its history. Ordinary nonaggregate SQL evaluates eac
 separately. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
 Ordinary SQL starts a new row lineage. Row-local expressions may follow
-append SQL. Compute rolling features before a SQL stage. A fixed event
-window can use the input time column after a proved row-local projection
-or rename.
+append SQL. Compute rolling features before a SQL stage. A SQL projection feeding a
+fixed event window must satisfy the
+[time-column proof](relational-frontends.md#sql-projections-before-windows-and-joins).
 
 `cf.snapshot_sql(query, **tables)` adds stream-only SQL over complete latest
 relations. Every data Batch replaces an alias, including empty data; all

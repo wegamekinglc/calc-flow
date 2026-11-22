@@ -844,10 +844,10 @@ operations for rolling state and the documented window/join declarations for
 event-time aggregation and matching.
 
 The pipeline above calculates rolling values before SQL and can apply
-row-local expressions to the new SQL row lineage. A fixed event window can
-follow deterministic single-input row-local SQL when the time column passes
-through unchanged or purely renamed. Program collection requires table
-outputs. See [SQL composition](symbolic-api.md#sql-composition).
+row-local expressions to the new SQL row lineage. A fixed event window can follow SQL if
+the upstream projection satisfies the
+[time-column proof](relational-frontends.md#sql-projections-before-windows-and-joins).
+Program collection requires table outputs. See [SQL composition](symbolic-api.md#sql-composition).
 
 By default, convenience streams use a temporary managed checkpoint root and
 ordinary output sinks. Async iterable inputs provide best-effort delivery and no replay;

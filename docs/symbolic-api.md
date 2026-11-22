@@ -180,13 +180,13 @@ DAG. Shared roots and stateful upstream declarations fan out from their native
 state owners. The compiler does not collect intermediate tables or rebuild
 Python declarations for each source batch.
 
-Ordinary SQL starts a new row lineage. Temporal ordering requires a separate
-proof on supported join paths. Row-local projections, filters, and arithmetic after SQL are
-supported. Rolling calculations can feed SQL. Downstream temporal expressions require
-proved ordering. An `ORDER BY` inside SQL does not
-establish symbolic temporal ordering. A fixed event window can follow
-deterministic single-input row-local SQL when the event-time column passes
-through unchanged or under a new name. A native table-rooted ArrayExpr may collect its array result after
+Ordinary SQL starts a new row lineage. Row-local projections, filters, and
+arithmetic can follow SQL, and rolling calculations can feed SQL. Downstream
+temporal expressions require proved ordering. A fixed event window or bounded
+join can use time or identity columns from a proved row-local `SELECT` over
+one directly referenced input alias. See the
+[SQL projection requirements](relational-frontends.md#sql-projections-before-windows-and-joins).
+A native table-rooted ArrayExpr may collect its array result after
 SQL with `collect_array`, using explicit native provider registration.
 `Program.collect` still returns tables; mixed table/array Program results and
 NumPy/JAX standalone outputs remain unsupported.
@@ -206,10 +206,15 @@ each aggregate node's live groups and owned bytes. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
 for admission, ordering, budget and recovery contracts. Other SQL stays
 batch-local. `ORDER BY` and `LIMIT` apply to the current
-snapshot; SQL window functions alone remain batch-local. These aggregate
-snapshots repeat unchanged groups, so downstream operators receive them as new
-rows. Native rolling, event windows, and bounded stream joins have their
-separately declared cross-batch semantics. Use
+snapshot. SQL window functions alone remain batch-local. Aggregate snapshots
+include unchanged groups.
+With the default `legacy_append` semantics, a downstream aggregate consumes
+each snapshot as additional rows. For input batches `[1]` and `[2, 3]`, an
+upstream SUM emits 1 then 6, so a downstream SUM finishes at 7. With explicit
+`latest_relation` and a configured `sql_replacement_state_budget`, an eligible
+[single-alias replacement aggregate](streaming-guide.md#restricted-replacement-aggregates)
+consumes the latest snapshot and finishes at 6. Native rolling, event windows,
+and bounded stream joins have their separately declared cross-batch semantics. Use
 [SQL composition](../examples/32_sql_expression_pipeline.py),
 [named SQL inputs](../examples/02_sql_join.py), and the
 [rolling-to-SQL stream](../examples/33_streaming_pipeline.py) as executable examples.
@@ -460,10 +465,11 @@ signed-zero, overflow, metrics, and chunking semantics.
 Each dependency path through a window supports stateless `table.project`,
 `table.filter`, `with_columns`, and row-local expressions before and after
 one window. Window results have a distinct row origin; they cannot mix with
-raw input columns or arrays by position. Deterministic single-input row-local
-SQL can feed a window when its time column passes through or is purely renamed. The compiler rejects rolling,
-cross-section, joins, another event window, array/matrix attachment, external
-stateful providers, and cross-row reductions on that path. Independent
+raw input columns or arrays by position. Upstream SQL must satisfy the
+[window time-column proof](relational-frontends.md#sql-projections-before-windows-and-joins).
+The compiler rejects rolling, cross-section, joins, another event window,
+array/matrix attachment, external stateful providers, and cross-row reductions
+on that path. Independent
 windows and unrelated legal outputs may coexist in the same `Program`.
 Filters retain their declared side of the window finality boundary.
 
@@ -568,9 +574,9 @@ ordering derives from the left side, and every right field is nullable.
 Supported paths include row-local inputs, shared fan-out, independent and
 chained ASOF nodes, mixed inner/ASOF joins with complete valid ordering,
 post-ASOF rolling/cross-section, and single-alias stream SQL after ASOF.
-Single-input row-local SQL can feed ASOF when the required temporal identity
-fields pass through unchanged or purely renamed. Event-window/ASOF chains and
-matrix attachments around ASOF are rejected. Independent windows may coexist.
+SQL inputs must satisfy the
+[join identity proof](relational-frontends.md#sql-projections-before-windows-and-joins).
+Event-window/ASOF chains and matrix attachments around ASOF are rejected. Independent windows may coexist.
 Optimization cannot move a filter across the ASOF finality boundary or change
 its candidate set. See the [composition matrix](asof-join-guide.md#composition-and-explanation).
 
@@ -871,6 +877,7 @@ rejection and `drop` to a metrics-recorded drop — and the
 referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows. Cross-section stages consume the same
 options; event-window programs apply the option checks described above.
+Python symbolic lowering selects the layout from the stage's outputs.
 Stages with MACD components use declaration and writer layout 6. RSI/ATR
 stages without MACD components use layout 5. Among the remaining stages,
 cumulative sum/min/max/variance use layout 4 to persist exact summaries and

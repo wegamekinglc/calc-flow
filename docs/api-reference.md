@@ -118,9 +118,9 @@ Its outputs currently connect directly to sinks and reject ExactlyOnce. See
 whole-message, state-budget, and recovery contracts.
 Ordinary SQL produces a new row lineage. Row-local expressions after
 ordinary `sql` stages and rolling before those stages are supported.
-A fixed event window can follow deterministic single-input row-local SQL if
-its time column passes through unchanged or purely renamed. Program collection
-returns table outputs. Native array declarations have a separate blocking batch entry point:
+A fixed event window can follow a SQL projection that satisfies the
+[time-column proof](relational-frontends.md#sql-projections-before-windows-and-joins).
+Program collection returns table outputs. Native array declarations have a separate blocking batch entry point:
 `ArrayExpr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`
 returns one `NativeArray`; see [native collection](python-api.md#native-arrayexpr-declarations-and-collection).
 
