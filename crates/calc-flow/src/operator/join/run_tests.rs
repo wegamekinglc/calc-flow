@@ -1112,3 +1112,47 @@ fn test_hot_dictionary_routing_admits_new_keys_after_existing_groups() {
     let actual = route_hot_keys(&record, &[0], &mut actual).unwrap();
     assert_eq!(actual, expected);
 }
+
+#[test]
+fn test_hot_utf8_charge_does_not_eagerly_create_migration_groups() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let schema =
+        KeySchema::groupable(vec![Arc::new(Field::new("key", DataType::Utf8, false))]).unwrap();
+    let mut keys = KeyStore::new(
+        schema.clone(),
+        runtime.incremental_reservation("hot-charge-lazy-groups"),
+    );
+    let mut reference = KeyStore::new(
+        schema,
+        runtime.incremental_reservation("hot-charge-reference-groups"),
+    );
+    let record = RecordBatch::try_from_iter([
+        (
+            "key",
+            Arc::new(StringArray::from(
+                (0_usize..5_000)
+                    .map(|row| if row.is_multiple_of(2) { "a" } else { "b" })
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+        ),
+        (
+            "value",
+            Arc::new(Int64Array::from_iter_values(0..5_000)) as ArrayRef,
+        ),
+    ])
+    .unwrap();
+    let batch = Batch::table(vec![record.clone(), record], BatchMetadata::default()).unwrap();
+    let actual = super::runs::hot_batch_charge(&batch, &[0], &mut keys).unwrap();
+    let expected =
+        super::runs::hot_batch_charge_with_key_store(&batch, &[0], &mut reference).unwrap();
+    assert_eq!(actual, expected);
+    let next = RecordBatch::try_from_iter([(
+        "key",
+        Arc::new(StringArray::from(vec!["next"])) as ArrayRef,
+    )])
+    .unwrap();
+    let routed = keys
+        .route_with_limit(&[next.column(0).clone()], 1, &mut || Ok(()))
+        .unwrap();
+    assert_eq!(routed, [GroupId::new(0).unwrap()]);
+}

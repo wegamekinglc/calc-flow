@@ -14,7 +14,7 @@ use crate::{
 use datafusion::arrow::{
     array::{Array, BooleanArray, StringArray, UInt64Array},
     compute::take,
-    datatypes::SchemaRef,
+    datatypes::{DataType, SchemaRef},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 #[cfg(test)]
@@ -480,6 +480,52 @@ pub(super) fn hot_batch_charge(
     key_indices: &[usize],
     keys: &mut KeyStore,
 ) -> Result<(usize, usize)> {
+    if let [index] = key_indices
+        && batch.table_payload()?.batches().iter().all(|record| {
+            let column = record.column(*index);
+            column.data_type() == &DataType::Utf8 && column.null_count() == 0
+        })
+    {
+        return hot_utf8_batch_charge(batch, *index);
+    }
+    hot_batch_charge_with_key_store(batch, key_indices, keys)
+}
+
+fn hot_utf8_batch_charge(batch: &Batch, index: usize) -> Result<(usize, usize)> {
+    let mut run_bytes = 0usize;
+    let mut groups = hashbrown::HashMap::<String, Vec<usize>, ahash::RandomState>::default();
+    let mut expiration = Vec::new();
+    for record in batch.table_payload()?.batches() {
+        for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+            let rows = (record.num_rows() - start).min(MORSEL_ROWS);
+            let record = record.slice(start, rows);
+            run_bytes = run_bytes
+                .checked_add(RunCharge::read(&record)?.total(rows)?)
+                .ok_or_else(|| run_error("hot state run charge overflowed"))?;
+            let keys = record
+                .column(index)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("hot UTF-8 key was validated");
+            for row in 0..keys.len() {
+                groups.entry_ref(keys.value(row)).or_default().push(0);
+                expiration.push(0);
+            }
+        }
+    }
+    hot_charge_parts(
+        batch.num_rows(),
+        run_bytes,
+        groups.into_values(),
+        expiration.capacity(),
+    )
+}
+
+pub(super) fn hot_batch_charge_with_key_store(
+    batch: &Batch,
+    key_indices: &[usize],
+    keys: &mut KeyStore,
+) -> Result<(usize, usize)> {
     let mut run_bytes = 0usize;
     let mut groups = BTreeMap::<GroupId, Vec<usize>>::new();
     let mut expiration = Vec::new();
@@ -497,15 +543,29 @@ pub(super) fn hot_batch_charge(
             }
         }
     }
-    let bucket_bytes = groups.into_values().try_fold(0usize, |total, entries| {
+    hot_charge_parts(
+        batch.num_rows(),
+        run_bytes,
+        groups.into_values(),
+        expiration.capacity(),
+    )
+}
+
+fn hot_charge_parts(
+    rows: usize,
+    run_bytes: usize,
+    groups: impl IntoIterator<Item = Vec<usize>>,
+    expiration_capacity: usize,
+) -> Result<(usize, usize)> {
+    let bucket_bytes = groups.into_iter().try_fold(0usize, |total, entries| {
         let charge = BUCKET_OWNER_BYTES + entries.capacity() * size_of::<LocatorEntry>();
         total.checked_add(charge)
     });
     let bytes = bucket_bytes
-        .and_then(|bytes| bytes.checked_add(expiration.capacity() * size_of::<LocatorEntry>()))
+        .and_then(|bytes| bytes.checked_add(expiration_capacity * size_of::<LocatorEntry>()))
         .and_then(|bytes| bytes.checked_add(run_bytes))
         .ok_or_else(|| run_error("hot state owner charge overflowed"))?;
-    Ok((batch.num_rows(), bytes))
+    Ok((rows, bytes))
 }
 
 #[derive(Clone)]
