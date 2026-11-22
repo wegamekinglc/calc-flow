@@ -55,9 +55,10 @@ input inference, explicit inputs and the declaration fingerprint, then checks th
 target shape. Prepared caches still include mode and registration identity;
 plans are distinct across modes and stream contexts always own a fresh job.
 Within batch mode, the existing Runtime cache can reuse a compiled plan; each
-execute call still has independent run state. The exact-schema UNION ALL
-subset below also supports multiple stream aliases. Other multi-alias SQL
-keeps its existing batch-only behavior.
+execute call still has independent run state. Named stream SQL admits multiple aliases for the
+[exact-schema union](#same-schema-union) and the explicit
+[inner](#bounded-inner-joins) and [ASOF](#bounded-backward-asof) join macros.
+General multi-alias SQL is available in batch mode.
 
 `collect_schema` plans all table outputs without data, including zero-row inputs.
 It returns exact column order, Arrow types and nullability. Array outputs reject
@@ -100,8 +101,9 @@ See [query history and portability](query-history-portability.md).
 
 Schema and diagnostic errors identify logical input/output roles and stable
 codes. SQL schema errors identify the SQL node or alias; unavailable source spans
-are not invented. SQL creates new row lineage and clears temporal identity;
-`ORDER BY` alone does not establish identity for temporal operators.
+are not invented. Ordinary SQL creates a new row lineage. A join can retain temporal identity
+through a proved row-local projection or rename of the required columns.
+`ORDER BY` alone does not establish that identity.
 
 `to_project` returns the existing strict project-v3 data-only document. It carries
 schema placeholders and declarations, with no actual input rows, callbacks,
@@ -263,7 +265,7 @@ Low-level finite UnionOperator requires table ports with an explicit exact
 schema and `required=true`; the existing wider stream forwarding stays available.
 
 Query reports use schema version 2, analysis revision 11. Old SQL declaration
-digests stay unchanged, but admitted multi-alias SQL exports a new native union
+digests stay unchanged, but admitted UNION ALL SQL exports a native union
 topology and fingerprint. Saved legacy SQL projects retain their SQL nodes;
 checkpoints with different fingerprints cannot be restored across the change.
 See the runnable [Python example](../examples/finite_union.py) and
@@ -417,7 +419,7 @@ Join paths do not yet include union/window/aggregate combinations; those may
 remain independent output branches. Outer, semi, anti, cross and replacement
 joins are outside this contract.
 
-Revision 7 analysis conditionally proves `final_relation / accepted_history /
+[Query history analysis](query-history-portability.md) conditionally proves `final_relation / accepted_history /
 all_sources_eof / unordered`: both executions must succeed within their budget,
 and stream candidates must coexist without late/progress discards. Compare the
 multiset of all append pair outputs, not only the last chunk. Global ordering and

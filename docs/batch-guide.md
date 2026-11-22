@@ -140,7 +140,7 @@ and calculates discounted values with another Python function. The result is
 schema from the declared input schemas; it does not execute data during
 construction. Collection executes the entire graph in the native runtime.
 
-SQL creates its own row lineage and does not inherit temporal ordering.
+The SQL stage in this pipeline starts a new row lineage.
 Row-local transformations after SQL are supported. Compute rolling features
 before SQL, as in the [streaming pipeline](streaming-guide.md#first-python-continuous-job).
 A deterministic single-input row-local SQL result can feed a fixed UTC event
@@ -340,12 +340,12 @@ plan, or handwritten SQL result schema is needed. The final `doubled` values
 are `[140, 216, 72]` for order IDs `[1, 2, 3]`.
 
 SQL aliases are local to the query, and Calc Flow never looks them up in caller
-globals. Multiple aliases are supported in batch mode. A streaming SQL node
-accepts one alias or the
-[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
-Other multi-alias SQL remains batch-only; use the
-[bounded stream join](streaming-guide.md#bounded-event-time-join)
-for stateful matching between streams.
+globals. Batch mode supports general multi-alias SQL joins. In streams, named
+`cf.sql` accepts a single alias, the
+[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union),
+or one of two explicit two-input join macros,
+[`CF_INNER_JOIN`](relational-frontends.md#bounded-inner-joins) and
+[`CF_ASOF_JOIN`](relational-frontends.md#bounded-backward-asof).
 
 A SQL node accepts one read-only `SELECT` or CTE. DDL, DML, utility commands,
 and multiple statements fail validation. Table calculation uses DataFusion;

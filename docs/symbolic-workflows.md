@@ -40,11 +40,12 @@ order. [02_sql_join.py](../examples/02_sql_join.py) joins explicit `cf.sql`
 aliases and follows SQL with a column expression, producing
 `doubled=[140, 216, 72]`. No intermediate table is collected.
 
-SQL output uses a native planned schema and a new row lineage. It supports
-row-local expressions afterward, but carries no temporal ordering proof.
-Compute rolling features before SQL. Append stream SQL accepts one alias or the exact-schema
-[UNION ALL subset](relational-frontends.md#same-schema-union), with cumulative
-snapshots for ordinary aggregation. See the
+The SQL stages in these examples start a new row lineage and support
+downstream row-local expressions. Compute rolling features before SQL.
+Ordinary stream SQL uses one alias and emits cumulative snapshots for
+aggregation. Named SQL also supports
+[exact-schema UNION ALL](relational-frontends.md#same-schema-union)
+and the two-input `CF_INNER_JOIN` and `CF_ASOF_JOIN` macros. See the
 [batch tutorial](batch-guide.md#compose-sql-and-python-pipelines) and
 [SQL composition reference](symbolic-api.md#sql-composition).
 

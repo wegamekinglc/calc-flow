@@ -56,8 +56,7 @@ Markdown, tests, and verification.
 
 * Align table columns with pipes and pad each column's separator row so dashes
   span the full column width (including the spaces on either side of the cell
-  content). This keeps tables readable in plain text and consistent with the
-  format used in `CLAUDE.md`.
+  content). See the [repository table convention](../../AGENTS.md#coding-style).
 * Remove trailing whitespace and end every Markdown file with a newline.
 
 ## Verification

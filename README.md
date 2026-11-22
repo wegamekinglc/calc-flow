@@ -132,9 +132,10 @@ The Python package is not a second engine.
   deep-copied strict-JSON settings and a cooperative, timezone-aware deadline
   normalized to UTC.
 - `TableExpr.stream` and `Program.stream` own a single native job with bounded
-  backpressure. Append SQL accepts one alias or the exact-schema
-  [UNION ALL subset](docs/relational-frontends.md#same-schema-union) in a stream. Ordinary aggregates and
-  `GROUP BY` emit full cumulative snapshots; other SQL runs per batch.
+  backpressure. Ordinary stream SQL uses one alias. Named `cf.sql` also lowers
+  [exact-schema UNION ALL](docs/relational-frontends.md#same-schema-union)
+  and the two-input `CF_INNER_JOIN` and `CF_ASOF_JOIN` macros to native operators.
+  Ordinary SQL aggregates and `GROUP BY` emit full cumulative snapshots.
   Stream-only `cf.snapshot_sql` queries complete latest relations across aliases;
   see [semantics and recovery](docs/streaming-guide.md#complete-replacement-snapshot-sql).
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes

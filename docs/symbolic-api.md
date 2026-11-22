@@ -41,10 +41,10 @@ editors or validating stored declarations:
 | Domain                      | Construct/analyze   | Batch/stream compile           | Current lowering boundary                                               |
 |-----------------------------|---------------------|--------------------------------|-------------------------------------------------------------------------|
 | row-local columns           | yes                 | yes                            | portable scalar types and the documented SQL allowlist                  |
-| SQL table stages            | yes                 | yes; see SQL composition       | stream: one alias or exact-schema UNION ALL; native SELECT/CTE schema   |
+| SQL table stages            | yes                 | yes; see SQL composition       | single-alias stream SQL and explicit relational subsets                 |
 | rolling `ts`                | yes                 | yes                            | source/alias/row-local operands and earlier rolling results             |
 | cross-section `cs`          | yes                 | yes                            | staged values; event time and partitions resolve to inputs or aliases   |
-| relational stream joins     | yes                 | stream only                    | independent/nested native joins with proved post-join ordering          |
+| bounded inner joins         | yes                 | batch and stream               | independent/nested native joins with proved post-join ordering          |
 | backward ASOF joins         | yes                 | batch and stream               | strict final left preservation; typed identity and bounded state        |
 | NumPy/JAX matrix            | yes                 | exact supported shape          | one static `weights` parameter and one allowlisted matmul               |
 | event `window`              | yes                 | batch/stream with aggregates   | fixed UTC tumbling/hopping; stateless table work on either side         |
@@ -96,9 +96,10 @@ row-local functions, rolling frames (`rows`/`duration`), cross-section groups
 (`exact_time`/`event_time_bucket`), table bridges, and matrix work.
 
 A `Program` declares uniquely named inputs (`table_input`, native `array_input`
-or `parameter` values) and outputs (tables or arrays) in declaration order. Its required
-keyword-only `engine` is `"sql"` or `"streaming"` and remains fixed on copies
-returned by `with_input` and `output`. Outputs accept a
+or `parameter` values) and outputs (tables or arrays) in declaration order.
+Choose exactly one keyword at construction, `mode="batch"|"stream"` or the
+legacy alias `engine="sql"|"streaming"`. Copies returned by `with_input` and
+`output` retain the chosen mode. Outputs accept a
 mapping or tuple-pair sequence. Omitting `inputs` discovers reachable roots;
 explicit inputs, including an empty sequence, are honored. Its `fingerprint`
 is the runtime-independent `calc_flow.symbolic.declaration.v1` program
@@ -109,11 +110,10 @@ paths such as `inputs.quotes: duplicate_name`. An input referenced by an
 output but missing from `inputs` is reported during analysis as an issue
 rooted at `inputs.<name>`.
 
-`Program.analyze(runtime=None, /, *, mode=None)` and
-`Program.explain(runtime=None, /, *, mode=None)` select a default `Runtime`
-when omitted. The default mode follows the selected engine: `"batch"` for
-`"sql"` and `"stream"` for `"streaming"`. An explicit mode selects diagnostic
-analysis without changing the engine. Pass the registered runtime for providers.
+`Program.analyze(runtime=None, /, *, mode=None, options=None)` and
+`Program.explain(runtime=None, /, *, mode=None, options=None)` select a default `Runtime`
+when omitted. The default mode is the Program's declared mode.
+An explicit mode selects a diagnostic view of the same declaration. Pass the registered runtime for providers.
 Both consume one immutable capability snapshot and record its session and
 revision. From the
 declaration graph alone — no data object, source, sink, or runner is accepted —
@@ -153,7 +153,7 @@ static-weight bytes when known, and provider calls per micro-batch. These are
 compile-time estimates and shape facts;
 runtime resident-memory and measured copy metrics remain authoritative. The
 report never contains row payloads, static values, secrets, callable
-representations, or object addresses. The frozen analysis vocabulary is
+representations, or object addresses. Common analysis codes include
 `capability_mismatch`, `duplicate_name`, `invalid_literal`,
 `ordering_required`, `schema_mismatch`, `unbounded_state`,
 `unknown_primitive_version`, `unresolved_type`, `unsupported_mode`, and
@@ -180,20 +180,23 @@ DAG. Shared roots and stateful upstream declarations fan out from their native
 state owners. The compiler does not collect intermediate tables or rebuild
 Python declarations for each source batch.
 
-SQL has a distinct row lineage and clears entity, event-time, and sequence
-ordering facts. Row-local projections, filters, and arithmetic after SQL are
-supported. Rolling calculations can feed SQL; temporal expressions directly
-after SQL fail the missing-ordering check. An `ORDER BY` inside SQL does not
-establish symbolic temporal ordering. SQL-to-event-window composition remains
-unsupported. A native table-rooted ArrayExpr may collect its array result after
+Ordinary SQL starts a new row lineage. Temporal ordering requires a separate
+proof on supported join paths. Row-local projections, filters, and arithmetic after SQL are
+supported. Rolling calculations can feed SQL. Downstream temporal expressions require
+proved ordering. An `ORDER BY` inside SQL does not
+establish symbolic temporal ordering. A fixed event window can follow
+deterministic single-input row-local SQL when the event-time column passes
+through unchanged or under a new name. A native table-rooted ArrayExpr may collect its array result after
 SQL with `collect_array`, using explicit native provider registration.
 `Program.collect` still returns tables; mixed table/array Program results and
 NumPy/JAX standalone outputs remain unsupported.
 
-Batch SQL can join multiple aliases. Append stream SQL accepts one alias or the
-exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
-Other multi-alias append SQL is rejected before any source opens, even if
-aliases share a root. Stream SQL with an
+Batch SQL can join multiple aliases. In a stream, ordinary SQL uses one
+alias. Named `cf.sql` also recognizes the exact-schema
+[UNION ALL subset](relational-frontends.md#same-schema-union) and the two-input
+[bounded inner join](relational-frontends.md#bounded-inner-joins) and
+[backward ASOF](relational-frontends.md#bounded-backward-asof) macros.
+Other multi-alias append queries fail before sources open. Stream SQL with an
 ordinary aggregate or `GROUP BY` emits the full cumulative result after every
 batch. Eligible queries, including admitted grouped ordered `LAST_VALUE`,
 update compact state; unsupported aggregate shapes rerun over retained input.
@@ -222,14 +225,16 @@ empty/EOF behavior, whole-message budgets, source restrictions and recovery.
 
 ## Symbolic compilation
 
-`Program.compile_batch(runtime=None, /)` and
+`Program.compile_batch(runtime=None, /, *, portability=None)` and
 `Program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0,
-late_policy="error")` lower a program to the
+late_policy="error", portability=None)` lower a program to the
 existing execution plans. Batch compilation requires `mode="batch"`; stream
 compilation requires `mode="stream"`. Legacy `engine="sql"|"streaming"` is an
 exclusive construction alias. Project export follows the selected lifecycle
 and rejects a conflicting explicit mode. `for_mode` copies declarations into
 an independent wrapper for another lifecycle.
+Pass a [portability request](query-history-portability.md) to either compiler
+to require a supported comparison before execution.
 Compilation is declaration processing only. On a preparation-cache miss, it
 captures one immutable capability snapshot and lowers one strict project-v3
 document. Native compilation performs final port, kind, schema,
@@ -480,8 +485,8 @@ fail before any source opens, with field paths such as
 `outputs.minute.window_tumbling.aggregates[0].column`; unsupported field
 types append `.dtype` to the field path.
 
-The native window owns accumulators, output sequence, and checkpoint layout
-`1`. Bind sources and sinks through `StreamingRunner` and use
+The native window owns the accumulators and output sequence. It advertises
+state version 1, writes checkpoint layout 2, and restores layouts 1 and 2. Bind sources and sinks through `StreamingRunner` and use
 `ManagedCheckpointRuntime` for the existing aligned checkpoint and recovery
 protocol. Recovering an open window restores that native state. There is no
 Python row executor or separate Python window buffer. Session windows, local
@@ -500,8 +505,11 @@ resolved fields must have identical supported Arrow types. Each event-time
 name resolves to a non-null `timestamp[us, UTC]` field.
 
 Both inputs must declare `event_time`, non-empty `entity_by`, and non-empty
-`sequence_by` ordering facts for stream analysis. Batch analysis and
-compilation fail with `unsupported_mode`. The output schema is deterministic:
+`sequence_by` ordering facts for stream analysis. A batch Program can compile and collect the
+same join over two complete inputs. Each execute owns fresh state and
+enforces both side budgets and the match limit. See the
+[finite inner join example](../examples/finite_inner_join.py).
+The output schema is deterministic:
 all left fields named `{left_prefix}__{name}` in source order, followed by all
 right fields named `{right_prefix}__{name}` in source order, with exact type
 and nullability preserved.
@@ -548,8 +556,9 @@ create the independent `stream_asof_join@1` primitive. Required `tolerance` and
 [ASOF guide](asof-join-guide.md) defines these entry points and exact types.
 
 Each unique declaration digest owns one native ASOF state across outputs.
-Analysis verifies the native stream-only, watermark-requiring,
-`group_final_append_only`, checkpointed-stateful capability with
+Analysis requires the native capability to advertise both batch and stream
+modes. Its stream contract requires watermarks and checkpointed state with
+`group_final_append_only` finality. The capability must report
 `state_version=3` and a `state_layouts` inventory containing `10`
 (currently `(10,)`);
 missing or inconsistent evidence fails closed. All ordered side settings,
@@ -559,16 +568,19 @@ ordering derives from the left side, and every right field is nullable.
 Supported paths include row-local inputs, shared fan-out, independent and
 chained ASOF nodes, mixed inner/ASOF joins with complete valid ordering,
 post-ASOF rolling/cross-section, and single-alias stream SQL after ASOF.
-SQL into ASOF, event-window/ASOF chains, and matrix attachment around ASOF are
-rejected; unrelated legal branches and independent windows may coexist.
+Single-input row-local SQL can feed ASOF when the required temporal identity
+fields pass through unchanged or purely renamed. Event-window/ASOF chains and
+matrix attachments around ASOF are rejected. Independent windows may coexist.
 Optimization cannot move a filter across the ASOF finality boundary or change
 its candidate set. See the [composition matrix](asof-join-guide.md#composition-and-explanation).
 
 `Program.explain(mode="stream")` shows resolved selection/ordering, strict
 watermark closure, limits, frontier lag, and state ownership. `compile_stream`
 lateness settings apply to rolling/cross-section stages; ASOF uses its own
-spec's late policy and has no allowed-lateness parameter. Batch analysis,
-compilation, and collection reject ASOF. There is no Python matching engine.
+spec's late policy. In batch mode the same declaration admits both complete
+inputs before matching, using fresh state for each execution. The
+[finite ASOF example](../examples/finite_asof_join.py) checks typed tie
+selection and an unmatched left row.
 
 ## RSI and ATR calculations
 
@@ -859,11 +871,10 @@ rejection and `drop` to a metrics-recorded drop — and the
 referenced value. Batch lowering writes the default lateness values, batch
 evaluation classifies no late rows. Cross-section stages consume the same
 options; event-window programs apply the option checks described above.
-Cumulative sum/min/max/variance require declaration and writer
-`state_layout_version` 4, persisting exact summaries and progress. Other
-declarations use version 1, or version 2 when they include EWMA/cumulative mean,
-and retain writer layout 3. Existing checkpoint identities remain unchanged;
-see [native rolling state](symbolic-design.md#native-rolling-state).
+Stages with MACD components use declaration and writer layout 6. RSI/ATR
+stages without MACD components use layout 5. Among the remaining stages,
+cumulative sum/min/max/variance use layout 4 to persist exact summaries and
+progress. Declarations using layout 1 or 2 write layout 3. See [native rolling state](symbolic-design.md#native-rolling-state).
 
 `cs.rank`, `cs.percentile`, `cs.demean`, `cs.mean`, `cs.zscore`, `cs.winsorize`,
 `cs.top`, `cs.bottom`, `cs.top_quantile`, `cs.bottom_quantile`, and
@@ -919,11 +930,10 @@ including declaration-only `window_tumbling@1`/`window_hopping@1` nodes and
 shape above — fail with `unknown_primitive_version` rooted at the output or
 `static_inputs.<name>`, in both batch and stream modes. Native stateful
 operators retain their declared finality; explicit stream SQL uses the snapshot
-or batch-local semantics described in [SQL composition](#sql-composition). Standalone array outputs fail
-with `unknown_primitive_version` in batch mode; stream mode rejects them
-earlier, at the analysis phase, with `unbounded_state` rooted at
-`outputs.<name>` — the stream-safety rule for an array output with row-axis
-lineage described above. Casts to non-portable targets fail with
+or batch-local semantics described in [SQL composition](#sql-composition). In batch mode a native `ArrayExpr` can return an
+array through `collect_array`. Stream analysis reports `unsupported_mode`
+for native array outputs and `unbounded_state` for a NumPy/JAX array output
+with table row-axis lineage, rooted at `outputs.<name>`. Casts to non-portable targets fail with
 `unsupported_type` at `outputs.<name>.cast.data_type`.
 
 Stream plans also reject read-only queries that call volatile built-in

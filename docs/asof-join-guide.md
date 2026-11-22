@@ -77,8 +77,9 @@ example these are `trades` and `quotes`; each has a
 result is available. After they advance to 122, the two trades produce
 `quote__price = [10.2, None]`. The example requires no external service.
 
-`collect`, `compute`, and batch compilation consume one complete history per
-input. The compiled plan owns no candidates between executions. Explicit runner
+For finite ASOF, declare both inputs with their temporal metadata and pass
+their complete tables to `collect` by logical name. Each execution of a
+compiled batch plan matches those two histories independently. Explicit runner
 bindings and exported projects use the plan's physical binding names; see
 [stream ownership](python-api.md#streaming-results) and
 [project export](projects-guide.md#export-expressions-and-retain-the-right-names).
@@ -120,7 +121,7 @@ cannot establish the next join's identity. A nested inner join still needs its
 complete canonical pair ordering. Export uses the same project-v3 native ASOF
 node and physical bindings; logical Python input names are not serialized.
 
-Revision 7 analysis can prove `final_relation / accepted_history /
+[Query history analysis](query-history-portability.md) can prove `final_relation / accepted_history /
 all_sources_eof / unordered` conditionally: both runs must succeed over the same
 complete accepted history, within their own budgets, with no stream late discard.
 Compare all append outputs at EOF against the finite relation. Stream intermediate
@@ -406,8 +407,8 @@ for separate settlement, allocation, and RSS diagnostics.
 | ASOF into ASOF                                           | Supported using valid left-derived identity and time fields      |
 | Inner Join into ASOF, or ASOF into inner Join            | Supported with complete valid ordering and schema evidence       |
 | ASOF into rolling/cross-section                          | Supported under the downstream operator's own type rules         |
-| ASOF into projection/filter or single-alias stream SQL   | Supported; SQL output has its usual new lineage and no ordering  |
-| SQL into ASOF                                            | Rejected because SQL does not retain temporal ordering           |
+| ASOF into projection/filter or single-alias stream SQL   | Supported with the downstream projection, filter or query schema |
+| SQL into ASOF                                            | Row-local, single-input SQL preserving required identity fields  |
 | Event window into ASOF, or ASOF into event window        | Rejected; independent window branches may coexist                |
 | Matrix attachment around ASOF                            | Unsupported                                                      |
 

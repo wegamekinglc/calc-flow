@@ -214,14 +214,16 @@ selectors.
   callbacks or run a Python pipeline per batch. Arrow schemas, named outputs,
   and SQL stages lower through one immutable expression graph to project-v3.
 - SQL result schemas come from private native planning without reading rows.
-  SQL output has a new row lineage and no inherited temporal ordering.
-  Batch SQL supports multiple aliases; append stream SQL accepts one alias or
-  the exact-schema multi-alias subset that appends rows without deduplication.
+  Ordinary SQL has a new row lineage. A supported row-local SQL projection
+  can pass temporal identity fields to a bounded join or its time column to
+  a fixed event window. Batch SQL supports multiple aliases. Ordinary stream
+  SQL uses one alias. Named SQL also lowers exact-schema UNION ALL and the
+  two-input CF_INNER_JOIN and CF_ASOF_JOIN macros to native operators.
   Ordinary and grouped SQL aggregates emit a full cumulative snapshot after each
   batch.
   Eligible queries, including admitted grouped ordered LAST_VALUE, use compact
   state; unsupported aggregate shapes retain input and rerun over history.
-  Other SQL runs per batch. SQL state has no fixed default cap;
+  Ordinary nonaggregate SQL runs per batch. SQL state has no fixed default cap;
   `sql_state_budget` limits cumulative input and `sql_compact_state_budget`
   independently requires and limits compact state per aggregate node. See
   `docs/streaming-guide.md` for admission, ordering and recovery boundaries.
@@ -242,9 +244,9 @@ selectors.
   bounded backpressure and awaited lifecycle cleanup. Event-time iterables default
   to validated nondecreasing arrival times and native watermarks at
   `max_seen - 1 microsecond`. `watermarks` selects existing policies by logical
-  input name; supplied `SourceBinding` policies cannot be overridden. Inputs
-  without event time retain per-batch output, except SQL aggregates with
-  cumulative snapshots. Ordinary iterables have
+  input name; supplied `SourceBinding` policies cannot be overridden. Row-local stages process
+  each batch independently. Ordinary SQL aggregates emit cumulative snapshots,
+  and bounded-source finalizers wait for EOF. Ordinary iterables have
   no replay; temporary checkpoints do not provide durable restart or exactly-once
   application delivery.
 - `Program(name, mode="batch")` or `Program(name, mode="stream")` fixes the

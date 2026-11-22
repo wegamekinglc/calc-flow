@@ -156,9 +156,10 @@ cleanup instead of detaching background work.
 
 `WindowAggregateOperator` supports fixed UTC tumbling and hopping windows.
 Its `WindowSpec` names the event-time column, ordered group columns, geometry,
-and ordered `count`, `sum`, `min`, `max`, or `avg` aggregates. It is stream-only.
+and ordered `count`, `sum`, `min`, `max`, or `avg` aggregates. Batch execution uses fresh accumulators and finalizes all
+nonempty windows over the complete input.
 
-The operator keeps deterministic incremental state keyed by window bounds and
+In a stream the operator keeps deterministic incremental state keyed by window bounds and
 group values. A watermark closes eligible windows; end-of-input closes the
 remaining non-empty windows. Assignments whose window end is not later than
 the current input watermark are late and are not applied. Session windows,
@@ -330,13 +331,15 @@ validation. `PipelineBuilder` exposes explicit graph and UDF/provider selection.
 
 SQL and expressions share one DAG. A private native planning bridge derives SQL
 result schemas without reading rows or executing queries; data execution stays
-in Rust/DataFusion. SQL output has a distinct lineage without inherited temporal
-ordering. Row-local work may follow SQL, and native rolling may precede it.
-Append stream SQL accepts one alias or the exact-schema
-[UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY` emit
+in Rust/DataFusion. Ordinary SQL output has a distinct lineage. Row-local
+work may follow SQL, and native rolling may precede it. An ordinary stream
+SQL node has one alias. The relational frontend lowers
+[exact-schema UNION ALL](relational-frontends.md#same-schema-union),
+`CF_INNER_JOIN`, and `CF_ASOF_JOIN` to native relational operators.
+Ordinary SQL aggregates and `GROUP BY` emit
 full cumulative snapshots after each batch. Eligible queries update compact
 state; unsupported aggregate shapes retain input and rerun over its history.
-Other append SQL, including window functions without an ordinary aggregate,
+Other ordinary append SQL, including window functions without an ordinary aggregate,
 executes per native batch. Stream-only `snapshot_sql` queries the latest
 complete replacement relations across multiple aliases. See the
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)

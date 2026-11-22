@@ -1001,9 +1001,9 @@ state budget, checkpoint preparation and managed recovery apply.
 all three components over nullable integer prices.
 
 
-Cumulative sum/min/max/variance require
-`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in both declarations and writer
-state. Layout 4 extends the columnar layout with exact per-group summaries
+For stages without RSI, ATR or MACD components, cumulative sum/min/max/variance
+use `ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION` (4) in both declarations and
+writer state. Layout 4 extends the columnar layout with exact per-group summaries
 (including binary64 bits), alongside entity keys, history and pending rows.
 Other declarations keep their existing layout and checkpoint fingerprints.
 Recovery validates the layout, complete summary inventory, configuration,
@@ -1016,9 +1016,10 @@ the `size` rows through the current row of the entity total order — or
 open at the lower bound and closed at the upper bound, with equal-time rows
 ordered by `sequence_by`. `configuration_version` and `state_layout_version`
 use their validated declaration constants. `configuration_version` is
-`ROLLING_CONFIGURATION_VERSION` (1). Declarations without cumulative summaries,
-EWMA or cumulative mean use `ROLLING_STATE_LAYOUT_VERSION` (1), while either recurrence requires
-`ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). These values belong to project
+`ROLLING_CONFIGURATION_VERSION` (1). Among stages without indicators or cumulative
+sum/min/max/variance, EWMA and cumulative mean use
+`ROLLING_EWMA_STATE_LAYOUT_VERSION` (2). The other stages in that group use
+`ROLLING_STATE_LAYOUT_VERSION` (1). These values belong to project
 documents and configuration fingerprints. Old-only operators without cumulative
 summaries write `ROLLING_COLUMNAR_STATE_LAYOUT_VERSION` (3): one deterministic entity
 dictionary, projected retained history, a columnar reorder buffer, recurrence
@@ -1316,8 +1317,8 @@ restart. Delivery remains a per-output contract: exactly-once requires the
 normal source, operator, and transactional sink proofs; ordinary sinks can
 observe replay duplicates. The [file connector](connectors/file.md) describes
 transactional Parquet recovery. Project and manifest formats remain 3, with
-rolling writer layout 3 or 4 according to the declared outputs, and
-cross-section state layout 1.
+the writer layout selected by the [rolling outputs](#rolling-windows)
+and cross-section state layout 1.
 
 Python declares paired outputs through
 [`with_late_output`](python-api.md#lateoutputs-and-local-late-policy).

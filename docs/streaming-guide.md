@@ -355,8 +355,9 @@ relations. Aliases must be valid SQL identifiers without case-insensitive
 duplicates, and each input requires a fixed Arrow schema. It emits a new row
 lineage without inherited temporal ordering. Outputs currently connect
 directly to sinks; expressions or other operators after this node are rejected.
-For append streams, named `cf.sql` declarations accept one alias or the
-[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
+For append streams, named `cf.sql` supports single-alias queries,
+[exact-schema UNION ALL](relational-frontends.md#same-schema-union), and
+the explicit two-input `CF_INNER_JOIN` and `CF_ASOF_JOIN` macros.
 `TableExpr.sql` remains the single-table interface. Low-level
 `PipelineBuilder.sql` creates a native SQL operator with one stream alias;
 it does not perform the symbolic UNION ALL lowering. Named `cf.sql` and
@@ -768,8 +769,11 @@ slow consumers. `StreamRuntimeConfig.edge_budget` also bounds each iterable
 input batch; schema mismatches and oversized batches fail with the input name.
 This does not bound tables that application code accumulates after reading them.
 
-An append streaming SQL stage supports one alias or the shared
-[exact-schema UNION ALL subset](relational-frontends.md#same-schema-union).
+Ordinary append SQL uses one alias. The relational frontend also lowers
+[exact-schema UNION ALL](relational-frontends.md#same-schema-union),
+[bounded inner join](relational-frontends.md#bounded-inner-joins), and
+[backward ASOF](relational-frontends.md#bounded-backward-asof) SQL
+declarations to native operators.
 Union preserves each ingress FIFO and duplicates; compare all output rows at
 all-source EOF without a cross-source ordering promise. Ordinary aggregates
 and `GROUP BY` emit a full cumulative result after each batch.
@@ -831,19 +835,19 @@ compact state has been installed. Both SQL budgets default to `None`; when
 configured together, the cumulative input quota and compact-state limits both
 apply. Neither changes the semantic plan fingerprint.
 
-Other SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
+Other ordinary SQL remains batch-local. `ORDER BY` and `LIMIT` apply to each snapshot;
 SQL window functions alone remain batch-local. Downstream stages receive each
-snapshot as new rows. Multi-alias append SQL is a batch operation;
+snapshot as new rows under the default `legacy_append` semantics.
 [`cf.snapshot_sql`](#complete-replacement-snapshot-sql) replaces complete
 relations in streams. Use native `ts`
 operations for rolling state and the documented window/join declarations for
 event-time aggregation and matching.
 
-SQL results have a new row lineage and no inherited temporal ordering. The
-supported pipeline above calculates rolling values before SQL, then may apply
-row-local expressions after it. A SQL result cannot currently feed a symbolic
-event window or execute as a standalone array Program output; see
-[SQL composition](symbolic-api.md#sql-composition).
+The pipeline above calculates rolling values before SQL and can apply
+row-local expressions to the new SQL row lineage. A fixed event window can
+follow deterministic single-input row-local SQL when the time column passes
+through unchanged or purely renamed. Program collection requires table
+outputs. See [SQL composition](symbolic-api.md#sql-composition).
 
 By default, convenience streams use a temporary managed checkpoint root and
 ordinary output sinks. Async iterable inputs provide best-effort delivery and no replay;
@@ -916,8 +920,10 @@ continues to count cumulative accepted input, not live groups.
 ### SQL aggregate recovery compatibility
 
 `Runtime().capabilities()` lists SQL `state_version=2` with
-`state_layouts=(3, 4, 5)`: ordinary compact, retained input, and ordered compact
-state, respectively. The operator's semantic state version is separate from
+`state_layouts=(3, 4, 5, 6)`. Append aggregates use layout 3 for ordinary
+compact state, 4 for retained input and 5 for ordered compact state. Layout 6
+belongs to [replacement aggregates](#restricted-replacement-aggregates),
+which use semantic state version 3 when that policy is selected. The operator's semantic state version is separate from
 the checkpoint layout and its native accumulator semantics. Compact control
 records use `native_semantics=1` for layout 3 and `native_semantics=2` for
 layout 5; retained layout 4 has no native accumulator semantics field.

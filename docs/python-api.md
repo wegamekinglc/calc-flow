@@ -181,21 +181,25 @@ into an independent wrapper for the other lifecycle. Calls for the other engine 
 diagnostics; it does not change the program engine or permit opposite-mode
 compilation, export, or execution.
 
-| Method                                                                                                | Result and input contract                                                        |
-|-------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                        | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
-| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                   | One NativeArray from native array/table roots; explicit registered Runtime       |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                           | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
-| `cf.Program(name, mode=...)`                                                                          | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias             |
-| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`             | SQL: named Arrow tables; streaming: owned `StreamOutput` events                  |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                        | Awaitable forms of the same contracts                                            |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                         | Owned async iterator of Arrow tables                                             |
-| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of named `StreamOutput` events; input mapping required      |
-| `program.analyze(runtime=None, /, *, mode=None)`                                                      | Immutable analysis result; defaults to the selected engine                       |
-| `program.explain(runtime=None, /, *, mode=None)`                                                      | Deterministic explanation text                                                   |
-| `program.compile_batch(runtime=None, /)`                                                              | Explicit batch execution plan                                                    |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`          | Explicit stream plan for a runner                                                |
-| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`   | Validated, data-only project-v3 document for the selected engine                 |
+| Method                                                                                                         | Result and input contract                                                      |
+|----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                                 | One Arrow table; one table root accepts data directly, otherwise use a mapping |
+| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                            | One NativeArray from native array/table roots; explicit registered Runtime     |
+| `program.collect(inputs, /, *, runtime=None, options=None, portability=None)`                                  | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping    |
+| `cf.Program(name, mode=...)`                                                                                   | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias           |
+| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None, portability=None)`    | SQL: named Arrow tables; streaming: owned `StreamOutput` events                |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                                 | Awaitable forms of the same contracts                                          |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                                  | Owned async iterator of Arrow tables                                           |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None, portability=None)`                   | Owned async iterator of named `StreamOutput` events; input mapping required    |
+| `program.analyze(runtime=None, /, *, mode=None, options=None)`                                                 | Immutable analysis result; defaults to the selected engine                     |
+| `program.explain(runtime=None, /, *, mode=None, options=None)`                                                 | Deterministic explanation text                                                 |
+| `program.compile_batch(runtime=None, /, *, portability=None)`                                                  | Explicit batch execution plan                                                  |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error", portability=None)` | Explicit stream plan for a runner                                              |
+| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`            | Validated, data-only project-v3 document for the selected engine               |
+
+Use `options=AnalysisOptions(portability=request)` with Program analysis or
+explanation. The Program compilation and execution methods accept
+`portability=request` directly. See [query history and portability](query-history-portability.md).
 
 `BatchExecutionPlan.external_inputs` and `.external_outputs` are deterministic
 tuples of physical binding names. Use them when executing a reloaded project;
@@ -269,14 +273,17 @@ exception retains its original traceback. These functions are never runtime
 UDFs or serialized callbacks.
 
 See the complete [SQL and Python pipeline](batch-guide.md#compose-sql-and-python-pipelines)
-and [multi-input SQL example](#multi-input-sql). SQL output has a distinct row
-lineage and does not inherit entity/event-time/sequence ordering. Row-local
-work after SQL and rolling before SQL are supported. SQL-to-event-window paths
-and standalone array Program outputs are unsupported; the
+and [multi-input SQL example](#multi-input-sql). Ordinary SQL starts a new row
+lineage. Row-local work can follow SQL, and rolling calculations can precede
+it. A fixed event window accepts deterministic single-input row-local SQL
+that preserves its time column unchanged or purely renamed. Program outputs
+for collection must be tables. The
 [composition reference](symbolic-api.md#sql-composition) gives the full boundary.
 
-Batch SQL accepts multiple aliases. Append stream SQL accepts one alias or the
-exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
+Batch SQL accepts multiple aliases. In a stream, named `cf.sql` supports
+single-alias queries, the exact-schema
+[UNION ALL subset](relational-frontends.md#same-schema-union), and the explicit
+two-input `CF_INNER_JOIN` and `CF_ASOF_JOIN` macros.
 Queries with ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
 current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
 `6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged
@@ -359,7 +366,7 @@ and [example 31](../examples/31_streaming_account_market_values.py).
 
 `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)` returns
 `StreamResults[pyarrow.Table]`. `Program.stream(inputs, /, *, runtime=None,
-config=None, watermarks=None)` returns `StreamResults[StreamOutput]`. Both require
+config=None, watermarks=None, portability=None)` returns `StreamResults[StreamOutput]`. Both require
 `async with` and `async for`; there is no blocking convenience stream. Run the
 [stateful pipeline](../examples/33_streaming_pipeline.py) and
 [named-output example](../examples/34_streaming_outputs.py), or follow the
@@ -495,14 +502,14 @@ to physical `normal.output`/`late.output` Sink bindings; inspect
 ## Bounded backward ASOF Join
 
 `cf.table.stream_asof_join` and `TableExpr.stream_asof_join` declare a
-stream-only backward match. They require `tolerance=timedelta(...)` and
+bounded backward match in batch and stream modes. They require `tolerance=timedelta(...)` and
 `limits=AsofStateLimits(max_state_rows, max_state_bytes)`, with optional
 `keys`, `late_policy`, and `prefixes`. Time/sequence come from input temporal
 metadata, and omitted keys use each input's entity keys.
 
 The operator chooses at most one historical right row per accepted left row
 and preserves unmatched left rows with nullable right fields. Equal-time ties
-use a typed sequence order. Both input watermarks must strictly pass the left
+use a typed sequence order. During streaming, both input watermarks must strictly pass the left
 time, or the corresponding input must end, before any final result is emitted.
 Run [example 35](../examples/35_stream_asof_join.py) and read the
 [ASOF guide](asof-join-guide.md) for exact types, inclusive tolerance, late and
@@ -788,19 +795,20 @@ These rules establish neither table lineage nor a general array stream API.
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 
-The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
-`rolling@1`, `sql@1`, `stream_asof_join@1`, `stream_join@1`, and `window@1`,
-with truths anchored in
-the engine implementation:
+A fresh Runtime reports the following built-in operator capabilities.
 
 | Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts    |
 |----------------------|---------------|-------------------------|-----------------------|---------------|------------------|
+| `bounded_order@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2             |
+| `bounded_over@1`     | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2             |
 | `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                |
+| `distinct@1`         | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 2, 3             |
 | `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                |
 | `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6 |
-| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4             |
-| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 10               |
-| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1, 2, 3          |
+| `snapshot_sql@1`     | stream        | unproven                | checkpointed_stateful | 1             | 1                |
+| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4, 5, 6       |
+| `stream_asof_join@1` | batch, stream | group_final_append_only | checkpointed_stateful | 3             | 10               |
+| `stream_join@1`      | batch, stream | unproven                | checkpointed_stateful | 1             | 1, 2, 3          |
 | `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2             |
 
 The rolling inventory includes retained-history and accumulator layouts as well
@@ -809,13 +817,16 @@ as columnar layout `3` and cumulative layout `4`. See
 implemented encoding and restore rules.
 
 `cross_section@1`, `rolling@1`, `stream_asof_join@1`, `stream_join@1`, and
-`window@1` describe stream state and watermark requirements. Finite windows
-finalize the complete input in fresh temporary state without watermarks or
-checkpoint recovery. Aggregate-bearing
-`sql@1` is stateful without requiring one. Row-local SQL remains stateless.
-`cross_section@1`, `expression@1`, `rolling@1`, `stream_asof_join@1`, and
-`window@1` are micro-batch invariant. All seven
-report `deterministic=True` and `replay_safe=True`. For `sql@1` those two claims
+`window@1` require watermark support in their stream capability. Finite
+windows and bounded joins finalize complete inputs in fresh state. Ordinary
+aggregate SQL maintains state across batches without requiring a watermark.
+Row-local SQL remains stateless.
+
+The snapshot marks `bounded_order@1`, `snapshot_sql@1`, `sql@1`, and
+`stream_join@1` with
+`microbatch_invariant=False`. The other entries report `True`.
+Only `bounded_order@1` reports both `deterministic=False` and
+`replay_safe=False` in this inventory. For `sql@1` the positive flags
 hold from the engine viewpoint: exactly-once stream
 plans reject nodes that select volatile registered UDFs, and stream
 compilation rejects read-only queries that call volatile built-in SQL

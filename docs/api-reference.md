@@ -92,33 +92,35 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                    | Contract                                                             |
-|--------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| `sql(query, /, **tables)`                                                      | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
-| `snapshot_sql(query, /, **tables)`                                             | Stream-only query over complete latest replacement relations         |
-| `TableExpr.sql(query, /)`                                                      | Single-table SQL with the local alias `input`                        |
-| `Expr.pipe(function, /, *args, **kwargs)`                                      | Call the synchronous builder once and preserve its return type       |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[pyarrow.Table]`                                       |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`     | `StreamResults[StreamOutput]`; logical input mapping required        |
-| `Program(name, mode=...)`                                                      | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
-| `Program.execute(inputs, /, *, ...)`                                           | SQL: named Arrow tables; streaming: owned named events               |
-| `StreamOutput.name` / `.table`                                                 | Immutable named Arrow output event                                   |
-| `StreamResults` async context / iteration / `aclose()` / `.job`                | One native job, one consumer, bounded output and owned cleanup       |
+| Entry point                                                                                  | Contract                                                             |
+|----------------------------------------------------------------------------------------------|----------------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                                    | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
+| `snapshot_sql(query, /, **tables)`                                                           | Stream-only query over complete latest replacement relations         |
+| `TableExpr.sql(query, /)`                                                                    | Single-table SQL with the local alias `input`                        |
+| `Expr.pipe(function, /, *args, **kwargs)`                                                    | Call the synchronous builder once and preserve its return type       |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                 | `StreamResults[pyarrow.Table]`                                       |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None, portability=None)` | `StreamResults[StreamOutput]`; logical input mapping required        |
+| `Program(name, mode=...)`                                                                    | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
+| `Program.execute(inputs, /, *, ...)`                                                         | SQL: named Arrow tables; streaming: owned named events               |
+| `StreamOutput.name` / `.table`                                                               | Immutable named Arrow output event                                   |
+| `StreamResults` async context / iteration / `aclose()` / `.job`                              | One native job, one consumer, bounded output and owned cleanup       |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
-aliases; append stream SQL accepts one alias or the exact-schema
-[UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY`
+aliases. In a stream, named `sql` accepts single-alias queries, the exact-schema
+[UNION ALL subset](relational-frontends.md#same-schema-union), and the explicit
+two-input `CF_INNER_JOIN` and `CF_ASOF_JOIN` macros. Ordinary aggregates and `GROUP BY`
 emit full cumulative snapshots after each batch. Eligible aggregate queries
-update compact state; unsupported shapes rerun over retained input. Other append
+update compact state; unsupported shapes rerun over retained input. Other ordinary append
 SQL executes per batch. `snapshot_sql` supports multiple aliases, waits for all
 relations to initialize, then emits a complete result after each replacement.
 Its outputs currently connect directly to sinks and reject ExactlyOnce. See
 [snapshot SQL](streaming-guide.md#complete-replacement-snapshot-sql) for the
 whole-message, state-budget, and recovery contracts.
-SQL output does not inherit temporal ordering. Row-local expressions after
+Ordinary SQL produces a new row lineage. Row-local expressions after
 ordinary `sql` stages and rolling before those stages are supported.
-SQL-to-event-window paths and standalone array Program collection outputs are
-unsupported. Native array declarations have a separate blocking batch entry point:
+A fixed event window can follow deterministic single-input row-local SQL if
+its time column passes through unchanged or purely renamed. Program collection
+returns table outputs. Native array declarations have a separate blocking batch entry point:
 `ArrayExpr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`
 returns one `NativeArray`; see [native collection](python-api.md#native-arrayexpr-declarations-and-collection).
 
@@ -127,7 +129,8 @@ and binds inputs by logical declaration name. Event-time iterables default to
 validated nondecreasing arrival times and native watermark generation, so rolling
 results can arrive before EOF. `watermarks` selects existing policies for one
 dynamic input or a mapping by logical name; it cannot override `SourceBinding`.
-Inputs without event time retain per-batch output except for SQL aggregates.
+Row-local stages process each batch independently. Ordinary aggregates emit
+cumulative snapshots, and bounded-source finalizers wait for EOF.
 Ordinary iterables have best-effort delivery without replay; each convenience
 stream uses temporary checkpoint storage. Explicit bindings and managed state
 provide the separate durable-recovery path. Multi-output streams yield named
@@ -140,8 +143,8 @@ and the [streaming guide](streaming-guide.md).
 backward bounded match in batch or stream mode with required `tolerance` and `limits`, plus optional `keys`,
 `late_policy`, and `prefixes`. Exact non-null event time and sequence are
 inherited from each operand. The result preserves every accepted left row and
-makes right fields nullable; final output waits for strict progress on both
-inputs. See the [Python entry points](python-api.md#bounded-backward-asof-join)
+makes right fields nullable. Finite execution matches both complete inputs.
+In streams, a left row waits until each side advances past its time or ends. See the [Python entry points](python-api.md#bounded-backward-asof-join)
 and [ASOF contract](asof-join-guide.md).
 
 ### Batch
@@ -407,24 +410,24 @@ Rust runtime. Every expression, feature, and analysis result is immutable.
 Programs are immutable, including the required lifecycle chosen at construction.
 Constructors copy caller-owned sequences and mappings.
 
-| Member                                                                                  | Contract                                                                                                           |
-|-----------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------|
-| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`                         | Immutable typed declaration values with v1 digests                                                                 |
-| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())`           | Declare one named table input                                                                                      |
-| `parameter(name, *, kind=...)`                                                          | Declare one named static table or array input                                                                      |
-| `Field(name, data_type, nullable=True)`                                                 | One exact table field declaration                                                                                  |
-| `rows(size)` / `duration(micros)`                                                       | Row-count and exact-microsecond rolling frames                                                                     |
-| `exact_time(...)` / `event_time_bucket(...)`                                            | Cross-section group declarations                                                                                   |
-| `row` / `ts` / `cs` / `table` / `linalg` / `window`                                     | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs   |
-| `FeatureSet(features=())` / `.with_feature(name, value)`                                | Ordered uniquely named column expressions                                                                          |
-| `TableExpr.with_columns(features=None, /, **named)`                                     | Append a mapping, named expressions, or a feature set                                                              |
-| `Program(name, /, *, mode, inputs=None, outputs=())`                                    | Immutable lifecycle, declared inputs and outputs, and the declaration v1 fingerprint                               |
-| `Program.for_mode(mode, /)`                                                             | Independent declaration wrapper for `"batch"` or `"stream"`, preserving update semantics                           |
-| `Program.execute(inputs, /, *, ...)`                                                    | Finite named Arrow tables or owned streaming events, according to the selected engine                              |
-| `with_late_output(value, /, *, allowed_lateness_micros=0)`                              | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed    |
-| `Program.analyze(runtime=None, /, *, mode=None)` / `.explain(...)`                      | Static analysis plus deterministic optimization and cost facts; mode defaults to the selected engine               |
-| `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)`   | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans               |
-| `AnalysisIssue` / `AnalysisResult`                                                      | Immutable findings with stable output/input-rooted paths                                                           |
+| Member                                                                                                     | Contract                                                                                                         |
+|------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `Expr` / `ColumnExpr` / `ArrayExpr` / `TableExpr` / `Parameter`                                            | Immutable typed declaration values with v1 digests                                                               |
+| `table_input(name, *, schema, entity_by=(), event_time=None, sequence_by=())`                              | Declare one named table input                                                                                    |
+| `parameter(name, *, kind=...)`                                                                             | Declare one named static table or array input                                                                    |
+| `Field(name, data_type, nullable=True)`                                                                    | One exact table field declaration                                                                                |
+| `rows(size)` / `duration(micros)`                                                                          | Row-count and exact-microsecond rolling frames                                                                   |
+| `exact_time(...)` / `event_time_bucket(...)`                                                               | Cross-section group declarations                                                                                 |
+| `row` / `ts` / `cs` / `table` / `linalg` / `window`                                                        | Namespace functions; `ts` includes EWMA/EMA and MACD, while `table` includes ordered relational stream-join DAGs |
+| `FeatureSet(features=())` / `.with_feature(name, value)`                                                   | Ordered uniquely named column expressions                                                                        |
+| `TableExpr.with_columns(features=None, /, **named)`                                                        | Append a mapping, named expressions, or a feature set                                                            |
+| `Program(name, /, *, mode, inputs=None, outputs=())`                                                       | Immutable lifecycle, declared inputs and outputs, and the declaration v1 fingerprint                             |
+| `Program.for_mode(mode, /)`                                                                                | Independent declaration wrapper for `"batch"` or `"stream"`, preserving update semantics                         |
+| `Program.execute(inputs, /, *, ...)`                                                                       | Finite named Arrow tables or owned streaming events, according to the selected engine                            |
+| `with_late_output(value, /, *, allowed_lateness_micros=0)`                                                 | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed  |
+| `Program.analyze(runtime=None, /, *, mode=None, options=None)` / `.explain(...)`                           | Static analysis plus deterministic optimization and cost facts; mode defaults to the selected engine             |
+| `Program.compile_batch(runtime=None, /, *, portability=None)` / `.compile_stream(runtime=None, /, *, ...)` | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans             |
+| `AnalysisIssue` / `AnalysisResult`                                                                         | Immutable findings with stable output/input-rooted paths                                                         |
 
 Structural identity uses `identical()`; public comparison operators build
 symbolic expressions, and converting one to `bool` fails. See the

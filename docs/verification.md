@@ -50,8 +50,8 @@ time and platform-specific debug formatting are not fixed output contracts.
 
 The repository command groups cover:
 
-- Rust formatting, all-target/all-feature Clippy, the core/PyO3 test harness,
-  rustdoc, and workspace coverage.
+- Rust formatting, Clippy on libraries, binaries, tests, and examples with
+  all features in Linux CI, the Rust test harness, rustdoc, and workspace coverage.
 - Python native installation, binding/adapter tests, and Ruff.
 - Supply-chain policy and packaging/release helper tests.
 

@@ -67,8 +67,9 @@ The private `Runtime._infer_symbolic_sql_schema` bridge invokes native planning
 with named schema-only tables. It reads the resulting plan schema without
 executing rows or opening sources. Query aliases, input schemas, and runtime
 registration changes determine schema-cache validity. No Python SQL parser or
-second row-execution path is involved. SQL output has its own row lineage and
-does not carry upstream entity/event-time/sequence facts.
+second row-execution path is involved. Ordinary SQL output has its own row lineage. The join analyzer can recover
+entity, event-time, and sequence facts when single-input row-local SQL passes
+the identity columns through unchanged or purely renamed.
 
 The [stream adapter](../python/calc_flow/stream.py) shares logical-to-physical
 binding metadata with collection. On context entry, it creates one fresh owning
@@ -174,8 +175,9 @@ checks this separately from the ordering proof used for rolling and
 cross-section state; nullable time and ungrouped event windows are valid.
 
 The native window owns accumulation, late-assignment and null-time counters,
-watermark closure, output order, and checkpoint state layout `1`. Tumbling and
-hopping close at `watermark >= end` or end-of-input and append final results.
+watermark closure, and output order. It advertises state version 1 and writes
+checkpoint layout 2. Recovery also reads layout 1 segments.
+In streams, tumbling and hopping windows close at `watermark >= end` or end-of-input and append final results.
 An aligned checkpoint preserves open windows using the existing manifest and
 state protocol. Python adds no runtime accumulator or window buffer. Active
 window/group counts remain data-dependent; the 1024 hopping-overlap limit is
@@ -199,11 +201,13 @@ reference path. Retained history remains authoritative for recovery; see the
 [decay kernel](../crates/calc-flow/src/operator/rolling/kernel/decay.rs).
 
 Project declarations carry the validated configuration and declaration layout
-versions. Operators without cumulative sum/min/max/variance write columnar state layout `3`, with
+versions. MACD components use writer layout 6. RSI/ATR stages without MACD
+components use layout 5. Among the remaining stages, operators without
+cumulative sum/min/max/variance write columnar state layout `3`, with
 an entity dictionary, projected history, a reorder buffer, recurrence state,
 and kernel/numerical fingerprints. Restore also supports the declaration's
 layout `1` or `2` state. Writer layout is distinct from the declaration fields.
-Cumulative sum/min/max/variance use declaration and writer layout `4`, adding
+Without indicator outputs, cumulative sum/min/max/variance use layout `4`, adding
 complete per-entity/per-group summaries. Counts, exact integer totals, extrema,
 the variance origin/mean/M2 IEEE bits and infinity classification survive
 recovery without replaying prefix history. Layout `4` requires an entity

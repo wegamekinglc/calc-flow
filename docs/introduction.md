@@ -127,17 +127,19 @@ advanced graph, UDF, provider, and lifecycle controls. Rust crate APIs are docum
 ## Supported boundaries
 
 DataFusion 55 executes table expressions and SQL. SQL nodes accept one
-read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
-accepts one alias for append SQL, or the exact-schema
-[UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY` emit a
+read-only `SELECT` or CTE. Batch SQL supports multiple aliases. Ordinary stream SQL uses
+one alias. Named SQL also supports [exact-schema UNION ALL](relational-frontends.md#same-schema-union)
+and the explicit two-input `CF_INNER_JOIN` and `CF_ASOF_JOIN` macros.
+Ordinary SQL aggregates and `GROUP BY` emit a
 full cumulative snapshot after each native batch. Eligible queries, including the supported
 grouped ordered `LAST_VALUE`, update compact state; other aggregate shapes
-retain input and rerun over its history. Other SQL evaluates each batch
+retain input and rerun over its history. Ordinary nonaggregate SQL evaluates each batch
 separately. See
 [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
-SQL output has a new row lineage and does not inherit temporal ordering.
-Row-local expressions may follow append SQL; compute rolling features before
-a SQL stage.
+Ordinary SQL starts a new row lineage. Row-local expressions may follow
+append SQL. Compute rolling features before a SQL stage. A fixed event
+window can use the input time column after a proved row-local projection
+or rename.
 
 `cf.snapshot_sql(query, **tables)` adds stream-only SQL over complete latest
 relations. Every data Batch replaces an alias, including empty data; all
