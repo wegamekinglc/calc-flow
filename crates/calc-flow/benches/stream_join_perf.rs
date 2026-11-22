@@ -18,7 +18,7 @@
 //! (8.8 ms @17.5k → 67.4 ms @62.5k rows).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
 use calc_flow::{
@@ -28,7 +28,8 @@ use calc_flow::{
     StreamOperator, StreamOperatorContext,
 };
 use criterion::{Criterion, criterion_group};
-use datafusion::arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray};
+use datafusion::arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray, UInt32Array};
+use datafusion::arrow::compute::take;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
 use sha2::{Digest, Sha256};
@@ -62,12 +63,16 @@ fn schema() -> Arc<Schema> {
 }
 
 fn make_batch(keys: &[String], ts: i64) -> Batch {
+    valued_batch(keys, ts, 7)
+}
+
+fn valued_batch(keys: &[String], ts: i64, amount: i64) -> Batch {
     let batch = RecordBatch::try_new(
         schema(),
         vec![
             Arc::new(StringArray::from(keys.to_vec())),
             Arc::new(TimestampMicrosecondArray::from(vec![ts; keys.len()])),
-            Arc::new(Int64Array::from(vec![7_i64; keys.len()])),
+            Arc::new(Int64Array::from(vec![amount; keys.len()])),
         ],
     )
     .unwrap();
@@ -581,6 +586,57 @@ fn baseline(c: &mut Criterion) {
     group.finish();
 }
 
+/// Compare all six output columns in ingress order, across batch boundaries.
+fn check_pairs(collector: &mut EdgeCollector, left: &Batch, right: &Batch, per_input: usize) {
+    assert_eq!(left.num_rows(), right.num_rows());
+    let indices = UInt32Array::from_iter_values(
+        (0..right.num_rows())
+            .flat_map(|row| std::iter::repeat_n(u32::try_from(row).unwrap(), per_input)),
+    );
+    let expected = [left, right]
+        .into_iter()
+        .flat_map(|batch| batch.table_payload().unwrap().batches()[0].columns())
+        .map(|column| take(column.as_ref(), &indices, None).unwrap())
+        .collect::<Vec<_>>();
+    let mut offset = 0;
+    for message in collector.drain("output") {
+        let table = message.as_data().unwrap().table_payload().unwrap();
+        for record in table.batches() {
+            assert_eq!(record.num_columns(), expected.len());
+            for (actual, wanted) in record.columns().iter().zip(&expected) {
+                assert_eq!(
+                    actual.as_ref(),
+                    wanted.slice(offset, record.num_rows()).as_ref()
+                );
+            }
+            offset += record.num_rows();
+        }
+    }
+    assert_eq!(offset, indices.values().len());
+}
+
+async fn check_recovery(probe: &mut StreamJoinOperator, job: &StreamJobContext) {
+    let left_key = ["left-only".to_owned()];
+    let right_key = ["right-only".to_owned()];
+    let left = valued_batch(&left_key, BASE_TS + SECOND, 11);
+    let right = valued_batch(&right_key, BASE_TS + 2 * SECOND, 23);
+    let mut collector = EdgeCollector::new(probe.output_ports().to_vec());
+    feed(probe, job, &mut collector, "left", &left).await;
+    feed(probe, job, &mut collector, "right", &right).await;
+    check_pairs(&mut collector, &left, &right, 0);
+
+    let snapshot = probe.checkpoint(Epoch::INITIAL).unwrap();
+    let mut restored = new_operator();
+    restored.restore(&snapshot).unwrap();
+    assert_eq!(restored.status(), probe.status());
+    let next_right = valued_batch(&left_key, BASE_TS + 3 * SECOND, 31);
+    feed(&mut restored, job, &mut collector, "right", &next_right).await;
+    check_pairs(&mut collector, &left, &next_right, 1);
+    let next_left = valued_batch(&right_key, BASE_TS + 4 * SECOND, 43);
+    feed(&mut restored, job, &mut collector, "left", &next_left).await;
+    check_pairs(&mut collector, &next_left, &right, 1);
+}
+
 /// Warm-up probe: prints the per-scenario state/match cardinality and RSS,
 /// then runs the fail-closed harness self-checks.
 fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
@@ -599,6 +655,8 @@ fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
             status.left.retained_bytes,
             status.right.retained_rows,
         );
+        check_pairs(&mut collector, &batches.left_one_to_one, &batches.right_one_to_one, 1);
+        check_recovery(&mut probe, &job).await;
         let mut probe = new_operator();
         let mut collector = EdgeCollector::new(probe.output_ports().to_vec());
         feed(&mut probe, &job, &mut collector, "left", &batches.left_fan).await;
@@ -609,49 +667,65 @@ fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
             status.emitted_match_rows, status.left.retained_rows,
         );
 
-        // Fail-closed self-checks require checkpoint preparation to compact
-        // the armed operator; dirty_operator must already carry that base.
-        let (mut armed, next_epoch) = armed_operator(20_000).await;
-        armed
-            .prepare_checkpoint_async(&plain_ctx(&job))
-            .await
-            .unwrap();
-        let mut collector = EdgeCollector::new(armed.output_ports().to_vec());
-        feed(
-            &mut armed,
-            &job,
-            &mut collector,
-            "left",
-            &make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND),
-        )
-        .await;
-        let snapshot = armed.checkpoint(Epoch::new(next_epoch).unwrap()).unwrap();
-        assert!(
-            snapshot.segments.contains_key("left-base"),
-            "harness self-check failed: checkpoint preparation did not compact; segments: {:?}",
-            snapshot.segments.keys().collect::<Vec<_>>()
-        );
-        let (mut compacted, next_epoch) = dirty_operator(20_000, 1_250).await;
-        let snapshot = compacted.checkpoint(Epoch::new(next_epoch).unwrap()).unwrap();
-        assert!(
-            snapshot.segments.contains_key("left-base"),
-            "harness self-check failed: setup compaction missing; segments: {:?}",
-            snapshot.segments.keys().collect::<Vec<_>>()
-        );
-        let bytes: u64 = snapshot
-            .segments
-            .values()
-            .map(|segment| segment.bytes().len() as u64)
-            .sum();
-        println!(
-            "JOIN_PERF_PROBE snapshot_20k segments={} encoded_bytes={bytes}",
-            snapshot
+        check_pairs(&mut collector, &batches.left_fan, &batches.right_fan, ROWS / FAN_KEYS);
+    });
+}
+
+// These historical workloads specifically require a compacted base and delta segments.
+fn check_legacy_compaction(runtime: &tokio::runtime::Runtime) {
+    static VERIFIED: Once = Once::new();
+    if focused_checkpoint_mode() {
+        return; // The focused selector already verified its own exact workload.
+    }
+    VERIFIED.call_once(|| {
+        runtime.block_on(async {
+            let job = job();
+            // Fail-closed self-checks require checkpoint preparation to compact
+            // the armed operator; dirty_operator must already carry that base.
+            let (mut armed, next_epoch) = armed_operator(20_000).await;
+            armed
+                .prepare_checkpoint_async(&plain_ctx(&job))
+                .await
+                .unwrap();
+            let mut collector = EdgeCollector::new(armed.output_ports().to_vec());
+            feed(
+                &mut armed,
+                &job,
+                &mut collector,
+                "left",
+                &make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND),
+            )
+            .await;
+            let snapshot = armed.checkpoint(Epoch::new(next_epoch).unwrap()).unwrap();
+            assert!(
+                snapshot.segments.contains_key("left-base"),
+                "harness self-check failed: checkpoint preparation did not compact; segments: {:?}",
+                snapshot.segments.keys().collect::<Vec<_>>()
+            );
+            let (mut compacted, next_epoch) = dirty_operator(20_000, 1_250).await;
+            let snapshot = compacted
+                .checkpoint(Epoch::new(next_epoch).unwrap())
+                .unwrap();
+            assert!(
+                snapshot.segments.contains_key("left-base"),
+                "harness self-check failed: setup compaction missing; segments: {:?}",
+                snapshot.segments.keys().collect::<Vec<_>>()
+            );
+            let bytes: u64 = snapshot
                 .segments
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+                .values()
+                .map(|segment| segment.bytes().len() as u64)
+                .sum();
+            println!(
+                "JOIN_PERF_PROBE snapshot_20k segments={} encoded_bytes={bytes}",
+                snapshot
+                    .segments
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            );
+        })
     });
 }
 
@@ -800,6 +874,7 @@ fn capture_dirty_scenario(
 ) {
     let name = format!("checkpoint/capture_dirty_1250_base_{total_rows}");
     group.bench_function(name, |b| {
+        check_legacy_compaction(runtime);
         b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let mut total = Duration::ZERO;
@@ -822,6 +897,7 @@ fn prepare_compact_scenario(
     runtime: &tokio::runtime::Runtime,
 ) {
     group.bench_function("checkpoint/prepare_then_left_500_compact_60k", |b| {
+        check_legacy_compaction(runtime);
         b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let job = job();
@@ -856,6 +932,7 @@ fn compaction_scenarios(
     prepare_compact_scenario(group, runtime);
 
     group.bench_function("checkpoint/prepare_then_left_500_steady_60k", |b| {
+        check_legacy_compaction(runtime);
         b.to_async(runtime).iter_custom(|iters| {
             Box::pin(async move {
                 let job = job();
@@ -889,6 +966,7 @@ fn restore_scenarios(
     for total_rows in [20_000_usize, 60_000] {
         let name = format!("restore/full_{total_rows}");
         group.bench_function(name, |b| {
+            check_legacy_compaction(runtime);
             b.to_async(runtime).iter_custom(|iters| {
                 Box::pin(async move {
                     let snapshot = full_snapshot(total_rows).await;
