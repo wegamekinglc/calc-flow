@@ -117,6 +117,7 @@ impl JoinCpuTraceOwner {
         }
         Stage {
             owner: Some(self.clone()),
+            units: 0,
             index,
             thread: std::thread::current().id(),
             cpu: worker.then(thread_cpu).flatten(),
@@ -229,6 +230,7 @@ impl JoinCpuTraceOwner {
 #[cfg(any(test, feature = "benchmark-internals"))]
 pub(crate) struct Stage {
     owner: Option<JoinCpuTraceOwner>,
+    units: usize,
     index: usize,
     thread: ThreadId,
     cpu: Option<u64>,
@@ -236,9 +238,14 @@ pub(crate) struct Stage {
 
 #[cfg(any(test, feature = "benchmark-internals"))]
 impl Stage {
+    pub(crate) fn units(&mut self) -> Option<&mut usize> {
+        self.owner.as_ref().map(|_| &mut self.units)
+    }
+
     fn disabled() -> Self {
         Self {
             owner: None,
+            units: 0,
             index: 0,
             thread: std::thread::current().id(),
             cpu: None,
@@ -261,6 +268,7 @@ impl Drop for Stage {
         let mut capture = owner.0.lock();
         if let State::Active(trace) = &mut *capture {
             let event = &mut trace.events[self.index];
+            event.units = self.units;
             event.end_ns = Some(elapsed(trace.started));
             event.thread_cpu_ns = cpu;
             trace.active -= 1;

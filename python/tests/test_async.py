@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 
 import pyarrow as pa
 import pytest
 
-from calc_flow import Batch, PipelineBuilder
+from calc_flow import Batch, PipelineBuilder, Runtime
 
 
 def _batch(**columns: list[int]) -> Batch:
@@ -78,22 +79,46 @@ def test_concurrent_async_calls_serialize_and_both_complete() -> None:
 
 def test_cancelling_async_execution_preserves_plan_recovery() -> None:
     async def exercise() -> None:
+        entered = asyncio.Event()
+        release = Event()
+        loop = asyncio.get_running_loop()
+
+        def await_release(values: pa.Array) -> pa.Array:
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(timeout=10):
+                raise TimeoutError("cancellation test did not release the query")
+            return values
+
+        runtime = Runtime()
+        runtime.register_scalar_udf(
+            provider="python",
+            name="await_release",
+            version="1",
+            input_types=("int64",),
+            return_type="int64",
+            volatility="volatile",
+            function=await_release,
+        )
         plan = (
             PipelineBuilder("cancel")
             .sql(
                 "query",
-                "SELECT sum(left.value * right.value) AS total "
+                "SELECT sum(await_release(left.value) * right.value) AS total "
                 "FROM left CROSS JOIN right",
                 aliases=("left", "right"),
+                udfs=(("python", "await_release", "1"),),
             )
-            .compile_batch()
+            .compile_batch(runtime)
         )
-        large = _batch(value=list(range(5_000)))
+        value = _batch(value=[1])
         running = asyncio.create_task(
-            plan.execute_async({"left": large, "right": large})
+            plan.execute_async({"left": value, "right": value})
         )
-        await asyncio.sleep(0.005)
-        running.cancel()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            assert running.cancel()
+        finally:
+            release.set()
         with pytest.raises(asyncio.CancelledError):
             await running
 
