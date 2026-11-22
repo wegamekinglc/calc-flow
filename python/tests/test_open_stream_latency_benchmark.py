@@ -158,5 +158,23 @@ def test_eligibility_warmup_cancels_reader_before_closing_stream() -> None:
     asyncio.run(run())
 
 
+def test_phase_summaries_include_input_wait_and_eligible_delivery(monkeypatch) -> None:
+    async def sample(query, rows, offset):
+        return {"eligible_to_arrow_ns": 30, "input_to_arrow_ns": 50 + offset}
+
+    monkeypatch.setattr(latency, "observe", sample)
+    monkeypatch.setattr(latency, "verify_eligibility", AsyncMock())
+    result = asyncio.run(latency.collect(2, 217))
+    assert result["eligible_to_arrow"]["seeded"] == {"p50_ns": 30, "p95_ns": 30}
+    assert result["input_to_arrow"]["immediate"] == {"p50_ns": 50, "p95_ns": 50}
+    assert (
+        result["input_to_arrow"]["seeded"]["p50_ns"]
+        == (73_929_008 + 85_857_836) / 2 + 50
+    )
+    assert result["input_to_arrow"]["seeded"]["p95_ns"] == pytest.approx(
+        50 + 73_929_008 + 0.95 * (85_857_836 - 73_929_008)
+    )
+
+
 def test_eligibility_warmup_accepts_watermark_closed_rolling_result() -> None:
     asyncio.run(latency.verify_eligibility(*latency.workload()))

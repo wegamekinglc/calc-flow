@@ -128,16 +128,16 @@ async def collect(samples: int, seed: int) -> dict:
     for phase, offset in plan:
         sample = await observe(query, rows, offset)
         observations.append({"phase": phase, **sample})
-    summary = {}
+    summary = {"eligible_to_arrow": {}, "input_to_arrow": {}}
     for phase in ("immediate", "seeded"):
-        elapsed = [
-            row["eligible_to_arrow_ns"] for row in observations if row["phase"] == phase
-        ]
-        summary[phase] = {
-            "p50_ns": linear_percentile(elapsed, 0.50),
-            "p95_ns": linear_percentile(elapsed, 0.95),
-        }
-    return {"seed": seed, "observations": observations, "eligible_to_arrow": summary}
+        phase_rows = [row for row in observations if row["phase"] == phase]
+        for clock, phases in summary.items():
+            elapsed = [row[f"{clock}_ns"] for row in phase_rows]
+            phases[phase] = {
+                "p50_ns": linear_percentile(elapsed, 0.50),
+                "p95_ns": linear_percentile(elapsed, 0.95),
+            }
+    return {"seed": seed, "observations": observations, **summary}
 
 
 def main() -> None:

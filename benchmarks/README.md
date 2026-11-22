@@ -235,9 +235,9 @@ delivery, and the requested and actual offsets after receiving the first
 result. The warmups use delays of 0 and 50 ms. In the 50 ms warmup a reader
 requests the second result before the third row is sent. It must stay pending
 for the full delay and deliver the expected result when the third row arrives.
-The formal samples
-alternate phase order between pairs. Each phase reports raw observations,
-median and linearly interpolated P95. Timeouts or incorrect results fail
+The formal samples alternate phase order between pairs. Each phase reports
+raw observations, median and linearly interpolated P95 for both clocks.
+Timeouts or incorrect results fail
 the run. Use a new output path for each build.
 
 ## ASOF settlement benchmark
