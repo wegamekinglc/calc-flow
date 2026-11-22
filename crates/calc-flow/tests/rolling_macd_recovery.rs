@@ -13,12 +13,11 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchMetadata, CheckpointManifest, CheckpointManifestFields, Cursor, EventTime,
-    JobState, ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder,
-    ReplayPositioning, Result, RollingOperator, RollingSpec, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StateHandle,
-    StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource, StreamingRunner,
-    UdfRegistry,
+    Batch, BatchMetadata, Cursor, EventTime, JobState, ManagedCheckpointRuntime,
+    NativeWatermarkCapability, PipelineBuilder, ReplayPositioning, Result, RollingOperator,
+    RollingSpec, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
+    SourceEvent, SourceSchema, StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource,
+    StreamingRunner, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{
@@ -297,10 +296,35 @@ async fn test_macd_managed_terminal_restart_keeps_source_closed() {
     assert_eq!(probe.sinks.load(Ordering::SeqCst), 2);
     assert_eq!(probe.writes.load(Ordering::SeqCst), writes);
 }
-async fn manifest(root: &Path) -> (PathBuf, CheckpointManifest) {
-    let path = root.join("manifests/manifest-00000000000000000001.json");
-    let manifest = CheckpointManifest::from_bytes(&tokio::fs::read(&path).await.unwrap()).unwrap();
+async fn manifest(root: &Path) -> (PathBuf, serde_json::Value) {
+    let path = root.join("manifests/lineage/manifests/epoch-1.json");
+    let manifest = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     (path, manifest)
+}
+
+async fn write_manifest(path: PathBuf, manifest: &serde_json::Value) {
+    let mut changed = manifest.clone();
+    changed["operators"]["features"]["state_fingerprint"] = hex::encode(Sha256::digest(
+        calc_flow::canonical_json(&changed["operators"]["features"]["inline_metadata"])
+            .unwrap()
+            .as_bytes(),
+    ))
+    .into();
+    let mut unsigned = changed.clone();
+    unsigned
+        .as_object_mut()
+        .unwrap()
+        .remove("manifest_fingerprint");
+    changed["manifest_fingerprint"] = hex::encode(Sha256::digest(
+        calc_flow::canonical_json(&unsigned).unwrap().as_bytes(),
+    ))
+    .into();
+    tokio::fs::write(
+        path,
+        calc_flow::canonical_json(&changed).unwrap().into_bytes(),
+    )
+    .await
+    .unwrap();
 }
 fn corrupt(bytes: &[u8]) -> Vec<u8> {
     let mut reader = FileReader::try_new(IoCursor::new(bytes), None).unwrap();
@@ -336,58 +360,31 @@ fn corrupt(bytes: &[u8]) -> Vec<u8> {
     drop(writer);
     encoded
 }
-fn changed_manifest(
-    original: &CheckpointManifest,
-    operators: BTreeMap<String, calc_flow::OperatorManifestEntry>,
-) -> CheckpointManifest {
-    CheckpointManifest::new(CheckpointManifestFields {
-        pipeline_name: original.pipeline_name().into(),
-        pipeline_fingerprint: original.pipeline_fingerprint().into(),
-        runtime_config_hash: original.runtime_config_hash().into(),
-        epoch: original.epoch(),
-        created_at: original.created_at(),
-        recovery_status: original.recovery_status(),
-        sources: original.sources().clone(),
-        operators,
-        sinks: original.sinks().clone(),
-        static_inputs: original.static_inputs().clone(),
-    })
-    .unwrap()
-}
 async fn corrupt_saved_state(root: &Path) {
-    let (path, original) = manifest(root).await;
-    let old = &original.operators()["features"].segments[0];
+    let (path, mut original) = manifest(root).await;
+    let blocks = original["operators"]["features"]["blocks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(blocks.len(), 1);
     assert_eq!(
-        original.operators()["features"].inline_metadata["state_layout_version"],
+        original["operators"]["features"]["inline_metadata"]["state_layout_version"],
         json!(6)
     );
-    let segment_path = root.join("state").join(old.relative_path());
+    let segment_path = root.join("manifests").join(
+        original["operators"]["features"]["blocks"][0]["relative_path"]
+            .as_str()
+            .unwrap(),
+    );
     let encoded = corrupt(&tokio::fs::read(&segment_path).await.unwrap());
     let checksum = hex::encode(Sha256::digest(&encoded));
-    let replacement = StateHandle::new(
-        old.operator_id(),
-        old.epoch(),
-        old.segment_id(),
-        old.relative_path(),
-        u64::try_from(encoded.len()).unwrap(),
-        &checksum,
-    )
-    .unwrap();
-    let mut operators = original.operators().clone();
-    let entry = operators.get_mut("features").unwrap();
-    entry.segments = vec![replacement];
-    let descriptor = &mut entry.inline_metadata.get_mut("segment_inventory").unwrap()[0]["handle"];
+    original["operators"]["features"]["blocks"][0]["byte_len"] = json!(encoded.len());
+    original["operators"]["features"]["blocks"][0]["sha256"] = json!(checksum);
+    let descriptor =
+        &mut original["operators"]["features"]["inline_metadata"]["segment_inventory"][0]["handle"];
     descriptor["byte_len"] = json!(encoded.len());
     descriptor["sha256"] = json!(checksum);
     tokio::fs::write(segment_path, encoded).await.unwrap();
-    tokio::fs::write(
-        path,
-        changed_manifest(&original, operators)
-            .canonical_bytes()
-            .unwrap(),
-    )
-    .await
-    .unwrap();
+    write_manifest(path, &original).await;
 }
 async fn assert_corrupt_rejected(root: &Path, probe: &Probe) {
     corrupt_saved_state(root).await;
