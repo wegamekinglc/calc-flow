@@ -242,7 +242,8 @@ struct InputProgress {
 
 /// One validated call: messages for the input edge and the committed state.
 struct Staged {
-    messages: Vec<StreamMessage>,
+    message: Option<StreamMessage>,
+    watermark: Option<EventTime>,
     next: InputProgress,
     finishes: bool,
 }
@@ -392,7 +393,8 @@ impl StreamSession {
     pub fn finish(&mut self) -> Result<SessionOutput> {
         self.check_callable()?;
         self.run(Staged {
-            messages: vec![StreamMessage::end_of_input()],
+            message: Some(StreamMessage::end_of_input()),
+            watermark: None,
             next: self.input.progress.clone(),
             finishes: true,
         })
@@ -413,7 +415,7 @@ impl StreamSession {
     }
 
     fn run(&mut self, staged: Staged) -> Result<SessionOutput> {
-        match self.drive(staged.messages) {
+        match self.drive(staged.message, staged.watermark) {
             Ok(output) => {
                 self.input.progress = staged.next;
                 if staged.finishes {
@@ -432,7 +434,11 @@ impl StreamSession {
         clippy::large_futures,
         reason = "the drain future is polled in place by block_on; boxing would allocate per call"
     )]
-    fn drive(&mut self, messages: Vec<StreamMessage>) -> Result<SessionOutput> {
+    fn drive(
+        &mut self,
+        message: Option<StreamMessage>,
+        watermark: Option<EventTime>,
+    ) -> Result<SessionOutput> {
         let Self {
             runtime,
             input,
@@ -440,18 +446,16 @@ impl StreamSession {
             outputs,
             ..
         } = self;
-        for message in messages {
-            // Staging validated the data envelope; control messages carry no rows.
+        if let Some(message) = message {
             input.sender.enqueue(message);
         }
-        if nodes.iter().all(CallerDrivenOperator::is_sync) {
-            debug_assert!(runtime.is_none());
-            drain_in_order_sync(nodes)?;
-        } else {
-            let runtime = runtime.as_ref().ok_or_else(|| CalcFlowError::Internal {
-                message: "session runtime was released".into(),
-            })?;
+        if let Some(watermark) = watermark {
+            input.sender.enqueue(StreamMessage::watermark(watermark));
+        }
+        if let Some(runtime) = runtime {
             session_block_on(runtime, drain_in_order(nodes))?;
+        } else {
+            drain_in_order_sync(nodes)?;
         }
         collect_outputs(outputs)
     }
@@ -600,12 +604,10 @@ impl SessionInput {
         self.check_input(input)?;
         self.check_explicit(Some(watermark))?;
         let mut next = self.progress.clone();
-        let messages = advance_watermark(&mut next, Some(watermark))
-            .map(StreamMessage::watermark)
-            .into_iter()
-            .collect();
+        let watermark = advance_watermark(&mut next, Some(watermark));
         Ok(Staged {
-            messages,
+            message: None,
+            watermark,
             next,
             finishes: false,
         })
@@ -629,12 +631,10 @@ impl SessionInput {
             sequenced_source_message(&self.binding_id, next.next_sequence, batch, None)?;
         self.sender.check_cost(&cost)?;
         next.next_sequence = sequence.checked_add(1);
-        let mut messages = vec![data];
-        messages.extend(
-            advance_watermark(&mut next, generated.max(watermark)).map(StreamMessage::watermark),
-        );
+        let watermark = advance_watermark(&mut next, generated.max(watermark));
         Ok(Staged {
-            messages,
+            message: Some(data),
+            watermark,
             next,
             finishes: false,
         })
