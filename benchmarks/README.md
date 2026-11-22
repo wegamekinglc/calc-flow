@@ -232,7 +232,10 @@ schema metadata, sequence and means
 The primary clock runs from third input enqueue until the second Arrow result
 returns. The report also records the time from second input enqueue to
 delivery, and the requested and actual offsets after receiving the first
-result. One warmup per phase uses delays of 0 and 50 ms. The formal samples
+result. The warmups use delays of 0 and 50 ms. In the 50 ms warmup a reader
+requests the second result before the third row is sent. It must stay pending
+for the full delay and deliver the expected result when the third row arrives.
+The formal samples
 alternate phase order between pairs. Each phase reports raw observations,
 median and linearly interpolated P95. Timeouts or incorrect results fail
 the run. Use a new output path for each build.

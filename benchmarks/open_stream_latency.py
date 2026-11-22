@@ -69,16 +69,35 @@ def arrival_schedule(samples: int, seed: int) -> list[tuple[str, int]]:
     return plan
 
 
+async def _open_source(queue: asyncio.Queue[pa.Table]):
+    while True:
+        yield await queue.get()
+
+
+async def verify_eligibility(query: cf.TableExpr, rows: tuple[pa.Table, ...]) -> None:
+    queue: asyncio.Queue[pa.Table] = asyncio.Queue()
+    async with query.stream(_open_source(queue)) as stream:
+        queue.put_nowait(rows[0])
+        queue.put_nowait(rows[1])
+        check_output(await asyncio.wait_for(stream.__anext__(), 5), 0)
+        pending = asyncio.ensure_future(stream.__anext__())
+        try:
+            await asyncio.wait([pending], timeout=0.05)
+            if pending.done():
+                pending.result()
+                raise ValueError("second result arrived before the third input")
+            queue.put_nowait(rows[2])
+            check_output(await asyncio.wait_for(pending, 5), 1)
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
 async def observe(
     query: cf.TableExpr, rows: tuple[pa.Table, ...], offset_ns: int
 ) -> dict[str, int]:
     queue: asyncio.Queue[pa.Table] = asyncio.Queue()
-
-    async def source():
-        while True:
-            yield await queue.get()
-
-    async with query.stream(source()) as stream:
+    async with query.stream(_open_source(queue)) as stream:
         queue.put_nowait(rows[0])
         input_at = perf_counter_ns()
         queue.put_nowait(rows[1])
@@ -103,8 +122,8 @@ async def observe(
 async def collect(samples: int, seed: int) -> dict:
     plan = arrival_schedule(samples, seed)
     query, rows = workload()
-    for warmup_offset in (0, 50_000_000):
-        await observe(query, rows, warmup_offset)
+    await observe(query, rows, 0)
+    await verify_eligibility(query, rows)
     observations = []
     for phase, offset in plan:
         sample = await observe(query, rows, offset)

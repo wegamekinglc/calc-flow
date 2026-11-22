@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pyarrow as pa
@@ -104,3 +106,57 @@ def test_environment_failure_precedes_sampling(monkeypatch, tmp_path) -> None:
     with pytest.raises(OSError, match="worker environment unavailable"):
         latency.main()
     collect.assert_not_awaited()
+
+
+def test_collector_rejects_correct_result_delivered_before_third_input(monkeypatch):
+    @asynccontextmanager
+    async def stream(source):
+        async def results():
+            await source.__anext__()
+            await source.__anext__()
+            for sequence, mean in enumerate((1.0, 1.5)):
+                yield pa.table({"sequence": [sequence], "mean": [mean]}, latency.OUTPUT)
+
+        yield results()
+
+    _, rows = latency.workload()
+    monkeypatch.setattr(
+        latency, "workload", lambda: (SimpleNamespace(stream=stream), rows)
+    )
+    with pytest.raises(ValueError, match="before the third input"):
+        asyncio.run(latency.collect(1, 217))
+
+
+def test_eligibility_warmup_cancels_reader_before_closing_stream() -> None:
+    async def run():
+        waiting, settled = asyncio.Event(), asyncio.Event()
+
+        @asynccontextmanager
+        async def stream(source):
+            async def results():
+                yield pa.table({"sequence": [0], "mean": [1.0]}, latency.OUTPUT)
+                try:
+                    waiting.set()
+                    await asyncio.Event().wait()
+                finally:
+                    settled.set()
+
+            try:
+                yield results()
+            finally:
+                assert settled.is_set()
+
+        _, rows = latency.workload()
+        warmup = asyncio.create_task(
+            latency.verify_eligibility(SimpleNamespace(stream=stream), rows)
+        )
+        await asyncio.wait_for(waiting.wait(), 2)
+        warmup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await warmup
+
+    asyncio.run(run())
+
+
+def test_eligibility_warmup_accepts_watermark_closed_rolling_result() -> None:
+    asyncio.run(latency.verify_eligibility(*latency.workload()))
