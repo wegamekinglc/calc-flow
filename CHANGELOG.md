@@ -9,6 +9,226 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-21: Withdraw the experimental N=1 pane preaggregation and its
+  physical layout 3 after direct paired measurements found 86.04% and 233.12%
+  regressions. All window declarations use per-window accumulators and layouts
+  1/2; experimental pane snapshots are rejected. The 2026-11-18 pane entry is
+  superseded. Existing window tests pass 46 with one ignored, and all-feature
+  Clippy passes. See [window state and storage](docs/runtime-envelope.md#window-state-and-storage)
+  and [the performance evidence](benchmarks/window-panes/p7-count-min-max-20261121/summary.json).
+
+- 2026-11-18: Replace production ASOF state with shared-key columnar runs.
+  Each admitted batch becomes an immutable Arrow run with group, time, sequence,
+  and payload/identity liveness columns. Stable `(run ID, row offset)` locators
+  merge in per-key `(time, sequence)` order and in global pending-left
+  `(time, key, sequence)` order. Selection carries left/right locators and right
+  validity; output columns materialize through Arrow `take` or `interleave`,
+  including explicit nulls for unmatched rows and direct-consumer projections.
+  Output commits only the accepted pending prefix. Eviction cuts expired or
+  dominated right-payload prefixes, retires identity-only history after right
+  progress or EOF, and releases empty runs. Native layout/accounting 11 with
+  `arrow-columnar-59.2.0` checkpoints persist canonical shared keys, per-run
+  identity/payload columns, and control/index-capacity descriptors. Restore
+  validates their inventory, schemas, charges, progress and counters, then
+  continues with the same output sequence and snapshot bytes. The old ASOF
+  row/object codecs and base/delta checkpoint machinery are removed; earlier
+  native layouts are rejected and require a new lineage. Verification passed
+  133 focused tests and independent review approved the migration. Final P5
+  performance acceptance, P6, and final CI remain open. See
+  [ASOF state and recovery](docs/asof-join-guide.md#recovery-status-and-delivery).
+
+- 2026-11-18: Make immutable source history native to runner checkpoint v4.
+  `SourceHistoryManifestEntry` now carries canonically ordered public
+  `SourceHistorySegmentHandle` values, and `SourceHistoryContext::archive_file`
+  returns that type after writing bytes directly to v4 storage instead of
+  staging and converting them through v3 operator state. The handle's raw
+  `byte_len` drives storage and prepaid buffer budgets on archive, restore and
+  load; reads verify the persisted checksum. Later manifests carry unchanged
+  handles, retention preserves referenced history across epochs, and restored
+  ended sources contribute their history to out-of-band final cuts without
+  reopening. ASOF ordinary and terminal v4 recovery retain `source_replay`
+  metadata and replay through these native histories. Final manifest publication
+  runs on a blocking worker. Legacy v3 history is rejected rather than
+  converted. Verification passed 6 source-history, 12 frozen-connector, 697
+  non-soak streaming, and 67 soak tests.
+  See [manifest publication and recovery](docs/runtime-envelope.md#manifest-publication-and-recovery).
+
+- 2026-11-18: Persist `StreamingRunner` checkpoints as manifest v4 with
+  `job_kind=runner`. Source cuts, opaque operator snapshots with ingress and
+  output-frontier progress, and sink recovery blocks are published as v4
+  objects. Native restore selects the highest complete runner epoch, validates
+  the exact participants, capabilities, frontiers and terminal agreement,
+  rejects legacy v3 manifests, restores operator/source/sink state before input
+  admission, and continues at the next epoch. Join and ASOF retain paid restore
+  admission, including checkpoint-preload reservations and paid local opaque
+  loading for terminal Join recovery. Manifest durability remains the commit
+  point: sink finalization precedes source acknowledgement, and post-checkpoint
+  retention and orphan cleanup follow durable settlement. Uncertain manifest
+  rename or parent synchronization preserves prepared sinks and requires
+  recovery; once a manifest is durable, later settlement or maintenance failures
+  retain it as recovery truth. The named restart matrix covers twelve fault
+  points under I/O, panic, cancellation and restart, including a real
+  parent-directory sync failure, partial sink commit, retention and compaction.
+  Process-restart soak evidence classifies v4 artifacts and includes their state
+  bytes. Legacy protocol deletion, P6, performance gates and final CI remain
+  open. See the
+  [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+
+- 2026-11-18: Add a crate-private synchronous columnar Join run core. Each
+  retained input morsel becomes an immutable Arrow run with group-ID,
+  event-time, and physical row-ID columns. Stable run/row locators are merged
+  per key in `(event_time, row_id)` order without rewriting out-of-order Arrow
+  payloads, and probe-only rows create no persistent run. Native probing
+  produces ordered incoming/opposite selection vectors and enforces the match
+  cap before selection allocation. Output columns materialize through Arrow
+  `take` or `interleave`, including direct projections and dictionary/nested
+  payloads. Strict watermark expiry cuts ordered prefixes and retires empty
+  runs. Per-side logical accounting covers live retained rows, payload cells,
+  identity/locator columns, run owners, and index capacities, including
+  replacement overlap. In-memory snapshot restore validates locator coverage,
+  ordering, row-ID frontiers, and accounting, then continues with identical
+  output records and sequences and equal snapshot fingerprints. Production
+  `StreamJoinOperator` admission and durable v4 state-page wiring are not
+  connected yet; existing managed Join layouts 1–3 and recovery contracts remain
+  unchanged. Final old-layout deletion and performance gates remain open. See
+  [the columnar run core](docs/streaming-guide.md#columnar-run-core).
+
+- 2026-11-18: Add N=1 pane preaggregation for hopping windows whose complete
+  aggregate list contains only `count`, `min`, and `max`. Slide-aligned panes
+  use mathematical floor for negative timestamps; each valid row updates one
+  `(group, pane)`, and close merges exactly the target window's panes in
+  ascending pane-start order. COUNT uses checked `u64` addition during update
+  and merge, while MIN/MAX retain exact total-order values and floating bits.
+  Valid all-null groups still emit count zero and null extrema. Late
+  classification remains per target window, and panes retire only when their
+  last possible target closes, including at watermark equality. State-budget
+  rows still count logical open window/group pairs; bytes cover physical
+  pane/key/open-window storage and merge scratch. Input and close failures are
+  atomic, and rejected close restores the exact pre-call state and output
+  sequence. Pane snapshots use physical layout 3 with canonical pane and
+  open-window segments; compatible restore continues with bit-identical output
+  and subsequent checkpoint bytes. Per-window layouts 1/2 are not valid pane
+  snapshots, so existing per-window state for a newly pane-eligible declaration
+  requires a new lineage. Tumbling and hopping declarations involving `sum` or
+  `avg` retain the legacy per-window path; other aggregate admission,
+  partitioned dispatch, performance acceptance, and final old-path deletion
+  remain open. See
+  [window state and storage](docs/runtime-envelope.md#window-state-and-storage).
+
+- 2026-11-17: Add the separate, explicitly installed `calc-flow-python-v3`
+  distribution for x86-64-v3 processors. It shares the calendar version and
+  `calc_flow` import package with portable `calc-flow-python`; install exactly
+  one in a clean environment because the distributions are mutually exclusive
+  and importing with both present raises an actionable `ImportError`. Publish
+  eighteen v3 abi3 wheels across Linux, macOS, and Windows x86-64 with the same
+  six Python tags and two abi3 build tiers as the portable matrix, and no v3
+  source distribution. Only v3 jobs set `target-cpu=x86-64-v3`; portable x86-64
+  and AArch64 builds are unchanged. The release workflow verifies both artifact
+  matrices and hashes, inspects v3 numeric loops for vector instructions,
+  clean-installs a v3 wheel, and publishes the distributions independently.
+  Runtime partitioning and unified morsel-pool migration remain open. See
+  [installation](docs/getting-started.md#install-published-packages) and the
+  [Python release guide](docs/python-release.md).
+
+- 2026-11-17: Add opt-in changelog output for compact single-alias stream SQL
+  aggregates. Rust exposes `SqlAggregateOutputMode::{Snapshot, Changelog}` and
+  `SqlOperator::set_aggregate_output_mode`; Python adds `cf.changelog_sql` and
+  `TableExpr.changelog_sql`. Project-v3 SQL nodes accept optional
+  `aggregate_output: "snapshot" | "changelog"`, with omitted/explicit snapshot
+  preserving the default full cumulative relation. Changelog output appends
+  non-null Utf8 `_cf_op` and carries complete projected rows for
+  retract-before-upsert changes in ascending internal group-ID order. It
+  requires visible `GROUP BY` identity, rejects outer `ORDER BY`/`LIMIT` and
+  noncompact shapes, includes `HAVING` transitions and exact floating-bit
+  changes, suppresses unchanged rows, and restores without bootstrap upserts.
+  See [changelog aggregate output](docs/streaming-guide.md#changelog-aggregate-output).
+
+- 2026-11-17: Expose durable session checkpoints in Python.
+  `TableExpr.session` and `Program.session` accept
+  `checkpoints: ManagedCheckpointRuntime | None = None` and
+  `restore: bool = False`. Durable construction requires effective
+  `checkpointing=True`; `restore=True` requires storage and selects the highest
+  complete v4 session epoch. `StreamSession.checkpoint() -> int` synchronously
+  persists the current state and returns its epoch. The default
+  `checkpoints=None` retains in-memory behavior. Construction, restore, and
+  checkpoint reject a running event loop, and checkpoint has no async
+  alternative; `push`, `advance`, `finish`, and `close` retain their
+  caller-thread synchronous contract. Runner checkpoint wiring, the full fault
+  matrix, and performance-gate verification remain open. See
+  [stream sessions](docs/python-api.md#stream-sessions).
+
+- 2026-11-17: Add durable checkpoints to Rust `StreamSession`.
+  `new_with_checkpoints` starts a fresh managed lineage and rejects one that
+  already contains a manifest; `restore` selects the highest complete v4
+  session epoch and validates `job_kind="session"` and the plan fingerprint;
+  `checkpoint()` synchronously persists opaque operator snapshots plus input
+  sequence and watermark progress and returns its `Epoch`. Restored sessions
+  open no connectors and replay no earlier input or output. A failure after
+  capture begins fails the live session, and a failure after manifest
+  publication does not invalidate that complete restorable epoch. Existing
+  `StreamSession::new` remains in-memory, ignores checkpoint configuration,
+  and is otherwise unchanged. Python session checkpoint construction, restore,
+  and capture are not wired yet. Runner checkpoint wiring, the full fault
+  matrix, and performance-gate verification remain open. See
+  [caller-driven stream sessions](docs/rust-api.md#caller-driven-stream-sessions)
+  and the [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+
+- 2026-11-16: Replace selectable rolling numerical profiles with one
+  compensated sliding numeric contract. Remove Rust `RollingNumericalProfile`,
+  `RollingSpec.numerical_profile`, the rolling-mean profile accessors, every
+  Python/IR `numerical_profile` option, and the project-v3 enum/property;
+  documents and options carrying the removed field are rejected. Rolling
+  floating sum/mean, variance/stddev and covariance/correlation now share
+  compensated sliding arithmetic, so their last bits can change; integer sums
+  remain exact and checked, and EWMA, cumulative, decay, RSI, ATR and MACD
+  recurrences are unchanged. A finite window whose sum overflows reads the
+  corresponding infinity for sum and mean, while opposite extremes
+  `{-1e308, +1e308}` read zero; dispersion preserves overflow-produced NaN
+  rather than clamping it to zero. Native array rolling mean and the AVG-only
+  DataFusion rewrite use the same arithmetic, with sticky NaN retained for the
+  rewrite. Rolling checkpoints carrying removed profile markers or prior kernel
+  identities are rejected rather than recovered; start a new lineage. See
+  [rolling windows](docs/rust-api.md#rolling-windows) and
+  [native arrays](docs/python-api.md#native-arrays).
+
+- 2026-11-15: Add the synchronous `StreamSession` push API. Rust
+  `StreamSession`, `SessionWatermark`, and `SessionOutput`, and Python
+  `TableExpr.session()` and `Program.session()`, run one admitted stream plan
+  on the calling thread and return the rows each `push`, `advance`, or `finish`
+  emits, with no source, sink, job, or checkpoint. Sessions admit one dynamic
+  input feeding rolling (except RSI/ATR/MACD layouts), expression, and union
+  nodes, keep state in memory, ignore checkpoint configuration, and have no
+  queue backpressure. Calls on an existing Python session may run inside an
+  event loop. The P1 measurement was 3.5–5.4x faster than the runner path for
+  1- and 99-row appends and 1.9x faster for 6,400 rows, with no runner
+  regression, but missed the pre-registered 20 µs one-row gate (152.9 µs p50
+  with forced GC); that gate moves to plan phase P2. See
+  [stream sessions](docs/python-api.md#stream-sessions), the
+  [Rust reference](docs/rust-api.md#caller-driven-stream-sessions), and the
+  [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+
+- 2026-11-15: Default convenience streams (`TableExpr.stream`,
+  `Program.stream`, streaming `Program.execute`) to checkpointing off and
+  per-batch watermarks. A zero `emit_interval` on
+  `WatermarkPolicy::BoundedOutOfOrderness`, previously invalid, now arms no
+  watermark timer and emits after every advancing data batch; durable restore
+  arms no watermark deadline for it. Declared event-time convenience inputs
+  default to `BoundedOutOfOrderness(col, 1 µs, 0)` instead of a 100 ms timer.
+  Python `StreamRuntimeConfig.checkpointing` changes from `bool = True` to
+  `bool | None = None`: convenience streams resolve `None` to off and create no
+  temporary checkpoint root, so a config tuning only other fields no longer
+  enables checkpoints; explicit `StreamingRunner` resolves it to on and is
+  unchanged. Invalid values raise `checkpointing must be a bool or None`.
+  Checkpoint-off convenience jobs admit operators without a proven checkpoint
+  lifecycle. Project-v3 bounded-disorder bindings that omit `emit_interval_ms`
+  (default 0) now run per batch instead of failing prepare; the schema is
+  unchanged. The Python convenience-stream benchmarks
+  (`benchmarks/test_stream_operators.py`, `benchmarks/test_program_engine.py`,
+  `benchmarks/arrow_source.py`) now run checkpoint-off, with per-batch
+  watermarks for event-time inputs, so earlier baselines are not comparable.
+  See [streaming results](docs/python-api.md#streaming-results) and
+  [watermark policies](docs/streaming-guide.md#watermark-policies).
+
 - 2026-11-14: Prepare the aligned `calc-flow` and `calc-flow-python`
   2026.11.14 releases, synchronizing workspace versions, exact internal
   dependencies, lockfiles, package metadata, and current-version documentation.

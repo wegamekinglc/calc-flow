@@ -64,6 +64,15 @@ fn prepare_terminal(
     if !plan.nodes.iter().any(|node| is_join(&node.operator)) {
         return Ok(false);
     }
+    if let Some(selected) = &checkpoint.selected_v4 {
+        super::super::progress::restore_durable_progress_v4(
+            prepared,
+            &selected.manifest.sources,
+            LogicalInstant::ZERO,
+        )?;
+        super::checkpoint_v4_metadata::prepare_join_preloads(plan, &selected.manifest)?;
+        return Ok(true);
+    }
     let selected = checkpoint
         .selected
         .as_ref()
@@ -82,6 +91,68 @@ async fn load_restore(
     cancellation: &CancellationToken,
 ) -> Result<OperatorRestoreState> {
     let id = node.operator_id.as_str();
+    if let Some(selected) = &checkpoint.selected_v4 {
+        let entry = &selected.manifest.operators[id];
+        let (raw, prepaid) = if let Some(reader) = checkpoint
+            .join_preload_reader
+            .as_ref()
+            .filter(|_| matches!(entry, crate::state::v4::OperatorV4::Opaque { .. }))
+        {
+            let CompiledStreamOperator::StreamJoin(operator) = &node.operator else {
+                unreachable!("Join terminal restore requires a Join operator")
+            };
+            (
+                asof::join_preload::load_snapshot_v4(
+                    loads,
+                    operator,
+                    id,
+                    entry,
+                    &checkpoint.manifest_root,
+                    cancellation,
+                    reader,
+                )
+                .await?,
+                true,
+            )
+        } else {
+            let mut snapshots =
+                super::checkpoint_v4::load_snapshots(checkpoint, &selected.manifest).await?;
+            (
+                snapshots
+                    .remove(id)
+                    .ok_or_else(|| crate::CalcFlowError::CheckpointMismatch {
+                        message: format!("terminal v4 Join {id:?} has no snapshot"),
+                    })?,
+                false,
+            )
+        };
+        let mut snapshot = if prepaid {
+            crate::state::PreloadedSnapshot::uncredited(raw)
+        } else {
+            super::admit_v4_snapshot(node, entry, raw)?
+        }
+        .map(|snapshot| node.checkpoint_capability.decode_snapshot(id, snapshot))?;
+        let metadata = snapshot
+            .snapshot_mut()
+            .inline_metadata
+            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
+        let expected = entry
+            .output_frontier()
+            .map_or(serde_json::Value::Null, |value| {
+                serde_json::Value::from(value.as_micros())
+            });
+        if metadata != Some(expected) {
+            return Err(crate::CalcFlowError::CheckpointMismatch {
+                message: format!("terminal v4 Join {id:?} frontier metadata differs"),
+            });
+        }
+        return Ok(OperatorRestoreState {
+            snapshot: Arc::new(snapshot),
+            progress: entry.progress().clone(),
+            output_frontier: entry.output_frontier(),
+            next_epoch: checkpoint.next_epoch,
+        });
+    }
     let selected = checkpoint
         .selected
         .as_ref()

@@ -32,7 +32,7 @@ impl fmt::Display for Coordinate {
     }
 }
 
-pub(super) fn numeric_error(
+pub(in crate::operator::rolling) fn numeric_error(
     error: CalcFlowError,
     node: &str,
     coordinate: Coordinate,

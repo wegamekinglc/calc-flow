@@ -686,11 +686,10 @@ mod rolling_history {
     use calc_flow::{
         Cursor, DeliveryGuarantee, JobState, LateErrorScope, LatePolicySpec,
         NativeWatermarkCapability, ROLLING_CONFIGURATION_VERSION, ROLLING_STATE_LAYOUT_VERSION,
-        ReplayPositioning, RollingFrameSpec, RollingMetrics, RollingNumericalProfile,
-        RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, SinkBinding,
-        SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
-        StreamRequirements, StreamRuntimeConfig, StreamSink, StreamSource, StreamingRunner,
-        WatermarkPolicy,
+        ReplayPositioning, RollingFrameSpec, RollingMetrics, RollingOperator, RollingOutputSpec,
+        RollingSpec, RollingValuePolicy, SinkBinding, SourceBinding, SourceCapabilities,
+        SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRequirements,
+        StreamRuntimeConfig, StreamSink, StreamSource, StreamingRunner, WatermarkPolicy,
     };
     use criterion::SamplingMode;
     use datafusion::arrow::{
@@ -1149,7 +1148,6 @@ mod rolling_history {
         let spec = RollingSpec {
             configuration_version: ROLLING_CONFIGURATION_VERSION,
             state_layout_version: ROLLING_STATE_LAYOUT_VERSION,
-            numerical_profile: RollingNumericalProfile::StableV1,
             partition_by: vec!["target_id".into()],
             event_time: "event_time".into(),
             sequence_by: vec!["event_time".into(), "seq".into()],

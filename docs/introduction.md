@@ -41,7 +41,8 @@ inputs. `sql` adds a read-only query to that same graph. `pipe` applies a
 reusable synchronous function to a declaration during construction.
 `compute(data, build)` supplies the input schema and returns an Arrow table.
 A `Program` gives reusable calculations named inputs and outputs; `stream`
-exposes an owned async iterator over a running calculation.
+exposes an owned async iterator over a running calculation, and `session`
+returns a synchronous push session over one compiled stream plan.
 
 For runtime integration, `Batch` is the immutable data envelope:
 
@@ -112,7 +113,23 @@ before EOF. Select `watermarks` for disorder or source-provided progress; inputs
 without event time need no progress configuration for stateless work. See the
 [streaming guide](streaming-guide.md#first-python-continuous-job).
 
-Convenience streams use temporary managed state. Async iterable inputs provide
+Use `TableExpr.session()` or `Program.session()` when the application holds
+each batch and wants its results returned by the same synchronous call. A
+Python session compiles once and runs each `push`, `advance`, or `finish` on the
+calling thread, returning the rows that call emits. With the default
+`checkpoints=None`, native state remains in memory with no recovery. Passing a
+`ManagedCheckpointRuntime` through `checkpoints=` enables durable v4 session
+checkpoints; `restore=True` selects the highest complete epoch in that storage.
+A session accepts one dynamic input feeding rolling, row-local expression, and
+union stages. Existing `push`, `advance`, `finish`, and `close` calls may run
+inside an event loop; construction, restore, and `checkpoint()` reject one. See
+[stream sessions](python-api.md#stream-sessions). Rust exposes the same native
+durability through `StreamSession::new_with_checkpoints`, `restore`, and
+`checkpoint`; see
+[caller-driven stream sessions](rust-api.md#caller-driven-stream-sessions).
+
+Convenience streams run without checkpoints by default; `checkpointing=True`
+adds temporary managed checkpoints. Async iterable inputs provide
 best-effort delivery without replay. For durable recovery,
 transactional delivery, or explicit sink ownership, use `program.compile_stream()`
 and `StreamingRunner` with capable source/sink bindings and a stable checkpoint
@@ -130,11 +147,13 @@ DataFusion 55 executes table expressions and SQL. SQL nodes accept one
 read-only `SELECT` or CTE. Batch SQL supports multiple aliases; streaming SQL
 accepts one alias for append SQL, or the exact-schema
 [UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY` emit a
-full cumulative snapshot after each native batch. Eligible queries, including the supported
+full cumulative snapshot after each native batch by default. Eligible queries, including the supported
 grouped ordered `LAST_VALUE`, update compact state; other aggregate shapes
 retain input and rerun over its history. Other SQL evaluates each batch
-separately. See
-[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
+separately. `cf.changelog_sql` and `TableExpr.changelog_sql` explicitly select
+compact-only retract/upsert output for a single-alias stream aggregate. See
+[SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries)
+and [changelog aggregate output](streaming-guide.md#changelog-aggregate-output).
 SQL output has a new row lineage and does not inherit temporal ordering.
 Row-local expressions may follow append SQL; compute rolling features before
 a SQL stage.
@@ -163,13 +182,18 @@ a bounded expression language. Graphs exchange `Batch` values rather than
 raw tables or arrays, and configuration contains data and registration
 references rather than executable objects.
 
-Projects use format `3`; managed checkpoint manifests also use version `3`.
-These protocol versions are separate from this checkout's package version `2026.11.14`.
+Projects use format `3`. Runner-managed and durable session checkpoints use
+internal manifest version `4`, distinguished by `job_kind="runner"` and
+`job_kind="session"`. Runner source history carries native v4 segment handles.
+Legacy v3 checkpoints are rejected rather than converted; start a new lineage.
+These protocol versions are separate from this checkout's package version
+`2026.11.14`.
 
 The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
 identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints
 marked with Arrow 58 cannot be restored directly by this version. Native ASOF
-snapshots also require the current layout/accounting version `10`; semantic
+snapshots also require the current layout/accounting version `11` and
+`arrow-columnar-59.2.0` encoding; semantic
 state version `3` alone does not establish compatibility. Resume incompatible
 checkpoints with the prior version and replay input into a new job when upgrading. An
 unchanged project/checkpoint format version does not imply engine or state

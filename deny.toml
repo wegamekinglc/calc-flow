@@ -12,6 +12,9 @@ all-features = true
 ignore = [
     { id = "RUSTSEC-2026-0176", reason = "Temporary: DataFusion 55 requires Arrow 59; the pyo3-arrow 0.18 bridge preserves the existing NumPy/PyO3 0.28 binding; Calc Flow never calls BoundListIterator or BoundTupleIterator nth/nth_back. Remove when the NumPy/PyO3 binding moves to a patched release." },
     { id = "RUSTSEC-2026-0177", reason = "Temporary: DataFusion 55 requires Arrow 59; the pyo3-arrow 0.18 bridge preserves the existing NumPy/PyO3 0.28 binding; Calc Flow never constructs PyCFunction closures. Remove when the NumPy/PyO3 binding moves to a patched release." },
+    { id = "RUSTSEC-2026-0543", reason = "Transitive Arrow/DataFusion dependency; the upstream unmaintained advisory has no safe upgrade. No vulnerability is asserted, and this exception is reviewed with the Arrow/DataFusion upgrade." },
+    { id = "RUSTSEC-2026-0555", reason = "Transitive Arrow timezone dependency; no safe upgrade is available for this unmaintained advisory. Review with the Arrow/DataFusion upgrade." },
+    { id = "RUSTSEC-2026-0542", reason = "Transitive object_store dependency wrapping chrono; no safe upgrade is available for this unmaintained advisory. Review with the object_store/DataFusion upgrade." },
 ]
 
 [licenses]

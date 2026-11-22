@@ -472,12 +472,12 @@ fn cleanup_observer_preserves_cancel_and_deadline_failure() {
             ticket.observe_cleanup(context.gather_owner().retain_retirement().unwrap());
         let output = ticket.finish().await.unwrap();
         let mut stop = GatherStop::from_job(&context);
-        stop.deadline = Some(chrono::Utc::now() - chrono::Duration::seconds(1));
+        stop.set_deadline_for_test(Some(chrono::Utc::now() - chrono::Duration::seconds(1)));
         assert!(matches!(
             observer.wait(&stop).await,
             Err(crate::CalcFlowError::Cancelled { .. })
         ));
-        stop.deadline = None;
+        stop.set_deadline_for_test(None);
         context.cancellation().cancel();
         assert!(matches!(
             observer.wait(&stop).await,

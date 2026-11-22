@@ -22,6 +22,7 @@ pub(in crate::operator::join) use budget::ContainerFunding;
 pub(in crate::operator::join) use budget::{
     expiration_credit, grow_expiration_credit, optional_expiration_credit,
 };
+#[cfg(test)]
 pub(super) use loans::V2SqlOwners;
 pub(in crate::operator::join) use writer::{HistoryIdentity, WriterState};
 

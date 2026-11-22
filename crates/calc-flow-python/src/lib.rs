@@ -14,6 +14,7 @@ mod execution_options;
 mod pipeline;
 mod provider;
 mod runtime;
+mod session;
 mod store;
 mod stream_results;
 mod udf;
@@ -47,6 +48,7 @@ fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {
 fn register_runtime(module: &Bound<'_, PyModule>) -> PyResult<()> {
     continuous::register(module)?;
     pipeline::register(module)?;
+    session::register(module)?;
     store::register(module)?;
     stream_results::register(module)?;
     Ok(())

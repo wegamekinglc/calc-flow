@@ -1,0 +1,632 @@
+{
+  "contract": "paired-native-evidence-v1",
+  "status": "completed",
+  "cases": [
+    "1x1-dual",
+    "6400x64-dual",
+    "64x64-dual-tick"
+  ],
+  "requested_rounds": 10,
+  "completed_rounds": 10,
+  "timed_samples_per_round": 30,
+  "sample_pairs_per_case": 300,
+  "budget_seconds": 590.0,
+  "elapsed_seconds": 3.6256137649761513,
+  "numeric_contract_change": false,
+  "binaries": [
+    {
+      "side": "baseline",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57",
+      "sha256": "aea812a6c22c51ba45892a971bd5d0b43db2254cf0976e447af39f6cbb824112"
+    },
+    {
+      "side": "candidate",
+      "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895",
+      "sha256": "71e4166f423a5bbfc06642d516275d1428165f8761b55bd49bdc22cfb7a87e32"
+    }
+  ],
+  "round_evidence": [
+    {
+      "round": 1,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-1-baseline.json",
+          "sha256": "6e678eec9c41387d214c312d565ed194689a9933ede8cac8c54c43e44e193741",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-1-candidate.json",
+          "sha256": "328502e02973cbb36d51c2f5908b90c39a1445d14076ae94d3bf7e2f3350ea6d",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 2,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-2-baseline.json",
+          "sha256": "827517432d8220252b24b9e451682f8f9ccaa07db250ba1d467ebc0c4e816104",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-2-candidate.json",
+          "sha256": "bcc0a0327a89d3f06df16773355905c2eabc0ed0c1005fc5a06c22cc2c76d4f8",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 3,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-3-baseline.json",
+          "sha256": "f31d4651f57cec69e28217f283a5ea7d249cd5d7b14b2d817bd770f6fcb21e30",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-3-candidate.json",
+          "sha256": "bc34d35cd78f0ffedf4dea2cdcb14884b097fe334980ae2d1298abe0c0b13cd8",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 4,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-4-baseline.json",
+          "sha256": "6a38e2c34b4c06cb1c244f93c5559a5c5f0d1e51e972558fde8c84e8df5d3677",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-4-candidate.json",
+          "sha256": "589e7a4b68ec2877c68fedccc27985c48740323cd902d6f02d6af97c1060ad68",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 5,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-5-baseline.json",
+          "sha256": "86d6d8e3a95ab81369bcd2cb8c47e692af5e9b2d0675fa36b8abd6262a9017ee",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-5-candidate.json",
+          "sha256": "7e69d552b752ef37614fb8cb1fb67a8808ca7e60226742b743e6915d5ae0d73e",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 6,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-6-baseline.json",
+          "sha256": "4d1512c808293c31375268d96163821c97e6d78ef31731c047b0936473465d20",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-6-candidate.json",
+          "sha256": "96232b193526a04469f3f3dc63dbf268cfd621b419dcf7d0bd69da3e07c6f8a2",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 7,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-7-baseline.json",
+          "sha256": "2d199b47aadf0ea54f890e732382b276b578ad05da3864ce45c0f740f424859b",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-7-candidate.json",
+          "sha256": "05e02c5396087638c91223576065a5cffe6b2ae7587d06b87773751335e8d106",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 8,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-8-baseline.json",
+          "sha256": "38fd1e682ea2a0fb05d887b1f52fe9c7e51a54cb80212fc6f0a64367697151dd",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-8-candidate.json",
+          "sha256": "2107adccf461553a039f3b9a8a901e5606517e29f10198b73bcb10bc8dc6fc1f",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 9,
+      "order": "AB",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-9-baseline.json",
+          "sha256": "d865a520999042acc01cafc96a16e17b7c9a76217173c7cf0c47ad82aa31e2da",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-9-candidate.json",
+          "sha256": "54f340eb75b0f1897dc526141efa32225d4791a2563f5ac718925181be00d8b9",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    },
+    {
+      "round": 10,
+      "order": "BA",
+      "outputs": {
+        "baseline": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-10-baseline.json",
+          "sha256": "dd092b16ab71b393fccf7a474223c203f564e48d69246ce4ddeaac877008ea2e",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-current-2a4c6d57"
+        },
+        "candidate": {
+          "path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-result-work/round-10-candidate.json",
+          "sha256": "7705b2bfb7e63b932970864ce6d6b43aca8af786b524f7d3c5d1828ddaecb48e",
+          "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p2-run-finite-bff7b895"
+        }
+      }
+    }
+  ],
+  "arms": [
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 5.4235e-06,
+        "p95_seconds": 7.315550000000002e-06,
+        "cv": 0.5744293370515352,
+        "rows_per_second": 184382.77864847422
+      },
+      "candidate": {
+        "p50_seconds": 5.561e-06,
+        "p95_seconds": 7.182150000000003e-06,
+        "cv": 0.43675423124568125,
+        "rows_per_second": 179823.7727027513
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          5.0525e-06,
+          5.405499999999999e-06,
+          5.4155e-06,
+          5.476e-06,
+          5.473e-06,
+          5.621e-06,
+          5.524499999999999e-06,
+          5.271e-06,
+          5.548e-06,
+          5.3205e-06
+        ],
+        "candidate": [
+          5.0745e-06,
+          5.454e-06,
+          5.6295e-06,
+          5.558e-06,
+          5.446e-06,
+          5.473e-06,
+          5.684e-06,
+          5.52e-06,
+          5.896e-06,
+          5.5739999999999995e-06
+        ]
+      },
+      "paired_round_speedups": [
+        0.9956645974972904,
+        0.991107444077741,
+        0.9619859667821299,
+        0.9852464915437207,
+        1.004957767168564,
+        1.0270418417686826,
+        0.9719387755102039,
+        0.9548913043478261,
+        0.9409769335142469,
+        0.9545209903121638
+      ],
+      "paired_round_speedup_median": 0.9785926335269624,
+      "paired_round_speedup_ci95": [
+        0.9548913043478261,
+        0.9980326056231525
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "slower",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "1x1-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 1,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 6.565e-06,
+        "p95_seconds": 8.43615e-06,
+        "cv": 0.2202799542157706,
+        "rows_per_second": 152322.92460015233
+      },
+      "candidate": {
+        "p50_seconds": 6.779e-06,
+        "p95_seconds": 8.797900000000001e-06,
+        "cv": 0.7766831045832648,
+        "rows_per_second": 147514.38265230862
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          6.236e-06,
+          6.5495e-06,
+          6.6055e-06,
+          6.716e-06,
+          6.7255e-06,
+          6.7915e-06,
+          6.669e-06,
+          6.3815e-06,
+          6.6835e-06,
+          6.5070000000000005e-06
+        ],
+        "candidate": [
+          6.2025e-06,
+          6.5595000000000005e-06,
+          6.856e-06,
+          6.743500000000001e-06,
+          6.6395e-06,
+          6.66e-06,
+          6.935999999999999e-06,
+          6.766e-06,
+          7.120500000000001e-06,
+          6.8205e-06
+        ]
+      },
+      "paired_round_speedups": [
+        1.0054010479645303,
+        0.9984754935589601,
+        0.9634626604434072,
+        0.9959219989619632,
+        1.0129527825890505,
+        1.0197447447447447,
+        0.9615051903114188,
+        0.9431717410582323,
+        0.9386279053437258,
+        0.9540356278865186
+      ],
+      "paired_round_speedup_median": 0.9796923297026852,
+      "paired_round_speedup_ci95": [
+        0.9523384656848255,
+        1.0057141380740053
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 189.0,
+        "candidate": 201.0
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.0004946675,
+        "p95_seconds": 0.00056524075,
+        "cv": 0.11222016504434587,
+        "rows_per_second": 12937983.595041113
+      },
+      "candidate": {
+        "p50_seconds": 0.000484409,
+        "p95_seconds": 0.0005606337,
+        "cv": 0.13099677037075758,
+        "rows_per_second": 13211975.830341715
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.000497692,
+          0.000486779,
+          0.00047590899999999995,
+          0.000498168,
+          0.000496298,
+          0.0004977390000000001,
+          0.0004894145,
+          0.0004827055,
+          0.0004928605000000001,
+          0.000498645
+        ],
+        "candidate": [
+          0.0004775035,
+          0.000491577,
+          0.000475661,
+          0.0005129189999999999,
+          0.000465566,
+          0.000487498,
+          0.0004819945,
+          0.0004900925,
+          0.000475644,
+          0.000475839
+        ]
+      },
+      "paired_round_speedups": [
+        1.0422792712514148,
+        0.9902395758955362,
+        1.0005213797221129,
+        0.9712410731519013,
+        1.0660099749552159,
+        1.0210072656708338,
+        1.0153943665332281,
+        0.9849273351459163,
+        1.0361961887462052,
+        1.0479279756388191
+      ],
+      "paired_round_speedup_median": 1.018200816102031,
+      "paired_round_speedup_ci95": [
+        0.9902395758955362,
+        1.0422792712514148
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "6400x64-dual",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 6400,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 0.0005016655,
+        "p95_seconds": 0.0005756974,
+        "cv": 0.11125855362300202,
+        "rows_per_second": 12757504.751672179
+      },
+      "candidate": {
+        "p50_seconds": 0.00048785500000000004,
+        "p95_seconds": 0.0005769959500000001,
+        "cv": 0.1325012550029647,
+        "rows_per_second": 13118652.058500988
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          0.0004839205,
+          0.0004940645,
+          0.0005018620000000001,
+          0.0005045655,
+          0.00048502249999999995,
+          0.0005064685,
+          0.000488362,
+          0.0005004495,
+          0.000497666,
+          0.00048596399999999997
+        ],
+        "candidate": [
+          0.000499806,
+          0.0004852625,
+          0.0004718135,
+          0.0005051925,
+          0.0004809565,
+          0.00048498650000000003,
+          0.00050103,
+          0.0004917945,
+          0.00048818349999999995,
+          0.0004969605
+        ]
+      },
+      "paired_round_speedups": [
+        0.9682166680672101,
+        1.0181386363050926,
+        1.063687240827149,
+        0.998758888938375,
+        1.0084539870029825,
+        1.0442940164313852,
+        0.9747160848651778,
+        1.0175988141388324,
+        1.0194240485391253,
+        0.9778724868475461
+      ],
+      "paired_round_speedup_median": 1.0130264005709075,
+      "paired_round_speedup_ci95": [
+        0.9778724868475461,
+        1.0312163263682388
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 28.403984375,
+        "candidate": 23.7078125
+      }
+    },
+    {
+      "case": "64x64-dual-tick",
+      "kind": "dispatch",
+      "arm": "absent",
+      "rows": 64,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 2.9149e-05,
+        "p95_seconds": 3.1974250000000006e-05,
+        "cv": 0.08144351733756275,
+        "rows_per_second": 2195615.630038766
+      },
+      "candidate": {
+        "p50_seconds": 2.9012e-05,
+        "p95_seconds": 5.02003e-05,
+        "cv": 0.26468354715342707,
+        "rows_per_second": 2205983.7308699847
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          2.90765e-05,
+          2.8908000000000002e-05,
+          2.8884e-05,
+          2.76645e-05,
+          2.97415e-05,
+          2.91255e-05,
+          3.01995e-05,
+          2.83735e-05,
+          3.05085e-05,
+          2.7520500000000002e-05
+        ],
+        "candidate": [
+          4.9932500000000003e-05,
+          2.7515499999999998e-05,
+          2.9542499999999997e-05,
+          2.76625e-05,
+          2.82695e-05,
+          2.9168000000000003e-05,
+          2.9873e-05,
+          2.85885e-05,
+          2.8647e-05,
+          2.929e-05
+        ]
+      },
+      "paired_round_speedups": [
+        0.582316126771141,
+        1.0506078392178955,
+        0.9777100787001778,
+        1.0000723000451874,
+        1.0520702523921541,
+        0.998542923752057,
+        1.0109296019817227,
+        0.9924794935026322,
+        1.0649806262435857,
+        0.9395868897234552
+      ],
+      "paired_round_speedup_median": 0.9993076118986222,
+      "paired_round_speedup_ci95": [
+        0.9690649067377561,
+        1.0506078392178955
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      }
+    },
+    {
+      "case": "64x64-dual-tick",
+      "kind": "dispatch",
+      "arm": "present",
+      "rows": 64,
+      "rounds": 10,
+      "baseline": {
+        "p50_seconds": 3.0262000000000003e-05,
+        "p95_seconds": 3.566765e-05,
+        "cv": 0.08962607937769086,
+        "rows_per_second": 2114863.525213138
+      },
+      "candidate": {
+        "p50_seconds": 3.0265000000000002e-05,
+        "p95_seconds": 5.0978000000000006e-05,
+        "cv": 0.21450876589992987,
+        "rows_per_second": 2114653.890632744
+      },
+      "round_medians_seconds": {
+        "baseline": [
+          3.01585e-05,
+          2.99505e-05,
+          2.99485e-05,
+          2.89785e-05,
+          3.0643e-05,
+          3.01435e-05,
+          3.1437000000000004e-05,
+          2.95135e-05,
+          3.16235e-05,
+          2.85235e-05
+        ],
+        "candidate": [
+          5.07285e-05,
+          2.8441e-05,
+          3.08525e-05,
+          2.84685e-05,
+          2.9467e-05,
+          3.0571e-05,
+          3.0788e-05,
+          2.99045e-05,
+          2.9766e-05,
+          3.0659000000000006e-05
+        ]
+      },
+      "paired_round_speedups": [
+        0.5945080181751875,
+        1.0530747863999157,
+        0.9706992950328174,
+        1.0179145371199747,
+        1.0399090508025925,
+        0.9860161591050342,
+        1.0210796414187349,
+        0.9869250447257102,
+        1.0624034132903313,
+        0.9303467171140609
+      ],
+      "paired_round_speedup_median": 1.0024197909228425,
+      "paired_round_speedup_ci95": [
+        0.9586358809198856,
+        1.0399090508025925
+      ],
+      "bootstrap_resamples": 20000,
+      "verdict": {
+        "paired_speedup": "inconclusive",
+        "confirmed_regression": false
+      },
+      "numeric_update_ns_per_window_row": {
+        "baseline": 96.01171875,
+        "candidate": 95.19921875
+      }
+    }
+  ],
+  "gate_values": {
+    "G1": {
+      "case": "1x1-dual",
+      "arm": "absent",
+      "value_seconds": 5.561e-06,
+      "limit_seconds": 1e-06,
+      "met": false
+    },
+    "G2": {
+      "case": "6400x64-dual",
+      "arm": "present",
+      "value_ns_per_window_row": 23.7078125,
+      "limit_ns_per_window_row": 4.0,
+      "met": false
+    },
+    "G3": {
+      "case": "6400x64-dual",
+      "arm": "absent",
+      "value_seconds": 0.000484409,
+      "limit_seconds": 0.0001,
+      "met": false
+    }
+  },
+  "timed_boundary": "current-thread dispatch_data plus dispatch_watermark_handler on a RollingOperator; no projection; output drain outside the timer",
+  "comparison_note": "P2.1 uses the async dispatch boundary; later cross-boundary speedups are informational, while G1-G3 remain absolute",
+  "harness_sha256": "4496479e206390cabdcaf988cc92acb4c180309beb6e9986d17785fc4a4352ea"
+}

@@ -40,7 +40,7 @@ def test_rolling_inventory_advertises_the_implemented_layout_six() -> None:
         for operator in cf.Runtime().capabilities().operators
         if operator.kind == "rolling"
     )
-    assert rolling.state_layouts == (1, 2, 3, 4, 5, 6)
+    assert rolling.state_layouts == (1, 2, 3, 4, 5, 6, 7)
     assert rolling.state_version == 1
 
 

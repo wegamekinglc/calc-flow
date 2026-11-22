@@ -100,7 +100,9 @@ def _node_schema(
             operator, runtime, fallback if source is None else source
         )
     if operator["kind"] in {"sql", "snapshot_sql"}:
-        return runtime._infer_symbolic_sql_schema(operator["query"], inputs)
+        return runtime._infer_symbolic_sql_schema(
+            operator["query"], inputs, operator.get("aggregate_output")
+        )
     declared = _port_schema(node.get("output_ports", []), "output")
     if declared is None:
         declared = fallback

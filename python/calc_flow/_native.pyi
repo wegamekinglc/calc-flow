@@ -124,7 +124,6 @@ def _native_array_rolling_mean(
     array: NativeArray,
     window: int,
     min_periods: int,
-    numerical_profile: str,
     max_elements: int,
     max_allocation_bytes: int,
 ) -> NativeArray: ...
@@ -350,7 +349,10 @@ class Runtime:
         """Analyze declarations with update_semantics; return report v2/r4."""
         ...
     def _infer_sql_schema(
-        self, query: str, schemas: Mapping[str, pa.Schema]
+        self,
+        query: str,
+        schemas: Mapping[str, pa.Schema],
+        aggregate_output: str | None = ...,
     ) -> pa.Schema: ...
     def _plan_union_all(self, query: str, schemas: Mapping[str, pa.Schema]) -> str: ...
     def validation_report(self, project_json: str) -> dict[str, object]: ...
@@ -413,6 +415,31 @@ class StreamExecutionPlan:
 @final
 class _ManagedCheckpointRuntime:
     def __init__(self, directory: str, /) -> None: ...
+
+@final
+class _StreamSession:
+    def __init__(
+        self,
+        plan: StreamExecutionPlan,
+        config: Mapping[str, int | bool],
+        watermarks: Mapping[str, Mapping[str, object]],
+        *,
+        checkpoints: _ManagedCheckpointRuntime | None = ...,
+        restore: bool = ...,
+    ) -> None: ...
+    def checkpoint(self) -> int: ...
+    def push(
+        self, input: str, batch: object, watermark_micros: int | None = ...
+    ) -> dict[str, list[pa.RecordBatch]]: ...
+    def advance(
+        self, input: str, watermark_micros: int
+    ) -> dict[str, list[pa.RecordBatch]]: ...
+    def finish(self) -> dict[str, list[pa.RecordBatch]]: ...
+    def close(self) -> None: ...
+    @property
+    def input_ids(self) -> tuple[str, ...]: ...
+    @property
+    def output_ids(self) -> tuple[str, ...]: ...
 
 @final
 class _StreamingRunner:

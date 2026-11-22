@@ -1,4 +1,3 @@
-use super::super::{CandidateMap, RandomState};
 use super::*;
 use crate::{
     Batch, BatchMetadata, CalcFlowError, CancellationToken, DataFusionConfig, DataFusionRuntime,
@@ -19,25 +18,12 @@ async fn test_compact_native_state_wire_ignores_cached_results_and_rebuilds_nati
         let expected = result(&original);
         let saved = snapshot(&original);
         let first = original.export_native_state("codec", || Ok(())).unwrap();
-        for group in &mut original.groups {
-            let GroupAggregates::Generic { results, .. } = &mut group.aggregates else {
-                panic!("decimal state must remain generic")
-            };
-            results.clear();
-        }
-        let second = original.export_native_state("codec", || Ok(())).unwrap();
-        assert_eq!(first.records(), second.records());
         let restored = plan(&runtime, &kind, grouped)
-            .import_native_state(second.records(), 3, true, || Ok(()), "codec")
+            .import_native_state(first.records(), 3, true, || Ok(()), "codec")
             .unwrap();
         assert_eq!(result(&restored), expected);
         assert_eq!(snapshot(&restored), saved);
-        assert!(
-            original
-                .groups
-                .iter()
-                .all(|group| group.aggregates.results().len() == 0)
-        );
+        assert_eq!(first.descriptor.group_count, original.group_count());
     }
 }
 
@@ -103,14 +89,8 @@ async fn test_compact_native_state_composite_string_null_keys_rebuild_lookup_and
             .import_native_state(exported.records(), 4, true, || Ok(()), "codec")
             .unwrap();
         assert_eq!(snapshot(&restored), snapshot(&original));
-        for (slot, group) in restored.groups.iter().enumerate() {
-            assert_eq!(restored.index.get(&group.key), Some(&slot));
-            let Group {
-                reservation: credit,
-                ..
-            } = group;
-            assert!(credit.size() >= group.key.len());
-        }
+        assert!(restored.keyed_state.is_some());
+        assert_eq!(restored.group_count(), 3);
         let update = original.update(&input, &context, "codec").await.unwrap();
         original.commit(update);
         let update = restored.update(&input, &context, "codec").await.unwrap();
@@ -155,9 +135,6 @@ async fn test_compact_native_state_roundtrip_exact_widths_and_continuation() {
             let reexported = restored.export_native_state("codec", || Ok(())).unwrap();
             assert_eq!(reexported.records(), exported.records());
             drop(reexported);
-            for (slot, group) in restored.groups.iter().enumerate() {
-                assert_eq!(restored.index.get(&group.key), Some(&slot));
-            }
             apply(&mut original, &kind, &[None, Some(5), Some(9)]).await;
             apply(&mut restored, &kind, &[None, Some(5), Some(9)]).await;
             assert_eq!(snapshot(&restored), snapshot(&original));
@@ -176,7 +153,7 @@ fn assert_native_descriptor(
     grouped: bool,
 ) {
     assert_eq!(exported.descriptor.wire_schema, descriptor.wire_schema);
-    assert_eq!(exported.descriptor.group_count, original.groups.len());
+    assert_eq!(exported.descriptor.group_count, original.group_count());
     assert_eq!(descriptor.key_fields.len(), usize::from(grouped));
     assert_eq!(descriptor.aggregate_names.len(), original.aggregates.len());
     assert_eq!(descriptor.output_schema, original.output_schema);
@@ -267,7 +244,7 @@ async fn test_compact_native_state_avg_all_null_and_global_seed_preserve_states(
     let restored = plan(&runtime, &DataType::Int64, false)
         .import_native_state(exported.records(), 0, false, || Ok(()), "codec")
         .unwrap();
-    assert!(restored.groups.is_empty());
+    assert_eq!(restored.group_count(), 0);
     assert!(
         plan(&runtime, &DataType::Int64, false)
             .import_native_state(exported.records(), 1, false, || Ok(()), "codec")
@@ -324,10 +301,9 @@ async fn avg_null_state_case(kind: &DataType, grouped: bool, values: &[Option<i6
             .import_native_state(&nullable, values.len() as u64, true, || Ok(()), "codec")
             .unwrap();
         assert!(
-            alternate
-                .groups
+            snapshot(&alternate)
                 .iter()
-                .all(|group| group.aggregates.state(avg)[0] == ScalarValue::UInt64(None))
+                .all(|(_, states, _)| states[avg][0] == ScalarValue::UInt64(None))
         );
         assert_eq!(result(&alternate), result(&original));
         apply(&mut alternate, kind, &[Some(4), Some(8), Some(12)]).await;
@@ -344,7 +320,7 @@ async fn avg_null_state_case(kind: &DataType, grouped: bool, values: &[Option<i6
             .unwrap();
     }
     assert_eq!(
-        original.groups.len(),
+        original.group_count(),
         if grouped { values.len().min(3) } else { 1 }
     );
     apply(&mut restored, kind, &[Some(4), Some(8)]).await;
@@ -775,28 +751,14 @@ async fn apply(plan: &mut IncrementalSql, kind: &DataType, values: &[Option<i64>
 type Saved = Vec<(Vec<ScalarValue>, Vec<Vec<ScalarValue>>, Vec<ScalarValue>)>;
 
 fn snapshot(plan: &IncrementalSql) -> Saved {
-    plan.groups
-        .iter()
-        .map(|group| {
-            (
-                group.values.to_vec(),
-                group
-                    .aggregates
-                    .states()
-                    .map(|state| state.to_vec())
-                    .collect(),
-                group
-                    .aggregates
-                    .results()
-                    .map(std::borrow::Cow::into_owned)
-                    .collect(),
-            )
-        })
-        .collect()
+    plan.keyed_state
+        .as_ref()
+        .expect("typed aggregate state")
+        .snapshot()
 }
 
 fn result(plan: &IncrementalSql) -> RecordBatch {
-    if plan.groups.is_empty() {
+    if plan.group_count() == 0 {
         return RecordBatch::try_new(
             plan.output_schema.clone(),
             plan.output_schema
@@ -807,13 +769,13 @@ fn result(plan: &IncrementalSql) -> RecordBatch {
         )
         .unwrap();
     }
-    plan.output_chunk(
-        0,
-        plan.groups.len(),
-        &CandidateMap::with_hasher(RandomState::new()),
-        "codec",
-    )
-    .unwrap()
+    let aggregate = plan
+        .keyed_state
+        .as_ref()
+        .expect("typed aggregate state")
+        .record_for_test(plan.aggregate_schema.clone());
+    let aggregate = plan.apply_having(aggregate, "codec").unwrap();
+    plan.project_output(&aggregate, "codec").unwrap()
 }
 
 fn pool(runtime: &DataFusionRuntime) -> Arc<dyn MemoryPool> {

@@ -23,11 +23,15 @@ fn replay_recording_pressure_preserves_admission_success() {
         .build()
         .unwrap();
     runtime.block_on(async {
+        let mut fallbacks = 0;
         for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
             for count in [1, 4, 16, 64, 256] {
-                run_pressure_pair(&template, &schema, limit, count, &service, false).await;
+                fallbacks += usize::from(
+                    run_pressure_pair(&template, &schema, limit, count, &service, false).await,
+                );
             }
         }
+        assert!(fallbacks > 0, "matrix must exercise replay fallback");
     });
     drop(runtime);
     service.shutdown();
@@ -43,11 +47,15 @@ fn test_review_ingress_facts_preserve_replay_pressure_fallback() {
         .build()
         .unwrap();
     runtime.block_on(async {
+        let mut fallbacks = 0;
         for limit in [32 * 1024, 64 * 1024, 128 * 1024] {
             for count in [1, 4, 16, 64, 256] {
-                run_pressure_pair(&template, &schema, limit, count, &service, true).await;
+                fallbacks += usize::from(
+                    run_pressure_pair(&template, &schema, limit, count, &service, true).await,
+                );
             }
         }
+        assert!(fallbacks > 0, "matrix must exercise replay fallback");
     });
     drop(runtime);
     service.shutdown();
@@ -73,7 +81,7 @@ async fn run_pressure_pair(
     count: i32,
     service: &TestService,
     prepare_ingress: bool,
-) {
+) -> bool {
     let spec = StreamAsofJoinSpec::new(
         template.spec.left().clone(),
         template.spec.right().clone(),
@@ -86,7 +94,7 @@ async fn run_pressure_pair(
     let mut recorded =
         StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
     recorded.replay = Some(Box::new(recorded.new_replay_log().unwrap()));
-    recorded.status.state_bytes = recorded.current_inventory(None).unwrap().bytes;
+    recorded.status.state_bytes = recorded.current_inventory().unwrap().bytes;
     let rows = (0..count)
         .map(|sequence| ("A", 100, i64::from(sequence)))
         .collect::<Vec<_>>();
@@ -104,12 +112,6 @@ async fn run_pressure_pair(
         candidate.accepted, baseline.accepted,
         "limit={limit}, rows={count}"
     );
-    if limit == 64 * 1024 && count == 64 {
-        assert_eq!(
-            candidate.admitted_replay_bytes, 0,
-            "regression must exercise replay fallback"
-        );
-    }
     assert_status(
         &baseline.admitted,
         candidate.admitted,
@@ -127,6 +129,7 @@ async fn run_pressure_pair(
             candidate.finished_replay_bytes,
         );
     }
+    candidate.admitted_replay_bytes == 0
 }
 
 struct PressureOutcome {
@@ -185,10 +188,7 @@ async fn run_pressure_operator(
     let admitted_replay_bytes = operator.replay_bytes();
     assert_eq!(
         admitted.state_bytes,
-        operator
-            .current_inventory(operator.prepared.as_ref())
-            .unwrap()
-            .bytes
+        operator.current_inventory().unwrap().bytes
     );
     let finalized = operator
         .on_end(
@@ -198,7 +198,7 @@ async fn run_pressure_operator(
         .await;
     let finished = operator.status();
     let finished_replay_bytes = operator.replay_bytes();
-    let pool = operator.runtime.pool.clone();
+    let pool = operator.runtime_pool.clone();
     assert!(job.gather_owner().close_and_drain().await.is_empty());
     operator.reset().unwrap();
     drop(operator);
@@ -251,15 +251,15 @@ fn assert_status(
 async fn replay_anchor_preparation_cancellation_keeps_log_owned() {
     let (mut operator, _) = fixture();
     operator.replay = Some(Box::new(operator.new_replay_log().unwrap()));
-    operator.status.state_bytes = operator.current_inventory(None).unwrap().bytes;
+    operator.status.state_bytes = operator.current_inventory().unwrap().bytes;
     let status = operator.status();
-    let pool = operator.runtime.pool.clone();
+    let pool = operator.runtime_pool.clone();
     let reserved = pool.reserved();
     let cancellation = CancellationToken::new();
     cancellation.cancel();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancellation);
     let context = StreamOperatorContext::new(&job, "asof", None);
-    assert!(operator.prepare_replay_anchor(&context).await.is_err());
+    assert!(operator.prepare_checkpoint_async(&context).await.is_err());
     assert_eq!(operator.status(), status);
     assert!(operator.replay.is_some());
     assert_eq!(pool.reserved(), reserved);

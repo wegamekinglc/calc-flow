@@ -79,8 +79,16 @@ async fn observe(failure: Failure) -> Observation {
         false,
         parts.name.clone(),
     ));
-    let Ok(mut runtime) =
-        run_operator_entry(parts, &context, &core, &cancellation, BTreeMap::new(), None).await
+    let Ok(mut runtime) = run_operator_entry(
+        parts,
+        &context,
+        &core,
+        &cancellation,
+        BTreeMap::new(),
+        None,
+        true,
+    )
+    .await
     else {
         panic!("ASOF entry failed")
     };

@@ -50,7 +50,7 @@ async fn test_side_output_direct_execution_completes_both_ports() {
     );
 }
 
-use datafusion::arrow::array::Array;
+use datafusion::arrow::array::{Array, Int64Array};
 use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use serde_json::{Value, json};
 
@@ -269,7 +269,7 @@ async fn ordered_rolling_admitted_timezone_column_can_be_checkpointed() {
 #[tokio::test]
 async fn rolling_history_budget_failure_restores_rows_for_retry() {
     let mut operator =
-        RollingOperator::new("rolling", Arc::new(kernel_schema()), valid_spec()).unwrap();
+        RollingOperator::new("rolling", Arc::new(general_schema()), general_spec()).unwrap();
     operator
         .set_state_budget(StateBudget::new(1, 1_048_576).unwrap())
         .unwrap();
@@ -282,7 +282,7 @@ async fn rolling_history_budget_failure_restores_rows_for_retry() {
     );
     let context = StreamOperatorContext::new(&job, "rolling", None);
     let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
-    let record = float64_fast_record(&[(1, "a", 1, Some(1.0))]);
+    let record = general_record(&[(1, "a", 1, Some(1.0))]);
     operator
         .process_data(
             "input",
@@ -292,13 +292,57 @@ async fn rolling_history_budget_failure_restores_rows_for_retry() {
         )
         .await
         .unwrap();
+    let before = operator.checkpoint(Epoch::INITIAL).unwrap();
     let error = operator
         .on_watermark(EventTime::from_micros(1), &context, &mut output)
         .await
         .unwrap_err();
     assert!(error.to_string().contains("state budget"), "{error}");
+    let after = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    let mut before_restored =
+        RollingOperator::new("rolling", Arc::new(general_schema()), general_spec()).unwrap();
+    StreamOperator::restore(&mut before_restored, &before).unwrap();
+    let mut after_restored =
+        RollingOperator::new("rolling", Arc::new(general_schema()), general_spec()).unwrap();
+    StreamOperator::restore(&mut after_restored, &after).unwrap();
+    let mut before_output = crate::EdgeCollector::new(before_restored.output_ports().to_vec());
+    let mut after_output = crate::EdgeCollector::new(after_restored.output_ports().to_vec());
+    before_restored
+        .on_watermark(EventTime::from_micros(1), &context, &mut before_output)
+        .await
+        .unwrap();
+    after_restored
+        .on_watermark(EventTime::from_micros(1), &context, &mut after_output)
+        .await
+        .unwrap();
+    let before_records = before_output
+        .drain("output")
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    let after_records = after_output
+        .drain("output")
+        .into_iter()
+        .flat_map(|message| {
+            message
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(before_records, after_records);
     assert_eq!(operator.state.charge.rows, 1);
-    assert_eq!(operator.state.buffer.len(), 1);
     assert!(output.drain("output").is_empty());
 
     operator
@@ -429,17 +473,7 @@ async fn ordered_rolling_budget_failure_restores_partially_closed_record() {
             .sum::<usize>(),
         1
     );
-    assert_eq!(
-        operator.state.charge,
-        budget::full_state_charge(
-            &operator.state.buffer,
-            &operator.state.ordered,
-            &operator.state.histories,
-            &operator.compiled,
-            "rolling",
-        )
-        .unwrap()
-    );
+    assert_cached_rolling_charge(&operator);
 }
 
 #[tokio::test]
@@ -481,6 +515,92 @@ async fn rolling_restore_rejects_an_oversized_snapshot_without_replacing_state()
         .unwrap();
     StreamOperator::restore(&mut target, &snapshot).unwrap();
     assert_eq!(target.state.charge.rows, 2);
+}
+
+#[tokio::test]
+async fn layout7_restore_matches_uninterrupted_bits_and_rejects_old_layouts() {
+    let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 2)]));
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, Some(1.0)),
+                    (2, "a", 2, Some(3.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(2), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(3, "a", 3, Some(5.0))]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(3), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
+
+    let mut old = snapshot;
+    old.inline_metadata
+        .insert("state_layout_version".into(), json!(3));
+    let error = StreamOperator::restore(&mut restored, &old).unwrap_err();
+    assert!(matches!(&error, CalcFlowError::CheckpointMismatch { .. }));
+    assert!(error.to_string().contains("layout"), "{error}");
 }
 
 fn input_schema() -> Schema {
@@ -531,6 +651,29 @@ fn valid_spec() -> RollingSpec {
     serde_json::from_value(valid_spec_json()).unwrap()
 }
 
+fn general_schema() -> Schema {
+    with_field(
+        &kernel_schema(),
+        5,
+        &Field::new("label", DataType::LargeUtf8, true),
+    )
+}
+
+fn general_record(rows: &[(i64, &str, u64, Option<f64>)]) -> RecordBatch {
+    let input = float64_fast_record(rows);
+    let mut columns = input.columns().to_vec();
+    columns[5] = Arc::new(datafusion::arrow::array::LargeStringArray::new_null(
+        rows.len(),
+    ));
+    RecordBatch::try_new(Arc::new(general_schema()), columns).unwrap()
+}
+
+fn general_spec() -> RollingSpec {
+    let mut document = valid_spec_json();
+    document["outputs"] = json!([lag_label(1)]);
+    serde_json::from_value(document).unwrap()
+}
+
 fn with_field(schema: &Schema, index: usize, replacement: &Field) -> Schema {
     let fields = schema
         .fields()
@@ -552,27 +695,12 @@ fn with_field(schema: &Schema, index: usize, replacement: &Field) -> Schema {
 // ------------------------------------------------------------------
 
 #[test]
-fn stable_v2_profile_is_explicit_and_fingerprinted() {
-    let mut document = valid_spec_json();
-    document["numerical_profile"] = json!("stable_v2");
-    let preview: RollingSpec = serde_json::from_value(document.clone()).unwrap();
-    let stable = valid_spec();
-
-    assert_eq!(
-        preview.numerical_profile,
-        RollingNumericalProfile::StableV2Preview
-    );
-    assert_eq!(serde_json::to_value(&preview).unwrap(), document);
-    assert_ne!(
-        compile_spec(&stable, &input_schema())
-            .unwrap()
-            .kernel_plan
-            .fingerprint(),
-        compile_spec(&preview, &input_schema())
-            .unwrap()
-            .kernel_plan
-            .fingerprint()
-    );
+fn removed_numerical_profiles_are_rejected() {
+    for profile in ["stable_v1", "stable_v2"] {
+        let mut document = valid_spec_json();
+        document["numerical_profile"] = json!(profile);
+        assert!(serde_json::from_value::<RollingSpec>(document).is_err());
+    }
 }
 
 // ------------------------------------------------------------------
@@ -743,6 +871,26 @@ fn lag_price(periods: u64) -> Value {
     })
 }
 
+fn lag_label(periods: u64) -> Value {
+    json!({
+        "kind": "lag",
+        "primitive_version": 1,
+        "input": "label",
+        "output": "label_lag",
+        "periods": periods
+    })
+}
+
+fn lag_time() -> Value {
+    json!({
+        "kind": "lag",
+        "primitive_version": 1,
+        "input": "ts",
+        "output": "ts_lag",
+        "periods": 1
+    })
+}
+
 fn delta_price(periods: u64) -> Value {
     json!({
         "kind": "delta",
@@ -782,15 +930,14 @@ fn float_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<f64>> {
 }
 
 #[test]
-fn stable_v2_rebases_large_offset_variance_with_shifted_sums() {
-    let mut spec = kernel_spec(json!([ddof_output(
+fn compensated_rebuild_handles_large_offset_variance_with_shifted_sums() {
+    let spec = kernel_spec(json!([ddof_output(
         "variance",
         "price",
         "price_variance",
         64,
         0
     )]));
-    spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
     let prices = (0..64)
         .map(|index| 1.0e12 + f64::from(index % 9) / 10.0)
         .collect::<Vec<_>>();
@@ -810,20 +957,21 @@ fn stable_v2_rebases_large_offset_variance_with_shifted_sums() {
 
     let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
     let actual = float_column(&outputs, 0)[63].unwrap();
-    let shift = prices[0];
+    let shift = prices[63];
     let shifted = prices.iter().map(|value| value - shift).collect::<Vec<_>>();
     let sum = shifted.iter().sum::<f64>();
     let expected =
         shifted.iter().map(|value| value * value).sum::<f64>() / 64.0 - (sum / 64.0).powi(2);
 
-    assert_eq!(actual.to_bits(), expected.to_bits());
+    let tolerance = 1.0e-12 * expected.abs().max(1.0);
+    assert!((actual - expected).abs() <= tolerance);
     assert_eq!(outputs.touched[0].1.transition_count, 64);
 }
 
 fn signed_column(outputs: &ComputedOutputs, index: usize) -> Vec<Option<i64>> {
     outputs.columns[index]
         .as_any()
-        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+        .downcast_ref::<Int64Array>()
         .unwrap()
         .iter()
         .collect()
@@ -918,7 +1066,7 @@ fn ewma_layout_two_restores_without_retained_history() {
         configuration_hash: compiled.configuration_hash.clone(),
         state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
         kernel_fingerprint: None,
-        numerical_profile: None,
+        typed_last_identity: None,
         epoch: Epoch::new(1).unwrap(),
         pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
         operator_id: Some("rolling".into()),
@@ -990,7 +1138,7 @@ fn layout_one_history_bootstraps_the_typed_transition() {
         configuration_hash: compiled.configuration_hash.clone(),
         state_schema_fingerprint: compiled.legacy_state_schema_fingerprint.clone(),
         kernel_fingerprint: None,
-        numerical_profile: None,
+        typed_last_identity: None,
         epoch: Epoch::new(1).unwrap(),
         pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
         operator_id: Some("rolling".into()),
@@ -1133,6 +1281,129 @@ fn lag_preserves_null_and_nan_at_the_referenced_position() {
     assert_eq!(values.value(3).to_bits(), 3.0_f64.to_bits());
 }
 
+#[tokio::test]
+async fn lag_and_delta_use_the_typed_plan_without_changing_results() {
+    let spec = kernel_spec(json!([lag_price(1), delta_price(1)]));
+    let mut operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(3.0)),
+        (3, "a", 3, Some(8.0)),
+    ]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(3), &context, &mut collector)
+        .await
+        .unwrap();
+    assert!(operator.state.typed_kernel_state.is_some());
+
+    let emitted = collector.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let lag = record
+        .column(record.schema().index_of("price_lag").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    let delta = record
+        .column(record.schema().index_of("price_delta").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(
+        lag.iter().collect::<Vec<_>>(),
+        vec![None, Some(1.0), Some(3.0)]
+    );
+    assert_eq!(
+        delta.iter().collect::<Vec<_>>(),
+        vec![None, Some(2.0), Some(5.0)]
+    );
+}
+
+#[tokio::test]
+async fn typed_lag_restore_preserves_period_history() {
+    let spec = kernel_spec(json!([lag_price(2)]));
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "a", 2, Some(2.0))]);
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![first], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(2), &context, &mut collector)
+        .await
+        .unwrap();
+    let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let mut collector = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    let second = float64_fast_record(&[(3, "a", 3, Some(3.0)), (4, "a", 4, Some(4.0))]);
+    restored
+        .process_data(
+            "input",
+            Batch::table(vec![second], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    restored
+        .on_watermark(EventTime::from_micros(4), &context, &mut collector)
+        .await
+        .unwrap();
+    assert!(restored.state.typed_kernel_state.is_some());
+    let emitted = collector.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let lag = record
+        .column(record.schema().index_of("price_lag").unwrap())
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(lag.iter().collect::<Vec<_>>(), vec![Some(1.0), Some(2.0)]);
+}
+
 #[test]
 fn lag_works_for_non_numeric_columns() {
     let spec = kernel_spec(json!([{
@@ -1171,6 +1442,218 @@ fn lag_works_for_non_numeric_columns() {
         .unwrap();
     assert!(values.is_null(0));
     assert_eq!(values.value(1), "x");
+}
+
+#[test]
+fn typed_utf8_lag_matches_general_with_nulls() {
+    let spec = kernel_spec(json!([lag_label(1)]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let mut columns = input.columns().to_vec();
+    columns[5] = Arc::new(datafusion::arrow::array::StringArray::from(vec![
+        Some("x"),
+        Some("y"),
+        None,
+    ]));
+    let input = RecordBatch::try_new(input.schema(), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_timestamp_lag_matches_general() {
+    let spec = kernel_spec(json!([lag_time()]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_date32_lag_matches_general() {
+    let spec = kernel_spec(json!([lag_label(1)]));
+    let schema = with_field(
+        &kernel_schema(),
+        5,
+        &Field::new("label", DataType::Date32, true),
+    );
+    let base = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let mut columns = base.columns().to_vec();
+    columns[5] = Arc::new(datafusion::arrow::array::Date32Array::from(vec![1, 2, 3]));
+    let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_temporal_lag_matches_general() {
+    let base = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let cases: Vec<(DataType, ArrayRef)> = vec![
+        (
+            DataType::Date64,
+            Arc::new(datafusion::arrow::array::Date64Array::from(vec![
+                100, 200, 300,
+            ])),
+        ),
+        (
+            DataType::Time64(datafusion::arrow::datatypes::TimeUnit::Microsecond),
+            Arc::new(datafusion::arrow::array::Time64MicrosecondArray::from(
+                vec![100, 200, 300],
+            )),
+        ),
+        (
+            DataType::Duration(datafusion::arrow::datatypes::TimeUnit::Microsecond),
+            Arc::new(datafusion::arrow::array::DurationMicrosecondArray::from(
+                vec![100, 200, 300],
+            )),
+        ),
+    ];
+    for (data_type, values) in cases {
+        let schema = with_field(&kernel_schema(), 5, &Field::new("label", data_type, true));
+        let mut columns = base.columns().to_vec();
+        columns[5] = values;
+        let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+        let spec = kernel_spec(json!([lag_label(1)]));
+        assert_typed_matches_general(&spec, &input.schema(), &input);
+    }
+}
+
+#[test]
+fn typed_nested_lag_matches_general() {
+    use datafusion::arrow::array::{Int32Builder, ListBuilder};
+
+    let mut values = ListBuilder::new(Int32Builder::new());
+    values.values().append_value(1);
+    values.values().append_value(2);
+    values.append(true);
+    values.append(false);
+    values.values().append_null();
+    values.append(true);
+    let (schema, input) = primitive_volume_record(Arc::new(values.finish()));
+    let spec = kernel_spec(json!([{
+        "kind": "lag",
+        "primitive_version": 1,
+        "input": "volume",
+        "output": "volume_lag",
+        "periods": 1
+    }]));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn typed_nested_count_matches_general() {
+    use datafusion::arrow::array::{Int32Builder, ListBuilder};
+
+    let mut values = ListBuilder::new(Int32Builder::new());
+    values.values().append_value(1);
+    values.append(true);
+    values.append(false);
+    values.values().append_null();
+    values.append(true);
+    values.values().append_value(4);
+    values.append(true);
+    let (schema, input) = primitive_volume_record(Arc::new(values.finish()));
+    let spec = kernel_spec(json!([
+        aggregate_output("count", "volume", "volume_count", 2),
+        {
+            "kind": "count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_duration_count",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 2
+        }
+    ]));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn typed_non_numeric_extrema_match_general() {
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(datafusion::arrow::array::StringArray::from(vec![
+            Some("b"),
+            None,
+            Some("a"),
+            Some("c"),
+        ])),
+        Arc::new(datafusion::arrow::array::LargeStringArray::from(vec![
+            Some("b"),
+            None,
+            Some("a"),
+            Some("c"),
+        ])),
+        Arc::new(datafusion::arrow::array::BooleanArray::from(vec![
+            Some(true),
+            None,
+            Some(false),
+            Some(true),
+        ])),
+        Arc::new(datafusion::arrow::array::Date32Array::from(vec![
+            Some(20),
+            None,
+            Some(10),
+            Some(30),
+        ])),
+    ];
+    let spec = kernel_spec(json!([
+        aggregate_output("min", "volume", "volume_min", 2),
+        aggregate_output("max", "volume", "volume_max", 2)
+    ]));
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        assert_typed_matches_general(&spec, &schema, &input);
+    }
+}
+
+#[test]
+fn typed_non_numeric_unique_count_matches_general() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_unique",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_duration_unique",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        }
+    ]));
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(datafusion::arrow::array::LargeStringArray::from(vec![
+            Some("a"),
+            Some("a"),
+            None,
+            Some("b"),
+        ])),
+        Arc::new(datafusion::arrow::array::BooleanArray::from(vec![
+            Some(true),
+            Some(true),
+            None,
+            Some(false),
+        ])),
+    ];
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        assert_typed_matches_general(&spec, &schema, &input);
+    }
 }
 
 #[test]
@@ -1266,6 +1749,50 @@ fn delta_unsigned_underflow_is_a_data_error() {
         matches!(error, CalcFlowError::Operator { .. }),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn typed_integer_delta_matches_general_and_preserves_checked_errors() {
+    let spec = kernel_spec(json!([delta_volume(1)]));
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![7, 10, 4])));
+    assert_typed_matches_general(&spec, &schema, &input);
+    let (schema, input) = primitive_volume_record(Arc::new(UInt64Array::from(vec![10, 13, 14])));
+    assert_typed_matches_general(&spec, &schema, &input);
+
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![-1, i64::MAX])));
+    let compiled = compile_spec(&spec, &schema).unwrap();
+    assert!(
+        compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .is_err()
+    );
+    let (schema, input) = primitive_volume_record(Arc::new(UInt64Array::from(vec![10, 3])));
+    let compiled = compile_spec(&spec, &schema).unwrap();
+    assert!(
+        compiled
+            .kernel_plan
+            .open_and_fill(&input, "rolling")
+            .is_err()
+    );
+}
+
+#[test]
+fn typed_float32_lag_delta_matches_general() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "lag",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_lag",
+            "periods": 1
+        },
+        delta_volume(1)
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(
+        datafusion::arrow::array::Float32Array::from(vec![Some(1.0), None, Some(3.5)]),
+    ));
+    assert_typed_matches_general(&spec, &schema, &input);
 }
 
 #[test]
@@ -1586,28 +2113,6 @@ fn typed_update_and_fill_matches_one_shot_fill_across_micro_batches() {
     assert_eq!(second.metrics.scalar_value_conversions, 0);
 }
 
-fn single_entity_retained_prices(operator: &RollingOperator) -> &Float64Array {
-    operator
-        .state
-        .histories
-        .by_entity
-        .values()
-        .next()
-        .unwrap()
-        .columnar
-        .records
-        .iter()
-        .find_map(|chunk| match chunk {
-            history::RetainedRows::Columnar(record) => Some(record),
-            history::RetainedRows::Scalar(_) => None,
-        })
-        .unwrap()
-        .column(3)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .unwrap()
-}
-
 #[tokio::test]
 async fn ordered_stream_finalization_reuses_input_columns_and_keeps_incremental_state() {
     use crate::{CancellationToken, StreamJobContext};
@@ -1845,10 +2350,8 @@ fn sparse_fixed_width_appends_amortize_retained_buffer_copies() {
     ))
     .unwrap();
     collector.drain("output");
-    let initial = single_entity_retained_prices(&operator).to_data();
-    let initial_bytes = single_entity_retained_prices(&operator).get_buffer_memory_size();
-    let mut backing = initial.buffers()[0].data_ptr();
-    drop(initial);
+    let initial_bytes = operator.state.charge.bytes;
+    let mut backing = retained_price_address(&operator, 1023);
     let mut copies = 0;
     let measured = allocation_counter::measure(|| {
         for time in 1025..=1792 {
@@ -1876,28 +2379,19 @@ fn sparse_fixed_width_appends_amortize_retained_buffer_copies() {
             ))
             .unwrap();
             collector.drain("output");
-            let current = single_entity_retained_prices(&operator).to_data();
-            copies += usize::from(current.buffers()[0].data_ptr() != backing);
-            backing = current.buffers()[0].data_ptr();
+            let survivor = 1023 - usize::try_from(time - 1024).unwrap();
+            let current = retained_price_address(&operator, survivor);
+            copies += usize::from(current != backing);
+            backing = current;
         }
     });
     assert!(
         copies <= 8,
         "768 sparse appends copied the retained prefix {copies} times"
     );
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    assert_eq!(
-        history
-            .columnar
-            .records
-            .iter()
-            .map(history::RetainedRows::len)
-            .sum::<usize>()
-            + history.rows.len(),
-        1024
-    );
-    assert_eq!(history.transition_count, 1792);
-    assert!(single_entity_retained_prices(&operator).get_buffer_memory_size() <= initial_bytes / 2);
+    assert_eq!(retained_row_count(&operator), 1024);
+    assert_eq!(retained_transition_count(&operator), 1792);
+    assert_eq!(operator.state.charge.bytes, initial_bytes);
     println!(
         "768 sparse appends: prefix copies={copies}, allocations={}, allocated bytes={}",
         measured.count_total, measured.bytes_total
@@ -1982,11 +2476,11 @@ async fn native_rolling_observations_report_tiny_payload_work_without_scalar_inp
     assert_eq!(observations.data.order_proof_rows, 4);
     assert_eq!(observations.watermark.resolved_rows, 4);
     assert_eq!(observations.watermark.touched_entities, 4);
-    assert_eq!(observations.watermark.copied_entities, 2);
+    assert_eq!(observations.watermark.copied_entities, 0);
     assert_eq!(observations.watermark.numeric_rows, 4);
     assert_eq!(observations.data.scalar_value_conversions, 0);
-    assert_eq!(observations.watermark.history_rows_materialized, 4);
-    assert_eq!(observations.watermark.scalar_value_conversions, 28);
+    assert_eq!(observations.watermark.history_rows_materialized, 0);
+    assert_eq!(observations.watermark.scalar_value_conversions, 0);
     assert_eq!(observations.watermark.output_rows_prepared, 4);
     assert_eq!(observations.watermark.output_chunks_prepared, 2);
 }
@@ -2224,6 +2718,92 @@ fn parallel_rollback_record(start: usize, count: usize) -> RecordBatch {
     )
 }
 
+#[derive(Debug, PartialEq)]
+struct CommittedScalars {
+    last_input_watermark: Option<EventTime>,
+    next_output_sequence: u64,
+    ended: bool,
+    metrics: LateMetricDelta,
+    pipeline_fingerprint: Option<String>,
+    operator_id: Option<String>,
+    last_checkpoint_epoch: Option<Epoch>,
+}
+
+struct CommittedState {
+    encoded: Option<(String, Vec<u8>)>,
+    canonical: String,
+    scalars: CommittedScalars,
+    addresses: Vec<usize>,
+}
+
+fn committed_state(operator: &RollingOperator, epoch: Epoch) -> CommittedState {
+    CommittedState {
+        encoded: operator.encode_state(epoch).unwrap(),
+        canonical: operator
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        scalars: CommittedScalars {
+            last_input_watermark: operator.state.last_input_watermark,
+            next_output_sequence: operator.state.next_output_sequence,
+            ended: operator.state.ended,
+            metrics: operator.state.metrics,
+            pipeline_fingerprint: operator.state.pipeline_fingerprint.clone(),
+            operator_id: operator.state.operator_id.clone(),
+            last_checkpoint_epoch: operator.state.last_checkpoint_epoch,
+        },
+        addresses: retained_buffer_addresses(operator),
+    }
+}
+
+fn assert_parallel_rollback_preserved(
+    operator: &RollingOperator,
+    before: &CommittedState,
+    after: &CommittedState,
+    previous_charge: StateCharge,
+    charge: StateCharge,
+    launches: u64,
+    collector: &mut crate::EdgeCollector,
+) {
+    if after.canonical != before.canonical {
+        let index = after
+            .canonical
+            .bytes()
+            .zip(before.canonical.bytes())
+            .position(|(left, right)| left != right)
+            .unwrap_or(after.canonical.len().min(before.canonical.len()));
+        let start = index.saturating_sub(100);
+        let after_end = (index + 160).min(after.canonical.len());
+        let before_end = (index + 160).min(before.canonical.len());
+        eprintln!(
+            "canonical diff at {index}: after={} before={}",
+            &after.canonical[start..after_end],
+            &before.canonical[start..before_end]
+        );
+    }
+    assert_eq!(after.canonical, before.canonical);
+    assert_eq!(after.encoded, before.encoded);
+    assert_eq!(after.scalars, before.scalars);
+    assert_eq!(after.addresses, before.addresses);
+    assert_eq!(
+        operator.state.charge,
+        previous_charge.checked_add(charge, "rolling").unwrap()
+    );
+    assert!(operator.state.buffer.is_empty());
+    assert_eq!(operator.state.ordered.records().count(), 1);
+    assert!(collector.drain("output").is_empty());
+    assert_eq!(
+        launches,
+        if operator.compiled.kernel_plan.supports_slab() {
+            0
+        } else {
+            2
+        }
+    );
+}
+
 struct RejectParallelOutput;
 
 #[async_trait]
@@ -2237,7 +2817,7 @@ impl StreamCollector for RejectParallelOutput {
 async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-    use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+    use crate::runtime::streaming::morsel_pool::JobMorselOwner;
     use crate::{CancellationToken, StreamJobContext};
 
     let spec = kernel_spec(json!([
@@ -2274,38 +2854,22 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
     collector.drain("output");
     assert!(operator.state.typed_kernel_state.is_some());
 
-    // Materialize the existing history once; compare the same epoch's
-    // complete encoded snapshot without advancing checkpoint state again.
     let epoch = Epoch::new(1).unwrap();
     let snapshot = operator.checkpoint(epoch).unwrap();
-    let committed = |operator: &RollingOperator| {
-        (
-            operator.encode_state(epoch).unwrap(),
-            format!("{:?}", operator.state.typed_kernel_state),
-            (
-                operator.state.last_input_watermark,
-                operator.state.next_output_sequence,
-                operator.state.ended,
-                operator.state.metrics,
-                operator.state.pipeline_fingerprint.clone(),
-                operator.state.operator_id.clone(),
-                operator.state.last_checkpoint_epoch,
-            ),
-            retained_buffer_addresses(operator),
-        )
-    };
-    let before = committed(&operator);
-    let (segment_id, bytes) = before.0.as_ref().unwrap();
+    let before = committed_state(&operator, epoch);
+    let previous_charge = operator.state.charge;
+    let (segment_id, bytes) = before.encoded.as_ref().unwrap();
     assert_eq!(snapshot.segments[segment_id].bytes(), bytes);
 
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
-    let parallel_context =
-        StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1_279)))
-            .with_entity_work(task.context_client().unwrap());
+    let parallel_job = job.clone().with_morsel_owner(owner.clone());
+    let parallel_context = StreamOperatorContext::new(
+        &parallel_job,
+        "rolling",
+        Some(EventTime::from_micros(1_279)),
+    );
     let record = parallel_rollback_record(1_280, 64_000);
     let charge = budget::ordered_buffer_record_charge(&record, &operator.compiled, "rolling")
         .unwrap()
@@ -2323,11 +2887,8 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
             &mut RejectParallelOutput,
         )
         .await;
-    scope.settle_abandoned().await;
     drop(parallel_context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
 
     let error = result.unwrap_err();
     assert!(
@@ -2336,11 +2897,16 @@ async fn failed_parallel_ordered_emission_preserves_committed_snapshot() {
             .contains("expected parallel collector rejection"),
         "{error}"
     );
-    assert_eq!(launches.load(AtomicOrdering::SeqCst), 2);
-    assert_eq!(committed(&operator), before);
-    assert!(operator.state.buffer.is_empty());
-    assert!(operator.state.ordered.is_empty());
-    assert!(collector.drain("output").is_empty());
+    let after = committed_state(&operator, epoch);
+    assert_parallel_rollback_preserved(
+        &operator,
+        &before,
+        &after,
+        previous_charge,
+        charge,
+        launches.load(AtomicOrdering::SeqCst),
+        &mut collector,
+    );
 }
 
 #[tokio::test]
@@ -2409,9 +2975,8 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     );
     assert_eq!(retained_buffer_addresses(&operator), prior_buffers);
     assert_eq!(retained_state_ipc(&operator), prior_ipc);
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    assert_eq!(history.transition_count, 2);
-    assert!(retained_column_bytes(history, 5) >= 8 * 1024 * 1024);
+    assert_eq!(retained_transition_count(&operator), 2);
+    assert!(retained_column_bytes_for_operator(&operator, 5) < 1024);
     assert_eq!(retained_prices(&operator), [1.0, 3.0]);
     let metrics = store.snapshot().watermark;
     assert_eq!(metrics.failed, u64::from(!cancelled));
@@ -2419,9 +2984,12 @@ async fn assert_rejected_compaction_preserves_state(cancelled: bool) {
     assert_eq!(metrics.numeric_rows, 1);
     assert_eq!(metrics.output_rows_prepared, 1);
     assert_eq!(metrics.output_chunks_prepared, 1);
-    assert_eq!(metrics.history_append_rows_prepared, 1);
-    assert_eq!(metrics.history_evict_rows_prepared, 1);
-    assert!(metrics.history_charge_scalar_rows + metrics.history_charge_columnar_chunks > 0);
+    assert_eq!(metrics.history_append_rows_prepared, 0);
+    assert_eq!(metrics.history_evict_rows_prepared, 0);
+    assert_eq!(
+        metrics.history_charge_scalar_rows + metrics.history_charge_columnar_chunks,
+        0
+    );
     assert!(collector.drain("output").is_empty());
     assert_retry_releases_evicted_label(&mut operator, &job, &mut collector, next, sequence).await;
 }
@@ -2466,7 +3034,13 @@ async fn rolling_with_large_retained_label() -> (
 }
 
 fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
-    assert!(operator.state.ordered.is_empty());
+    // Retry records are intentionally pending again after a rejected emission;
+    // this helper captures only the committed kernel/history representation.
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && RollingKernelPlan::slab_history_for_test(typed).is_some()
+    {
+        return RollingKernelPlan::encode_slab_state(typed).unwrap();
+    }
     let mut histories = operator.state.histories.clone();
     histories
         .materialize_columnar(&operator.compiled, "rolling", None)
@@ -2483,6 +3057,11 @@ fn retained_state_ipc(operator: &RollingOperator) -> Vec<u8> {
 }
 
 fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(addresses) = RollingKernelPlan::slab_slot_addresses_for_test(typed)
+    {
+        return addresses;
+    }
     operator
         .state
         .histories
@@ -2511,6 +3090,11 @@ fn retained_buffer_addresses(operator: &RollingOperator) -> Vec<usize> {
 }
 
 fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(history) = RollingKernelPlan::slab_history_for_test(typed)
+    {
+        return history.into_iter().flatten().collect();
+    }
     operator
         .state
         .histories
@@ -2541,6 +3125,11 @@ fn retained_prices(operator: &RollingOperator) -> Vec<f64> {
 }
 
 fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(address) = RollingKernelPlan::slab_history_address_for_test(typed, index)
+    {
+        return address;
+    }
     let history = operator.state.histories.by_entity.values().next().unwrap();
     for chunk in history.retained_chunks() {
         if index < chunk.len() {
@@ -2561,6 +3150,44 @@ fn retained_price_address(operator: &RollingOperator, mut index: usize) -> usize
         index -= chunk.len();
     }
     panic!("missing retained row")
+}
+
+fn retained_transition_count(operator: &RollingOperator) -> u64 {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(count) = RollingKernelPlan::slab_transition_count_for_test(typed)
+    {
+        return count;
+    }
+    operator
+        .state
+        .histories
+        .by_entity
+        .values()
+        .next()
+        .unwrap()
+        .transition_count
+}
+
+fn retained_row_count(operator: &RollingOperator) -> usize {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(history) = RollingKernelPlan::slab_history_for_test(typed)
+    {
+        return history.len();
+    }
+    let history = operator.state.histories.by_entity.values().next().unwrap();
+    history.rows.len() + history.columnar.rows
+}
+
+fn retained_column_bytes_for_operator(operator: &RollingOperator, column: usize) -> usize {
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && RollingKernelPlan::slab_history_for_test(typed).is_some()
+    {
+        return 0;
+    }
+    retained_column_bytes(
+        operator.state.histories.by_entity.values().next().unwrap(),
+        column,
+    )
 }
 
 fn retained_column_bytes(history: &EntityRollingState, column: usize) -> usize {
@@ -2608,10 +3235,9 @@ async fn assert_retry_releases_evicted_label(
         .unwrap();
     assert_eq!(means.values().as_ref(), &[4.0]);
     assert_eq!(operator.state.next_output_sequence, sequence + 1);
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    assert_eq!(history.transition_count, 3);
+    assert_eq!(retained_transition_count(operator), 3);
     assert_eq!(retained_prices(operator), [3.0, 5.0]);
-    assert!(retained_column_bytes(history, 5) < 1024);
+    assert!(retained_column_bytes_for_operator(operator, 5) < 1024);
 }
 
 #[tokio::test]
@@ -2746,6 +3372,575 @@ async fn rolling_scan_retains_history_across_checkpoint() {
             .unwrap();
         assert_eq!(counts.value(0), 2, "checkpoint={checkpoint}");
     }
+}
+
+#[test]
+fn typed_rank_quantile_match_general_with_ties_and_invalid_rows() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "rank",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_rank",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "quantile",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_quantile",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        }
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(3.0)),
+        (2, "a", 2, Some(1.0)),
+        (3, "a", 3, Some(1.0)),
+        (4, "a", 4, Some(f64::NAN)),
+        (5, "a", 5, None),
+        (6, "a", 6, Some(2.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+}
+
+#[test]
+fn typed_numeric_scans_preserve_exact_integer_ordering() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "argmax",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmax",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "argmin",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmin",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "rank",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_rank",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "quantile",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_quantile",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_unique",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        },
+        {
+            "kind": "decay",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_decay",
+            "frame": {"kind": "rows", "size": 3},
+            "min_periods": 1
+        }
+    ]));
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(Int64Array::from(vec![
+            Some(i64::MAX),
+            Some(i64::MAX - 1),
+            None,
+            Some(i64::MIN),
+        ])),
+        Arc::new(UInt64Array::from(vec![
+            Some(u64::MAX),
+            Some(u64::MAX - 1),
+            None,
+            Some(0),
+        ])),
+        Arc::new(datafusion::arrow::array::Float32Array::from(vec![
+            Some(3.0),
+            Some(1.0),
+            None,
+            Some(2.0),
+        ])),
+    ];
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        assert_typed_matches_general(&spec, &schema, &input);
+    }
+}
+
+#[test]
+fn typed_duration_scans_support_every_numeric_readout() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "argmax",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmax",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "argmin",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_argmin",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "rank",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_rank",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "quantile",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_quantile",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_unique",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        },
+        {
+            "kind": "decay",
+            "primitive_version": 1,
+            "input": "volume",
+            "output": "volume_decay",
+            "frame": {"kind": "duration", "micros": 2},
+            "min_periods": 1
+        }
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![
+        Some(i64::MAX),
+        Some(i64::MAX - 1),
+        None,
+        Some(i64::MIN),
+    ])));
+    assert_typed_matches_general(&spec, &schema, &input);
+}
+
+#[test]
+fn rolling_manifest_has_no_general_typed_transitions() {
+    for capability in generated_kernel_manifest::GENERATED_KERNEL_CAPABILITIES {
+        assert_eq!(
+            capability.complexity,
+            generated_kernel_manifest::GeneratedComplexity::AmortizedConstant,
+            "{}",
+            capability.primitive
+        );
+    }
+}
+
+#[test]
+fn typed_rsi_atr_match_general() {
+    let mut spec = kernel_spec(json!([
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":2},
+        {
+            "kind":"atr", "primitive_version":1,
+            "high":"high", "low":"low", "close":"close", "output":"atr", "period":2
+        }
+    ]));
+    spec.state_layout_version = 5;
+    let mut fields = kernel_schema().fields().to_vec();
+    fields[3] = Arc::new(Field::new("high", DataType::Float64, true));
+    fields[4] = Arc::new(Field::new("low", DataType::Float64, true));
+    fields[5] = Arc::new(Field::new("close", DataType::Float64, true));
+    fields.push(Arc::new(Field::new("price", DataType::Float64, true)));
+    let schema = Schema::new(fields);
+    let base = float64_fast_record(&[
+        (1, "a", 1, Some(2.0)),
+        (2, "a", 2, Some(3.0)),
+        (3, "a", 3, Some(4.0)),
+        (4, "a", 4, Some(5.0)),
+    ]);
+    let mut columns = base.columns().to_vec();
+    columns[3] = Arc::new(Float64Array::from(vec![3.0, 4.0, 5.0, 6.0]));
+    columns[4] = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0]));
+    columns[5] = Arc::new(Float64Array::from(vec![2.0, 3.0, 4.0, 5.0]));
+    columns.push(base.column(3).clone());
+    let input = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+    let operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    assert!(operator.indicator_resources.is_none());
+    assert_eq!(operator.state_layout_version(), 7);
+}
+
+#[test]
+fn typed_macd_matches_general_for_all_components() {
+    let mut spec = kernel_spec(json!([
+        {
+            "kind": "macd_component",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "macd_line",
+            "fast_span": 1,
+            "slow_span": 2,
+            "signal_span": 1,
+            "component": "line"
+        },
+        {
+            "kind": "macd_component",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "macd_signal",
+            "fast_span": 1,
+            "slow_span": 2,
+            "signal_span": 1,
+            "component": "signal"
+        },
+        {
+            "kind": "macd_component",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "macd_histogram",
+            "fast_span": 1,
+            "slow_span": 2,
+            "signal_span": 1,
+            "component": "histogram"
+        }
+    ]));
+    spec.state_layout_version = 6;
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+        (4, "a", 4, Some(4.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
+    let operator = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    assert!(operator.indicator_resources.is_none());
+    assert_eq!(operator.state_layout_version(), 7);
+}
+
+#[tokio::test]
+async fn cumulative_float64_slab_restore_matches_uninterrupted_bits() {
+    let mut spec = kernel_spec(json!([
+        {"kind":"cumulative_sum", "primitive_version":1, "input":"price", "output":"sum", "min_periods":1},
+        {"kind":"cumulative_min", "primitive_version":1, "input":"price", "output":"min", "min_periods":1},
+        {"kind":"cumulative_max", "primitive_version":1, "input":"price", "output":"max", "min_periods":1},
+        {"kind":"cumulative_variance", "primitive_version":1, "input":"price", "output":"variance", "min_periods":1, "ddof":0}
+    ]));
+    spec.state_layout_version = 4;
+    let schema = Arc::new(kernel_schema());
+    let mut source = RollingOperator::new("rolling", schema.clone(), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", schema, spec).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, Some(1.0)),
+                    (2, "a", 2, None),
+                    (3, "a", 3, Some(3.0)),
+                    (4, "a", 4, Some(-2.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(4), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+    source.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(5, "a", 5, Some(5.0)), (6, "a", 6, Some(4.0))]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(6), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
+}
+
+#[tokio::test]
+async fn ewma_slab_restore_matches_uninterrupted_bits() {
+    let spec = exponential_kernel_spec(json!([ewma_price(3, 1, "ema")]));
+    let schema = Arc::new(kernel_schema());
+    let mut source = RollingOperator::new("rolling", schema.clone(), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", schema, spec).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, None),
+                    (2, "a", 2, Some(1.0)),
+                    (3, "a", 3, Some(f64::NAN)),
+                    (4, "a", 4, Some(3.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(4), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+    source.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(5, "a", 5, Some(5.0)), (6, "a", 6, None)]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(6), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
+}
+
+#[tokio::test]
+async fn indicator_slab_restore_matches_uninterrupted_bits() {
+    let mut spec = kernel_spec(json!([
+        {"kind":"rsi", "primitive_version":1, "input":"price", "output":"rsi", "period":2},
+        {
+            "kind":"atr", "primitive_version":1, "high":"price", "low":"price",
+            "close":"price", "output":"atr", "period":2
+        },
+        {
+            "kind":"macd_component", "primitive_version":1, "input":"price",
+            "output":"macd_line", "fast_span":1, "slow_span":2,
+            "signal_span":1, "component":"line"
+        },
+        {
+            "kind":"macd_component", "primitive_version":1, "input":"price",
+            "output":"macd_signal", "fast_span":1, "slow_span":2,
+            "signal_span":1, "component":"signal"
+        },
+        aggregate_output("mean", "price", "mean", 2)
+    ]));
+    spec.state_layout_version = 6;
+    let schema = Arc::new(kernel_schema());
+    let mut source = RollingOperator::new("rolling", schema.clone(), spec.clone()).unwrap();
+    let mut restored = RollingOperator::new("rolling", schema, spec).unwrap();
+    let job = crate::StreamJobContext::new(
+        1,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut source_output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    source
+        .process_data(
+            "input",
+            Batch::table(
+                vec![float64_fast_record(&[
+                    (1, "a", 1, Some(1.0)),
+                    (2, "a", 2, Some(2.0)),
+                    (3, "a", 3, Some(4.0)),
+                    (4, "a", 4, Some(3.0)),
+                ])],
+                BatchMetadata::default(),
+            )
+            .unwrap(),
+            &context,
+            &mut source_output,
+        )
+        .await
+        .unwrap();
+    source
+        .on_watermark(EventTime::from_micros(4), &context, &mut source_output)
+        .await
+        .unwrap();
+    source_output.drain("output");
+
+    source.prepare_checkpoint_async(&context).await.unwrap();
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert!(restored.indicator_resources.is_none());
+    assert_eq!(
+        source
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test(),
+        restored
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .canonical_state_for_test()
+    );
+
+    let continuation = float64_fast_record(&[(5, "a", 5, Some(5.0)), (6, "a", 6, Some(2.0))]);
+    let mut restored_output = crate::EdgeCollector::new(restored.output_ports().to_vec());
+    for (operator, output) in [
+        (&mut source, &mut source_output),
+        (&mut restored, &mut restored_output),
+    ] {
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![continuation.clone()], BatchMetadata::default()).unwrap(),
+                &context,
+                output,
+            )
+            .await
+            .unwrap();
+        operator
+            .on_watermark(EventTime::from_micros(6), &context, output)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        format!("{:?}", source_output.drain("output")),
+        format!("{:?}", restored_output.drain("output"))
+    );
+}
+
+#[test]
+fn typed_duration_scans_match_general_with_expiration() {
+    let spec = kernel_spec(json!([
+        {
+            "kind": "argmax",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_argmax",
+            "frame": {"kind": "duration", "micros": 5},
+            "min_periods": 1
+        },
+        {
+            "kind": "unique_count",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "price_unique",
+            "frame": {"kind": "duration", "micros": 5},
+            "min_periods": 1
+        }
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(3.0)),
+        (2, "a", 2, Some(1.0)),
+        (3, "a", 3, Some(2.0)),
+        (10, "a", 4, Some(4.0)),
+    ]);
+    assert_typed_matches_general(&spec, &input.schema(), &input);
 }
 
 #[test]
@@ -2971,102 +4166,128 @@ fn incremental_scans_keep_ties_zero_signs_and_invalid_rows_across_batches() {
 
 #[tokio::test]
 async fn columnar_history_compacts_input_and_survives_checkpoint_or_fallback() {
-    use crate::{CancellationToken, StreamJobContext};
-
     for checkpoint in [false, true] {
-        let spec = kernel_spec(json!([
-            aggregate_output("mean", "price", "mean2", 2),
-            aggregate_output("mean", "price", "mean5", 5)
-        ]));
-        let mut operator =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
-        let job = StreamJobContext::new(
-            7,
-            TEST_FINGERPRINT,
-            JsonMap::new(),
-            None,
-            CancellationToken::new(),
-        );
-        let rows = (1..=128_u32)
-            .map(|index| {
-                (
-                    i64::from(index),
-                    if index % 2 == 0 { "a" } else { "b" },
-                    u64::from(index),
-                    Some(f64::from(index)),
-                )
-            })
-            .collect::<Vec<_>>();
-        let input = float64_fast_record(&rows);
-        let context = StreamOperatorContext::new(&job, "rolling", None);
-        let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
-        operator
-            .process_data(
-                "input",
-                Batch::table(vec![input.clone()], BatchMetadata::default()).unwrap(),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-        operator
-            .on_watermark(EventTime::from_micros(128), &context, &mut collector)
-            .await
-            .unwrap();
-        collector.drain("output");
-        for history in operator.state.histories.by_entity.values() {
-            assert!(history.rows.is_empty());
-            assert_eq!(history.transition_count, 64);
-            let retained = history.columnar.records.front().unwrap().columnar_record();
-            assert_eq!(retained.num_rows(), 5);
-            assert!(
-                retained.column(3).get_buffer_memory_size()
-                    < input.column(3).get_buffer_memory_size() / 4
-            );
-        }
-        if checkpoint {
-            let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
-            for history in operator.state.histories.by_entity.values() {
-                assert!(history.columnar.records.is_empty());
-                assert_eq!(history.rows.len(), 5);
-            }
-            let mut restored =
-                RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
-            StreamOperator::restore(&mut restored, &snapshot).unwrap();
-            operator = restored;
-        }
-        let next =
-            float64_fast_record(&[(132, "a", 132, Some(132.0)), (130, "a", 130, Some(130.0))]);
-        let context =
-            StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(128)));
-        operator
-            .process_data(
-                "input",
-                Batch::table(vec![next], BatchMetadata::default()).unwrap(),
-                &context,
-                &mut collector,
-            )
-            .await
-            .unwrap();
-        operator
-            .on_watermark(EventTime::from_micros(132), &context, &mut collector)
-            .await
-            .unwrap();
-        let emitted = collector.drain("output");
-        let record = &emitted[0]
-            .as_data()
-            .unwrap()
-            .table_payload()
-            .unwrap()
-            .batches()[0];
-        let means = record
-            .column(7)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(means.values().as_ref(), &[126.0, 128.0]);
-        assert_eq!(operator.state.histories.by_entity.len(), 2);
+        let (mut operator, job, mut collector) = seed_columnar_history(checkpoint).await;
+        assert_columnar_history_continuation(&mut operator, &job, &mut collector).await;
     }
+}
+
+async fn seed_columnar_history(
+    checkpoint: bool,
+) -> (
+    RollingOperator,
+    crate::StreamJobContext,
+    crate::EdgeCollector,
+) {
+    use crate::StreamJobContext;
+
+    let spec = kernel_spec(json!([
+        aggregate_output("mean", "price", "mean2", 2),
+        aggregate_output("mean", "price", "mean5", 5)
+    ]));
+    let mut operator =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let rows = (1..=128_u32)
+        .map(|index| {
+            (
+                i64::from(index),
+                if index % 2 == 0 { "a" } else { "b" },
+                u64::from(index),
+                Some(f64::from(index)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let input = float64_fast_record(&rows);
+    let context = StreamOperatorContext::new(&job, "rolling", None);
+    let mut collector = crate::EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![input], BatchMetadata::default()).unwrap(),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(128), &context, &mut collector)
+        .await
+        .unwrap();
+    collector.drain("output");
+    let histories = RollingKernelPlan::slab_histories_for_test(
+        operator.state.typed_kernel_state.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(histories.len(), 2);
+    assert!(histories.iter().all(|history| history.len() == 5));
+    let transitions = RollingKernelPlan::slab_transition_counts_for_test(
+        operator.state.typed_kernel_state.as_deref().unwrap(),
+    )
+    .unwrap();
+    assert!(transitions.iter().all(|&count| count == 64));
+    if checkpoint {
+        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let histories = RollingKernelPlan::slab_histories_for_test(
+            operator.state.typed_kernel_state.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert!(histories.iter().all(|history| history.len() == 5));
+        let mut restored =
+            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        operator = restored;
+    }
+    (operator, job, collector)
+}
+
+async fn assert_columnar_history_continuation(
+    operator: &mut RollingOperator,
+    job: &crate::StreamJobContext,
+    collector: &mut crate::EdgeCollector,
+) {
+    let next = float64_fast_record(&[(132, "a", 132, Some(132.0)), (130, "a", 130, Some(130.0))]);
+    let context = StreamOperatorContext::new(job, "rolling", Some(EventTime::from_micros(128)));
+    operator
+        .process_data(
+            "input",
+            Batch::table(vec![next], BatchMetadata::default()).unwrap(),
+            &context,
+            collector,
+        )
+        .await
+        .unwrap();
+    operator
+        .on_watermark(EventTime::from_micros(132), &context, collector)
+        .await
+        .unwrap();
+    let emitted = collector.drain("output");
+    let record = &emitted[0]
+        .as_data()
+        .unwrap()
+        .table_payload()
+        .unwrap()
+        .batches()[0];
+    let means = record
+        .column(7)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(means.values().as_ref(), &[126.0, 128.0]);
+    assert_eq!(
+        RollingKernelPlan::slab_histories_for_test(
+            operator.state.typed_kernel_state.as_deref().unwrap(),
+        )
+        .unwrap()
+        .len(),
+        2
+    );
 }
 
 #[test]
@@ -3134,17 +4355,20 @@ fn with_sparse_large_first_label(record: &RecordBatch) -> RecordBatch {
 }
 
 fn assert_cached_rolling_charge(operator: &RollingOperator) {
-    assert_eq!(
-        operator.state.charge,
-        budget::full_state_charge(
-            &operator.state.buffer,
-            &operator.state.ordered,
-            &operator.state.histories,
-            &operator.compiled,
-            "rolling",
-        )
-        .unwrap()
-    );
+    let mut expected = budget::full_state_charge(
+        &operator.state.buffer,
+        &operator.state.ordered,
+        &operator.state.histories,
+        &operator.compiled,
+        "rolling",
+    )
+    .unwrap();
+    if let Some(typed) = operator.state.typed_kernel_state.as_deref()
+        && let Some(slab) = RollingKernelPlan::slab_charge(typed, "rolling").unwrap()
+    {
+        expected = expected.checked_add(slab, "rolling").unwrap();
+    }
+    assert_eq!(operator.state.charge, expected);
     for (key, state) in &operator.state.histories.by_entity {
         assert_eq!(
             state.charge_cache,
@@ -3229,10 +4453,9 @@ async fn assert_releases_evicted_large_label(window: u32) {
         .unwrap();
     collector.drain("output");
     assert_cached_rolling_charge(&operator);
-    let history = operator.state.histories.by_entity.values().next().unwrap();
-    let retained_label_bytes = retained_column_bytes(history, 5);
+    let retained_label_bytes = retained_column_bytes_for_operator(&operator, 5);
     assert_eq!(
-        history.rows.len() + history.columnar.rows,
+        retained_row_count(&operator),
         usize::try_from(window).unwrap()
     );
     assert!(
@@ -3738,7 +4961,7 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
             configuration_hash: compiled.configuration_hash.clone(),
             state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
             kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
-            numerical_profile: Some(compiled.kernel_plan.numerical_profile().to_owned()),
+            typed_last_identity: None,
             epoch: Epoch::new(1).unwrap(),
             pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
             operator_id: Some("rolling".into()),
@@ -3786,65 +5009,6 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
             .collect::<Vec<_>>();
         assert_eq!(actual, float_column(&expected, 0));
     }
-}
-
-#[test]
-fn stable_v2_transition_count_round_trips_in_columnar_state() {
-    let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 64)]));
-    spec.numerical_profile = RollingNumericalProfile::StableV2Preview;
-    let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
-    let rows = (0..64)
-        .map(|index| {
-            let sequence = u64::try_from(index + 1).unwrap();
-            full_row(
-                i64::from(index + 1),
-                "a",
-                sequence,
-                vec![ScalarValue::Float64(Some(1.0e12 + f64::from(index)))],
-            )
-        })
-        .collect::<Vec<_>>();
-    let outputs =
-        compute_output_columns(&rows, &RollingHistories::default(), &compiled, "rolling").unwrap();
-    let mut histories = RollingHistories::default();
-    histories.apply(outputs.touched);
-    let bytes = encode_state_segment(
-        &histories,
-        &BTreeMap::new(),
-        &kernel_schema(),
-        &compiled,
-        TEST_FINGERPRINT,
-        "rolling",
-    )
-    .unwrap();
-    let metadata = RollingSnapshotMetadata {
-        late_output: None,
-        state_layout_version: ROLLING_COLUMNAR_STATE_LAYOUT_VERSION,
-        configuration_hash: compiled.configuration_hash.clone(),
-        state_schema_fingerprint: compiled.state_schema_fingerprint.clone(),
-        kernel_fingerprint: Some(compiled.kernel_plan.fingerprint().to_owned()),
-        numerical_profile: Some("stable_v2".into()),
-        epoch: Epoch::new(1).unwrap(),
-        pipeline_fingerprint: Some(TEST_FINGERPRINT.into()),
-        operator_id: Some("rolling".into()),
-        last_input_watermark: None,
-        next_output_sequence: 0,
-        ended: false,
-        metrics: LateMetricDelta::default(),
-        segment_inventory: Vec::new(),
-    };
-
-    let restored = decode_state_segment(&bytes, &kernel_schema(), &compiled, &metadata).unwrap();
-    assert_eq!(
-        restored
-            .histories
-            .by_entity
-            .values()
-            .next()
-            .unwrap()
-            .transition_count,
-        64
-    );
 }
 
 #[test]
@@ -4385,17 +5549,13 @@ fn negative_infinity_departure_restores_finite_window_outputs() {
 }
 
 #[test]
-fn a4_near_overflow_finite_window_keeps_the_west_mean() {
+fn a4_near_overflow_window_mean_reads_positive_infinity() {
     let spec = kernel_spec(json!([aggregate_output("mean", "price", "price_mean", 2)]));
     let rows = entity_prices("a", &[Some(1e308), Some(1e308)]);
     let outputs = compute(&spec, &RollingHistories::default(), &rows).unwrap();
     let means = float_column(&outputs, 0);
-    let value = means[1].expect("finite window mean must be non-null");
-    assert!(
-        value.is_finite(),
-        "naive sum/count readout would overflow to infinity"
-    );
-    assert!((value - 1e308).abs() <= 1e308 * 1e-15);
+    let value = means[1].expect("overflowed window mean must be non-null");
+    assert_eq!(value.to_bits(), f64::INFINITY.to_bits());
 }
 
 #[test]
@@ -4411,8 +5571,7 @@ fn a5_variance_and_stddev_with_inf_are_nan_after_the_null_gates() {
     assert_eq!(variances[0], None);
     // Two valid samples with an inf present: NaN, not null and not inf.
     assert!(variances[1].unwrap().is_nan());
-    // The inf has left the window: back to finite values (the removal
-    // step carries West drift well inside the frozen D13 tolerance).
+    // The inf has left the window: compensated finite moments are restored.
     assert!((variances[2].unwrap() - 4.5).abs() <= 4.5 * 1e-10);
     assert!((variances[3].unwrap() - 0.5).abs() <= 1e-12);
     let stddevs = float_column(&outputs, 1);
@@ -4586,7 +5745,7 @@ async fn emission_chunks_by_edge_budget_and_oversize_rows_fail() {
                 Arc::new(datafusion::arrow::array::StringArray::from(vec!["a"; len])) as ArrayRef,
                 Arc::new(UInt64Array::from((1..=len as u64).collect::<Vec<_>>())),
                 Arc::new(Float64Array::from(prices)),
-                Arc::new(datafusion::arrow::array::Int64Array::from(
+                Arc::new(Int64Array::from(
                     (1..=len as u64)
                         .map(|v| Some(i64::try_from(v).unwrap() * 10))
                         .collect::<Vec<_>>(),

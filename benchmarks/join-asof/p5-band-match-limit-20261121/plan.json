@@ -1,0 +1,45 @@
+{
+  "schema": "calc-flow.join-band-resource-plan.v1",
+  "created_at": "2026-11-21T12:33:49+08:00",
+  "baseline": {
+    "kind": "bounded_runtime_before_test_instrumentation",
+    "revision": "58d7b26f",
+    "implementation": "execute_stream with per-batch match-cap enforcement"
+  },
+  "correctness_baseline": {
+    "revision": "7ccd7d80",
+    "implementation": "DataFusion collect before match-cap enforcement",
+    "expected_failure": "The two-row cap regression returned two rows instead of JoinMatchLimitExceeded."
+  },
+  "candidate": {
+    "kind": "test_only_instrumentation_and_resource_regression",
+    "runtime_revision": "58d7b26f",
+    "change": "Count output batches and rows under cfg(test), and measure allocator activity around the same bounded runtime."
+  },
+  "execution": {
+    "planned_resource_observations": 1,
+    "timing_samples": 0,
+    "total_budget_seconds": 600,
+    "build_budget": "separate from acquisition",
+    "runtime": "current-thread Tokio, debug test binary",
+    "measurement": "allocation_counter::measure around execute_band only; fixtures and runtime construction are outside the measured closure",
+    "resource_guard_policy": "Observe the first allocation result before choosing a peak-memory assertion; do not relax a failed bound.",
+    "additional_observations": "The complete Join regression may contribute a second allocator observation; it is retained rather than selected as a favorable repetition."
+  },
+  "cases": [
+    {
+      "id": "hot-band-high-duplicate-match-limit",
+      "connection": "A duplicate-heavy right side can produce many matches. The cap must stop output collection after the first oversized DataFusion output batch rather than materialize all matches.",
+      "left_rows": 1,
+      "right_rows": 100000,
+      "right_symbol": "S000",
+      "right_event_time_micros": 0,
+      "max_matches_per_input_batch": 1,
+      "datafusion_batch_rows": 65536,
+      "expected_error": "input batch match limit exceeded",
+      "expected_output_batches_read": 1,
+      "expected_output_rows_read": 65536
+    }
+  ],
+  "unmeasured": "No latency or throughput comparison, RSS attribution, general Join performance verdict, multi-batch hot-path input, durable hot-path restore, or ASOF acceptance."
+}

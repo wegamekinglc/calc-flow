@@ -68,8 +68,12 @@ uv --version
 
 ## Install published packages
 
-Create a Python project and add the core package. Add only the optional array
-providers your application uses.
+Create a Python project and install exactly one native distribution in a clean
+environment. `calc-flow-python` is the portable default. On Linux, macOS, or
+Windows x86-64 processors with x86-64-v3 support (including AVX2),
+`calc-flow-python-v3` is an explicitly installed alternative. Both distributions
+have the same calendar version and provide the same `calc_flow` import package
+and Python API. Add only the optional array providers your application uses.
 
 ### Linux and WSL
 
@@ -95,9 +99,23 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
-The default Python dependencies are `pyarrow` and `typing-extensions`. NumPy and
-JAX are optional; `calc-flow-python[array]` installs both. Project-document
-validation uses the native Rust runtime and does not require Pydantic.
+For the v3 alternative, create a new clean project and replace the core package
+command with `uv add calc-flow-python-v3`. Use the corresponding
+`calc-flow-python-v3[numpy]`, `calc-flow-python-v3[jax]`, or
+`calc-flow-python-v3[array]` extras for optional providers.
+
+The distributions are mutually exclusive because both install `calc_flow` and
+its single native module. Do not install both or install one over the other;
+importing `calc_flow` with both distributions present raises an `ImportError`.
+Recreate the environment with exactly one distribution instead. There is no
+import-time native-module selection. V3 wheels are published only for the three
+x86-64 targets named above, with no v3 source distribution; portable x86-64 and
+AArch64 packages remain available unchanged.
+
+The default Python dependencies for either distribution are `pyarrow` and
+`typing-extensions`. NumPy and JAX are optional; the selected distribution's
+`array` extra installs both. Project-document validation uses the native Rust
+runtime and does not require Pydantic.
 
 Continue with the [batch guide](batch-guide.md) after installation. Native
 runtime and extension authors can find crate installation and examples in the

@@ -1,0 +1,19 @@
+{
+  "schema": "calc-flow.sum-state-source-diagnostic.v1",
+  "runtime_revision": "439395a5",
+  "source_revision": "aad87f6e",
+  "runtime": "dense SUM vectors with restored FNV routing; no AHash code",
+  "binary": "target/p6-vector-sums-cargo/release/examples/30_streaming_stock_positions",
+  "diagnostic_branch": "temporary source-only branch in example30, removed before delivery",
+  "rows": 10010000,
+  "batch_rows": 1000000,
+  "cpu_affinity": 0,
+  "samples": 1,
+  "source_seconds": 1.233,
+  "timer_boundary": "DemoSource open through every next() batch and close(); no graph, expression, aggregate, output table or positions check",
+  "build_task_seconds": 635.922,
+  "measurement_budget_seconds": 60,
+  "within_budget": true,
+  "acceptance": "diagnostic only; no P50 and no replacement for the formal P4 result",
+  "gate_implication": "the lazy source alone exceeds the 500 ms P4 limit, so engine-only optimization cannot pass the fixed absolute boundary"
+}

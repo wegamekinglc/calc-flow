@@ -9,8 +9,9 @@ use datafusion::{
     logical_expr::{FetchType, Projection, SkipType, Sort},
 };
 
-use crate::runtime::streaming::gather_work::{
-    AdmissionFailure, GatherOperatorId, GatherStop, OwnedCpuWork,
+use crate::{
+    CalcFlowError,
+    runtime::streaming::morsel_pool::{ManagedMorsel, MorselCost, MorselLease, execute_managed},
 };
 
 use super::native_expression::{NativeAggregateInput, describe_input, expression_work};
@@ -81,7 +82,6 @@ pub(super) struct OutputOrder {
     keys: Vec<Key>,
     skip: usize,
     fetch: Option<usize>,
-    operator: GatherOperatorId,
 }
 
 pub(super) enum OrderPlan {
@@ -100,7 +100,7 @@ impl OutputOrder {
         self.keys.is_empty()
     }
 
-    pub(super) fn bind(plan: &LogicalPlan, name: &str) -> Option<OrderPlan> {
+    pub(super) fn bind(plan: &LogicalPlan, _name: &str) -> Option<OrderPlan> {
         let shape = shape(plan)?;
         if !shape.limited && shape.sort.is_none() {
             return Some(OrderPlan::Identity);
@@ -140,7 +140,6 @@ impl OutputOrder {
             keys,
             skip: shape.skip,
             fetch,
-            operator: GatherOperatorId::new(name.to_owned().into()),
         }))
     }
 
@@ -185,30 +184,42 @@ impl OutputOrder {
             skip: self.skip,
             fetch: self.fetch,
             name: name.to_owned(),
+            credit,
         };
-        self.execute_sort(work, credit, context, name).await
+        self.execute_sort(work, context, name).await
     }
 
     async fn execute_sort(
         &self,
         work: SortWork,
-        credit: MemoryReservation,
         context: &StreamOperatorContext<'_>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
-        let scope = context.gather_client(self.operator.clone()).scope()?;
-        let ticket = scope
-            .submit_work(work, credit, GatherStop::from_job(context.job()))
-            .await
-            .map_err(|failure| match failure {
-                AdmissionFailure::Budget { source, .. } => df_error(name, source),
-                AdmissionFailure::Runtime(error) => error,
-            })?;
-        let output = ticket.finish().await?;
+        let cost = MorselCost {
+            rows: work.records.iter().map(RecordBatch::num_rows).sum(),
+            scratch_bytes: 0,
+            output_bytes: work.credit.size(),
+        };
+        let output = execute_managed(
+            context.job(),
+            name,
+            context.task_id(),
+            ManagedMorsel::new(work, cost, SortWork::run),
+            |error| match error {
+                CalcFlowError::InvalidArgument { ref field, .. }
+                    if matches!(
+                        field.as_str(),
+                        "morsel.rows" | "morsel.bytes" | "morsel.count"
+                    ) =>
+                {
+                    df_error(name, error)
+                }
+                error => error,
+            },
+        )
+        .await?;
         context.check_cancelled()?;
-        let records = output.value.clone();
-        drop(output);
-        Ok(records)
+        Ok(output.records)
     }
     fn reserve_sort(
         &self,
@@ -255,16 +266,20 @@ struct SortWork {
     skip: usize,
     fetch: Option<usize>,
     name: String,
+    credit: MemoryReservation,
 }
 
-impl OwnedCpuWork for SortWork {
-    type Output = Vec<RecordBatch>;
+struct SortOutput {
+    records: Vec<RecordBatch>,
+    _credit: MemoryReservation,
+}
 
-    fn run(self, stop: &GatherStop) -> Result<Self::Output> {
-        stop.check()?;
+impl SortWork {
+    fn run(self, lease: &MorselLease) -> Result<SortOutput> {
+        lease.check()?;
         let input = concat_batches(&self.schema, &self.records)
             .map_err(|error| df_error(&self.name, error))?;
-        let keys = self.sort_keys(&input, stop)?;
+        let keys = self.sort_keys(&input, lease)?;
         let indices = lexsort_to_indices(
             &keys,
             self.fetch.map(|fetch| self.skip.saturating_add(fetch)),
@@ -273,21 +288,25 @@ impl OwnedCpuWork for SortWork {
         let start = self.skip.min(indices.len());
         let count = indices.len() - start;
         let indices = indices.slice(start, count);
-        let columns = self.sorted_columns(&input, &indices, stop)?;
-        stop.check()?;
-        Ok(vec![
+        let columns = self.sorted_columns(&input, &indices, lease)?;
+        lease.check()?;
+        let records = vec![
             RecordBatch::try_new(self.schema, columns)
                 .map_err(|error| df_error(&self.name, error))?,
-        ])
+        ];
+        Ok(SortOutput {
+            records,
+            _credit: self.credit,
+        })
     }
 }
 
 impl SortWork {
-    fn sort_keys(&self, input: &RecordBatch, stop: &GatherStop) -> Result<Vec<SortColumn>> {
+    fn sort_keys(&self, input: &RecordBatch, lease: &MorselLease) -> Result<Vec<SortColumn>> {
         self.keys
             .iter()
             .map(|key| {
-                stop.check()?;
+                lease.check()?;
                 let values = key
                     .expression
                     .evaluate(input)
@@ -305,13 +324,13 @@ impl SortWork {
         &self,
         input: &RecordBatch,
         indices: &datafusion::arrow::array::UInt32Array,
-        stop: &GatherStop,
+        lease: &MorselLease,
     ) -> Result<Vec<datafusion::arrow::array::ArrayRef>> {
         input
             .columns()
             .iter()
             .map(|column| {
-                stop.check()?;
+                lease.check()?;
                 take(column.as_ref(), indices, None).map_err(|error| df_error(&self.name, error))
             })
             .collect::<Result<Vec<_>>>()

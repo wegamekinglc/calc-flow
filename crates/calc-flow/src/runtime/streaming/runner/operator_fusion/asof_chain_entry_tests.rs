@@ -167,8 +167,16 @@ async fn physical_driver_count(two_selects: bool) -> usize {
         plan.name().into(),
     ));
     let parts = plan.into_runtime_parts(EdgeBudget::default()).unwrap();
-    let Ok(mut runtime) =
-        run_operator_entry(parts, &context, &core, &cancellation, BTreeMap::new(), None).await
+    let Ok(mut runtime) = run_operator_entry(
+        parts,
+        &context,
+        &core,
+        &cancellation,
+        BTreeMap::new(),
+        None,
+        true,
+    )
+    .await
     else {
         panic!("valid ASOF chain entry failed");
     };

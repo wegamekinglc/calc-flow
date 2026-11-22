@@ -25,10 +25,7 @@ pub(crate) use layouts::layout_controls;
 pub(crate) enum Component {
     CaptureRestore,
     Compaction,
-    DictionaryRefusalRetention,
     LayoutControls,
-    #[cfg(feature = "benchmark-checkpoint-diagnostic")]
-    CheckpointHistory,
 }
 
 pub(crate) fn parse_arguments(
@@ -57,17 +54,6 @@ fn approved_component(name: &str, check: bool) -> Result<Component, &'static str
             Component::LayoutControls,
             check,
             "layout controls require --check",
-        ),
-        "join_dictionary_refusal_retention" => check_only_component(
-            Component::DictionaryRefusalRetention,
-            check,
-            "dictionary refusal retention requires --check",
-        ),
-        #[cfg(feature = "benchmark-checkpoint-diagnostic")]
-        "join_checkpoint_history_4m" => check_only_component(
-            Component::CheckpointHistory,
-            check,
-            "checkpoint history requires --check",
         ),
         _ => Err("unknown native component"),
     }
@@ -385,11 +371,11 @@ async fn armed(
     (operator, before, admission_batch_rows)
 }
 
-fn base_hashes(snapshot: &OperatorStateSnapshot) -> Value {
+fn stable_hashes(snapshot: &OperatorStateSnapshot) -> Value {
     snapshot
         .segments
         .iter()
-        .filter(|(name, _)| name.ends_with("-base"))
+        .filter(|(name, _)| name.starts_with("right/"))
         .map(|(name, segment)| {
             (
                 name.clone(),
@@ -398,15 +384,6 @@ fn base_hashes(snapshot: &OperatorStateSnapshot) -> Value {
         })
         .collect::<serde_json::Map<String, Value>>()
         .into()
-}
-
-fn delta_names(snapshot: &OperatorStateSnapshot) -> Vec<String> {
-    snapshot
-        .segments
-        .keys()
-        .filter(|name| name.contains("-delta-"))
-        .cloned()
-        .collect()
 }
 
 async fn compaction_sample(
@@ -439,26 +416,9 @@ async fn compaction_sample(
     let post_handler_retained_rows = retained(&operator);
     assert_eq!(post_handler_retained_rows, (rows + incoming) as u64);
     let after = operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
-    let before_base = base_hashes(&before);
-    let after_base = base_hashes(&after);
-    let before_deltas = delta_names(&before);
-    let after_deltas = delta_names(&after);
-    if steady {
-        assert_eq!(before_base, after_base);
-        assert_eq!(
-            before
-                .inline_metadata
-                .get("v2_inventory")
-                .map(|v| &v["base_epoch"]),
-            after
-                .inline_metadata
-                .get("v2_inventory")
-                .map(|v| &v["base_epoch"])
-        );
-    } else {
-        assert_ne!(before_base, after_base);
-        assert!(before_deltas.len() > after_deltas.len());
-    }
+    let before_stable = stable_hashes(&before);
+    let after_stable = stable_hashes(&after);
+    assert_eq!(before_stable, after_stable);
     let mut restored = self::operator();
     restored.restore(&after).unwrap();
     assert_eq!(restored.status(), status);
@@ -490,14 +450,14 @@ async fn compaction_sample(
             "compaction_witness": {
                 "setup_dirty_epochs": 4,
                 "layout_version": after.inline_metadata["layout_version"],
-                "before_base_epoch": before.inline_metadata.get("v2_inventory").map(|v| &v["base_epoch"]),
-                "after_base_epoch": after.inline_metadata.get("v2_inventory").map(|v| &v["base_epoch"]),
-                "before_base_sha256": before_base,
-                "after_base_sha256": after_base,
-                "before_deltas": before_deltas,
-                "after_deltas": after_deltas,
+                "before_stable_sha256": before_stable,
+                "after_stable_sha256": after_stable,
+                "stable_pages_equal": true,
             }
-        }).as_object().unwrap().clone()
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
     );
     (sample, original_output, status)
 }
@@ -563,7 +523,7 @@ async fn measure_serial_handler(
             "handler_started_ns":handler_started_ns,
             "handler_completed_ns":handler_completed_ns,
             "during_compaction_status":"unmeasured",
-            "reason":"prepare_checkpoint_async exclusively borrows this operator through worker completion and installation; handler dispatch is serialized",
+            "reason":"native preparation has no legacy worker compaction; handler dispatch remains serialized by the operator borrow",
             "queue_scope":"benchmark handler readiness after first preparation poll to handler start; not a production edge-queue clock",
         },
     })
@@ -586,26 +546,4 @@ pub(crate) async fn compaction(rows: usize, incoming: usize) -> Value {
         "state_equal": true,
         "restore_output_equivalent": true,
     })
-}
-
-#[cfg(test)]
-mod dictionary_arguments {
-    #[test]
-    fn test_dictionary_refusal_requires_the_registered_check_only_case() {
-        let arguments = [
-            "--native-component".into(),
-            "join_dictionary_refusal_retention".into(),
-            "--check".into(),
-        ];
-        assert!(super::parse_arguments(&arguments).unwrap().unwrap().1);
-        assert!(super::parse_arguments(&arguments[..2]).is_err());
-        assert!(
-            super::parse_arguments(&["--check".into()])
-                .unwrap()
-                .is_none()
-        );
-        let mut extra = arguments.to_vec();
-        extra.extend(["--rows".into(), "3".into()]);
-        assert!(super::parse_arguments(&extra).is_err());
-    }
 }

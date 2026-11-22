@@ -182,9 +182,9 @@ async fn test_match_budget_spans_records_and_failure_does_not_poison_reuse() -> 
 
 #[tokio::test]
 async fn test_both_side_budgets_span_records_even_when_opposite_is_empty() -> Result<()> {
-    // V1 charge: 64 overhead + (1 tag + 4 timezone length + 4 value length + 8 key bytes)
-    // + 16 time/row-id bytes + three (1 validity + 8 value) payload cells.
-    let row_bytes = 64 + 17 + 16 + 3 * 9;
+    // Native 64-bit run charge: three 8-byte payload cells, 32 identity bytes,
+    // 284 run-owner bytes, 96 bucket-owner bytes, and 32 expiration bytes.
+    let row_bytes = 3 * 8 + 32 + 284 + 96 + 32;
     for limits in [
         JoinStateLimits::new(1, 10_000, 10)?,
         JoinStateLimits::new(10, row_bytes, 10)?,

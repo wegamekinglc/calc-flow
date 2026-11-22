@@ -141,3 +141,48 @@ async fn test_abandoned_snapshot_worker_is_drained_and_refunds_ownership() {
         assert_eq!(pool.reserved(), 0);
     }
 }
+
+#[tokio::test]
+async fn test_checkpoint_worker_requires_an_open_job_morsel_pool() {
+    use crate::{
+        pipeline::CompiledStreamOperator,
+        runtime::streaming::sql_recovery_work::{
+            CheckpointWorkOperator, JobSqlRecoveryOwner, SqlCaptureRequest, SqlRecoveryContext,
+            SqlWorkIdentity,
+        },
+    };
+    let mut operator = operator();
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "snapshot", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("p", batch(&[1]), &context, &mut collector)
+        .await
+        .unwrap();
+    let pool = operator.state_pool_for_test();
+    let mut target = CompiledStreamOperator::SnapshotSql(operator);
+    let reservation = CheckpointWorkOperator::reserve_checkpoint(&mut target, 8).unwrap();
+    let owner = JobSqlRecoveryOwner::new();
+    owner.configure(2).unwrap();
+    job.managed_morsel_owner().close_and_drain().await.unwrap();
+    let ticket = owner
+        .submit_capture(SqlCaptureRequest {
+            operator: CheckpointWorkOperator::from_compiled(target),
+            identity: SqlWorkIdentity {
+                node_id: "snapshot".into(),
+                node_order: 0,
+                task_id: None,
+            },
+            context: SqlRecoveryContext::from(&job),
+            launch_cancel: CancellationToken::new(),
+            reservation,
+        })
+        .result
+        .unwrap();
+
+    assert!(matches!(
+        ticket.join().await,
+        Err(crate::CalcFlowError::Cancelled { .. })
+    ));
+    assert_eq!(pool.reserved(), 0);
+}

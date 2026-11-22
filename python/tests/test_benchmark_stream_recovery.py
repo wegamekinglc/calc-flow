@@ -118,7 +118,7 @@ def test_periodic_manual_checkpoint_cancel_restore_and_two_source_eof(
 
 async def _require_mixed_checkpoint(job, trigger, root, first):
     epoch = await asyncio.wait_for(trigger(job), 5)
-    mixed = json.loads(next(root.rglob(f"manifest-{epoch:020}.json")).read_text())
+    mixed = json.loads(next(root.rglob(f"epoch-{epoch}.json")).read_text())
     assert mixed["sources"][first]["ended"]
     assert all(
         not source["ended"]
@@ -137,7 +137,7 @@ def _require_completed(job, sources, root):
 
 
 def _require_terminal_manifest(root):
-    manifests = [json.loads(path.read_text()) for path in root.rglob("manifest-*.json")]
+    manifests = [json.loads(path.read_text()) for path in root.rglob("epoch-*.json")]
     terminal = max(manifests, key=lambda manifest: manifest["epoch"])
     assert all(source["ended"] for source in terminal["sources"].values())
     assert all(

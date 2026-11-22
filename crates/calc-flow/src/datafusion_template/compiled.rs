@@ -17,7 +17,7 @@ use crate::{
     datafusion::{
         MAX_SQL_RESULT_BYTES, MAX_SQL_RESULT_ROWS, datafusion_error, push_bounded_sql_batch,
     },
-    operator::StreamOperatorContext,
+    operator::{StreamOperatorContext, sync_operator::SyncContext},
 };
 
 use super::memory_scan;
@@ -40,9 +40,14 @@ struct Filter {
     batch_size: usize,
 }
 
-struct ActiveStep<'a> {
-    step: &'a Step,
+struct ActiveStep {
     coalescer: Option<LimitedBatchCoalescer>,
+}
+
+/// Reusable filter allocations; each evaluation starts with fresh logical
+/// coalescer state and releases partial state on both success and failure.
+pub(crate) struct CompiledExpressionState {
+    steps: Vec<ActiveStep>,
 }
 
 #[derive(Default)]
@@ -53,7 +58,7 @@ struct Output {
 }
 
 impl CompiledExpression {
-    pub(super) fn try_new(plan: &Arc<dyn ExecutionPlan>) -> Option<Self> {
+    pub(crate) fn try_new(plan: &Arc<dyn ExecutionPlan>) -> Option<Self> {
         let mut steps = Vec::new();
         append_steps(plan.as_ref(), &mut steps)?;
         Some(Self {
@@ -62,29 +67,108 @@ impl CompiledExpression {
         })
     }
 
+    pub(crate) fn state(&self) -> CompiledExpressionState {
+        CompiledExpressionState {
+            steps: self.steps.iter().map(ActiveStep::new).collect(),
+        }
+    }
+
     pub(crate) async fn evaluate(
         &self,
         input: &Batch,
         node_id: &str,
         context: &StreamOperatorContext<'_>,
     ) -> Result<Batch> {
-        let table = input.table_payload()?;
-        let mut steps = self.steps.iter().map(ActiveStep::new).collect::<Vec<_>>();
+        let mut state = self.state();
         let mut output = Output::default();
-        for (index, record) in table.batches().iter().enumerate() {
+        for (index, record) in input.table_payload()?.batches().iter().enumerate() {
             if index > 0 {
                 tokio::task::yield_now().await;
             }
-            push(&mut steps, record.clone(), &mut output, node_id, context)?;
+            push(
+                &self.steps,
+                &mut state.steps,
+                record.clone(),
+                &mut output,
+                node_id,
+                context,
+            )?;
         }
-        flush(&mut steps, &mut output, node_id, context)?;
+        finish(self, &mut state, input, output, node_id, context)
+    }
+
+    pub(crate) fn evaluate_sync(
+        &self,
+        state: &mut CompiledExpressionState,
+        input: &Batch,
+        node_id: &str,
+        context: &SyncContext<'_>,
+    ) -> Result<Batch> {
+        let result = evaluate_sync(self, state, input, node_id, context);
+        state.reset(&self.steps);
+        result
+    }
+}
+
+fn evaluate_sync(
+    program: &CompiledExpression,
+    state: &mut CompiledExpressionState,
+    input: &Batch,
+    node_id: &str,
+    context: &SyncContext<'_>,
+) -> Result<Batch> {
+    let mut output = Output::default();
+    for record in input.table_payload()?.batches() {
         context.check_cancelled()?;
-        if output.batches.is_empty() {
-            output
-                .batches
-                .push(RecordBatch::new_empty(Arc::clone(&self.schema)));
-        }
-        Batch::table(output.batches, input.metadata().clone())
+        push(
+            &program.steps,
+            &mut state.steps,
+            record.clone(),
+            &mut output,
+            node_id,
+            context,
+        )?;
+    }
+    finish(program, state, input, output, node_id, context)
+}
+
+fn finish<C: Cancellation>(
+    program: &CompiledExpression,
+    state: &mut CompiledExpressionState,
+    input: &Batch,
+    mut output: Output,
+    node_id: &str,
+    context: &C,
+) -> Result<Batch> {
+    flush(
+        &program.steps,
+        &mut state.steps,
+        &mut output,
+        node_id,
+        context,
+    )?;
+    context.check()?;
+    if output.batches.is_empty() {
+        output
+            .batches
+            .push(RecordBatch::new_empty(Arc::clone(&program.schema)));
+    }
+    Batch::table(output.batches, input.metadata().clone())
+}
+
+trait Cancellation {
+    fn check(&self) -> Result<()>;
+}
+
+impl Cancellation for StreamOperatorContext<'_> {
+    fn check(&self) -> Result<()> {
+        self.check_cancelled()
+    }
+}
+
+impl Cancellation for SyncContext<'_> {
+    fn check(&self) -> Result<()> {
+        self.check_cancelled()
     }
 }
 
@@ -127,29 +211,40 @@ fn compile_step(plan: &dyn ExecutionPlan, input: &dyn ExecutionPlan) -> Option<S
     }))
 }
 
-impl<'a> ActiveStep<'a> {
-    fn new(step: &'a Step) -> Self {
+impl ActiveStep {
+    fn new(step: &Step) -> Self {
         let coalescer = match step {
-            Step::Filter(filter) => Some(LimitedBatchCoalescer::new(
-                Arc::clone(&filter.schema),
-                filter.batch_size,
-                None,
-            )),
+            Step::Filter(filter) => Some(new_coalescer(filter)),
             _ => None,
         };
-        Self { step, coalescer }
+        Self { coalescer }
     }
 }
 
-fn push(
-    steps: &mut [ActiveStep<'_>],
+impl CompiledExpressionState {
+    fn reset(&mut self, steps: &[Step]) {
+        for (step, active) in steps.iter().zip(&mut self.steps) {
+            if let Step::Filter(filter) = step {
+                active.coalescer = Some(new_coalescer(filter));
+            }
+        }
+    }
+}
+
+fn new_coalescer(filter: &Filter) -> LimitedBatchCoalescer {
+    LimitedBatchCoalescer::new(Arc::clone(&filter.schema), filter.batch_size, None)
+}
+
+fn push<C: Cancellation>(
+    steps: &[Step],
+    active: &mut [ActiveStep],
     record: RecordBatch,
     output: &mut Output,
     node_id: &str,
-    context: &StreamOperatorContext<'_>,
+    context: &C,
 ) -> Result<()> {
-    context.check_cancelled()?;
-    let Some((head, tail)) = steps.split_first_mut() else {
+    context.check()?;
+    let Some((head, tail)) = steps.split_first() else {
         return push_bounded_sql_batch(
             &mut output.batches,
             &mut output.rows,
@@ -159,28 +254,48 @@ fn push(
             MAX_SQL_RESULT_BYTES,
         );
     };
-    match head.step {
+    let (active_head, active_tail) = active.split_first_mut().expect("matching active step");
+    match head {
         Step::Columns(indices) => {
             let record = record
                 .project(indices)
                 .map_err(|error| datafusion_error(Some(node_id), DataFusionError::from(error)))?;
-            push(tail, record, output, node_id, context)
+            push(tail, active_tail, record, output, node_id, context)
         }
         Step::Project(projector) => {
             let record = projector
                 .project_batch(&record)
                 .map_err(|error| datafusion_error(Some(node_id), error))?;
-            push(tail, record, output, node_id, context)
+            push(tail, active_tail, record, output, node_id, context)
         }
-        Step::Filter(filter) => {
-            let record = filter_record(filter, record, node_id)?;
-            let coalescer = head.coalescer.as_mut().expect("filter call state");
-            coalescer
-                .push_batch(record)
-                .map_err(|error| datafusion_error(Some(node_id), error))?;
-            drain(coalescer, tail, output, node_id, context)
-        }
+        Step::Filter(filter) => push_filter(
+            filter,
+            active_head,
+            tail,
+            active_tail,
+            record,
+            output,
+            (node_id, context),
+        ),
     }
+}
+
+fn push_filter<C: Cancellation>(
+    filter: &Filter,
+    active: &mut ActiveStep,
+    tail: &[Step],
+    active_tail: &mut [ActiveStep],
+    record: RecordBatch,
+    output: &mut Output,
+    node_context: (&str, &C),
+) -> Result<()> {
+    let (node_id, context) = node_context;
+    let record = filter_record(filter, record, node_id)?;
+    let coalescer = active.coalescer.as_mut().expect("filter call state");
+    coalescer
+        .push_batch(record)
+        .map_err(|error| datafusion_error(Some(node_id), error))?;
+    drain(coalescer, tail, active_tail, output, node_id, context)
 }
 
 fn filter_record(filter: &Filter, record: RecordBatch, node_id: &str) -> Result<RecordBatch> {
@@ -207,33 +322,36 @@ fn filter_record(filter: &Filter, record: RecordBatch, node_id: &str) -> Result<
         .map_err(|error| datafusion_error(Some(node_id), DataFusionError::from(error)))
 }
 
-fn flush(
-    steps: &mut [ActiveStep<'_>],
+fn flush<C: Cancellation>(
+    steps: &[Step],
+    active: &mut [ActiveStep],
     output: &mut Output,
     node_id: &str,
-    context: &StreamOperatorContext<'_>,
+    context: &C,
 ) -> Result<()> {
     for index in 0..steps.len() {
-        let (head, tail) = steps.split_at_mut(index + 1);
-        if let Some(coalescer) = head[index].coalescer.as_mut() {
+        let (_, tail_steps) = steps.split_at(index + 1);
+        let (head_active, tail_active) = active.split_at_mut(index + 1);
+        if let Some(coalescer) = head_active[index].coalescer.as_mut() {
             coalescer
                 .finish()
                 .map_err(|error| datafusion_error(Some(node_id), error))?;
-            drain(coalescer, tail, output, node_id, context)?;
+            drain(coalescer, tail_steps, tail_active, output, node_id, context)?;
         }
     }
     Ok(())
 }
 
-fn drain(
+fn drain<C: Cancellation>(
     coalescer: &mut LimitedBatchCoalescer,
-    tail: &mut [ActiveStep<'_>],
+    tail: &[Step],
+    active_tail: &mut [ActiveStep],
     output: &mut Output,
     node_id: &str,
-    context: &StreamOperatorContext<'_>,
+    context: &C,
 ) -> Result<()> {
     while let Some(record) = coalescer.next_completed_batch() {
-        push(tail, record, output, node_id, context)?;
+        push(tail, active_tail, record, output, node_id, context)?;
     }
     Ok(())
 }

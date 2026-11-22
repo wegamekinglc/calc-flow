@@ -153,9 +153,13 @@ class _CountingSink:
         return None
 
 
-async def _drain_convenience(limits: cf.AsofStateLimits, chunks: list[pa.Table]) -> int:
+async def _drain_convenience(
+    limits: cf.AsofStateLimits,
+    chunks: list[pa.Table],
+    config: cf.StreamRuntimeConfig | None = None,
+) -> int:
     result = _joined(limits).stream(
-        {"facts": _Feed(chunks), "dims": _Feed([dim_table()])}
+        {"facts": _Feed(chunks), "dims": _Feed([dim_table()])}, config=config
     )
     rows = 0
     async with asyncio.timeout(120), result:
@@ -225,12 +229,20 @@ def test_convenience_path_admits_ten_thousand_row_batches_under_recommended_limi
     assert asyncio.run(_drain_convenience(RECOMMENDED, chunks)) == 2 * BATCH_ROWS
 
 
-def test_convenience_path_workspace_failure_surfaces_reason_detail():
+@pytest.mark.parametrize("checkpointing", [True, None], ids=["checkpointed", "default"])
+def test_convenience_path_workspace_failure_surfaces_reason_detail(checkpointing):
     chunks = _chunks(BATCH_ROWS)
+    config = cf.StreamRuntimeConfig(checkpointing=checkpointing)
     with pytest.raises(cf.StreamingRuntimeError) as raised:
-        asyncio.run(_drain_convenience(cf.AsofStateLimits(100_000, 64 * 1024), chunks))
+        asyncio.run(
+            _drain_convenience(cf.AsofStateLimits(100_000, 64 * 1024), chunks, config)
+        )
     message = str(raised.value)
-    assert "ASOF aggregate workspace exceeds max_state_bytes" in message
+    phases = ["ASOF admission workspace exceeds max_state_bytes"]
+    if not checkpointing:
+        # Without checkpoints, source interleaving can trip index preparation first.
+        phases.append("ASOF expiration index and dictionary preparation exceed")
+    assert any(phase in message for phase in phases), message
     assert "asof_workspace_limit_exceeded" in message
     assert raised.value.reason_code == "asof_workspace_limit_exceeded"
 
@@ -256,5 +268,5 @@ def test_explicit_path_workspace_failure_surfaces_reason_detail(tmp_path):
     )
     assert state == "failed"
     assert failure is not None
-    assert "ASOF aggregate workspace exceeds max_state_bytes" in failure
+    assert "ASOF admission workspace exceeds max_state_bytes" in failure
     assert "asof_workspace_limit_exceeded" in failure

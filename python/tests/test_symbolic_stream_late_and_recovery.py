@@ -459,37 +459,21 @@ def test_one_join_digest_owns_one_physical_checkpoint_entry(tmp_path: Path) -> N
 
     asyncio.run(exercise())
 
-    manifests = sorted((tmp_path / "manifests").glob("manifest-*.json"))
+    manifest_root = tmp_path / "manifests" / "lineage" / "manifests"
+    manifests = sorted(manifest_root.glob("epoch-*.json"))
     assert len(manifests) == 1
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     operators = manifest["operators"]
     join_id = join_nodes[0]
     assert join_id in operators
     join_entry = operators[join_id]
-    assert join_entry["inline_metadata"]["layout_version"] == 2
-    inventory = join_entry["inline_metadata"]["v2_inventory"]
-    assert inventory["codec_version"] == 2
-    assert inventory["base_epoch"] == 1
-    assert inventory["deltas"] == []
-    payloads = inventory["payloads"]
-    assert [(payload["side"], payload["rows"]) for payload in payloads] == [
-        ("left", 1),
-        ("right", 1),
-    ]
-    segment_owners = {
-        operator_id: len(entry["segments"])
-        for operator_id, entry in operators.items()
-        if entry["segments"]
-    }
-    assert segment_owners == {join_id: 4}
-    segment_ids = {segment["segment_id"] for segment in join_entry["segments"]}
-    assert segment_ids == {"left-base", "right-base"} | {
-        f"{payload['side']}-payload-{payload['sha256']}" for payload in payloads
-    }
+    assert join_entry["kind"] == "table"
+    assert join_entry["partitions"]
+    assert join_entry["state_fingerprint"]
     # Fan-out branches and the join's output frontier record no durable
     # segment of their own.
     assert all(
-        not entry["segments"]
+        not entry["blocks"]
         for operator_id, entry in operators.items()
         if operator_id != join_id
     )

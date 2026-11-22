@@ -259,12 +259,14 @@ and key types record a fallback reason instead of partially rewriting the
 query. Map keys, including unsupported nested encodings, therefore retain the
 ordinary DataFusion path.
 
-AVG-only queries retain the existing shared Native numerical profile and its
-West mean and refold behavior. This is not a bitwise sum/count equivalence
-promise on arbitrary floating inputs. Native `stable_v1`/`stable_v2` profiles,
-checkpoint identities and transition ordering are unchanged. Finite
-comparison tolerances and special-value classifications are checked by the
-corresponding numerical fixtures.
+AVG-only queries use the shared Native compensated sliding sum and divide only
+at readout. They preserve DataFusion's sticky-NaN policy: once a NaN enters a
+partition, later rewritten AVG results in that partition remain NaN. This is
+not a bitwise sum/count equivalence promise on arbitrary floating inputs. The
+single numeric contract participates in Native checkpoint identities, and state
+carrying prior rolling-kernel identities is rejected rather than migrated.
+Finite comparison tolerances and special-value classifications are checked by
+the corresponding numerical fixtures.
 
 A separate composite rewrite recognizes the rolling-age expression formed by
 `COUNT(*)`, `array_position(array_agg(price), MAX(price))`, and the outer casts.

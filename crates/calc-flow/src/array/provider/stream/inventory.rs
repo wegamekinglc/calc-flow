@@ -65,6 +65,8 @@ pub(crate) fn is_native_sequence_operator(operator: &NodeOperator) -> bool {
 pub(super) fn compiled(operator: &CompiledStreamOperator) -> Option<&NativeStreamOperator> {
     match operator {
         CompiledStreamOperator::External(operator) => concrete(operator.as_ref()),
+        CompiledStreamOperator::NativeSequence(operator) => Some(operator),
+        CompiledStreamOperator::SyncArraySequence(node) => Some(node.operator()),
         _ => None,
     }
 }

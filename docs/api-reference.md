@@ -72,7 +72,8 @@ The inferred input has no ordering. Temporal calculations declare ordering on
 [temporal ordering](python-api.md#temporal-ordering).
 
 `TableExpr` provides indexing, overloaded column operators, append-only
-`with_columns`, `select`, `filter`, `sql`, `pipe`, collection, and `stream`.
+`with_columns`, `select`, `filter`, `sql`, `changelog_sql`, `pipe`, collection,
+and `stream`.
 `Program(name, /, *, mode, inputs=None, outputs=())` accepts an output mapping,
 automatically discovers omitted roots, collects by logical name, and exports
 strict native projects with `to_project`. Runtime arguments are optional;
@@ -92,24 +93,34 @@ collection state, streaming ownership, and logical versus physical bindings.
 
 ### SQL, pipelines, and streaming results
 
-| Entry point                                                                    | Contract                                                             |
-|--------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| `sql(query, /, **tables)`                                                      | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
-| `snapshot_sql(query, /, **tables)`                                             | Stream-only query over complete latest replacement relations         |
-| `TableExpr.sql(query, /)`                                                      | Single-table SQL with the local alias `input`                        |
-| `Expr.pipe(function, /, *args, **kwargs)`                                      | Call the synchronous builder once and preserve its return type       |
-| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`   | `StreamResults[pyarrow.Table]`                                       |
-| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`     | `StreamResults[StreamOutput]`; logical input mapping required        |
-| `Program(name, mode=...)`                                                      | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
-| `Program.execute(inputs, /, *, ...)`                                           | SQL: named Arrow tables; streaming: owned named events               |
-| `StreamOutput.name` / `.table`                                                 | Immutable named Arrow output event                                   |
-| `StreamResults` async context / iteration / `aclose()` / `.job`                | One native job, one consumer, bounded output and owned cleanup       |
+| Entry point                                                                       | Contract                                                             |
+|-----------------------------------------------------------------------------------|----------------------------------------------------------------------|
+| `sql(query, /, **tables)`                                                         | Lazy `TableExpr`; explicit aliases mapped to table declarations      |
+| `changelog_sql(query, /, **tables)`                                               | Compact single-alias stream aggregate with `_cf_op` changes          |
+| `snapshot_sql(query, /, **tables)`                                                | Stream-only query over complete latest replacement relations         |
+| `TableExpr.sql(query, /)`                                                         | Single-table SQL with the local alias `input`                        |
+| `TableExpr.changelog_sql(query, /)`                                               | Single-table changelog SQL with local alias `input`                  |
+| `Expr.pipe(function, /, *args, **kwargs)`                                         | Call the synchronous builder once and preserve its return type       |
+| `TableExpr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`      | `StreamResults[pyarrow.Table]`                                       |
+| `Program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`        | `StreamResults[StreamOutput]`; logical input mapping required        |
+| `TableExpr.session(*, ..., checkpoints=None, restore=False)`                      | `StreamSession[pyarrow.Table]`                                       |
+| `Program.session(*, ..., checkpoints=None, restore=False)`                        | `StreamSession[dict[str, pyarrow.Table]]`; stream mode required      |
+| `Program(name, mode=...)`                                                         | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias |
+| `Program.execute(inputs, /, *, ...)`                                              | SQL: named Arrow tables; streaming: owned named events               |
+| `StreamOutput.name` / `.table`                                                    | Immutable named Arrow output event                                   |
+| `StreamResults` async context / iteration / `aclose()` / `.job`                   | One native job, one consumer, bounded output and owned cleanup       |
+| `StreamSession.push` / `.advance` / `.finish` / `.close` / context manager        | Synchronous caller-thread calls returning the rows each call emits   |
+| `StreamSession.checkpoint() -> int`                                               | Synchronously capture durable state; managed storage required        |
 
 SQL schema planning reads declarations, not data. Batch SQL accepts multiple
 aliases; append stream SQL accepts one alias or the exact-schema
 [UNION ALL subset](relational-frontends.md#same-schema-union). Ordinary aggregates and `GROUP BY`
-emit full cumulative snapshots after each batch. Eligible aggregate queries
-update compact state; unsupported shapes rerun over retained input. Other append
+emit full cumulative snapshots after each batch by default. `changelog_sql`
+requires one compact single-alias stream aggregate and instead emits full-row
+retract/upsert changes with non-null Utf8 `_cf_op`; see
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output).
+Eligible aggregate queries update compact state; unsupported shapes rerun over
+retained input unless compact execution is explicitly required. Other append
 SQL executes per batch. `snapshot_sql` supports multiple aliases, waits for all
 relations to initialize, then emits a complete result after each replacement.
 Its outputs currently connect directly to sinks and reject ExactlyOnce. See
@@ -128,11 +139,25 @@ validated nondecreasing arrival times and native watermark generation, so rollin
 results can arrive before EOF. `watermarks` selects existing policies for one
 dynamic input or a mapping by logical name; it cannot override `SourceBinding`.
 Inputs without event time retain per-batch output except for SQL aggregates.
-Ordinary iterables have best-effort delivery without replay; each convenience
-stream uses temporary checkpoint storage. Explicit bindings and managed state
-provide the separate durable-recovery path. Multi-output streams yield named
+Ordinary iterables have best-effort delivery without replay; convenience
+streams run without checkpoints unless `config.checkpointing=True` adds
+temporary checkpoint storage. Explicit bindings and managed state provide the
+separate durable-recovery path. Multi-output streams yield named
 events rather than synchronized dictionaries. See [Python contracts](python-api.md#streaming-results)
 and the [streaming guide](streaming-guide.md).
+
+`session` compiles once and returns a `StreamSession` whose `push`, `advance`,
+and `finish` run synchronously on the calling thread and return the emitted
+rows: one Arrow table for `TableExpr.session`, or every declared output name
+for `Program.session`. It admits one dynamic input feeding rolling, row-local
+expression, and union stages. `checkpoints=None` retains in-memory behavior and
+ignores checkpoint configuration. A `ManagedCheckpointRuntime` enables durable
+v4 capture, `restore=True` selects its highest complete session epoch, and
+`StreamSession.checkpoint() -> int` captures state synchronously. Sessions have
+no queue backpressure. Existing `push`, `advance`, `finish`, and `close` calls
+may run inside an event loop; construction, restore, and checkpoint reject one,
+and checkpoint has no async alternative. Lifecycle errors raise `RuntimeError`.
+See [stream sessions](python-api.md#stream-sessions).
 
 ### Bounded backward ASOF Join
 
@@ -345,6 +370,13 @@ table-to-array-to-table provider described in the
 `project_json_schema()` returns the Rust-generated schema and
 `validate_project_json()` returns canonical validated JSON.
 
+A SQL operator may declare optional `aggregate_output` with values `"snapshot"`
+or `"changelog"`. Omission and explicit `"snapshot"` are equivalent, and
+canonical serialization omits the default. `"changelog"` selects the compact
+single-alias stream aggregate protocol and is not a field on `snapshot_sql`
+nodes. The mode participates in node configuration and semantic identity. See
+[SQL aggregate output](projects-guide.md#sql-aggregate-output).
+
 Rolling and cross-section `LatePolicySpec` supports `side_output` in native
 stream projects, with `metrics_version: 1` and `schema_version: 1`. Its `late`
 diagnostic port has no watermark/idle progress, but participates in aligned
@@ -376,7 +408,8 @@ application-owned lifecycle controls. Ordinary iteration uses the
 
 `StreamingRunner(plan, sources=None, sinks=None, checkpoints=None, *,
 config=None, static_inputs=None)` owns async `StreamSource` and sink connectors.
-Graph-only plans require explicit source/sink bindings and a checkpoint runtime.
+Graph-only plans require explicit source/sink bindings and a checkpoint runtime
+unless `config.checkpointing=False`.
 Plans returned by `compile_stream_project` own their connector bindings and
 runtime/state settings: pass only the plan and any required `static_inputs`;
 external `sources`, `sinks`, `checkpoints`, or `config` overrides are rejected.
@@ -444,7 +477,7 @@ The `calc_flow` crate re-exports its supported public types from
 | Operator traits       | `Port`, `OperatorMetadata`, `NodeOperator`, `BatchOperator`, `StreamOperator`, `StreamOperatorLifecycle`, `OperatorStateSnapshot`                                                                   |
 | Built-in operators    | `ExpressionOperator`, `SqlOperator`, `SnapshotSqlOperator`, `RollingOperator`, `CrossSectionOperator`, `UnionOperator`, `WindowAggregateOperator`, `StreamJoinOperator`, `StreamAsofJoinOperator`   |
 | Window model          | `WindowSpec`, `WindowGeometry`, `AggregateSpec`, `AggregateFunction`, `MAX_WINDOW_OVERLAP`                                                                                                          |
-| Rolling model         | `RollingSpec`, `RollingOutputSpec`, `RollingNumericalProfile`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                                             |
+| Rolling model         | `RollingSpec`, `RollingOutputSpec`, `LatePolicySpec`, `LateErrorScope`, `RollingValuePolicy`                                                                                                      |
 | Cross-section model   | `CrossSectionSpec`, `CrossSectionGroupingSpec`, `CrossSectionOutputSpec`, `CrossSectionValuePolicy`, `RankTieMethod`, `SortDirection`, `NullPlacement`                                              |
 | Stream join model     | `StreamJoinSpec`, `StreamJoinType`, `JoinTimeBounds`, `JoinStateLimits`, `StreamJoinStatus`                                                                                                         |
 | ASOF join model       | `StreamAsofJoinSpec`, `AsofJoinSide`, `AsofStateLimits`, `AsofLatePolicy`, `StreamAsofJoinStatus`, `StreamAsofJoinSideStatus`                                                                       |
@@ -456,17 +489,27 @@ The `calc_flow` crate re-exports its supported public types from
 | UDF/providers         | `UdfRegistry`, `UdfReference`, `ProviderRegistry`, `BatchOperatorFactory`, `StreamOperatorFactory`                                                                                                  |
 | Sources and sinks     | `StreamSource`, `StreamSink`, `TransactionalStreamSink`, `SourceBinding`, `SinkBinding`                                                                                                             |
 | Continuous runtime    | `StreamingRunner`, `StreamingJob`, `ManagedCheckpointRuntime`, `Cursor`, `SourceEvent`, `JobStatus`, `JobOutcome`                                                                                   |
+| Stream session        | `StreamSession`, `SessionWatermark`, `SessionOutput`                                                                                                                                                |
 | Static inputs         | `StaticInputSpec`, `StaticInputDigest`, `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, `StaticArrayValues`                                                               |
 | Projects              | `ProjectSpec`, `compile_project`, `validate_project`                                                                                                                                                |
 | Persistence           | `FileProjectStore`, `LocalStateBackend`, `CheckpointManifest`                                                                                                                                       |
 | Errors                | `CalcFlowError`, `Result<T>`                                                                                                                                                                        |
+
+`SqlAggregateOutputMode` is the crate-root SQL aggregate output selector; see
+[SQL operators](rust-api.md#sql-operators).
 
 `compile_project` produces a `BatchExecutionPlan`. `compile_batch` and
 `compile_stream` are the Rust graph-compilation entry points. A
 `StreamExecutionPlan` is consumed by the public source-driven
 `StreamingRunner`. The runner owns source and sink bindings plus a
 `ManagedCheckpointRuntime`; `start(self)` consumes it and returns the sole
-`StreamingJob` lifecycle owner. Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
+`StreamingJob` lifecycle owner. `StreamSession::new` instead consumes an
+admitted plan for synchronous, in-memory pushes on the calling thread. Rust
+callers can also use `StreamSession::new_with_checkpoints` to start a fresh
+managed durable lineage, `StreamSession::restore` to resume the highest complete
+session epoch after validating lineage compatibility, and
+`StreamSession::checkpoint` to capture state synchronously; see
+[caller-driven stream sessions](rust-api.md#caller-driven-stream-sessions). Static array inspection uses `StaticArraySnapshot` and `StaticArrayValues`.
 `Batch::static_array_snapshot()` is an explicit owned host-neutral copy for a
 latched static array: its backend, dtype, shape, optional full null bitmap, and
 compact scalar carrier are available through read-only accessors. The snapshot
@@ -512,12 +555,19 @@ through its existing `ExecutionError` category. Public continuous lifecycle
 failures use payload-safe `StreamingRuntimeError` projections; indeterminate
 manifest publication uses `CheckpointPublicationUnknownError`.
 
+`StreamSession` errors are ordinary `CalcFlowError` values rather than
+`StreamingError` projections, and contained operator panics surface as
+`CalcFlowError::Operator` with a `panicked: ` message. Python maps them to
+the hierarchy above and raises `RuntimeError` for calls on a failed,
+finished, closed, or busy session.
+
 ## Version and compatibility
 
 The Rust crate and Python binding are versioned `2026.11.14` in this checkout.
-Project format version `3` and checkpoint-manifest version `3` are separate
-protocol values from the package version. The Studio application moved to the
-separate [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
+Project format version `3`, runner checkpoint-manifest version `3`, and durable
+session-manifest version `4` are separate protocol values from the package
+version. The Studio application moved to the separate
+[calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)
 repository and is versioned there.
 
 Package versions use calendar versioning (`YYYY.M.D` release dates).

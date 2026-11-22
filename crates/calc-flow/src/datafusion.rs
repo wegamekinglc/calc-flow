@@ -34,7 +34,7 @@ use crate::{
     datafusion_interval::TimestampIntervalArithmetic,
     datafusion_predicate::UInt64ModuloPredicate,
     datafusion_rolling::{CalcFlowQueryPlanner, RollingRewriteAudit, RollingRewriteAuditSnapshot},
-    datafusion_template::{QueryTemplate, QueryTemplates, TemplateCandidate},
+    datafusion_template::{CompiledExpression, QueryTemplate, QueryTemplates, TemplateCandidate},
     expression::{ValidatedQuery, parse_select_query, sql_projection},
     validate_selected_udfs,
 };
@@ -43,7 +43,8 @@ pub(crate) const MAX_SQL_RESULT_ROWS: usize = 100_000_000;
 pub(crate) const MAX_SQL_RESULT_BYTES: usize = 1 << 30;
 
 #[path = "datafusion_join.rs"]
-mod datafusion_join;
+pub(crate) mod datafusion_join;
+#[cfg(test)]
 #[path = "datafusion_owned.rs"]
 pub(crate) mod owned;
 
@@ -114,6 +115,7 @@ impl Default for DataFusionConfig {
 }
 
 impl DataFusionConfig {
+    #[cfg(test)]
     pub(crate) const fn serial_owned_sql(self) -> bool {
         matches!(self.parallelism_mode, DataFusionParallelismMode::Fixed)
             && self.target_partitions == 1
@@ -244,6 +246,7 @@ pub struct DataFusionRuntime {
 }
 
 impl DataFusionRuntime {
+    #[cfg(test)]
     pub(crate) const fn serial_owned_sql(&self) -> bool {
         self.config.serial_owned_sql()
     }
@@ -303,7 +306,7 @@ impl DataFusionRuntime {
         Ok(runtime)
     }
 
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[cfg(test)]
     pub(crate) fn with_benchmark_pool(
         config: DataFusionConfig,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
@@ -557,6 +560,7 @@ impl DataFusionRuntime {
         self.compact_pool.take_peak()
     }
 
+    #[cfg(test)]
     pub(crate) fn incremental_memory_pool(
         &self,
     ) -> Arc<dyn datafusion::execution::memory_pool::MemoryPool> {
@@ -665,6 +669,30 @@ impl DataFusionRuntime {
             "snapshot-sql-owned",
             "snapshot_sql owned state exceeds max_bytes",
         ))
+    }
+
+    /// Plans a row-local stream expression once from its exact input schema.
+    pub(crate) async fn compile_stream_expression(
+        &self,
+        query: &ValidatedQuery,
+        input: SchemaRef,
+        node_id: &str,
+    ) -> Result<Option<Arc<CompiledExpression>>> {
+        self.ensure_open()?;
+        let input = Batch::table(
+            vec![RecordBatch::new_empty(input)],
+            BatchMetadata::default(),
+        )?;
+        let tables = BTreeMap::from([("input".into(), input)]);
+        let context = self.context_for_rows(0, None, "not_evaluated");
+        let planned = self
+            .prepare_query(context, query, &tables, Some(node_id))
+            .await?;
+        let partitions = planned.task_ctx.session_config().target_partitions();
+        Ok(self
+            .templates
+            .find(query.text(), &tables, partitions)
+            .and_then(|template| template.compiled_expression()))
     }
 
     pub(crate) async fn stream_expression(

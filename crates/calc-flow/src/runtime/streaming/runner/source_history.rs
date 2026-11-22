@@ -2,45 +2,114 @@ use super::*;
 
 mod projection;
 
-pub(super) async fn configure(
+use crate::runtime::streaming::runner::checkpoint_v4::{encode_new_objects, encode_objects};
+use crate::state::v4::{
+    EncodedObject, NewObject, ObjectPayload, OpaqueObject, V4Handle, V4Manifest, V4Store,
+    native::V4ObjectStore,
+};
+use crate::{Result, StreamJobContext};
+
+pub(crate) struct ManagedHistoryStore {
+    store: V4Store,
+    job: StreamJobContext,
+}
+
+impl ManagedHistoryStore {
+    pub(crate) fn new(root: std::path::PathBuf, job: &StreamJobContext) -> Self {
+        Self {
+            store: V4Store::new(root),
+            job: job.clone(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl V4ObjectStore for ManagedHistoryStore {
+    async fn write_objects(
+        &mut self,
+        epoch: u64,
+        objects: Vec<NewObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        let encoded = encode_new_objects(
+            &self.job,
+            "source-history-objects",
+            objects,
+            self.store.root().to_owned(),
+            epoch,
+        )
+        .await?;
+        self.store.write_encoded_objects(encoded).await
+    }
+
+    async fn write_opaque(
+        &mut self,
+        epoch: u64,
+        objects: Vec<OpaqueObject>,
+    ) -> Result<Vec<EncodedObject>> {
+        let encoded = encode_objects(
+            &self.job,
+            "source-history-opaque",
+            objects,
+            self.store.root().to_owned(),
+            epoch,
+        )
+        .await?;
+        self.store.write_encoded_opaque(encoded).await
+    }
+
+    fn record_carried(&mut self, count: usize) {
+        self.store.record_carried(count);
+    }
+
+    fn read_epoch_manifest(&self, epoch: u64) -> Result<Option<V4Manifest>> {
+        self.store.read_epoch_manifest(epoch)
+    }
+
+    fn read_object(&mut self, handle: &V4Handle) -> Result<ObjectPayload> {
+        self.store.read_object(handle)
+    }
+}
+
+pub(super) fn configure(
     checkpoint: Option<&OpenedCheckpointRuntime>,
+    job: &StreamJobContext,
     sources: &mut BTreeMap<String, SourceBinding>,
     owner: &HistoryOwner,
     plan: &mut StreamRuntimePlanParts,
-) -> crate::Result<()> {
+) -> Result<()> {
     if checkpoint.is_none() {
         return Ok(());
     }
-    configure_sources(checkpoint, sources, owner).await?;
+    configure_sources(checkpoint, job, sources, owner)?;
     configure_replay_nodes(checkpoint, sources, plan);
     Ok(())
 }
 
-async fn configure_sources(
+fn configure_sources(
     checkpoint: Option<&OpenedCheckpointRuntime>,
+    job: &StreamJobContext,
     sources: &mut BTreeMap<String, SourceBinding>,
     owner: &HistoryOwner,
-) -> crate::Result<()> {
+) -> Result<()> {
     for (source_id, source) in sources.iter_mut() {
         let restored = checkpoint
-            .and_then(|checkpoint| checkpoint.selected.as_ref())
-            .and_then(|selected| selected.manifest.sources().get(source_id))
+            .and_then(|checkpoint| checkpoint.selected_v4.as_ref())
+            .and_then(|selected| selected.manifest.sources.get(source_id))
             .and_then(|entry| entry.history.as_ref());
         source.validate_history(
             source_id,
             restored,
-            checkpoint.is_some_and(|checkpoint| checkpoint.selected.is_some()),
+            checkpoint.is_some_and(|checkpoint| checkpoint.selected_v4.is_some()),
         )?;
         if source.history_spec().is_some() {
             let checkpoint = managed_checkpoint(checkpoint)?;
-            source
-                .install_history(
-                    source_id,
-                    checkpoint.transaction.clone(),
-                    checkpoint.next_epoch,
-                    restored.cloned(),
-                )
-                .await?;
+            source.install_history(
+                source_id,
+                &checkpoint.manifest_root.join("lineage"),
+                job,
+                checkpoint.next_epoch,
+                restored.cloned(),
+            )?;
             if let Some(context) = source.history_context() {
                 owner.contexts.lock().insert(source_id.clone(), context);
             }
@@ -51,7 +120,7 @@ async fn configure_sources(
 
 fn managed_checkpoint(
     checkpoint: Option<&OpenedCheckpointRuntime>,
-) -> crate::Result<&OpenedCheckpointRuntime> {
+) -> Result<&OpenedCheckpointRuntime> {
     checkpoint
         .filter(|checkpoint| checkpoint.managed || cfg!(test))
         .ok_or_else(|| CalcFlowError::InvalidArgument {
@@ -74,9 +143,13 @@ fn configure_replay_nodes(
             continue;
         }
         let selected = checkpoint
-            .and_then(|checkpoint| checkpoint.selected.as_ref())
-            .and_then(|selected| selected.manifest.operators().get(node.operator_id.as_str()));
-        if selected.is_some_and(|entry| !entry.inline_metadata.contains_key("source_replay")) {
+            .and_then(|checkpoint| checkpoint.selected_v4.as_ref())
+            .and_then(|selected| selected.manifest.operators.get(node.operator_id.as_str()));
+        if selected.is_some_and(|entry| {
+            !entry
+                .opaque_metadata()
+                .is_some_and(|(metadata, _)| metadata.contains_key("source_replay"))
+        }) {
             continue;
         }
         let bindings =

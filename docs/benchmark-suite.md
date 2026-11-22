@@ -410,14 +410,17 @@ windows. The input cap is 20,000 rows, giving 960, 9,920, and 20,000 rows at
 the overhead, small, and standard scales. Join and ASOF receive the same
 prepared table on two distinct bindings. The Python Join and ASOF cases cap
 each input at 3,200 and 1,920 rows; the engine matrix and dedicated Rust
-targets measure larger join workloads. These measurements are
-informational and have a different scope from the ready-runner engine matrix.
+targets measure larger join workloads. The jobs use the convenience defaults:
+checkpointing off and generated watermarks after every advancing batch. These
+measurements are informational and have a different scope from the
+ready-runner engine matrix.
 
 `benchmarks/test_program_engine.py` adds four separately identified cases:
 SQL and streaming `Program.execute` over the same projection or cumulative
 aggregate declaration. The timer starts after engine selection and input
 construction and ends at Arrow output. Streaming includes its owned job and
-returns one full aggregate snapshot per 640-row batch. Inputs cap at 20,000
+returns one full aggregate snapshot per 640-row batch and runs with the
+convenience defaults, without checkpoints. Inputs cap at 20,000
 rows. Existing compiled-plan and direct `Program.stream` case identities and
 timing boundaries remain unchanged.
 
@@ -839,14 +842,14 @@ python -m unittest scripts.test_issue406_measurement scripts.test_issue406_repor
 
 The compaction component polls actual preparation once, then marks its prepared
 incoming batch ready. It records readiness, preparation completion and handler
-start/end on one monotonic timeline. Preparation exclusively borrows the same
-operator through worker completion and installation, so handler dispatch is
-serialized. `queue_seconds` measures benchmark readiness to dispatch, not a
+start/end on one monotonic timeline. Native Join preparation has no legacy
+base/delta worker compaction; handler dispatch remains serialized by the
+operator borrow. `queue_seconds` measures benchmark readiness to dispatch, not a
 production edge queue. Preparation, handler, queue and combined p50/p95/p99 stay
-separate; queue time overlaps preparation and must not be added again. Base/delta
-replacement and a pending first poll do not prove handler overlap. The original
-during-compaction ≤2× target remains **unmeasured** for this architecture, with
-its reason and the post-compaction diagnostic preserved.
+separate; queue time overlaps preparation and must not be added again. The
+witness checks that left-only appends preserve every right native page and that
+restore replays identical output. This stable-page check is not a dirty-page
+copy-on-write cost measurement and establishes no handler-overlap claim.
 
 This instrumentation changes the measured harness identity. Build it against
 both exact product revisions through the maintained overlay; old binaries and

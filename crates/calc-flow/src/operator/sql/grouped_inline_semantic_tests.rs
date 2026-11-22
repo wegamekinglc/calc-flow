@@ -120,7 +120,9 @@ fn expected(unsigned: bool, phase: usize) -> Vec<Vec<ScalarValue>> {
 
 fn assert_inline(plan: &IncrementalSql) {
     assert!(plan.inline_integer_sum());
-    assert!(plan.groups.iter().all(|group| group.aggregates.is_inline()));
+    assert!(plan.keyed_sum.is_some());
+    assert!(plan.groups.is_empty());
+    assert!(plan.index.is_empty());
 }
 
 async fn apply_phase(
@@ -199,25 +201,14 @@ fn ipc(records: &[RecordBatch]) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn test_grouped_inline_native_wire_is_identical_to_legacy_vec_storage() {
-    let mut fixture = allocation_fixture(true).await;
+async fn test_grouped_inline_native_wire_roundtrip_uses_shared_typed_state() {
+    let fixture = allocation_fixture(true).await;
     let inline = fixture
         .plan
         .export_native_state("inline-wire", || Ok(()))
         .unwrap();
-    for group in &mut fixture.plan.groups {
-        let value = group.aggregates.result(0).into_owned();
-        group.aggregates = GroupAggregates::Generic {
-            states: vec![vec![value.clone()]],
-            results: vec![value],
-        };
-    }
-    let legacy = fixture
-        .plan
-        .export_native_state("inline-wire", || Ok(()))
-        .unwrap();
-    assert_eq!(inline.records(), legacy.records());
-    assert_eq!(ipc(inline.records()), ipc(legacy.records()));
+    assert!(fixture.plan.groups.is_empty());
+    assert!(fixture.plan.index.is_empty());
     let fresh = plan_for(
         &fixture.runtime,
         &allocation_input(),
@@ -226,7 +217,7 @@ async fn test_grouped_inline_native_wire_is_identical_to_legacy_vec_storage() {
     .await;
     let restored = fresh
         .import_native_state(
-            legacy.records(),
+            inline.records(),
             u64::try_from(GROUPS).unwrap(),
             true,
             || Ok(()),
@@ -234,7 +225,12 @@ async fn test_grouped_inline_native_wire_is_identical_to_legacy_vec_storage() {
         )
         .unwrap();
     assert_inline(&restored);
-    drop((restored, inline, legacy, fixture.partial, fixture.plan));
+    let reexported = restored
+        .export_native_state("inline-wire", || Ok(()))
+        .unwrap();
+    assert_eq!(inline.records(), reexported.records());
+    assert_eq!(ipc(inline.records()), ipc(reexported.records()));
+    drop((restored, inline, reexported, fixture.plan));
     assert_eq!(fixture.runtime.incremental_memory_pool().reserved(), 0);
 }
 
@@ -353,7 +349,10 @@ async fn global_continuation(floating: bool) {
             .unwrap();
         let plan = operator.incremental.as_ref().unwrap();
         assert!(!plan.inline_integer_sum());
-        assert!(!plan.groups[0].aggregates.is_inline());
+        assert!(plan.keyed_sum.is_none());
+        assert!(plan.keyed_state.is_some());
+        assert_eq!(plan.group_count(), 1);
+        assert!(plan.groups.is_empty());
         assert!(plan.requires_global_coalescer());
         let expected = if floating {
             ScalarValue::Float64(Some(f64::from(total)))

@@ -24,7 +24,7 @@ pub(super) fn operator() -> RollingOperator {
     ]));
     let spec:RollingSpec=serde_json::from_value(json!({
         "configuration_version":1,"state_layout_version":5,"partition_by":["entity"],"event_time":"time","sequence_by":["seq"],
-        "outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":2},{"kind":"mean","primitive_version":1,"input":"price","output":"mean","frame":{"kind":"rows","size":2},"min_periods":1}],
+        "outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":2},{"kind":"mean","primitive_version":1,"input":"price","output":"mean","frame":{"kind":"rows","size":2},"min_periods":1},{"kind":"ewma","primitive_version":1,"input":"price","output":"ewma","span":2,"min_periods":1}],
         "allowed_lateness_micros":0,"late_policy":{"kind":"error","scope":"envelope"},"value_policy":"stateful_numeric_v1"
     })).unwrap();
     RollingOperator::new("features", schema, spec).unwrap()
@@ -84,7 +84,7 @@ pub(super) fn snapshot(operator: &RollingOperator) -> OperatorStateSnapshot {
         configuration_hash: operator.compiled.configuration_hash.clone(),
         state_schema_fingerprint: operator.compiled.state_schema_fingerprint.clone(),
         kernel_fingerprint: Some(operator.compiled.kernel_plan.fingerprint().into()),
-        numerical_profile: Some(operator.compiled.kernel_plan.numerical_profile().into()),
+        typed_last_identity: None,
         epoch,
         pipeline_fingerprint: Some(GRAPH.into()),
         operator_id: Some("features".into()),

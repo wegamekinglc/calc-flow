@@ -4,8 +4,8 @@ use calc_flow::array::{
 use std::{collections::BTreeMap, sync::Arc};
 
 use calc_flow::{
-    Batch, BatchMetadata, CalcFlowError, ExecutionOptions, PipelineBuilder,
-    RollingNumericalProfile, RollingOperator, RollingSpec, UdfRegistry,
+    Batch, BatchMetadata, CalcFlowError, ExecutionOptions, PipelineBuilder, RollingOperator,
+    RollingSpec, UdfRegistry,
 };
 use datafusion::arrow::{
     array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
@@ -51,14 +51,10 @@ fn test_rolling_mean_keeps_window_positions_and_minimum_periods() {
 }
 
 #[test]
-fn test_rolling_mean_preserves_profiles_and_non_finite_readouts() {
+fn test_rolling_mean_uses_compensated_contract_and_non_finite_readouts() {
     let options = RollingMeanOptions::new(2).unwrap();
     assert_eq!(options.window(), 2);
     assert_eq!(options.min_periods(), 1);
-    assert_eq!(
-        options.numerical_profile(),
-        RollingNumericalProfile::StableV1
-    );
     let output = rolling_mean(
         FloatView::from_f64(&[-1e308, 1e308]),
         options,
@@ -67,24 +63,19 @@ fn test_rolling_mean_preserves_profiles_and_non_finite_readouts() {
     .unwrap();
     assert_eq!(
         output_bits(&output),
-        [Some((-1e308_f64).to_bits()), Some(f64::INFINITY.to_bits())]
+        [Some((-1e308_f64).to_bits()), Some(0.0_f64.to_bits())]
     );
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let output = rolling_mean(
-            FloatView::from_f64(&[f64::INFINITY, f64::NEG_INFINITY, 2.0, 4.0]),
-            options.with_numerical_profile(profile),
-            &ArrayExecutionOptions::default(),
-        )
-        .unwrap();
-        let bits = output_bits(&output);
-        assert_eq!(bits[0], Some(f64::INFINITY.to_bits()));
-        assert!(f64::from_bits(bits[1].unwrap()).is_nan());
-        assert_eq!(bits[2], Some(f64::NEG_INFINITY.to_bits()));
-        assert_eq!(bits[3], Some(3.0_f64.to_bits()));
-    }
+    let output = rolling_mean(
+        FloatView::from_f64(&[f64::INFINITY, f64::NEG_INFINITY, 2.0, 4.0]),
+        options,
+        &ArrayExecutionOptions::default(),
+    )
+    .unwrap();
+    let bits = output_bits(&output);
+    assert_eq!(bits[0], Some(f64::INFINITY.to_bits()));
+    assert!(f64::from_bits(bits[1].unwrap()).is_nan());
+    assert_eq!(bits[2], Some(f64::NEG_INFINITY.to_bits()));
+    assert_eq!(bits[3], Some(3.0_f64.to_bits()));
 }
 
 #[test]
@@ -196,7 +187,7 @@ fn table_record(prices: &Float64Array) -> RecordBatch {
 }
 
 #[tokio::test]
-async fn test_rolling_mean_matches_native_table_profiles_bit_for_bit() {
+async fn test_rolling_mean_matches_native_table_bit_for_bit() {
     let prices = Float64Array::from(
         (0..130_u32)
             .map(|index| {
@@ -211,13 +202,10 @@ async fn test_rolling_mean_matches_native_table_profiles_bit_for_bit() {
             .collect::<Vec<_>>(),
     );
     let record = table_record(&prices);
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
+    {
         for window in [2_u64, 13] {
             let spec: RollingSpec = serde_json::from_value(serde_json::json!({
-                "configuration_version":1,"state_layout_version":1,"numerical_profile":profile,
+                "configuration_version":1,"state_layout_version":1,
                 "partition_by":["symbol"],"event_time":"ts","sequence_by":["sequence"],
                 "outputs":[{"kind":"mean","primitive_version":1,"input":"price","output":"average",
                     "frame":{"kind":"rows","size":window},"min_periods":2}],
@@ -253,8 +241,7 @@ async fn test_rolling_mean_matches_native_table_profiles_bit_for_bit() {
                 RollingMeanOptions::new(window)
                     .unwrap()
                     .with_min_periods(2)
-                    .unwrap()
-                    .with_numerical_profile(profile),
+                    .unwrap(),
                 &ArrayExecutionOptions::default(),
             )
             .unwrap();
@@ -264,7 +251,7 @@ async fn test_rolling_mean_matches_native_table_profiles_bit_for_bit() {
                     .map(|value| value.map(f64::to_bits))
                     .collect::<Vec<_>>(),
                 output_bits(&native),
-                "profile={profile:?}, window={window}",
+                "window={window}",
             );
         }
     }

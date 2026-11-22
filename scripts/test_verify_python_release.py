@@ -16,6 +16,7 @@ if __package__:
     from scripts.release_baseline import resolve_release_baseline
     from scripts.verify_python_release import (
         CORE_TARGETS,
+        ReleaseOptions,
         ensure_version_is_new_on_pypi,
         validate_release,
         validate_versions,
@@ -24,6 +25,7 @@ else:
     from release_baseline import resolve_release_baseline
     from verify_python_release import (
         CORE_TARGETS,
+        ReleaseOptions,
         ensure_version_is_new_on_pypi,
         validate_release,
         validate_versions,
@@ -152,7 +154,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
     def test_complete_release_has_a_stable_relative_manifest(self) -> None:
         self._complete_release()
 
-        manifest = validate_release(self.directory, root=ROOT)
+        manifest = validate_release(self.directory, ReleaseOptions(root=ROOT))
 
         self.assertEqual(len(manifest), 31)
         self.assertEqual(
@@ -167,7 +169,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "cp310"):
-            validate_release(self.directory, root=ROOT)
+            validate_release(self.directory, ReleaseOptions(root=ROOT))
 
     def test_core_only_release_validates_the_complete_python_artifact_set(self) -> None:
         for target in sorted(CORE_TARGETS):
@@ -175,7 +177,9 @@ class VerifyPythonReleaseTests(unittest.TestCase):
                 self._core_wheel(target, python_tag=python_tag)
         self._sdist()
 
-        manifest = validate_release(self.directory, root=ROOT, core_only=True)
+        manifest = validate_release(
+            self.directory, ReleaseOptions(root=ROOT, core_only=True)
+        )
 
         self.assertEqual(len(manifest), 31)
         self.assertEqual(
@@ -190,7 +194,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         (self.directory / "bogus-1.0.0-py3-none-any.whl").touch()
 
         with self.assertRaisesRegex(ValueError, "unexpected wheel artifacts"):
-            validate_release(self.directory, root=ROOT, core_only=True)
+            validate_release(self.directory, ReleaseOptions(root=ROOT, core_only=True))
 
     def test_core_only_release_requires_linux_and_windows_wheels(self) -> None:
         for missing_target in ("linux-x86_64", "windows-amd64"):
@@ -201,7 +205,9 @@ class VerifyPythonReleaseTests(unittest.TestCase):
                 self._sdist()
 
                 with self.assertRaisesRegex(ValueError, missing_target):
-                    validate_release(self.directory, root=ROOT, core_only=True)
+                    validate_release(
+                        self.directory, ReleaseOptions(root=ROOT, core_only=True)
+                    )
 
                 for artifact in self.directory.iterdir():
                     artifact.unlink()
@@ -212,7 +218,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "cp39"):
-            validate_release(self.directory, root=ROOT)
+            validate_release(self.directory, ReleaseOptions(root=ROOT))
 
     def test_release_rejects_a_missing_core_target(self) -> None:
         for target in sorted(CORE_TARGETS - {"linux-aarch64"}):
@@ -221,7 +227,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "missing=.*linux-aarch64"):
-            validate_release(self.directory, root=ROOT)
+            validate_release(self.directory, ReleaseOptions(root=ROOT))
 
     def test_release_rejects_a_non_abi3_core_wheel(self) -> None:
         for target in sorted(CORE_TARGETS - {"windows-amd64"}):
@@ -232,7 +238,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
         with self.assertRaisesRegex(ValueError, "ABI.*abi3"):
-            validate_release(self.directory, root=ROOT)
+            validate_release(self.directory, ReleaseOptions(root=ROOT))
 
     def test_pypi_check_uses_the_fixed_https_endpoint(self) -> None:
         response = MagicMock(status=404)

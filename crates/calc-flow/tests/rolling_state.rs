@@ -1144,7 +1144,7 @@ async fn checkpoints_write_the_columnar_v3_layout_and_kernel_identity() {
         snapshot.inline_metadata["segment_inventory"][0]["state_layout_version"],
         ROLLING_COLUMNAR_STATE_LAYOUT_VERSION
     );
-    assert_eq!(snapshot.inline_metadata["numerical_profile"], "stable_v1");
+    assert!(!snapshot.inline_metadata.contains_key("numerical_profile"));
     assert_eq!(
         snapshot.inline_metadata["kernel_fingerprint"]
             .as_str()

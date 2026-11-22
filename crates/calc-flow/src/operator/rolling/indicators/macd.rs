@@ -31,6 +31,14 @@ impl fmt::Debug for MacdGroup {
     }
 }
 impl MacdGroup {
+    pub(in crate::operator::rolling) fn input(&self) -> usize {
+        self.input
+    }
+
+    pub(in crate::operator::rolling) fn options(&self) -> MacdOptions {
+        self.options
+    }
+
     pub(super) fn compile(schema: &Schema, output: &RollingOutputSpec) -> Result<Self> {
         let RollingOutputSpec::MacdComponent { input, .. } = output else {
             return Err(super::internal_error("expected MACD component declaration"));

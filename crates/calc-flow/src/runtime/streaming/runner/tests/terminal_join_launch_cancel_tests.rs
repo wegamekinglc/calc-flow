@@ -180,6 +180,9 @@ impl TransactionalStreamSink for Sink {
     async fn recover(&mut self, manifest: &crate::CheckpointManifest) -> Result<()> {
         self.inner.recover(manifest).await
     }
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.inner.recover_scoped(recovery).await
+    }
     async fn close(&mut self) -> Result<()> {
         self.inner.close().await
     }
@@ -509,6 +512,27 @@ fn assert_cancelled(observed: &Observation, expected_readers: usize) {
             .iter()
             .any(|entry| entry.starts_with("sink-recover:"))
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_join_v4_restore_control_completes() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("managed");
+    natural_terminal_history(&root).await;
+    let fixture = Fixture::default();
+    let released = Arc::new(AtomicBool::new(true));
+    let (plan, _) = plan(None);
+    let mut runner = ContinuousRunner::new();
+    let job = runner
+        .start_checkpointed(spec(plan, &fixture, &released), checkpoint(&root, None))
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(StdDuration::from_secs(10), job.wait())
+        .await
+        .unwrap();
+    assert_eq!(outcome.state, ContinuousJobState::Completed, "{outcome:?}");
+    drop(job);
+    runner.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

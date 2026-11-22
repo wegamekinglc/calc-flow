@@ -1,0 +1,43 @@
+{
+  "acquisition_seconds": 76.9735448390129,
+  "audit": "passed",
+  "boundary": "Python/PyArrow/JSON adaptation versus native Arroyo connectors; paced results are producer-limited and do not establish engine equality",
+  "build_install_and_preflight_seconds": 1072.274,
+  "outcomes": [
+    {
+      "burst_gate": "failed",
+      "calc_flow_over_arroyo_max": 0.49851629475276704,
+      "calc_flow_over_arroyo_median": 0.39126896455827415,
+      "calc_flow_over_arroyo_min": 0.36738798375002324,
+      "case": "stateless",
+      "gap_s": 0.0
+    },
+    {
+      "burst_gate": "not-applicable",
+      "calc_flow_over_arroyo_max": 1.017320769881045,
+      "calc_flow_over_arroyo_median": 1.0033049441072386,
+      "calc_flow_over_arroyo_min": 0.9693896598753879,
+      "case": "stateless",
+      "gap_s": 0.005
+    },
+    {
+      "burst_gate": "failed",
+      "calc_flow_over_arroyo_max": 0.24745485744909088,
+      "calc_flow_over_arroyo_median": 0.21234964358427375,
+      "calc_flow_over_arroyo_min": 0.14989476105508615,
+      "case": "window",
+      "gap_s": 0.0
+    },
+    {
+      "burst_gate": "not-applicable",
+      "calc_flow_over_arroyo_max": 1.0172141142213142,
+      "calc_flow_over_arroyo_median": 1.0004303550822229,
+      "calc_flow_over_arroyo_min": 0.973709330515228,
+      "case": "window",
+      "gap_s": 0.005
+    }
+  ],
+  "samples": 40,
+  "schema": "calc-flow.arroyo-alignment-outcome.v1",
+  "status": "completed-with-failed-burst-gates"
+}

@@ -71,7 +71,7 @@ impl RollingOperator {
             configuration_hash: self.compiled.configuration_hash.clone(),
             state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             kernel_fingerprint: Some(self.compiled.kernel_plan.fingerprint().into()),
-            numerical_profile: Some(self.compiled.kernel_plan.numerical_profile().into()),
+            typed_last_identity: None,
             epoch,
             pipeline_fingerprint: Some(capture.graph.clone()),
             operator_id: Some(capture.node.as_str().to_owned()),

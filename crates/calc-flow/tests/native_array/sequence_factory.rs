@@ -23,7 +23,7 @@ fn ports() -> (Vec<Port>, Vec<Port>) {
 fn test_sequence_factory_accepts_closed_kernel_options_and_proves_stateful_stream() {
     let factory = NativeArraySequenceFactory::default();
     for kernel in [
-        json!({"function":"rolling_mean","window":u64::MAX,"numerical_profile":"stable_v2"}),
+        json!({"function":"rolling_mean","window":u64::MAX}),
         json!({"function":"ewma","span":1,"min_periods":3}),
     ] {
         let spec =
@@ -434,9 +434,8 @@ async fn test_sequence_transition_output_budget_rejection_does_not_advance_seed(
     );
 }
 
-fn mean_operator(profile: &str) -> Box<dyn calc_flow::StreamOperator> {
-    let mut configured =
-        options(json!({"function":"rolling_mean","window":3,"numerical_profile":profile}));
+fn mean_operator() -> Box<dyn calc_flow::StreamOperator> {
+    let mut configured = options(json!({"function":"rolling_mean","window":3}));
     configured.insert("input_dtype".into(), "float32".into());
     let spec = ExternalOperatorSpec::new("native", "array_sequence", "1", configured).unwrap();
     NativeArraySequenceFactory::default()
@@ -473,8 +472,8 @@ fn array_bits(array: &calc_flow::array::NativeArray) -> Vec<Option<u64>> {
         })
         .collect()
 }
-async fn mean_chunks(profile: &str, data: &datafusion::arrow::array::ArrayRef) -> Vec<Option<u64>> {
-    let mut operator = mean_operator(profile);
+async fn mean_chunks(data: &datafusion::arrow::array::ArrayRef) -> Vec<Option<u64>> {
+    let mut operator = mean_operator();
     let job = job();
     let context = calc_flow::StreamOperatorContext::new(&job, "sequence", None);
     let mut collector = calc_flow::EdgeCollector::new(ports().1);
@@ -495,7 +494,7 @@ async fn mean_chunks(profile: &str, data: &datafusion::arrow::array::ArrayRef) -
         if offset == 64 {
             operator.prepare_checkpoint_async(&context).await.unwrap();
             let snapshot = operator.checkpoint(calc_flow::Epoch::INITIAL).unwrap();
-            operator = mean_operator(profile);
+            operator = mean_operator();
             operator.restore_async(&snapshot, &context).await.unwrap();
         }
     }
@@ -516,29 +515,18 @@ async fn mean_chunks(profile: &str, data: &datafusion::arrow::array::ArrayRef) -
         .collect()
 }
 #[tokio::test]
-async fn test_sequence_mean_profiles_chunks_and_restored_global_cadence_match_eager() {
+async fn test_sequence_mean_chunks_and_restored_global_cadence_match_eager() {
     use calc_flow::array::{ArrayExecutionOptions, NativeArray, RollingMeanOptions, rolling_mean};
     let data = mean_fixture();
     let array = NativeArray::from_arrow(data.clone(), vec![130]).unwrap();
-    for profile in [
-        calc_flow::RollingNumericalProfile::StableV1,
-        calc_flow::RollingNumericalProfile::StableV2Preview,
-    ] {
-        let options = RollingMeanOptions::new(3)
-            .unwrap()
-            .with_numerical_profile(profile);
-        let expected = rolling_mean(
-            array.float_view().unwrap(),
-            options,
-            &ArrayExecutionOptions::default(),
-        )
-        .unwrap();
-        let name = match profile {
-            calc_flow::RollingNumericalProfile::StableV1 => "stable_v1",
-            calc_flow::RollingNumericalProfile::StableV2Preview => "stable_v2",
-        };
-        assert_eq!(mean_chunks(name, &data).await, array_bits(&expected));
-    }
+    let options = RollingMeanOptions::new(3).unwrap();
+    let expected = rolling_mean(
+        array.float_view().unwrap(),
+        options,
+        &ArrayExecutionOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(mean_chunks(&data).await, array_bits(&expected));
 }
 
 #[derive(Debug)]

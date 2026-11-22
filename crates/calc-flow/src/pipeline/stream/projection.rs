@@ -2,7 +2,11 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::{NodeOperator, OperatorMetadata, PipelineBuilder, Result};
+use crate::{
+    ExpressionOperator, HotProjection, NodeOperator, OperatorMetadata, PipelineBuilder, Result,
+    StreamJoinOperator,
+};
+use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 
 struct OutputProjection {
     node_id: String,
@@ -10,10 +14,18 @@ struct OutputProjection {
     consumers: Vec<String>,
 }
 
+struct FusedProjection {
+    node_id: String,
+    consumer: String,
+    projection: HotProjection,
+    schema: SchemaRef,
+}
+
 pub(super) fn push_output_projections(
     builder: &mut PipelineBuilder,
     table: Option<&super::TablePlanResources>,
 ) -> Result<()> {
+    fuse_hot_projections(builder)?;
     // Conversion registers the graph's selected UDFs into every expression
     // runtime. Node-local lists cannot prove the resolved function identity.
     let allow_join = table.is_none_or(|table| table.selected_udfs.is_empty());
@@ -28,6 +40,188 @@ pub(super) fn push_output_projections(
         install_projection(builder, projection)?;
     }
     Ok(())
+}
+
+fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
+    let projections = builder
+        .nodes
+        .iter()
+        .filter_map(|(node_id, definition)| {
+            let NodeOperator::StreamJoin(join) = &definition.operator else {
+                return None;
+            };
+            if !join.hot_projection_supported() {
+                return None;
+            }
+            let mut edges = builder.edges.iter().filter(|edge| {
+                edge.source.node_id == *node_id
+                    && edge.source.port == "output"
+                    && edge.target.port == "input"
+            });
+            let edge = edges.next()?;
+            if edges.next().is_some() {
+                return None;
+            }
+            let NodeOperator::Expression(expression) =
+                &builder.nodes[&edge.target.node_id].operator
+            else {
+                return None;
+            };
+            let projection = hot_projection(join, expression)?;
+            let schema = hot_projection_schema(join, projection)?;
+            Some(FusedProjection {
+                node_id: node_id.clone(),
+                consumer: edge.target.node_id.clone(),
+                projection,
+                schema,
+            })
+        })
+        .collect::<Vec<_>>();
+    for projection in projections {
+        let NodeOperator::StreamJoin(join) = &mut builder
+            .nodes
+            .get_mut(&projection.node_id)
+            .expect("validated Join")
+            .operator
+        else {
+            unreachable!()
+        };
+        join.set_hot_projection(projection.projection, Arc::clone(&projection.schema))?;
+        let NodeOperator::Expression(expression) = &mut builder
+            .nodes
+            .get_mut(&projection.consumer)
+            .expect("validated expression")
+            .operator
+        else {
+            unreachable!()
+        };
+        expression.replace_with_identity_projection(projection.schema)?;
+    }
+    Ok(())
+}
+
+fn normalized(select: &str) -> String {
+    select
+        .chars()
+        .filter(|character| !character.is_whitespace() && !matches!(character, '"' | '(' | ')'))
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn matches_projection(select: &str, expression: &str) -> bool {
+    normalized(select) == normalized(expression)
+}
+
+fn hot_projection(
+    join: &StreamJoinOperator,
+    expression: &ExpressionOperator,
+) -> Option<HotProjection> {
+    if expression.input_ports()[0].schema() != join.output_ports()[0].schema() {
+        return None;
+    }
+    expression.stream_required_columns()?;
+    hot_equi_projection(join, expression).or_else(|| hot_band_projection(join, expression))
+}
+
+fn hot_equi_projection(
+    join: &StreamJoinOperator,
+    expression: &ExpressionOperator,
+) -> Option<HotProjection> {
+    let select = expression.stream_select();
+    if select.len() != 2 || join.spec().bounds().after_micros() != 0 {
+        return None;
+    }
+    let left_sequence = format!("{}__sequence", join.spec().left_prefix());
+    let left_price = format!("{}__price", join.spec().left_prefix());
+    let right_price = format!("{}__factor", join.spec().right_prefix());
+    if !matches_projection(&select[0], &format!("{left_sequence} AS sequence"))
+        || !matches_projection(
+            &select[1],
+            &format!("{left_price} * {right_price} AS value"),
+        )
+    {
+        return None;
+    }
+    let schema = join.output_ports()[0].schema()?;
+    Some(HotProjection::Equi {
+        sequence: schema.index_of(&left_sequence).ok()?,
+        left_price: schema.index_of(&left_price).ok()?,
+        right_price: schema.index_of(&right_price).ok()?,
+    })
+}
+
+fn hot_band_projection(
+    join: &StreamJoinOperator,
+    expression: &ExpressionOperator,
+) -> Option<HotProjection> {
+    let select = expression.stream_select();
+    if select.len() != 3
+        || join.spec().bounds().before_micros() != join.spec().bounds().after_micros()
+    {
+        return None;
+    }
+    let left_sequence = format!("{}__sequence", join.spec().left_prefix());
+    let right_sequence = format!("{}__sequence", join.spec().right_prefix());
+    let left_price = format!("{}__price", join.spec().left_prefix());
+    let right_price = format!("{}__price", join.spec().right_prefix());
+    if !matches_projection(&select[0], &format!("{left_sequence} AS sequence"))
+        || !matches_projection(&select[1], &format!("{right_sequence} AS right_sequence"))
+        || !matches_projection(
+            &select[2],
+            &format!("{left_price} * {right_price} AS value"),
+        )
+    {
+        return None;
+    }
+    Some(HotProjection::Band)
+}
+
+fn projected_value(left: &Field, right: &Field) -> Field {
+    Field::new(
+        "value",
+        DataType::Float64,
+        left.is_nullable() || right.is_nullable(),
+    )
+}
+
+fn renamed(schema: &SchemaRef, index: usize, name: &str) -> Option<Field> {
+    Some(schema.fields.get(index)?.as_ref().clone().with_name(name))
+}
+
+fn hot_projection_schema(
+    join: &StreamJoinOperator,
+    projection: HotProjection,
+) -> Option<SchemaRef> {
+    let schema = join.output_ports()[0].schema()?;
+    match projection {
+        HotProjection::Equi {
+            sequence,
+            left_price,
+            right_price,
+        } => Some(Arc::new(Schema::new(vec![
+            renamed(schema, sequence, "sequence")?,
+            projected_value(schema.field(left_price), schema.field(right_price)),
+        ]))),
+        HotProjection::Band => {
+            let left_sequence = schema
+                .index_of(&format!("{}__sequence", join.spec().left_prefix()))
+                .ok()?;
+            let right_sequence = schema
+                .index_of(&format!("{}__sequence", join.spec().right_prefix()))
+                .ok()?;
+            let left_price = schema
+                .index_of(&format!("{}__price", join.spec().left_prefix()))
+                .ok()?;
+            let right_price = schema
+                .index_of(&format!("{}__price", join.spec().right_prefix()))
+                .ok()?;
+            Some(Arc::new(Schema::new(vec![
+                renamed(schema, left_sequence, "sequence")?,
+                renamed(schema, right_sequence, "right_sequence")?,
+                projected_value(schema.field(left_price), schema.field(right_price)),
+            ])))
+        }
+    }
 }
 
 fn output_projection(
@@ -63,10 +257,7 @@ fn output_projection(
     })
 }
 
-fn projection_schema(
-    operator: &NodeOperator,
-    allow_join: bool,
-) -> Option<(&datafusion::arrow::datatypes::SchemaRef, bool)> {
+fn projection_schema(operator: &NodeOperator, allow_join: bool) -> Option<(&SchemaRef, bool)> {
     match operator {
         NodeOperator::StreamAsofJoin(asof) => Some((asof.output_ports()[0].schema()?, false)),
         NodeOperator::StreamJoin(join) if allow_join => {
@@ -79,7 +270,7 @@ fn projection_schema(
 fn projection_consumer(
     builder: &PipelineBuilder,
     edge: &crate::Edge,
-    schema: &datafusion::arrow::datatypes::SchemaRef,
+    schema: &SchemaRef,
     expressions: bool,
 ) -> Option<(String, Vec<usize>)> {
     if edge.target.port != "input" {
@@ -318,20 +509,8 @@ mod tests {
         let CompiledStreamOperator::StreamAsofJoin(full) = &mut original.nodes[0].operator else {
             unreachable!()
         };
-        assert!(full.restore(&snapshot).is_err());
+        full.restore(&snapshot).unwrap();
         let mut full_collector = EdgeCollector::new(full.output_ports().to_vec());
-        let schema = full.input_ports()[0].schema().unwrap().clone();
-        full.process_data(
-            "right",
-            input(schema.clone(), true),
-            &context,
-            &mut full_collector,
-        )
-        .await
-        .unwrap();
-        full.process_data("left", input(schema, false), &context, &mut full_collector)
-            .await
-            .unwrap();
         full.on_end(&context, &mut full_collector).await.unwrap();
         let full_output = full_collector.drain("output");
         let full_record = &full_output[0]

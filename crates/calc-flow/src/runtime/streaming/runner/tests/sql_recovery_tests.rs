@@ -6,7 +6,7 @@ mod ordered_last;
 use super::*;
 use crate::runtime::streaming::progress::WatermarkPolicy;
 use crate::runtime::streaming::sql_recovery_work::CheckpointWorkOperator;
-use crate::{Epoch, OperatorStateSnapshot, SqlOperator, StateSegment};
+use crate::{Epoch, OperatorStateSnapshot, SqlOperator};
 use datafusion::arrow::{
     array::{Array, StringArray},
     datatypes::{DataType, Field, Schema, SchemaRef},
@@ -90,6 +90,7 @@ async fn sql() -> SqlOperator {
 struct Probe {
     source_opens: AtomicUsize,
     source_reads: AtomicUsize,
+    source_acks: AtomicUsize,
     source_closes: AtomicUsize,
     start_completed: AtomicBool,
     tail: AtomicBool,
@@ -149,6 +150,22 @@ impl StreamSource for Source {
     ) -> crate::runtime::streaming::progress::NativeWatermarkCapability {
         crate::runtime::streaming::progress::NativeWatermarkCapability::NeverEmits
     }
+    fn durable_cursor_acknowledger(
+        &self,
+    ) -> Option<Arc<dyn super::super::super::source_task::DurableCursorAcknowledger>> {
+        Some(Arc::new(SourceAcknowledgement(self.probe.clone())))
+    }
+}
+
+struct SourceAcknowledgement(Arc<Probe>);
+
+#[async_trait]
+impl super::super::super::source_task::DurableCursorAcknowledger for SourceAcknowledgement {
+    async fn acknowledge(&self, _cursor: &Cursor) -> Result<()> {
+        assert!(self.0.sink_commits.load(Ordering::SeqCst) > 0);
+        self.0.source_acks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 struct Sink(Arc<Probe>);
@@ -184,6 +201,10 @@ impl TransactionalStreamSink for Sink {
             manifest.sinks()["sink"].pre_commit.as_ref().unwrap(),
         )
         .await
+    }
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.0.sink_recovers.fetch_add(1, Ordering::SeqCst);
+        self.commit(recovery.epoch(), recovery.pre_commit()).await
     }
     async fn close(&mut self) -> Result<()> {
         self.0.sink_closes.fetch_add(1, Ordering::SeqCst);
@@ -253,7 +274,7 @@ fn checkpoint(root: &Path) -> CheckpointRuntimeSpec {
     .unwrap()
 }
 
-async fn capture(root: &Path, source: &str, terminal: bool) -> crate::CheckpointManifest {
+async fn capture(root: &Path, source: &str, terminal: bool) -> crate::state::v4::V4Manifest {
     let probe = Arc::new(Probe::default());
     let mut runner = ContinuousRunner::new();
     let job = runner
@@ -281,24 +302,16 @@ async fn capture(root: &Path, source: &str, terminal: bool) -> crate::Checkpoint
     assert_eq!(probe.sink_closes.load(Ordering::SeqCst), 1);
     let schema = sql().await.output_ports()[0].schema().unwrap().clone();
     assert_capture_output(&probe, source, schema);
-    let bytes = tokio::fs::read(root.join("manifests/manifest-00000000000000000001.json"))
+    let bytes = tokio::fs::read(root.join("manifests/lineage/manifests/epoch-1.json"))
         .await
         .unwrap();
-    let manifest = crate::CheckpointManifest::from_bytes(&bytes).unwrap();
-    assert_eq!(
-        manifest.operators()[NODE].inline_metadata["state_layout"],
-        serde_json::json!(3)
-    );
-    assert_eq!(
-        manifest.operators()[NODE].inline_metadata["state_accounting"],
-        serde_json::json!(3)
-    );
-    assert_eq!(manifest.operators()[NODE].segments.len(), 4);
-    assert_eq!(
-        manifest.operators()[NODE].inline_metadata["rows"],
-        serde_json::json!(2)
-    );
-    assert_eq!(manifest.sources()["events"].ended, terminal);
+    let manifest = crate::state::v4::V4Manifest::from_bytes(&bytes).unwrap();
+    let metadata = manifest.operators[NODE].opaque_metadata().unwrap().0;
+    assert_eq!(metadata["state_layout"], serde_json::json!(3));
+    assert_eq!(metadata["state_accounting"], serde_json::json!(3));
+    assert_eq!(metadata["rows"], serde_json::json!(2));
+    assert!(!manifest.operators[NODE].opaque_metadata().unwrap().1);
+    assert_eq!(manifest.sources["events"].ended, terminal);
     manifest
 }
 
@@ -421,11 +434,25 @@ fn candidate_witness(
     reserved: usize,
     backing: Vec<Weak<MemoryReservation>>,
 ) -> Witness {
+    let wire_metadata = records
+        .first()
+        .map(|record| {
+            let metadata = record.schema().metadata().clone();
+            assert_eq!(metadata.len(), 1);
+            let layout = metadata.get("key_layout").expect("key layout is present");
+            assert_eq!(layout.len(), 64);
+            assert!(layout.bytes().all(|byte| byte.is_ascii_hexdigit()));
+            metadata
+        })
+        .unwrap_or_default();
     let expected_record = RecordBatch::try_new(
-        Arc::new(Schema::new(vec![
-            Field::new("key_0", DataType::Utf8, false),
-            Field::new("state_0_0", DataType::Int64, true),
-        ])),
+        Arc::new(Schema::new_with_metadata(
+            vec![
+                Field::new("key_0", DataType::Utf8, false),
+                Field::new("state_0_0", DataType::Int64, true),
+            ],
+            wire_metadata,
+        )),
         vec![
             Arc::new(StringArray::from(vec!["a"])),
             Arc::new(Int64Array::from(vec![7])),
@@ -458,7 +485,8 @@ fn assert_released(gate: &Gate, expected_bytes: u64) {
     assert!(state.execution.entered && state.execution.callback_exited && state.ledger.paid);
     assert_eq!(state.ledger.rows, 2);
     assert_eq!(state.ledger.bytes, expected_bytes);
-    assert!(state.ledger.metadata_ok && state.ledger.values_ok);
+    assert!(state.ledger.metadata_ok, "candidate metadata differs");
+    assert!(state.ledger.values_ok, "candidate records differ");
     assert_eq!(state.ledger.arrays.len(), 2);
     assert!(!state.ledger.backing.is_empty());
     assert!(
@@ -574,8 +602,8 @@ fn cancelled_start_controller(
 async fn compact_managed_native3_restore_yields_before_entry_ack() {
     let directory = tempfile::tempdir().unwrap();
     let source = "managed-heartbeat-source";
-    let captured = capture(directory.path(), source, false).await;
-    let expected_bytes = captured.operators()[NODE].inline_metadata["bytes"]
+    let captured = capture_v4(directory.path(), source).await;
+    let expected_bytes = captured.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     let gate = Arc::new(Gate::default());
@@ -650,7 +678,7 @@ async fn compact_managed_native3_cancel_keeps_candidate_until_join_without_insta
     let directory = tempfile::tempdir().unwrap();
     let source = "managed-cancel-source";
     let captured = capture(directory.path(), source, false).await;
-    let expected_bytes = captured.operators()[NODE].inline_metadata["bytes"]
+    let expected_bytes = captured.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     let gate = Arc::new(Gate::default());
@@ -712,22 +740,9 @@ async fn compact_managed_native3_cancel_keeps_candidate_until_join_without_insta
     );
 }
 
-async fn snapshot(root: &Path, manifest: &crate::CheckpointManifest) -> OperatorStateSnapshot {
-    let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
-    let key =
-        StateLineageKey::new(manifest.pipeline_name(), manifest.pipeline_fingerprint()).unwrap();
-    let lineage = backend.open_lineage(&key).await.unwrap();
-    let mut segments = BTreeMap::new();
-    for handle in &manifest.operators()[NODE].segments {
-        let bytes = lineage.load_segment(handle).await.unwrap();
-        assert_eq!(bytes.len() as u64, handle.byte_len());
-        assert_eq!(hex::encode(Sha256::digest(&bytes)), handle.sha256());
-        segments.insert(handle.segment_id().into(), StateSegment::new(bytes));
-    }
-    let raw = OperatorStateSnapshot {
-        inline_metadata: manifest.operators()[NODE].inline_metadata.clone(),
-        segments,
-    };
+async fn snapshot(root: &Path, manifest: &crate::state::v4::V4Manifest) -> OperatorStateSnapshot {
+    let mut store = crate::state::v4::V4Store::new(root.join("manifests/lineage"));
+    let raw = crate::state::v4::V4OpaqueAdapter::restore(&mut store, manifest, NODE).unwrap();
     let specification = spec("terminal-reader", true, &Arc::new(Probe::default())).await;
     let parts = specification
         .plan
@@ -761,6 +776,89 @@ async fn snapshot(root: &Path, manifest: &crate::CheckpointManifest) -> Operator
     decoded
 }
 
+async fn capture_v4(root: &Path, source: &str) -> crate::state::v4::V4Manifest {
+    capture_v4_kind(root, source, false).await
+}
+
+async fn capture_v4_kind(
+    root: &Path,
+    source: &str,
+    terminal: bool,
+) -> crate::state::v4::V4Manifest {
+    let probe = Arc::new(Probe::default());
+    let mut runner = ContinuousRunner::new();
+    let job = runner
+        .start_checkpointed(spec(source, terminal, &probe).await, checkpoint(root))
+        .await
+        .unwrap();
+    if terminal {
+        let outcome = job.wait().await;
+        assert_eq!(
+            outcome.state,
+            ContinuousJobState::Completed,
+            "{:?}",
+            outcome.errors
+        );
+    } else {
+        while !probe.tail.load(Ordering::SeqCst) || probe.writes.lock().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(job.trigger_checkpoint().await.unwrap(), Epoch::INITIAL);
+        let _ = job.cancel().await;
+    }
+    drop(job);
+    runner.shutdown().await.unwrap();
+    let bytes = tokio::fs::read(root.join("manifests/lineage/manifests/epoch-1.json"))
+        .await
+        .unwrap();
+    crate::state::v4::V4Manifest::from_bytes(&bytes).unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_v4_restore_completes_and_captures_next_epoch() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "managed-v4-restart-source";
+    let _ = capture_v4(directory.path(), source).await;
+    let probe = Arc::new(Probe::default());
+    let mut runner = ContinuousRunner::new();
+    let job = runner
+        .start_checkpointed(
+            spec(source, false, &probe).await,
+            checkpoint(directory.path()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(job.trigger_checkpoint().await.unwrap().as_u64(), 2);
+    assert_eq!(probe.source_acks.load(Ordering::SeqCst), 1);
+    let _ = job.cancel().await;
+    drop(job);
+    runner.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_v4_terminal_restore_recovers_transactional_sink() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = "managed-v4-terminal-source";
+    let _ = capture_v4_kind(directory.path(), source, true).await;
+    let probe = Arc::new(Probe::default());
+    let mut runner = ContinuousRunner::new();
+    let job = match runner
+        .start_checkpointed(
+            spec(source, true, &probe).await,
+            checkpoint(directory.path()),
+        )
+        .await
+    {
+        Ok(job) => job,
+        Err(error) => panic!("{error:?}; {:?}", runner.diagnostics().records),
+    };
+    assert_eq!(job.wait().await.state, ContinuousJobState::Completed);
+    assert_eq!(probe.sink_recovers.load(Ordering::SeqCst), 1);
+    assert_eq!(probe.sink_commits.load(Ordering::SeqCst), 1);
+    drop(job);
+    runner.shutdown().await.unwrap();
+}
+
 #[derive(Clone, Copy)]
 enum Damage {
     Codec,
@@ -769,9 +867,9 @@ enum Damage {
 
 async fn damaged_manifest(
     root: &Path,
-    original: &crate::CheckpointManifest,
+    original: &crate::state::v4::V4Manifest,
     damage: Damage,
-) -> crate::CheckpointManifest {
+) -> crate::state::v4::V4Manifest {
     let (segment_id, bytes) = match damage {
         Damage::Codec => ("group-state", b"not-an-arrow-native-state-file".to_vec()),
         Damage::FullSchema => {
@@ -793,24 +891,22 @@ async fn damaged_manifest(
             ("logical-schema", bytes)
         }
     };
-    let mut operators = original.operators().clone();
-    let entry = operators.get_mut(NODE).unwrap();
-    let control_handle = entry
-        .segments
-        .iter()
-        .find(|handle| handle.segment_id() == "control")
-        .unwrap();
-    let control_bytes = tokio::fs::read(root.join("state").join(control_handle.relative_path()))
-        .await
-        .unwrap();
-    assert_eq!(
-        hex::encode(Sha256::digest(&control_bytes)),
-        control_handle.sha256()
-    );
+    let mut damaged = original.clone();
+    let mut store = crate::state::v4::V4Store::new(root.join("manifests/lineage"));
+    let control_bytes = {
+        let crate::state::v4::OperatorV4::Opaque { blocks, .. } = &damaged.operators[NODE] else {
+            panic!("expected opaque SQL state")
+        };
+        let handle = blocks
+            .iter()
+            .find(|handle| handle.object_id == "control")
+            .unwrap();
+        store.read_opaque(handle).unwrap()
+    };
     let mut control: serde_json::Value = serde_json::from_slice(&control_bytes).unwrap();
     assert_eq!(control["state_layout"], serde_json::json!(3));
     assert_eq!(control["state_accounting"], serde_json::json!(3));
-    let digest = rewrite_state_segment(root, &mut entry.segments, segment_id, &bytes).await;
+    let digest = rewrite_opaque_segment(&mut store, &mut damaged, segment_id, &bytes).await;
     match damage {
         Damage::Codec => control["segments"]["group_state"] = serde_json::json!(digest),
         Damage::FullSchema => {
@@ -820,30 +916,33 @@ async fn damaged_manifest(
     }
     let control_bytes = serde_json::to_vec(&control).unwrap();
     let control_digest =
-        rewrite_state_segment(root, &mut entry.segments, "control", &control_bytes).await;
-    entry
-        .inline_metadata
-        .insert("control_sha256".into(), serde_json::json!(control_digest));
-    let damaged = crate::CheckpointManifest::new(CheckpointManifestFields {
-        pipeline_name: original.pipeline_name().into(),
-        pipeline_fingerprint: original.pipeline_fingerprint().into(),
-        runtime_config_hash: original.runtime_config_hash().into(),
-        epoch: original.epoch(),
-        created_at: original.created_at(),
-        recovery_status: original.recovery_status(),
-        sources: original.sources().clone(),
-        operators,
-        sinks: original.sinks().clone(),
-        static_inputs: original.static_inputs().clone(),
-    })
-    .unwrap();
+        rewrite_opaque_segment(&mut store, &mut damaged, "control", &control_bytes).await;
+    {
+        let crate::state::v4::OperatorV4::Opaque {
+            inline_metadata,
+            state_fingerprint,
+            ..
+        } = &mut *damaged.operators.get_mut(NODE).unwrap()
+        else {
+            panic!("expected opaque SQL state")
+        };
+        inline_metadata.insert("control_sha256".into(), serde_json::json!(control_digest));
+        let metadata = serde_json::to_value(&*inline_metadata).unwrap();
+        *state_fingerprint = hex::encode(Sha256::digest(
+            crate::canonical_json(&metadata).unwrap().as_bytes(),
+        ));
+    }
+    damaged.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&damaged).unwrap();
     let encoded = damaged.canonical_bytes().unwrap();
     assert_eq!(
-        crate::CheckpointManifest::from_bytes(&encoded).unwrap(),
-        damaged
+        crate::state::v4::V4Manifest::from_bytes(&encoded)
+            .unwrap()
+            .canonical_bytes()
+            .unwrap(),
+        encoded
     );
     tokio::fs::write(
-        root.join("manifests/manifest-00000000000000000001.json"),
+        root.join("manifests/lineage/manifests/epoch-1.json"),
         encoded,
     )
     .await
@@ -851,29 +950,33 @@ async fn damaged_manifest(
     damaged
 }
 
-async fn rewrite_state_segment(
-    root: &Path,
-    handles: &mut [StateHandle],
+async fn rewrite_opaque_segment(
+    store: &mut crate::state::v4::V4Store,
+    manifest: &mut crate::state::v4::V4Manifest,
     segment_id: &str,
     bytes: &[u8],
 ) -> String {
-    let handle = handles
-        .iter_mut()
-        .find(|handle| handle.segment_id() == segment_id)
+    let epoch = manifest.epoch;
+    let crate::state::v4::OperatorV4::Opaque { blocks, .. } =
+        manifest.operators.get_mut(NODE).unwrap()
+    else {
+        panic!("expected opaque SQL state")
+    };
+    let index = blocks
+        .iter()
+        .position(|handle| handle.object_id == segment_id)
         .unwrap();
+    let old = blocks[index].clone();
     let digest = hex::encode(Sha256::digest(bytes));
-    tokio::fs::write(root.join("state").join(handle.relative_path()), bytes)
-        .await
-        .unwrap();
-    *handle = StateHandle::new(
-        handle.operator_id(),
-        handle.epoch(),
-        handle.segment_id(),
-        handle.relative_path(),
-        bytes.len() as u64,
-        &digest,
-    )
-    .unwrap();
+    let object = crate::state::v4::OpaqueObject {
+        owner: old.owner,
+        object_id: segment_id.into(),
+        generation: epoch,
+        bytes: bytes.to_vec(),
+        sha256: digest.clone(),
+    };
+    let encoded = store.write_opaque(epoch, vec![object]).await.unwrap();
+    blocks[index] = encoded[0].handle.clone();
     digest
 }
 
@@ -965,7 +1068,7 @@ async fn compact_terminal_sql_drop_retains_paid_candidate_until_native_join() {
     let directory = tempfile::tempdir().unwrap();
     let source = "terminal-drop-held-source";
     let manifest = capture(directory.path(), source, true).await;
-    let expected_bytes = manifest.operators()[NODE].inline_metadata["bytes"]
+    let expected_bytes = manifest.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     let gate = Arc::new(Gate::default());
@@ -1043,7 +1146,7 @@ async fn compact_sql_candidate_panic_keeps_original_registered_task_identity() {
     let directory = tempfile::tempdir().unwrap();
     let source = "managed-kernel-panic-source";
     let manifest = capture(directory.path(), source, false).await;
-    let expected_bytes = manifest.operators()[NODE].inline_metadata["bytes"]
+    let expected_bytes = manifest.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     let gate = Arc::new(Gate::default());
@@ -1123,13 +1226,13 @@ async fn captured_sql_recovery(
     source: &str,
 ) -> (
     tempfile::TempDir,
-    crate::CheckpointManifest,
+    crate::state::v4::V4Manifest,
     OperatorStateSnapshot,
     u64,
 ) {
     let manifest = capture(directory.path(), source, false).await;
     let saved = snapshot(directory.path(), &manifest).await;
-    let bytes = manifest.operators()[NODE].inline_metadata["bytes"]
+    let bytes = manifest.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     (directory, manifest, saved, bytes)
@@ -1197,7 +1300,7 @@ async fn compact_sql_aborted_driver_returns_live_join_to_job_home() {
     let directory = tempfile::tempdir().unwrap();
     let source = "managed-aborted-driver-source";
     let manifest = capture(directory.path(), source, false).await;
-    let expected_bytes = manifest.operators()[NODE].inline_metadata["bytes"]
+    let expected_bytes = manifest.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     let gate = Arc::new(Gate::default());
@@ -1358,7 +1461,7 @@ async fn compact_sql_request_fee_refusal_returns_actual_operator_before_launch()
     assert_eq!(restored.inline_metadata["rows"], serde_json::json!(2));
     assert_eq!(
         restored.inline_metadata["bytes"],
-        manifest.operators()[NODE].inline_metadata["bytes"]
+        manifest.operators[NODE].opaque_metadata().unwrap().0["bytes"]
     );
     assert_eq!(
         restored.inline_metadata["state_layout"],
@@ -1377,7 +1480,7 @@ async fn compact_sql_dropped_queued_request_does_not_block_next_join() {
     let source = "queued-request-drop-source";
     let manifest = capture(directory.path(), source, false).await;
     let saved = snapshot(directory.path(), &manifest).await;
-    let expected_bytes = manifest.operators()[NODE].inline_metadata["bytes"]
+    let expected_bytes = manifest.operators[NODE].opaque_metadata().unwrap().0["bytes"]
         .as_u64()
         .unwrap();
     let mut first = sql().await.with_one_gib_pool_for_test();

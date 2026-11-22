@@ -1,10 +1,12 @@
 use super::{AggregateFunctionExpr, ArrayRef, GroupsAccumulator, Result, ScalarValue, df_error};
+use std::mem::size_of;
+
 use datafusion::{
     arrow::{
-        array::{BooleanArray, new_empty_array},
+        array::{Array, BooleanArray, new_empty_array},
         datatypes::DataType,
     },
-    common::Result as DataFusionResult,
+    common::{DataFusionError, Result as DataFusionResult},
     logical_expr::EmitTo,
 };
 
@@ -26,6 +28,13 @@ pub(super) fn integer_sum(expression: &AggregateFunctionExpr) -> bool {
         )
 }
 
+pub(super) fn boolean_extrema(expression: &AggregateFunctionExpr) -> bool {
+    matches!(expression.fun().name(), "min" | "max")
+        && expression.field().data_type() == &DataType::Boolean
+        && !expression.is_distinct()
+        && expression.order_bys().is_empty()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MergeKind {
     Reset,
@@ -42,10 +51,15 @@ pub(super) struct PartialAccumulator {
 
 impl PartialAccumulator {
     pub fn new(expression: &AggregateFunctionExpr, name: &str) -> Result<Self> {
-        Ok(Self {
-            native: expression
+        let native: Box<dyn GroupsAccumulator> = if boolean_extrema(expression) {
+            Box::new(BooleanExtrema::new(expression.fun().name() == "max"))
+        } else {
+            expression
                 .create_groups_accumulator()
-                .map_err(|error| df_error(name, error))?,
+                .map_err(|error| df_error(name, error))?
+        };
+        Ok(Self {
+            native,
             merge_kind: if integer_sum(expression) {
                 MergeKind::IntegerSum
             } else if selected(expression) {
@@ -144,6 +158,111 @@ fn seed_present(state: &[ScalarValue], ordered_last: bool) -> bool {
         !state.is_empty()
     } else {
         state.last().is_some_and(|value| !value.is_null())
+    }
+}
+
+struct BooleanExtrema {
+    values: Vec<Option<bool>>,
+    maximum: bool,
+}
+
+impl BooleanExtrema {
+    fn new(maximum: bool) -> Self {
+        Self {
+            values: Vec::new(),
+            maximum,
+        }
+    }
+
+    fn update_row(
+        &mut self,
+        values: &BooleanArray,
+        row: usize,
+        group: usize,
+        opt_filter: Option<&BooleanArray>,
+    ) {
+        if opt_filter.is_some_and(|filter| filter.is_null(row) || !filter.value(row))
+            || values.is_null(row)
+        {
+            return;
+        }
+        let incoming = values.value(row);
+        let current = &mut self.values[group];
+        *current = Some(match *current {
+            None => incoming,
+            Some(current) if self.maximum => current.max(incoming),
+            Some(current) => current.min(incoming),
+        });
+    }
+
+    fn take(&mut self, emit_to: EmitTo) -> Vec<Option<bool>> {
+        match emit_to {
+            EmitTo::All => std::mem::take(&mut self.values),
+            EmitTo::First(groups) => self.values.drain(..groups).collect(),
+        }
+    }
+}
+
+impl GroupsAccumulator for BooleanExtrema {
+    fn update_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> DataFusionResult<()> {
+        let [values] = values else {
+            return Err(DataFusionError::Plan(
+                "Boolean extrema expects one input array".into(),
+            ));
+        };
+        let values = values
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| DataFusionError::Plan("Boolean extrema input differs".into()))?;
+        self.values.resize(total_num_groups, None);
+        for (row, group) in group_indices.iter().enumerate() {
+            self.update_row(values, row, *group, opt_filter);
+        }
+        Ok(())
+    }
+
+    fn evaluate(&mut self, emit_to: EmitTo) -> DataFusionResult<ArrayRef> {
+        Ok(std::sync::Arc::new(BooleanArray::from(self.take(emit_to))))
+    }
+
+    fn state(&mut self, emit_to: EmitTo) -> DataFusionResult<Vec<ArrayRef>> {
+        self.evaluate(emit_to).map(|array| vec![array])
+    }
+
+    fn merge_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        total_num_groups: usize,
+    ) -> DataFusionResult<()> {
+        self.update_batch(values, group_indices, None, total_num_groups)
+    }
+
+    fn convert_to_state(
+        &self,
+        values: &[ArrayRef],
+        filter: Option<&BooleanArray>,
+    ) -> DataFusionResult<Vec<ArrayRef>> {
+        let [array] = values else {
+            return Err(DataFusionError::Plan(
+                "Boolean extrema expects one input array".into(),
+            ));
+        };
+        let array = match filter {
+            Some(filter) => datafusion::arrow::compute::filter(array.as_ref(), filter)?,
+            None => array.clone(),
+        };
+        Ok(vec![array])
+    }
+
+    fn size(&self) -> usize {
+        size_of::<Self>() + self.values.capacity() * size_of::<Option<bool>>()
     }
 }
 

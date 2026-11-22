@@ -783,20 +783,10 @@ fn rows(records: &[RecordBatch]) -> Vec<Vec<ScalarValue>> {
 type GroupState = (Vec<ScalarValue>, Vec<Vec<ScalarValue>>, Vec<ScalarValue>);
 
 fn snapshot(plan: &IncrementalSql) -> Vec<GroupState> {
-    plan.groups
-        .iter()
-        .map(|group| {
-            (
-                group.values.to_vec(),
-                group
-                    .aggregates
-                    .states()
-                    .map(|state| state.to_vec())
-                    .collect(),
-                group.aggregates.results().map(Cow::into_owned).collect(),
-            )
-        })
-        .collect()
+    plan.keyed_state
+        .as_ref()
+        .expect("typed aggregate state")
+        .snapshot()
 }
 
 fn job() -> StreamJobContext {

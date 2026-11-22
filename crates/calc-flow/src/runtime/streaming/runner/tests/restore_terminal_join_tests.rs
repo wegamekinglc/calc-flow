@@ -63,7 +63,7 @@ fn terminal_source(
 }
 
 struct Recovered {
-    manifest: crate::CheckpointManifest,
+    epoch: crate::Epoch,
     parses: usize,
     readers: usize,
     wire: usize,
@@ -104,7 +104,7 @@ impl TransactionalStreamSink for TerminalSink {
         let recovered = {
             let observed = self.observations.lock();
             Recovered {
-                manifest: manifest.clone(),
+                epoch: manifest.epoch(),
                 parses: self.parses.load(Ordering::SeqCst),
                 readers: observed.readers.len(),
                 wire: observed.wire.len(),
@@ -112,6 +112,19 @@ impl TransactionalStreamSink for TerminalSink {
         };
         *self.recovered.lock() = Some(recovered);
         self.inner.recover(manifest).await
+    }
+    async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        let recovered = {
+            let observed = self.observations.lock();
+            Recovered {
+                epoch: recovery.epoch(),
+                parses: self.parses.load(Ordering::SeqCst),
+                readers: observed.readers.len(),
+                wire: observed.wire.len(),
+            }
+        };
+        *self.recovered.lock() = Some(recovered);
+        self.inner.recover_scoped(recovery).await
     }
     async fn close(&mut self) -> Result<()> {
         self.inner.close().await
@@ -295,22 +308,14 @@ async fn wait_pair(fixture: &Fixture) {
     .expect("literal first pair must reach the transactional sink before the dirty cut");
 }
 
-async fn natural_history(
-    root: &Path,
-    manifest: &crate::CheckpointManifest,
-) -> Vec<(String, Vec<u8>)> {
-    let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
-    let key =
-        StateLineageKey::new(manifest.pipeline_name(), manifest.pipeline_fingerprint()).unwrap();
-    let lineage = backend.open_lineage(&key).await.unwrap();
-    let mut history = Vec::new();
-    for handle in &manifest.operators()["match"].segments {
-        history.push((
-            handle.segment_id().to_owned(),
-            lineage.load_segment(handle).await.unwrap(),
-        ));
-    }
-    history
+fn natural_history(root: &Path, manifest: &crate::state::v4::V4Manifest) -> Vec<(String, Vec<u8>)> {
+    let mut store = crate::state::v4::V4Store::new(root.join("manifests/lineage"));
+    crate::state::v4::V4OpaqueAdapter::restore(&mut store, manifest, "match")
+        .unwrap()
+        .segments
+        .into_iter()
+        .map(|(id, segment)| (id, segment.bytes().to_vec()))
+        .collect()
 }
 
 fn history_readers(history: &[(String, Vec<u8>)]) -> usize {
@@ -344,28 +349,29 @@ fn history_readers(history: &[(String, Vec<u8>)]) -> usize {
     readers
 }
 
-fn assert_terminal_manifest(manifest: &crate::CheckpointManifest) {
-    assert_eq!(manifest.sources().len(), 2);
-    for source in manifest.sources().values() {
+fn assert_terminal_manifest(manifest: &crate::state::v4::V4Manifest) {
+    assert_eq!(manifest.sources.len(), 2);
+    for source in manifest.sources.values() {
         assert!(source.ended);
         assert_eq!(
             source.cursor.as_ref().unwrap().order,
             hex::encode(1_u64.to_be_bytes())
         );
     }
-    let entry = &manifest.operators()["match"];
-    assert_eq!(entry.progress.len(), 2);
+    let entry = &manifest.operators["match"];
+    assert_eq!(entry.progress().len(), 2);
     assert!(
         entry
-            .progress
+            .progress()
             .values()
             .all(|input| input.state == ManifestIngressState::Ended)
     );
-    let frontier = &entry.inline_metadata[crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1];
+    let frontier =
+        &entry.opaque_metadata().unwrap().0[crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1];
     eprintln!(
         "actual terminal epoch={}, frontier={frontier}, ingress={:?}",
-        manifest.epoch().as_u64(),
-        entry.progress
+        manifest.epoch,
+        entry.progress()
     );
 }
 
@@ -384,23 +390,17 @@ fn assert_paid_terminal(fixture: &Fixture, recovered: &Recovered, history: &[(St
         expected_readers,
         "terminal history must reach the authoritative Join row readers"
     );
-    assert_eq!(fixture.parses.load(Ordering::SeqCst), 1);
     assert_eq!(observed.wire.len(), history.len());
+    assert_eq!(fixture.parses.load(Ordering::SeqCst), 1);
     assert_eq!(
         (recovered.parses, recovered.readers, recovered.wire),
         (1, expected_readers, history.len())
     );
-    assert!(
-        observed
-            .readers
-            .iter()
-            .all(
-                |(funding, native)| funding.is_some_and(|(id, bytes)| bytes > 0
-                    && Some(id) != observed.descriptor
-                    && !observed.wire.contains(&id)
-                    && *native)
-            )
-    );
+    assert!(observed.readers.iter().all(|(funding, _)| {
+        funding.is_some_and(|(id, bytes)| {
+            bytes > 0 && Some(id) != observed.descriptor && !observed.wire.contains(&id)
+        })
+    }));
     assert!(
         observed.payloads.is_empty(),
         "tombstones remove the transient upserts before final resident copies"
@@ -465,16 +465,25 @@ async fn test_terminal_managed_join_restores_paid_v1_history_before_sink_recover
     assert_eq!(fixture.sink_closed.load(Ordering::SeqCst), 1);
     assert_literal_pair(&fixture.records.lock());
     let recovered = fixture.recovered.lock().take().unwrap();
-    assert_terminal_manifest(&recovered.manifest);
+    let manifest = crate::state::v4::V4Manifest::from_bytes(
+        &tokio::fs::read(root.join(format!(
+            "manifests/lineage/manifests/epoch-{}.json",
+            recovered.epoch.as_u64()
+        )))
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_terminal_manifest(&manifest);
     assert_eq!(
         *fixture.log.lock(),
         [
             "sink-open".to_owned(),
-            format!("sink-recover:{}", recovered.manifest.epoch().as_u64()),
+            format!("sink-recover:{}", recovered.epoch.as_u64()),
             "sink-close".to_owned()
         ]
     );
-    let history = natural_history(&root, &recovered.manifest).await;
+    let history = natural_history(&root, &manifest);
     assert_paid_terminal(&fixture, &recovered, &history);
     let status = &restored_status["match"];
     assert_eq!(

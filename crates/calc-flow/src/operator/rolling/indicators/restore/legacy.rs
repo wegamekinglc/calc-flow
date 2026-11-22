@@ -41,15 +41,60 @@ impl RollingOperator {
         }
     }
     fn legacy_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
+        if restored.deferred_history {
+            self.slab_restore_charge(restored)
+        } else {
+            self.history_restore_charge(restored)
+        }
+    }
+
+    fn slab_restore_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
+        let charge = self.slab_typed_charge(restored)?;
+        let pending = self.pending_restore_charge(restored)?;
+        let charge = charge.checked_add(pending, &self.name)?;
+        self.check_restore_budget(charge)
+    }
+
+    fn slab_typed_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
+        crate::operator::rolling::kernel::RollingKernelPlan::slab_charge(
+            restored.typed_kernel_state.as_deref().ok_or_else(|| {
+                crate::operator::checkpoint::checkpoint_mismatch(
+                    "rolling layout-7 restore is missing typed state",
+                )
+            })?,
+            &self.name,
+        )?
+        .ok_or_else(|| {
+            crate::operator::checkpoint::checkpoint_mismatch(
+                "rolling layout-7 restore is missing its state table",
+            )
+        })
+    }
+
+    fn pending_restore_charge(&self, restored: &DecodedRollingState) -> Result<StateCharge> {
+        budget::ordered_buffer_charge(restored.ordered.records(), &self.compiled, &self.name)?
+            .ok_or_else(|| {
+                crate::operator::checkpoint::checkpoint_mismatch(
+                    "rolling layout-7 pending state has unsupported charge",
+                )
+            })
+    }
+
+    fn history_restore_charge(&self, restored: &mut DecodedRollingState) -> Result<StateCharge> {
         let buffered = budget::buffered_charge(restored.buffer.values(), &self.name)?;
         let (histories, cache) = restored.histories.prepare_charge_cache(&self.name)?;
         let charge = buffered.checked_add(histories, &self.name)?;
+        self.check_restore_budget(charge)?;
+        restored.histories.install_charge_cache(cache);
+        Ok(charge)
+    }
+
+    fn check_restore_budget(&self, charge: StateCharge) -> Result<StateCharge> {
         if !self.state_budget.allows(charge.rows, charge.bytes) {
             return Err(crate::operator::checkpoint::checkpoint_mismatch(
                 "restored rolling state exceeds the configured state budget",
             ));
         }
-        restored.histories.install_charge_cache(cache);
         Ok(charge)
     }
 }
@@ -61,7 +106,7 @@ fn legacy_state(
 ) -> RollingStreamState {
     RollingStreamState {
         buffer: restored.buffer,
-        ordered: crate::operator::rolling::ordered_stream::OrderedStreamBuffer::default(),
+        ordered: restored.ordered,
         histories: restored.histories,
         last_input_watermark: metadata.last_input_watermark,
         next_output_sequence: metadata.next_output_sequence,
@@ -72,8 +117,8 @@ fn legacy_state(
         pipeline_fingerprint: metadata.pipeline_fingerprint,
         operator_id: metadata.operator_id,
         last_checkpoint_epoch: Some(metadata.epoch),
-        typed_kernel_state: None,
-        deferred_history: false,
+        typed_kernel_state: restored.typed_kernel_state,
+        deferred_history: restored.deferred_history,
         charge,
     }
 }

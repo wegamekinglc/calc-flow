@@ -26,7 +26,7 @@ fn anchored(operator: &mut StreamAsofJoinOperator) -> (Log, Anchor, OperatorStat
 #[test]
 fn native_anchor_rejects_corruption_and_refunds_credit() {
     let (mut operator, _) = crate::operator::asof::tests::fixture();
-    let pool = operator.runtime.pool.clone();
+    let pool = operator.runtime_pool.clone();
     {
         let (_log, anchor, snapshot) = anchored(&mut operator);
         let baseline = pool.reserved();
@@ -84,7 +84,7 @@ fn native_anchor_decode_refuses_unfunded_workspace() {
     let (mut operator, _) = crate::operator::asof::tests::fixture();
     let (_log, anchor, snapshot) = anchored(&mut operator);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1));
-    operator.runtime.pool = pool.clone();
+    operator.runtime_pool = pool.clone();
     assert!(
         operator
             .decode_replay_anchor(&snapshot, &anchor.descriptor())
@@ -96,12 +96,12 @@ fn native_anchor_decode_refuses_unfunded_workspace() {
 #[test]
 fn native_anchor_pressure_falls_back_to_a_native_checkpoint() {
     let (mut operator, _) = crate::operator::asof::tests::fixture();
-    let pool = operator.runtime.pool.clone();
+    let pool = operator.runtime_pool.clone();
     let (log, anchor, snapshot) = anchored(&mut operator);
     drop(anchor);
     drop(snapshot);
     operator.replay = Some(Box::new(log));
-    operator.status.state_bytes = operator.current_inventory(None).unwrap().bytes;
+    operator.status.state_bytes = operator.current_inventory().unwrap().bytes;
     let available =
         usize::try_from(operator.spec.limits().max_state_bytes()).unwrap() - pool.reserved();
     let blocker = operator.reserve_workspace((available - 1) as u64).unwrap();
@@ -128,7 +128,7 @@ fn native_anchor_empty_state_preserves_restorable_metrics() {
     drop(anchor);
     drop(snapshot);
     operator.replay = Some(Box::new(log));
-    operator.status.state_bytes = operator.current_inventory(None).unwrap().bytes;
+    operator.status.state_bytes = operator.current_inventory().unwrap().bytes;
     assert!(
         operator
             .replace_replay_anchor(Epoch::INITIAL)

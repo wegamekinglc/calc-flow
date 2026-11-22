@@ -10,11 +10,7 @@ type Segments = BTreeMap<String, StateSegment>;
 
 impl RollingOperator {
     pub(super) fn checkpoint_legacy(&mut self, epoch: Epoch) -> Result<OperatorStateSnapshot> {
-        if self.state.deferred_history {
-            return Err(checkpoint_mismatch(
-                "rolling checkpointing is disabled for the deferred-history stream state",
-            ));
-        }
+        self.validate_checkpoint_admission()?;
         self.validate_legacy_epoch(epoch)?;
         self.materialize_legacy_capture()?;
         self.recount_legacy_capture()?;
@@ -22,6 +18,15 @@ impl RollingOperator {
         let snapshot = self.legacy_snapshot(epoch, descriptor, segments)?;
         self.state.owned_mut()?.last_checkpoint_epoch = Some(epoch);
         Ok(snapshot)
+    }
+
+    fn validate_checkpoint_admission(&self) -> Result<()> {
+        if self.state.deferred_history && !self.compiled.kernel_plan.supports_slab() {
+            return Err(checkpoint_mismatch(
+                "rolling checkpointing is disabled for the deferred-history stream state",
+            ));
+        }
+        Ok(())
     }
 
     fn validate_legacy_epoch(&self, epoch: Epoch) -> Result<()> {
@@ -38,6 +43,9 @@ impl RollingOperator {
     }
 
     fn materialize_legacy_capture(&mut self) -> Result<()> {
+        if self.state.deferred_history {
+            return Ok(());
+        }
         self.materialize_ordered_buffer(None)?;
         self.state
             .owned_mut()?
@@ -46,6 +54,29 @@ impl RollingOperator {
     }
 
     fn recount_legacy_capture(&mut self) -> Result<()> {
+        if self.state.deferred_history {
+            let charge = super::kernel::RollingKernelPlan::slab_charge(
+                self.state
+                    .typed_kernel_state
+                    .as_deref()
+                    .ok_or_else(|| internal_error("rolling layout-7 typed state is absent"))?,
+                &self.name,
+            )?
+            .ok_or_else(|| internal_error("rolling layout-7 table is absent"))?;
+            let pending = budget::ordered_buffer_charge(
+                self.state.ordered.records(),
+                &self.compiled,
+                &self.name,
+            )?
+            .ok_or_else(|| internal_error("rolling ordered state has unsupported state charge"))?;
+            let buffered = budget::buffered_charge(self.state.buffer.values(), &self.name)?;
+            let charge = charge
+                .checked_add(pending, &self.name)?
+                .checked_add(buffered, &self.name)?;
+            self.check_state_budget(charge, &self.name)?;
+            self.state.owned_mut()?.charge = charge;
+            return Ok(());
+        }
         let buffered = budget::buffered_charge(self.state.buffer.values(), &self.name)?;
         let ordered = budget::ordered_buffer_charge(
             self.state.ordered.records(),
@@ -63,25 +94,29 @@ impl RollingOperator {
         Ok(())
     }
 
-    fn capture_legacy_segment(
-        &self,
-        epoch: Epoch,
-    ) -> Result<(Option<SegmentDescriptor>, Segments)> {
-        let Some((id, bytes)) = self.encode_state(epoch)? else {
-            return Ok((None, BTreeMap::new()));
-        };
-        let segment = StateSegment::new(bytes);
-        let descriptor = self.snapshot_segment_descriptor(epoch, &id, &segment)?;
-        Ok((Some(descriptor), BTreeMap::from([(id, segment)])))
+    fn capture_legacy_segment(&self, epoch: Epoch) -> Result<(Vec<SegmentDescriptor>, Segments)> {
+        let mut descriptors = Vec::new();
+        let mut segments = BTreeMap::new();
+        if let Some((id, bytes)) = self.encode_state(epoch)? {
+            let segment = StateSegment::new(bytes);
+            descriptors.push(self.snapshot_segment_descriptor(epoch, &id, &segment)?);
+            segments.insert(id, segment);
+        }
+        if let Some((id, bytes)) = self.encode_layout7_pending(epoch)? {
+            let segment = StateSegment::new(bytes);
+            descriptors.push(self.snapshot_segment_descriptor(epoch, &id, &segment)?);
+            segments.insert(id, segment);
+        }
+        Ok((descriptors, segments))
     }
 
     fn legacy_snapshot(
         &self,
         epoch: Epoch,
-        descriptor: Option<SegmentDescriptor>,
+        descriptor: Vec<SegmentDescriptor>,
         segments: Segments,
     ) -> Result<OperatorStateSnapshot> {
-        let inventory = StateInventory::new(descriptor.into_iter().collect())
+        let inventory = StateInventory::new(descriptor)
             .map_err(|error| checkpoint_mismatch(error.to_string()))?;
         let metadata = self.legacy_capture_metadata(epoch, &inventory);
         let Value::Object(inline) =
@@ -103,11 +138,19 @@ impl RollingOperator {
         inventory: &StateInventory,
     ) -> RollingSnapshotMetadata {
         RollingSnapshotMetadata {
-            state_layout_version: self.compiled.state_layout_version,
+            state_layout_version: if self.state.deferred_history {
+                super::ROLLING_STATE_TABLE_LAYOUT_VERSION
+            } else {
+                self.compiled.state_layout_version
+            },
             configuration_hash: self.compiled.configuration_hash.clone(),
             state_schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             kernel_fingerprint: Some(self.compiled.kernel_plan.fingerprint().to_owned()),
-            numerical_profile: Some(self.compiled.kernel_plan.numerical_profile().to_owned()),
+            typed_last_identity: self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .and_then(super::RollingKernelPlan::slab_last_identity),
             epoch,
             pipeline_fingerprint: self.state.pipeline_fingerprint.clone(),
             operator_id: self.state.operator_id.clone(),

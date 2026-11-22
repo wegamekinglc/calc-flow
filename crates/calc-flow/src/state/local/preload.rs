@@ -86,6 +86,53 @@ impl LocalStateLineageBackend {
         worker(move || input.read()).await
     }
 
+    pub(crate) async fn load_opaque_prepaid(
+        &self,
+        manifest_root: &std::path::Path,
+        handle: &crate::state::v4::V4Handle,
+        credit: Arc<MemoryReservation>,
+    ) -> Result<StateSegment> {
+        let read_path = format!("committed/{}.cfst4", handle.object_id);
+        let read_handle = StateHandle::new(
+            &handle.owner,
+            crate::Epoch::new(handle.epoch).expect("v4 object epoch is nonzero"),
+            &handle.object_id,
+            &read_path,
+            handle.byte_len,
+            &handle.sha256,
+        )?;
+        let committed = manifest_root.join(&handle.relative_path);
+        let staging = committed.with_extension("cfst4.tmp");
+        let input = PaidRead {
+            paths: ManagedSegmentPaths {
+                staging_parent: staging
+                    .parent()
+                    .unwrap_or(committed.parent().expect("committed object has a parent"))
+                    .to_owned(),
+                committed_parent: committed
+                    .parent()
+                    .expect("committed object has a parent")
+                    .to_owned(),
+                staging,
+                committed,
+            },
+            handle: read_handle,
+            #[cfg(test)]
+            hook: None,
+            #[cfg(test)]
+            path_peak: 0,
+            credit: credit.clone(),
+        };
+        let read = worker(move || input.read()).await?;
+        let decoded = crate::state::v4::decode_opaque(handle, &read.bytes)?;
+        #[cfg(test)]
+        if let Some(hook) = self.prepaid_read_hook.lock().clone() {
+            let peak = handle.relative_path.len().saturating_mul(4);
+            hook(&decoded, decoded.capacity(), &credit, peak)?;
+        }
+        Ok(StateSegment::new(decoded).with_owner(credit))
+    }
+
     #[cfg(test)]
     pub(crate) fn set_prepaid_read_hook(&self, hook: ReadHook) {
         *self.prepaid_read_hook.lock() = Some(hook);

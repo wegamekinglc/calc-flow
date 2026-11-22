@@ -15,7 +15,9 @@ pub(crate) use driver::{LiveProgressCoordinator, RawIngressEvent, spawn_live_pro
 )]
 pub(crate) use durable::{
     DurableProgressRestore, DurableSourceCut, RestoredSourceProgress, restore_durable_progress,
+    restore_durable_progress_v4,
 };
+pub(crate) use generated::GeneratedWatermarkState;
 pub(crate) use prepare::BindingIdentity;
 pub(crate) use status::{LiveProgressEvidence, LiveProgressStatusHandle};
 pub(crate) use trace::RawUpstreamPosition;

@@ -1,0 +1,215 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "status": "completed_thresholds_failed",
+  "build": {
+    "revision": "f327a88672b9b5e5cf031342af8ec5d12548b5a9",
+    "tree": "16a4fcd8efce6f708fb6035dc4c131983cc3ca29",
+    "source_status_at_build_and_measurement": "clean",
+    "build_elapsed_seconds": 714.23,
+    "command": "maturin build --release --locked --manifest-path crates/calc-flow-python/Cargo.toml"
+  },
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-22T02:48:16+08:00",
+    "baseline": {
+      "kind": "previous_sealed_candidate",
+      "revision": "6a2abc0876e20a8fb1883555b85bd5652b17b506",
+      "evidence": "benchmarks/join-asof/p5-review-fixes-20261122/result.json",
+      "join_p50_ms": 619.785377,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "f327a88672b9b5e5cf031342af8ec5d12548b5a9",
+      "tree": "16a4fcd8efce6f708fb6035dc4c131983cc3ca29",
+      "required_tracked_source_clean_before_build": true,
+      "build_budget": "separate from the 600-second acquisition budget",
+      "change": "Allow only fully transient input with an existing opposite hot history to use hot execution, then discard that side's history and charge its eviction. Mixed retention and missing opposite history still use RunCore."
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "static Join only; interval is not measured in this candidate",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "external_backstop": "timeout --signal=TERM --kill-after=30s 570s; normal completion writes the report, and forced termination is an inconclusive failed acquisition",
+      "state_root_policy": "new empty root for every warmup and measured observation",
+      "no_retries_or_case_expansion": true
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "Verify that the narrow transient hot admission fix restores the static hot path without relaxing mixed-retention or missing-history guards.",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 619.785377
+      }
+    ],
+    "unmeasured": "No paired significance claim, interval Join, multi-batch throughput, other row counts/types/modes, partitioned execution, or remaining acceptance matrix. Hot admission and recovery behavior is covered separately by 18 Rust tests."
+  },
+  "candidate": {
+    "wheel": "target/p5-static-transient-wheel-f327a886/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "12ba74bf78bbd53a47ceff6f07bda66988276162ecf283c45cec45ae31346cc0",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-static-transient-venv-f327a886/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "68f68df7615aed34d5d3bde7ba9216ab3d8c45c260a5ec73e9ea5cf24fe8a28e",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "taskset -c 0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Verify that the narrow transient hot admission fix restores the static hot path without relaxing mixed-retention or missing-history guards.",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 619.785377,
+      "samples": [
+        {
+          "seconds": 0.533201445,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.542012241,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.514820137,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.51133705,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.540999764,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.516417926,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.514907584,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.525417022,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.518472751,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.519100529,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 518.78664,
+      "p95_ms": 541.55662635,
+      "threshold_pass": false,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 10.36179395194631,
+  "within_budget": true,
+  "error": null
+}

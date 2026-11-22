@@ -29,6 +29,24 @@ fn side_operator(lateness: u64) -> RollingOperator {
     )
 }
 
+fn general_side_operator(lateness: u64) -> RollingOperator {
+    let mut spec = general_spec();
+    spec.late_policy = LatePolicySpec::SideOutput {
+        metrics_version: 1,
+        schema_version: 1,
+    };
+    spec.allowed_lateness_micros = lateness;
+    RollingOperator::new("roll", Arc::new(general_schema()), spec).unwrap()
+}
+
+fn general_batch(records: &[&[InputRow<'_>]]) -> Batch {
+    Batch::table(
+        records.iter().map(|rows| general_record(rows)).collect(),
+        BatchMetadata::new("upstream", 42, JsonMap::new()).unwrap(),
+    )
+    .unwrap()
+}
+
 type InputRow<'a> = (i64, &'a str, u64, Option<f64>);
 
 fn batch(records: &[&[InputRow<'_>]]) -> Batch {
@@ -81,13 +99,13 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
         let job = job();
         let context = StreamOperatorContext::new(&job, "roll", Some(EventTime::from_micros(10)))
             .with_output_budget(crate::EdgeBudget::new(10, 200).unwrap());
-        let mut side = side_operator(0);
+        let mut side = general_side_operator(0);
         let mut good = EdgeCollector::new(side.output_ports().to_vec());
-        let seed = batch(&[&[(26, "a", 1, Some(26.0))]]);
+        let seed = general_batch(&[&[(26, "a", 1, Some(26.0))]]);
         side.process_late_data(&seed, context.input_watermark(), &context, &mut good)
             .await
             .unwrap();
-        let input = batch(&[&[
+        let input = general_batch(&[&[
             (5, "a", 2, Some(5.0)),
             (6, "a", 3, Some(6.0)),
             (20, "a", 4, Some(20.0)),
@@ -96,6 +114,7 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
             fail_at,
             sent: Vec::new(),
         };
+        let before = side.checkpoint(Epoch::INITIAL).unwrap();
         let error = side
             .process_late_data(&input, context.input_watermark(), &context, &mut failing)
             .await
@@ -104,7 +123,39 @@ async fn test_native_late_rolling_emit_failure_preserves_state_and_forbids_live_
             matches!(error, CalcFlowError::Operator { ref node_id, ref message } if node_id == "sink" && message == "original sink failure")
         );
         assert_eq!(failing.sent.len(), fail_at);
-        assert_eq!(side.state.buffer.len(), 1);
+        let after = side.checkpoint(Epoch::new(2).unwrap()).unwrap();
+        let mut before_restored = general_side_operator(0);
+        StreamOperator::restore(&mut before_restored, &before).unwrap();
+        let mut after_restored = general_side_operator(0);
+        StreamOperator::restore(&mut after_restored, &after).unwrap();
+        let mut before_output = EdgeCollector::new(before_restored.output_ports().to_vec());
+        let mut after_output = EdgeCollector::new(after_restored.output_ports().to_vec());
+        before_restored
+            .process_late_data(
+                &input,
+                context.input_watermark(),
+                &context,
+                &mut before_output,
+            )
+            .await
+            .unwrap();
+        after_restored
+            .process_late_data(
+                &input,
+                context.input_watermark(),
+                &context,
+                &mut after_output,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            drain_records(&mut before_output, "late"),
+            drain_records(&mut after_output, "late")
+        );
+        assert_eq!(
+            drain_records(&mut before_output, "output"),
+            drain_records(&mut after_output, "output")
+        );
         assert_eq!(side.state.metrics, LateMetricDelta::default());
         assert_eq!(side.state.next_late_output_sequence, 0);
         let retry = side

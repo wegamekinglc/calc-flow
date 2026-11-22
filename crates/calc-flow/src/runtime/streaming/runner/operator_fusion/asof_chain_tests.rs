@@ -193,8 +193,16 @@ async fn entry_observation(two_selects: bool, interposed: bool) -> EntryObservat
         plan.name().into(),
     ));
     let parts = plan.into_runtime_parts(EdgeBudget::default()).unwrap();
-    let Ok(mut runtime) =
-        run_operator_entry(parts, &context, &core, &cancellation, BTreeMap::new(), None).await
+    let Ok(mut runtime) = run_operator_entry(
+        parts,
+        &context,
+        &core,
+        &cancellation,
+        BTreeMap::new(),
+        None,
+        true,
+    )
+    .await
     else {
         panic!("valid ASOF graph entry failed");
     };
@@ -454,8 +462,16 @@ async fn traffic_observation(two_selects: bool, interposed: bool) -> TrafficObse
         false,
         parts.name.clone(),
     ));
-    let Ok(mut runtime) =
-        run_operator_entry(parts, &context, &core, &cancellation, BTreeMap::new(), None).await
+    let Ok(mut runtime) = run_operator_entry(
+        parts,
+        &context,
+        &core,
+        &cancellation,
+        BTreeMap::new(),
+        None,
+        true,
+    )
+    .await
     else {
         panic!("valid ASOF traffic graph entry failed");
     };

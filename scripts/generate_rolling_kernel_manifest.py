@@ -43,6 +43,8 @@ EXPECTED_PRIMITIVES = (
     "difference",
     "argmax",
     "argmin",
+    "rank",
+    "quantile",
     "unique_count",
     "decay",
 )
@@ -54,6 +56,7 @@ TRANSITIONS = {
     "cumulative": "Cumulative",
     "fused_difference": "FusedDifference",
     "scan": "Scan",
+    "lag": "Lag",
 }
 COMPLEXITIES = {
     "amortized_constant": "AmortizedConstant",
@@ -181,12 +184,12 @@ pub(super) enum GeneratedTransition {{
     Cumulative,
     FusedDifference,
     Scan,
+    Lag,
 }}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GeneratedComplexity {{
     AmortizedConstant,
-    General,
 }}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

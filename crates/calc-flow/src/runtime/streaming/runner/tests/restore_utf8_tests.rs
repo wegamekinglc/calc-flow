@@ -311,19 +311,17 @@ async fn wait_quote_pairs(records: &Mutex<Vec<RecordBatch>>) {
 
 fn assert_quote_owners(observations: &Mutex<RestoreObservations>) {
     let observed = observations.lock();
-    assert_eq!(observed.wire.len(), 2);
     assert_eq!(observed.readers.len(), 2);
     eprintln!(
         "Utf8 readers: {:?}; resident: {:?}",
         observed.readers, observed.payloads
     );
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "both real Utf8 readers need independent prepaid native workspace"

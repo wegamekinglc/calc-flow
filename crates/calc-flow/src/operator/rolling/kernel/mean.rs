@@ -8,10 +8,10 @@ use std::{sync::Arc, time::Instant};
 use super::numeric_rows::SharedRowsShape;
 use super::{
     ArrayRef, Float64Array, Float64Builder, Float64NumericState, OutputStorage, RollingKernelPlan,
-    RollingMetricsRecorder, RollingNumericalProfile, RollingStage, RollingWork, Statistic,
-    TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput,
-    TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedRowInputs, TypedWindowState, float_mean,
-    internal_error, nanos, operator_error, valid_float64,
+    RollingMetricsRecorder, RollingStage, RollingWork, Statistic, TypedEntityState,
+    TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput, TypedGroupPlan,
+    TypedOutputKind, TypedOutputPlan, TypedRowInputs, TypedWindowState, float_mean, internal_error,
+    nanos, operator_error, valid_float64,
 };
 use crate::Result;
 
@@ -49,6 +49,7 @@ impl MeanKernel {
                 group,
                 TypedGroupPlan::Numeric {
                     frame: TypedFrame::Rows(_),
+                    dispersion: _,
                     ..
                 }
             )
@@ -253,7 +254,7 @@ fn update_mean_groups<const GROUPS: usize, const SHARED: bool>(
         let sample = valid_float64(values[0], row, plan.nan_as_value);
         entity.push_shared_row(sample);
         for ordinal in 0..GROUPS {
-            entity.update_shared_group(ordinal, sample, plan.numerical_profile, node_id)?;
+            entity.update_shared_group(ordinal, sample, node_id)?;
         }
         entity.trim_shared_rows();
         Ok(())
@@ -275,14 +276,7 @@ fn update_owned_groups<const GROUPS: usize>(
             return Err(group_mismatch());
         };
         let sample = valid_float64(values, row, plan.nan_as_value);
-        update_numeric_group(
-            state,
-            event_time,
-            sample,
-            plan.numerical_profile,
-            entity.transition_count,
-            node_id,
-        )?;
+        update_numeric_group(state, event_time, sample, node_id)?;
     }
     Ok(())
 }
@@ -309,13 +303,11 @@ pub(super) fn update_numeric_group(
     state: &mut Float64NumericState,
     event_time: i64,
     sample: Option<f64>,
-    profile: RollingNumericalProfile,
-    transition_count: u64,
     node_id: &str,
 ) -> Result<()> {
     #[cfg(test)]
     SHARED_GROUP_UPDATE_VISITS.set(SHARED_GROUP_UPDATE_VISITS.get() + 1);
-    state.update(event_time, sample, profile, transition_count, node_id)
+    state.update(event_time, sample, node_id)
 }
 
 pub(super) fn read_numeric_mean(state: &Float64NumericState, min_periods: u64) -> Option<f64> {
@@ -332,10 +324,10 @@ mod tests {
 
     use super::super::{
         DerivedBuilder, KernelComplexity, KernelSelection, OutputStorage,
-        ROLLING_KERNEL_PLAN_VERSION, RollingKernelPlan, RollingNumericalProfile, Statistic,
-        TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind,
-        TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
-        TypedRowInputs, TypedWindowState, fill_typed_rows,
+        ROLLING_KERNEL_PLAN_VERSION, RollingKernelPlan, Statistic, TimestampMicrosecondArray,
+        TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput,
+        TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedRowInputs, TypedWindowState,
+        fill_typed_rows,
     };
     use super::{MeanKernel, fill_mean_rows};
 
@@ -372,6 +364,7 @@ mod tests {
         TypedGroupPlan::Numeric {
             input_index,
             frame: TypedFrame::Rows(window),
+            dispersion: true,
         }
     }
 
@@ -379,7 +372,6 @@ mod tests {
         let mut plan = RollingKernelPlan {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version: 3,
-            numerical_profile: RollingNumericalProfile::StableV1,
             selection: KernelSelection::OrderedPrimitive,
             complexity: KernelComplexity::AmortizedConstant,
             event_time_index: 0,
@@ -426,6 +418,7 @@ mod tests {
         let duration = TypedGroupPlan::Numeric {
             input_index: 1,
             frame: TypedFrame::Duration(10),
+            dispersion: true,
         };
         let rejected = [
             plan(vec![rows(1, 20)], vec![mean_output(0, 1), count]),
@@ -445,6 +438,7 @@ mod tests {
                 vec![TypedGroupPlan::Signed {
                     input_index: 1,
                     frame: TypedFrame::Rows(3),
+                    dispersion: true,
                 }],
                 vec![mean_output(0, 1)],
             ),
@@ -569,7 +563,6 @@ mod tests {
             min_periods in proptest::collection::vec(0_u64..6, 2),
             spread in proptest::bool::ANY,
             nan_as_value in proptest::bool::weighted(0.2),
-            stable_v2 in proptest::bool::weighted(0.2),
             warm in proptest::collection::vec((0_usize..3, 0_u8..=255), 0..12),
             batch in proptest::collection::vec((0_usize..4, 0_u8..=255), 0..24),
         ) {
@@ -585,9 +578,6 @@ mod tests {
             };
             let mut plan = plan(groups, outputs);
             plan.nan_as_value = nan_as_value;
-            if stable_v2 {
-                plan.numerical_profile = RollingNumericalProfile::StableV2Preview;
-            }
             let batch_inputs = |rows: &[(usize, u8)]| {
                 let event_times = TimestampMicrosecondArray::from_iter_values(
                     (0..rows.len()).map(|row| i64::try_from(row).unwrap()),

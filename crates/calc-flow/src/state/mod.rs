@@ -10,9 +10,18 @@ mod manifest;
 mod preloaded_snapshot;
 mod segment;
 mod source_history;
+#[allow(
+    dead_code,
+    reason = "P2.3 layout-7 migration still consumes the remaining state-table columns"
+)]
+mod table;
 mod transaction;
+pub(crate) mod v4;
 
 pub(crate) use preloaded_snapshot::PreloadedSnapshot;
+pub(crate) use table::{
+    EntityId, EntityKey, StateTable, ValueKind, decode_layout7, encode_layout7,
+};
 
 #[cfg(test)]
 pub(crate) use transaction::ManifestTransactionFaultPoint;
@@ -48,3 +57,4 @@ pub use manifest::{
 pub use source_history::{
     SourceHistoryBytes, SourceHistoryContext, SourceHistoryLimits, SourceHistorySpec,
 };
+pub use v4::SourceHistorySegmentHandle;

@@ -57,7 +57,7 @@ impl dyn Rows + '_ {
         }
     }
 
-    #[cfg(any(test, feature = "benchmark-checkpoint-diagnostic"))]
+    #[cfg(test)]
     pub(super) fn iter(&self) -> Box<dyn Iterator<Item = StoredRow> + Send + '_> {
         Box::new(self.indexed().map(|(_, row)| row))
     }
@@ -362,20 +362,6 @@ impl StateRows {
     #[cfg(test)]
     pub(super) fn key_at(&self, ordinal: usize) -> &Arc<super::columnar::FramedKey> {
         self.key(self.reference(ordinal))
-    }
-    #[cfg(all(test, feature = "benchmark-checkpoint-diagnostic"))]
-    pub(super) fn replace_at(&mut self, ordinal: usize, row: StoredRow) {
-        let reference = self.reference(ordinal);
-        self.replace_payload(reference, row.record);
-        let chunk = self.chunks.get_mut(&(reference / CHUNK_ROWS)).unwrap();
-        let offset = reference % CHUNK_ROWS;
-        chunk.times[offset] = row.event_time;
-        chunk.ids[offset] = row.row_id;
-        chunk.charges[offset] = row.charge;
-        chunk.release_key(offset);
-        chunk.keys[offset] = Some(
-            u32::try_from(chunk.intern_key(&row.encoded_key)).expect("chunk key slot fits u32"),
-        );
     }
     #[cfg(test)]
     pub(super) fn last(&self) -> Option<StoredRow> {
@@ -1042,6 +1028,7 @@ fn chunk_base_bytes(count: usize, source_count: usize, key_count: usize) -> Opti
 }
 
 mod admission;
+#[cfg(test)]
 pub(super) use admission::ColumnarPlan;
 #[cfg(test)]
 pub(super) use admission::parallel::observe_preparation_for_test;

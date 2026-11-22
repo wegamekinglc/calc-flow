@@ -128,7 +128,7 @@ pub(super) fn prepare_grouped(
     Ok(growth)
 }
 
-fn array_bytes(array: &ArrayRef, row: usize) -> usize {
+pub(super) fn array_bytes(array: &ArrayRef, row: usize) -> usize {
     if array.is_null(row) {
         return 0;
     }

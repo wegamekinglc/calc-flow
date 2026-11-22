@@ -1,0 +1,68 @@
+{
+  "schema": "calc-flow.sum-state-absolute-result.v1",
+  "candidate_revision": "74ac0775",
+  "build_receipt_revision": "1aab97c6",
+  "binary": "target/p6-ordinal-cargo/release/examples/30_streaming_stock_positions",
+  "rows": 10000000,
+  "batch_rows": 1000000,
+  "cpu_affinity": 0,
+  "warmups": 2,
+  "samples": [
+    {
+      "wall_seconds": 3.9782390519976616,
+      "example_elapsed_seconds": 3.954,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.887466899002902,
+      "example_elapsed_seconds": 3.867,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.9780955229653046,
+      "example_elapsed_seconds": 3.956,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.931252633978147,
+      "example_elapsed_seconds": 3.91,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.910678928019479,
+      "example_elapsed_seconds": 3.889,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.8778630119632,
+      "example_elapsed_seconds": 3.858,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.9004390590125695,
+      "example_elapsed_seconds": 3.878,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.8564188060117885,
+      "example_elapsed_seconds": 3.835,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.8346498269820586,
+      "example_elapsed_seconds": 3.814,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 3.8439668680075556,
+      "example_elapsed_seconds": 3.822,
+      "correctness": true
+    }
+  ],
+  "p50_ms": 3872.5,
+  "p95_ms": 3956.0,
+  "threshold_p50_ms": 500,
+  "threshold_pass": false,
+  "wall_seconds": 46.821586006029975,
+  "within_budget": true
+}

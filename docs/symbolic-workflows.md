@@ -63,7 +63,7 @@ timestamp remains buffered behind the default safe watermark.
 `double=[2, 4, 6]` and `large=[2, 3]`. Output events arrive independently;
 they are not synchronized result dictionaries.
 
-Both examples use temporary managed checkpoints and require no external service.
+Both examples run without checkpoints and require no external service.
 Event-time iterables default to validated nondecreasing timestamps across their
 whole source and native watermarks; the timestamp-free branches need no progress
 configuration. Select an explicit [watermark policy](streaming-guide.md#watermark-policies)

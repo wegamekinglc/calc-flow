@@ -13,7 +13,12 @@ mod expression;
 pub use distinct::{DistinctHistory, DistinctOperator, DistinctSpec};
 pub(crate) mod ingress;
 mod join;
+#[cfg(test)]
 mod key_identity;
+mod keyed;
+#[cfg(test)]
+#[path = "keyed/tests.rs"]
+mod keyed_tests;
 pub(crate) mod late_output;
 mod output_chunk;
 mod retained_columns;
@@ -26,6 +31,7 @@ pub(crate) use snapshot_sql::{PreparedSnapshotCapture, PreparedSnapshotRestore};
 pub(crate) use sql::{PreparedSqlCheckpoint, PreparedSqlRestore};
 mod state_budget;
 mod stream;
+pub(crate) mod sync_operator;
 mod union;
 mod window;
 
@@ -42,12 +48,11 @@ pub use cross_section::{
     CrossSectionValuePolicy, NullPlacement, RankTieMethod, SortDirection,
 };
 pub use expression::ExpressionOperator;
+pub(crate) use expression::{PreparedExpression, SyncExpressionOperator};
 pub(crate) use join::admission_masks::IngressPlan as JoinIngressPlan;
-#[cfg(feature = "benchmark-checkpoint-diagnostic")]
-pub(crate) use join::run_checkpoint_history_diagnostic;
-pub(crate) use join::supported_key_type;
 #[cfg(test)]
 pub(crate) use join::with_one_gib_pool;
+pub(crate) use join::{HotProjection, supported_key_type};
 pub use join::{
     JoinStateLimits, JoinTimeBounds, STREAM_JOIN_MAX_SAFE_JSON_INTEGER,
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, StreamJoinOperator, StreamJoinSideStatus,
@@ -62,11 +67,10 @@ pub use rolling::{
     ROLLING_CONFIGURATION_VERSION, ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION,
     ROLLING_EWMA_STATE_LAYOUT_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
     ROLLING_MACD_STATE_LAYOUT_VERSION, ROLLING_STATE_LAYOUT_VERSION, RollingFloatPrimitiveSpec,
-    RollingFrameSpec, RollingNumericalProfile, RollingOperator, RollingOutputSpec, RollingSpec,
-    RollingValuePolicy,
+    RollingFrameSpec, RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy,
 };
 pub use snapshot_sql::SnapshotSqlOperator;
-pub use sql::SqlOperator;
+pub use sql::{SqlAggregateOutputMode, SqlOperator};
 pub use state_budget::StateBudget;
 pub use stream::{
     EdgeCollector, IngressProgress, IngressProgressSnapshot, IngressState, OperatorStateSnapshot,
@@ -143,7 +147,7 @@ impl StreamRuntimeState {
         self.runtime.is_some()
     }
 
-    #[cfg(any(test, feature = "benchmark-internals"))]
+    #[cfg(test)]
     fn initialize_benchmark_pool(
         &mut self,
         pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
@@ -265,13 +269,17 @@ impl Port {
         }
         if let Some(expected) = &self.schema {
             let actual = batch.table_payload()?.schema();
-            if actual != expected {
+            if !Arc::ptr_eq(actual, expected) && actual != expected {
                 return Err(CalcFlowError::Compile {
                     message: format!("{endpoint} schema mismatch"),
                 });
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_fast(&self, batch: &Batch, endpoint: &str) -> Result<()> {
+        self.validate(batch, endpoint)
     }
 }
 

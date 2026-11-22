@@ -10,7 +10,11 @@ use datafusion::arrow::{
     buffer::Buffer,
     datatypes::{DataType, Field},
 };
-use datafusion::arrow::{datatypes::SchemaRef, record_batch::RecordBatch};
+use datafusion::arrow::{
+    datatypes::{Schema, SchemaRef},
+    error::ArrowError,
+    record_batch::{RecordBatch, RecordBatchOptions},
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -260,6 +264,77 @@ impl TableBatch {
                         .ok_or_else(|| "size sum overflowed usize".to_owned())
                 })
             })
+    }
+}
+
+/// A uniquely owned table envelope whose Arrow values have been released.
+/// Record and column-vector allocations remain available to a later batch.
+pub(crate) struct TableBatchShell {
+    batches: Arc<[RecordBatch]>,
+    estimated_bytes_cache: Arc<OnceLock<std::result::Result<usize, String>>>,
+    empty_schema: SchemaRef,
+}
+
+static EMPTY_TABLE_SCHEMA: OnceLock<SchemaRef> = OnceLock::new();
+
+impl TableBatchShell {
+    fn new(mut table: TableBatch) -> Option<Self> {
+        Arc::get_mut(&mut table.estimated_bytes_cache)?.take();
+        let batches = Arc::get_mut(&mut table.batches)?;
+        let empty_schema = Arc::clone(EMPTY_TABLE_SCHEMA.get_or_init(|| Arc::new(Schema::empty())));
+        let options = RecordBatchOptions::new().with_row_count(Some(0));
+        for slot in batches {
+            let previous =
+                std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&empty_schema)));
+            let (_, mut columns, _) = previous.into_parts();
+            columns.clear();
+            *slot = RecordBatch::try_new_with_options(Arc::clone(&empty_schema), columns, &options)
+                .expect("an empty table shell is valid");
+        }
+        Some(Self {
+            batches: Arc::clone(&table.batches),
+            estimated_bytes_cache: Arc::clone(&table.estimated_bytes_cache),
+            empty_schema,
+        })
+    }
+
+    pub(crate) fn matches(&self, input: &Batch) -> bool {
+        input
+            .table_payload()
+            .is_ok_and(|table| table.batches.len() == self.batches.len())
+    }
+
+    /// Rebuilds a projected table without retaining or reusing Arrow buffers.
+    pub(crate) fn project(
+        mut self,
+        input: &Batch,
+        indices: &[usize],
+        schema: SchemaRef,
+        metadata: BatchMetadata,
+        source_cursor: Option<Arc<crate::Cursor>>,
+    ) -> std::result::Result<Batch, ArrowError> {
+        let input = input
+            .table_payload()
+            .expect("table shell input was validated");
+        let slots = Arc::get_mut(&mut self.batches).expect("recycled table shell is unique");
+        for (slot, input) in slots.iter_mut().zip(input.batches.iter()) {
+            let previous =
+                std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&self.empty_schema)));
+            let (_, mut columns, _) = previous.into_parts();
+            columns.clear();
+            columns.extend(indices.iter().map(|&index| input.column(index).clone()));
+            *slot = RecordBatch::try_new(Arc::clone(&schema), columns)?;
+        }
+        Ok(Batch {
+            payload: BatchPayload::Table(TableBatch {
+                schema,
+                batches: self.batches,
+                rows: input.rows,
+                estimated_bytes_cache: self.estimated_bytes_cache,
+            }),
+            metadata,
+            source_cursor,
+        })
     }
 }
 
@@ -715,6 +790,14 @@ impl Batch {
         })
     }
 
+    /// Releases Arrow values while retaining uniquely owned table containers.
+    pub(crate) fn recycle_table_shell(self) -> Option<TableBatchShell> {
+        let BatchPayload::Table(table) = self.payload else {
+            return None;
+        };
+        TableBatchShell::new(table)
+    }
+
     /// Creates an array batch from an externally owned payload.
     ///
     /// # Errors
@@ -1165,9 +1248,7 @@ mod tests {
         assert_ne!(payload_values.as_ptr(), snapshot_values.as_ptr());
 
         let table = Batch::table(
-            vec![RecordBatch::new_empty(Arc::new(
-                datafusion::arrow::datatypes::Schema::empty(),
-            ))],
+            vec![RecordBatch::new_empty(Arc::new(Schema::empty()))],
             BatchMetadata::default(),
         )
         .unwrap();
@@ -1175,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn table_byte_estimate_is_measured_once_and_shared_by_clones() {
+    fn table_shell_recycling_requires_unique_ownership_and_reuses_storage() {
         use datafusion::arrow::array::{ArrayRef, Int64Array};
 
         let record = RecordBatch::try_from_iter(vec![(
@@ -1184,14 +1265,40 @@ mod tests {
         )])
         .unwrap();
         let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
-        let clone = batch.clone();
-        let table = clone.table_payload().unwrap();
+        batch.estimated_bytes().unwrap();
+        let batches = Arc::as_ptr(&batch.table_payload().unwrap().batches);
+        let columns = batch.table_payload().unwrap().batches[0].columns().as_ptr();
+        let unique = batch.clone();
+        assert!(batch.recycle_table_shell().is_none());
+        let shell = unique.recycle_table_shell().unwrap();
+        assert!(shell.matches(&unique_source()));
+
+        let source = unique_source();
+        let projected = shell
+            .project(
+                &source,
+                &[0],
+                source.table_payload().unwrap().schema().clone(),
+                source.metadata().clone(),
+                None,
+            )
+            .unwrap();
+        let table = projected.table_payload().unwrap();
+        assert_eq!(Arc::as_ptr(&table.batches), batches);
+        assert_eq!(table.batches[0].columns().as_ptr(), columns);
         assert!(table.estimated_bytes_cache.get().is_none());
+        assert_eq!(projected.metadata(), source.metadata());
+        assert_eq!(table.batches(), source.table_payload().unwrap().batches());
+    }
 
-        let bytes = batch.estimated_bytes().unwrap();
+    fn unique_source() -> Batch {
+        use datafusion::arrow::array::{ArrayRef, Int64Array};
 
-        assert_eq!(table.estimated_bytes_cache.get(), Some(&Ok(bytes)));
-        assert_eq!(clone.estimated_bytes().unwrap(), bytes);
-        assert_eq!(bytes, 3 * size_of::<i64>());
+        let record = RecordBatch::try_from_iter(vec![(
+            "value",
+            Arc::new(Int64Array::from(vec![4, 5, 6])) as ArrayRef,
+        )])
+        .unwrap();
+        Batch::table(vec![record], BatchMetadata::default()).unwrap()
     }
 }

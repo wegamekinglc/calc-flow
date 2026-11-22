@@ -69,25 +69,6 @@ fn test_controlled_kernels_cancel_inside_a_single_long_node() {
 }
 
 #[test]
-fn test_stable_refold_checks_cancellation_inside_retained_history() {
-    let mut checks = 0;
-    let result = array::rolling_mean_math::stable_fold_controlled(
-        std::iter::repeat_n(Some(1.0), 8193),
-        &mut || {
-            checks += 1;
-            if checks == 3 {
-                Err(cancellation())
-            } else {
-                Ok(())
-            }
-        },
-        |_| cancellation(),
-    );
-    assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
-    assert_eq!(checks, 3);
-}
-
-#[test]
 fn test_ir_v1_runtime_shape_contract_rejects_higher_rank_storage() {
     assert!(super::execute::native_shape(&[1, 2], "inputs.x").is_err());
     assert!(matches!(

@@ -100,7 +100,8 @@ def _rows(table: pa.Table) -> dict[str, list[object]]:
 
 
 def _assert_projected_checkpoint(tmp_path: Path) -> None:
-    manifests = sorted((tmp_path / "manifests").glob("manifest-*.json"))
+    manifest_root = tmp_path / "manifests" / "lineage" / "manifests"
+    manifests = sorted(manifest_root.glob("epoch-*.json"))
     assert len(manifests) == 1
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
     entries = [
@@ -114,7 +115,7 @@ def _assert_projected_checkpoint(tmp_path: Path) -> None:
     assert metadata["state_layout"] == 4
     assert metadata["state_accounting"] == 4
     assert metadata["rows"] == 3
-    segments = {handle["segment_id"]: handle for handle in entry["segments"]}
+    segments = {handle["object_id"]: handle for handle in entry["blocks"]}
     assert set(segments) == {
         "input-retained",
         "logical-schema",
@@ -124,7 +125,7 @@ def _assert_projected_checkpoint(tmp_path: Path) -> None:
 
     def body(name: str) -> bytes:
         handle = segments[name]
-        raw = (tmp_path / "state" / handle["relative_path"]).read_bytes()
+        raw = (tmp_path / "manifests" / handle["relative_path"]).read_bytes()
         assert len(raw) == handle["byte_len"]
         assert hashlib.sha256(raw).hexdigest() == handle["sha256"]
         return raw

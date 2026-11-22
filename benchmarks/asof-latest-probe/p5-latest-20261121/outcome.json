@@ -1,0 +1,62 @@
+{
+  "acquisition_elapsed_seconds": 1.069625035,
+  "binary_sha256": "8f7d0f4f190bf4335fb213218bcc971269b7900ca42f4df689398b08577aafce",
+  "budget_seconds": 600,
+  "build_elapsed_seconds": 757.79,
+  "evidence_sha256": {
+    "samples.csv": "2dc930c08b117e6c269bcfa239994980d2421b24424942928fbdb6c01d03a6ba",
+    "summary.json": "7f3a91f3beed017432c303dc7291786ee4420ce920d6a6913477dd7493a4f3be"
+  },
+  "independent_harness_failure": "strict_frontiers_cancel_restore_check hangs under both algorithms and remains excluded from paired mode; it is not claimed as passing",
+  "measured_revision": "6a2abc0876e20a8fb1883555b85bd5652b17b506",
+  "measured_tree": "698cd13ffae1b6a45ff1e94a44364f6616d2908d",
+  "process_observations": {
+    "observed_cpu_affinity": [
+      0
+    ],
+    "observed_thread_environment": {
+      "MKL_NUM_THREADS": "1",
+      "NUMEXPR_NUM_THREADS": "1",
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "POLARS_MAX_THREADS": "1",
+      "RAYON_NUM_THREADS": "1",
+      "TOKIO_WORKER_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1"
+    },
+    "process_id": 93083
+  },
+  "protocol": {
+    "ab_ba_pairs_per_round": 10,
+    "cases": [
+      "balanced_8192",
+      "fixed128_right8192",
+      "skew_8192",
+      "restored_skew_8192"
+    ],
+    "formal_observation_validation": "maintained ASOF output, status, chunk, timing and resource validators; full values are checked during warmup",
+    "formal_observations": 160,
+    "full_value_oracle_warmups": 16,
+    "rounds_per_case": 2
+  },
+  "retry_or_case_expansion": false,
+  "schema": "calc-flow.asof-latest-probe-outcome.v1",
+  "source_sha256": {
+    "Cargo.lock": "00b7892fa062527bea87ce8a5f554836a007255906d82e5237cafe60a30a7d4a",
+    "crates/calc-flow/benches/stream_asof_perf.rs": "9db82b971f3a5c716b7896df8d4db11a8c8fb6f46ff4eaed3c9fa1264e8142f2",
+    "crates/calc-flow/src/operator/asof/columnar/run.rs": "aa8cc4bd01ffc163b0854384447de0c36bac21b8d34a264597b235b4d7839b65",
+    "crates/calc-flow/src/operator/asof/columnar/state.rs": "b5930b89a6e57c83949e81bf3e5f1a0558f4a52ffbd9fb15ca7a8a228f35b5b0"
+  },
+  "source_status_at_build_and_measurement": "clean",
+  "status": "completed",
+  "supersedes": {
+    "reason": "final review fixes changed the implementation head; this is a fresh sealed run with the same fixed protocol, not added samples",
+    "revision": "0cbe65dea4cd459bcd26ccc32b6722d972ac3a13"
+  },
+  "verdicts": {
+    "balanced_8192": "improved",
+    "fixed128_right8192": "no-confirmed-regression",
+    "restored_skew_8192": "improved",
+    "skew_8192": "improved"
+  }
+}

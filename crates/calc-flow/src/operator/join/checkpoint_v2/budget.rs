@@ -105,11 +105,15 @@ pub(super) fn registration_bytes() -> Result<usize> {
 }
 
 pub(super) fn containers(rows: usize) -> Result<usize> {
+    #[cfg(test)]
+    let sql = sql_loan_controls()?;
+    #[cfg(not(test))]
+    let sql = 0;
     sum(&[
         product(rows, size_of::<StoredRow>() + 128)?,
         product(rows.div_ceil(1024), 16_384)?,
         product(2, arc::<super::super::StateRows>()?)?,
-        sql_loan_controls()?,
+        sql,
     ])
 }
 
@@ -163,6 +167,7 @@ pub(super) fn tree<K, V>(count: usize) -> Result<usize> {
     history::tree::<K, V>(count).ok_or_else(|| invalid("V2 candidate tree charge overflow"))
 }
 
+#[cfg(test)]
 fn sql_loan_controls() -> Result<usize> {
     use super::loans::V2SqlOwners;
     use crate::datafusion::owned::{Failure, Input, Output};

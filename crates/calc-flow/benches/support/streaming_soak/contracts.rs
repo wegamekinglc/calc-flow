@@ -744,13 +744,19 @@ pub(super) fn is_canonical_checkpoint_manifest(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
+    if Path::new(name)
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cfst4"))
+    {
+        return true;
+    }
     let Some(epoch) = name
-        .strip_prefix("manifest-")
+        .strip_prefix("epoch-")
         .and_then(|name| name.strip_suffix(".json"))
     else {
         return false;
     };
-    epoch.len() == 20 && epoch.bytes().all(|byte| byte.is_ascii_digit())
+    !epoch.is_empty() && epoch.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub(super) fn is_canonical_checkpoint_sink_output(path: &Path) -> bool {
@@ -1141,17 +1147,6 @@ pub(super) fn checkpoint_soak_fresh_checkpoint_idle(
     previous_completed: Option<Epoch>,
 ) -> bool {
     status.current_epoch.is_none() && status.last_completed_epoch > previous_completed
-}
-
-pub(super) async fn read_checkpoint_manifest_document(
-    path: &Path,
-) -> Option<engine::CheckpointManifest> {
-    let bytes = match tokio::fs::read(path).await {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(error) => panic!("checkpoint soak could not read manifest: {error}"),
-    };
-    Some(engine::CheckpointManifest::from_bytes(&bytes).unwrap())
 }
 
 pub(super) fn checkpoint_soak_cursor_order(value: &str) -> Result<u64> {

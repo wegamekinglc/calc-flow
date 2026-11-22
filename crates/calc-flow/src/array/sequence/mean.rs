@@ -1,9 +1,9 @@
 use super::{ArrayStateOptions, Budget, Output, Prepared, history_charge, sample, validate_input};
 use crate::{
-    Result, RollingNumericalProfile,
+    Result,
     array::{
         ArrayExecutionOptions, ArrayView, NativeArray, RollingMeanOptions, control,
-        rolling_mean::MeanKernel, rolling_mean_math,
+        rolling_mean::MeanKernel,
     },
 };
 
@@ -115,7 +115,7 @@ impl RollingMeanState {
     ) -> Result<Budget<'a>> {
         let candidate = self.candidate_charge(len)?;
         self.limits.validate(candidate)?;
-        let scratch = self.scratch_bytes(len);
+        let scratch = 0;
         let budget = Budget {
             peak_field: "state.peak_bytes",
             old: self.bytes,
@@ -140,14 +140,6 @@ impl RollingMeanState {
             Ok(0)
         } else {
             history_charge(self.kernel.next_capacity(len, self.options.window()))
-        }
-    }
-
-    fn scratch_bytes(&self, len: usize) -> usize {
-        if len > 0 && self.options.numerical_profile() == RollingNumericalProfile::StableV2Preview {
-            rolling_mean_math::stable_scratch_bytes()
-        } else {
-            0
         }
     }
 

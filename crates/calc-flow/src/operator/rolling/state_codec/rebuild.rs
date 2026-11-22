@@ -68,8 +68,8 @@ fn rebuild_group(
         CompiledWindowGroup::Numeric {
             input_index,
             frame,
-            sum_class,
-        } => rebuild_numeric(context, window, *input_index, *frame, *sum_class, check),
+            sum_class: _,
+        } => rebuild_numeric(context, window, *input_index, *frame, check),
         CompiledWindowGroup::Pair {
             left_index,
             right_index,
@@ -102,18 +102,13 @@ fn rebuild_numeric(
     window: &mut WindowState,
     index: usize,
     frame: CompiledFrame,
-    class: SumClass,
     check: RestoreCheck<'_>,
 ) -> Result<()> {
     let WindowState::Numeric(accumulator) = window else {
         return Err(internal_error("rolling numeric group state mismatch"));
     };
     let start = retained_window_start(frame, context.state, context.compiled, check)?;
-    if spec_uses_stable_v2(context.compiled) && class == SumClass::Float {
-        *accumulator = stable_numeric(context, index, start, check)?;
-    } else {
-        numeric_rows(context, index, start, accumulator, check)?;
-    }
+    numeric_rows(context, index, start, accumulator, check)?;
     numeric_expiry(accumulator, frame, context.last_time);
     Ok(())
 }
@@ -143,22 +138,6 @@ fn numeric_rows(
     }
     Ok(())
 }
-fn stable_numeric(
-    context: &Rebuild<'_>,
-    index: usize,
-    start: usize,
-    check: RestoreCheck<'_>,
-) -> Result<super::WindowAccumulator> {
-    rebuild_control::fold(context.state.rows.iter().skip(start), check, |rows| {
-        kernel::stable_v2_float64_accumulator(
-            rows.filter_map(|values| {
-                let value = &values[index];
-                is_valid_sample(value).then(|| float_sample(value))
-            }),
-            context.node,
-        )
-    })
-}
 fn rebuild_pair(
     context: &Rebuild<'_>,
     window: &mut WindowState,
@@ -170,11 +149,7 @@ fn rebuild_pair(
         return Err(internal_error("rolling pair group state mismatch"));
     };
     let start = retained_window_start(frame, context.state, context.compiled, check)?;
-    if spec_uses_stable_v2(context.compiled) {
-        *accumulator = stable_pair(context, indices, start, check)?;
-    } else {
-        pair_rows(context, indices, start, accumulator, check)?;
-    }
+    pair_rows(context, indices, start, accumulator, check)?;
     if let CompiledFrame::Duration(micros) = frame {
         accumulator.expired_through = expired_through_bound(context.last_time, micros);
     }
@@ -196,24 +171,6 @@ fn pair_rows(
         }
     }
     Ok(())
-}
-fn stable_pair(
-    context: &Rebuild<'_>,
-    indices: (usize, usize),
-    start: usize,
-    check: RestoreCheck<'_>,
-) -> Result<super::PairAccumulator> {
-    rebuild_control::fold(context.state.rows.iter().skip(start), check, |rows| {
-        kernel::stable_v2_pair_accumulator(
-            rows.filter_map(|values| pair_sample(values, indices)),
-            context.node,
-        )
-    })
-}
-fn pair_sample(values: &[ScalarValue], indices: (usize, usize)) -> Option<(f64, f64)> {
-    let x = &values[indices.0];
-    let y = &values[indices.1];
-    (is_valid_sample(x) && is_valid_sample(y)).then(|| (float_sample(x), float_sample(y)))
 }
 fn rebuild_extrema(
     context: &Rebuild<'_>,

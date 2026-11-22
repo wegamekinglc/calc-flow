@@ -390,6 +390,12 @@ to supply physical graph bindings and explicit runtime/state settings.
 }
 ```
 
+The source watermark generates `max(event_time) - 5 s` every second and marks
+the source idle after 30 seconds without data. Omitting `emit_interval_ms`, or
+setting it to `0`, arms no watermark timer and publishes the watermark after
+every record batch that advances the observed `event_time` maximum instead. See
+[stream projects](../projects-guide.md#stream-projects-and-connector-bindings).
+
 The ledger topic must be dedicated, have exactly one partition, and use only
 `cleanup.policy=compact`. Calc Flow derives the transactional ID from pipeline
 and output identity; a project cannot supply it. Recovery validates the exact

@@ -8,11 +8,10 @@ use calc_flow::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EventTime, ExpressionOperator,
     JobOutcome, JobState, LateErrorScope, LatePolicySpec, ManagedCheckpointRuntime,
     NativeWatermarkCapability, PipelineBuilder, Port, PortEndpoint, ROLLING_CONFIGURATION_VERSION,
-    ROLLING_STATE_LAYOUT_VERSION, ReplayPositioning, Result, RollingNumericalProfile,
-    RollingOutputSpec, RollingSpec, RollingValuePolicy, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, SqlOperator,
-    StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource, StreamingJob,
-    StreamingRunner, UdfRegistry, WatermarkPolicy,
+    ROLLING_STATE_LAYOUT_VERSION, ReplayPositioning, Result, RollingOutputSpec, RollingSpec,
+    RollingValuePolicy, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
+    SourceEvent, SourceSchema, SqlOperator, StreamExecutionPlan, StreamRequirements, StreamSink,
+    StreamSource, StreamingJob, StreamingRunner, UdfRegistry, WatermarkPolicy,
 };
 use datafusion::arrow::{
     array::{
@@ -179,7 +178,6 @@ pub fn rolling(outputs: Vec<RollingOutputSpec>) -> RollingSpec {
     RollingSpec {
         configuration_version: ROLLING_CONFIGURATION_VERSION,
         state_layout_version: ROLLING_STATE_LAYOUT_VERSION,
-        numerical_profile: RollingNumericalProfile::default(),
         partition_by: vec!["symbol".into()],
         event_time: "ts".into(),
         sequence_by: vec!["seq".into()],

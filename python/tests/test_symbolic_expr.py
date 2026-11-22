@@ -138,6 +138,7 @@ def test_public_surface_is_the_frozen_export_list() -> None:
         "parameter",
         "row",
         "rows",
+        "changelog_sql",
         "sql",
         "snapshot_sql",
         "table",

@@ -14,21 +14,24 @@ fn identity() -> PreparedManifestIdentity {
 }
 
 async fn stage_ack(transaction: &ManifestTransaction, epoch: Epoch) -> OperatorCheckpointAck {
+    let snapshot = OperatorStateSnapshot {
+        inline_metadata: BTreeMap::new(),
+        segments: BTreeMap::from([("state".into(), StateSegment::new(b"state".to_vec()))]),
+    };
     let staged = transaction
-        .stage_operator_state(
-            "operator",
-            epoch,
-            OperatorStateSnapshot {
-                inline_metadata: BTreeMap::new(),
-                segments: BTreeMap::from([("state".into(), StateSegment::new(b"state".to_vec()))]),
-            },
-        )
+        .stage_operator_state("operator", epoch, snapshot.clone())
         .await
         .unwrap();
     OperatorCheckpointAck {
         capture_credit: None,
         node_id: "operator".into(),
         epoch,
+        snapshot,
+        native: None,
+        output_frontier: None,
+        reservation: crate::state::v4::V4InflightBudget::new(1 << 20)
+            .reserve(0)
+            .unwrap(),
         state: OperatorManifestEntry {
             progress: BTreeMap::new(),
             inline_metadata: staged.inline_metadata,

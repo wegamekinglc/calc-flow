@@ -1,13 +1,11 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, OnceLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+#[cfg(test)]
+use std::sync::OnceLock;
 
 use crate::{
     Batch, CalcFlowError, EdgeBudget, Epoch, EventTime, JsonMap, Port, Result, StreamJobContext,
@@ -16,6 +14,7 @@ use crate::{
 
 use super::OperatorMetadata;
 use super::rolling_metrics::RollingMetricsRecorder;
+#[cfg(test)]
 use crate::runtime::streaming::entity_work::ScopedEntityWorkClient;
 
 /// Lifecycle proof exposed by an external stream operator.
@@ -171,6 +170,7 @@ impl StateSegment {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn has_owner(&self) -> bool {
         self.owner.is_some()
     }
@@ -248,7 +248,7 @@ mod segment_tests;
 /// The runtime wraps it with input progress and segment handles into the
 /// checkpoint manifest; keyed row state never appears inline (spec D4.4), and
 /// no segment may carry secrets (I4).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OperatorStateSnapshot {
     /// Small bounded JSON placed inline in the manifest.
     pub inline_metadata: JsonMap,
@@ -348,11 +348,15 @@ pub struct StreamOperatorContext<'a> {
     output_budget: EdgeBudget,
     late_metrics: Arc<dyn LateMetricSink>,
     rolling_metrics: Option<RollingMetricsRecorder>,
+    #[cfg(test)]
     entity_work: Option<ScopedEntityWorkClient>,
+    #[cfg(test)]
     entity_work_task: Option<&'a crate::runtime::streaming::entity_work::TaskEntityWorkClient>,
+    #[cfg(test)]
     entity_work_scope: OnceLock<crate::runtime::streaming::entity_work::CallbackWorkScope>,
+    #[cfg(test)]
     entity_work_cache: OnceLock<ScopedEntityWorkClient>,
-    task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+    task_id: Option<crate::runtime::streaming::TaskId>,
     ingress_preparation: Option<&'a super::ingress::Preparation>,
 }
 
@@ -370,9 +374,13 @@ impl<'a> StreamOperatorContext<'a> {
             output_budget: self.output_budget,
             late_metrics: Arc::clone(&self.late_metrics),
             rolling_metrics: self.rolling_metrics.clone(),
+            #[cfg(test)]
             entity_work: self.entity_work.clone(),
+            #[cfg(test)]
             entity_work_task: self.entity_work_task,
+            #[cfg(test)]
             entity_work_scope: OnceLock::new(),
+            #[cfg(test)]
             entity_work_cache: OnceLock::new(),
             task_id: self.task_id,
             ingress_preparation: self.ingress_preparation,
@@ -393,9 +401,13 @@ impl<'a> StreamOperatorContext<'a> {
             output_budget: EdgeBudget::default(),
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
+            #[cfg(test)]
             entity_work: None,
+            #[cfg(test)]
             entity_work_task: None,
+            #[cfg(test)]
             entity_work_scope: OnceLock::new(),
+            #[cfg(test)]
             entity_work_cache: OnceLock::new(),
             task_id: None,
             ingress_preparation: None,
@@ -417,9 +429,13 @@ impl<'a> StreamOperatorContext<'a> {
             output_budget: EdgeBudget::default(),
             late_metrics: Arc::new(LateMetricRecorder::default()),
             rolling_metrics: None,
+            #[cfg(test)]
             entity_work: None,
+            #[cfg(test)]
             entity_work_task: None,
+            #[cfg(test)]
             entity_work_scope: OnceLock::new(),
+            #[cfg(test)]
             entity_work_cache: OnceLock::new(),
             task_id: None,
             ingress_preparation: None,
@@ -442,9 +458,13 @@ impl<'a> StreamOperatorContext<'a> {
             output_budget,
             late_metrics,
             rolling_metrics: None,
+            #[cfg(test)]
             entity_work: None,
+            #[cfg(test)]
             entity_work_task: None,
+            #[cfg(test)]
             entity_work_scope: OnceLock::new(),
+            #[cfg(test)]
             entity_work_cache: OnceLock::new(),
             task_id: None,
             ingress_preparation: None,
@@ -474,12 +494,13 @@ impl<'a> StreamOperatorContext<'a> {
 
     pub(crate) fn with_task_id(
         mut self,
-        task_id: Option<crate::runtime::streaming::gather_work::TaskId>,
+        task_id: Option<crate::runtime::streaming::TaskId>,
     ) -> Self {
         self.task_id = task_id;
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn gather_client(
         &self,
         operator: crate::runtime::streaming::gather_work::GatherOperatorId,
@@ -490,11 +511,6 @@ impl<'a> StreamOperatorContext<'a> {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_entity_work(mut self, client: ScopedEntityWorkClient) -> Self {
-        self.entity_work = Some(client);
-        self
-    }
-
     pub(crate) fn with_entity_work_task(
         mut self,
         task: &'a crate::runtime::streaming::entity_work::TaskEntityWorkClient,
@@ -503,6 +519,7 @@ impl<'a> StreamOperatorContext<'a> {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn entity_work(&self) -> Option<&ScopedEntityWorkClient> {
         if let Some(client) = self.entity_work.as_ref() {
             return Some(client);
@@ -541,6 +558,10 @@ impl<'a> StreamOperatorContext<'a> {
     /// Returns the operator's node identity.
     pub const fn operator_id(&self) -> &str {
         self.operator_id
+    }
+
+    pub(crate) const fn task_id(&self) -> Option<crate::runtime::streaming::TaskId> {
+        self.task_id
     }
 
     /// Returns the current input watermark `WM_in`; `None` while undefined

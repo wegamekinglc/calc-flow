@@ -15,11 +15,13 @@ use std::{
 
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, AsArray, Float64Array, Float64Builder, Int64Array, Int64Builder,
-        StringArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
+        Array, ArrayRef, AsArray, Date32Array, Date64Array, DurationMicrosecondArray, Float64Array,
+        Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
+        Time64MicrosecondArray, TimestampMicrosecondArray, UInt64Array, UInt64Builder,
+        new_null_array,
     },
-    compute::cast,
-    datatypes::{DataType, Int64Type, Schema, TimestampMicrosecondType, UInt64Type},
+    compute::{cast, interleave},
+    datatypes::{DataType, Int64Type, Schema, TimeUnit, TimestampMicrosecondType, UInt64Type},
     record_batch::RecordBatch,
     row::{RowConverter, SortField},
 };
@@ -28,16 +30,17 @@ use sha2::{Digest, Sha256};
 use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
-    CompiledFrame, CompiledKeyColumn, CompiledPairAggregate, CompiledRollingOutput,
-    CompiledWindowGroup, IncrementalScanState, PairAccumulator, RollingNumericalProfile, ScanKind,
-    Statistic, SumClass, SumState, WindowAccumulator,
+    CompiledFrame, CompiledPairAggregate, CompiledRollingOutput, CompiledWindowGroup,
+    PairAccumulator, ScanKind, Statistic, SumClass, SumState, WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
     internal_error, operator_error,
 };
-use crate::array::rolling_mean_math::{
-    self, ArithmeticError, CompensatedSum, FloatSummary, SummaryMut,
+use crate::accumulate::ArithmeticError;
+use crate::array::{
+    MacdOptions,
+    indicators::{AtrKernel, MacdKernel, MacdParameters, RsiKernel},
 };
 use crate::{
     Result,
@@ -51,6 +54,7 @@ mod decay;
 mod in_place;
 mod mean;
 mod numeric_rows;
+mod slab;
 use cumulative::TypedCumulativeState;
 mod sorted;
 pub(super) use sorted::SortedRollingState;
@@ -101,12 +105,37 @@ pub(super) enum KernelComplexity {
     General,
 }
 
+pub(super) struct KernelOrder {
+    state_layout_version: u32,
+    event_time_index: usize,
+    order_columns: Vec<usize>,
+    partition_columns: Vec<usize>,
+    sequence_columns: Vec<usize>,
+}
+
+impl KernelOrder {
+    pub(super) fn new(
+        state_layout_version: u32,
+        event_time_index: usize,
+        order_columns: Vec<usize>,
+        partition_columns: Vec<usize>,
+        sequence_columns: Vec<usize>,
+    ) -> Self {
+        Self {
+            state_layout_version,
+            event_time_index,
+            order_columns,
+            partition_columns,
+            sequence_columns,
+        }
+    }
+}
+
 /// Immutable execution plan derived from a validated rolling declaration.
 #[derive(Clone, Debug)]
 pub(super) struct RollingKernelPlan {
     version: u32,
     state_layout_version: u32,
-    numerical_profile: RollingNumericalProfile,
     selection: KernelSelection,
     complexity: KernelComplexity,
     event_time_index: usize,
@@ -134,14 +163,21 @@ enum TypedGroupPlan {
     Numeric {
         input_index: usize,
         frame: TypedFrame,
+        dispersion: bool,
+    },
+    Count {
+        input_index: usize,
+        frame: TypedFrame,
     },
     Signed {
         input_index: usize,
         frame: TypedFrame,
+        dispersion: bool,
     },
     Unsigned {
         input_index: usize,
         frame: TypedFrame,
+        dispersion: bool,
     },
     Extrema {
         input_index: usize,
@@ -163,6 +199,30 @@ enum TypedGroupPlan {
         input_index: usize,
         kind: ScanKind,
         window: usize,
+        storage: OutputStorage,
+    },
+    DurationScan {
+        input_index: usize,
+        kind: ScanKind,
+        duration: u64,
+        storage: OutputStorage,
+    },
+    Lag {
+        input_index: usize,
+        periods: usize,
+        storage: OutputStorage,
+    },
+    Macd {
+        input_index: usize,
+        options: MacdOptions,
+    },
+    Rsi {
+        input_index: usize,
+        period: u64,
+    },
+    Atr {
+        inputs: [usize; 3],
+        period: u64,
     },
 }
 
@@ -170,12 +230,29 @@ impl TypedGroupPlan {
     const fn frame(self) -> Option<TypedFrame> {
         match self {
             Self::Numeric { frame, .. }
+            | Self::Count { frame, .. }
             | Self::Signed { frame, .. }
             | Self::Unsigned { frame, .. }
             | Self::Extrema { frame, .. }
             | Self::Pair { frame, .. } => Some(frame),
             Self::Scan { window, .. } => Some(TypedFrame::Rows(window)),
-            Self::Ewma { .. } | Self::Cumulative { .. } => None,
+            Self::DurationScan { duration, .. } => Some(TypedFrame::Duration(duration)),
+            Self::Lag { periods, .. } => {
+                Some(TypedFrame::Rows(if periods == 0 { 1 } else { periods }))
+            }
+            Self::Ewma { .. }
+            | Self::Cumulative { .. }
+            | Self::Macd { .. }
+            | Self::Rsi { .. }
+            | Self::Atr { .. } => None,
+        }
+    }
+    fn dispersion_mut(&mut self) -> Option<&mut bool> {
+        match self {
+            Self::Numeric { dispersion, .. }
+            | Self::Signed { dispersion, .. }
+            | Self::Unsigned { dispersion, .. } => Some(dispersion),
+            _ => None,
         }
     }
 }
@@ -224,6 +301,11 @@ enum TypedOutputKind {
     Correlation,
     Ewma,
     Scan(ScanKind),
+    Lag,
+    Delta,
+    Macd(usize),
+    Rsi,
+    Atr,
     Difference {
         left: TypedFloatReadout,
         right: TypedFloatReadout,
@@ -259,11 +341,31 @@ enum OutputStorage {
     UInt64,
     Float32,
     Float64,
+    Value,
+    Utf8,
+    TimestampMicrosecond,
+    TimestampMicrosecondUtc,
+    Date32,
+    Date64,
+    Time64Microsecond,
+    DurationMicrosecond,
 }
 
 impl OutputStorage {
     const fn is_signed(self) -> bool {
-        matches!(self, Self::Int8 | Self::Int16 | Self::Int32 | Self::Int64)
+        matches!(
+            self,
+            Self::Int8
+                | Self::Int16
+                | Self::Int32
+                | Self::Int64
+                | Self::TimestampMicrosecond
+                | Self::TimestampMicrosecondUtc
+                | Self::Date32
+                | Self::Date64
+                | Self::Time64Microsecond
+                | Self::DurationMicrosecond
+        )
     }
 
     const fn is_unsigned(self) -> bool {
@@ -277,7 +379,7 @@ impl OutputStorage {
         matches!(self, Self::Float32 | Self::Float64)
     }
 
-    const fn data_type(self) -> DataType {
+    fn data_type(self) -> DataType {
         match self {
             Self::Count | Self::UInt64 => DataType::UInt64,
             Self::Int8 => DataType::Int8,
@@ -289,6 +391,16 @@ impl OutputStorage {
             Self::UInt32 => DataType::UInt32,
             Self::Float32 => DataType::Float32,
             Self::Float64 => DataType::Float64,
+            Self::Value => unreachable!("Arrow value outputs carry their input type"),
+            Self::Utf8 => DataType::Utf8,
+            Self::TimestampMicrosecond => DataType::Timestamp(TimeUnit::Microsecond, None),
+            Self::TimestampMicrosecondUtc => {
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            }
+            Self::Date32 => DataType::Date32,
+            Self::Date64 => DataType::Date64,
+            Self::Time64Microsecond => DataType::Time64(TimeUnit::Microsecond),
+            Self::DurationMicrosecond => DataType::Duration(TimeUnit::Microsecond),
         }
     }
 }
@@ -296,9 +408,13 @@ impl OutputStorage {
 enum TypedGroupInput {
     DecayReference(Box<decay::ReferenceInput>),
     Single(Float64Array),
+    Values(ArrayRef),
+    Utf8(StringArray),
     Signed(Int64Array),
     Unsigned(UInt64Array),
     Pair(Float64Array, Float64Array),
+    Rsi(Float64Array, String, u64),
+    Atr([Float64Array; 3], [String; 3], u64),
 }
 
 /// Stage-level facts from one typed kernel invocation.
@@ -459,6 +575,7 @@ pub(super) struct EntityRows {
 pub(crate) struct StreamKernelUpdate {
     execution: RollingKernelExecution,
     in_place: Option<in_place::InPlaceUpdate>,
+    slab: Option<slab::SlabUpdate>,
 }
 
 /// Durable recurrences which cannot be reconstructed from a retained row tail.
@@ -482,6 +599,9 @@ impl StreamKernelUpdate {
     }
 
     pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<RecurrenceSeed>>> {
+        if let Some(slab) = &self.slab {
+            return slab.recurrence_seeds();
+        }
         if let Some(in_place) = &self.in_place {
             return in_place.recurrence_seeds();
         }
@@ -512,6 +632,9 @@ impl StreamKernelUpdate {
         base: &RollingKernelState,
         node_id: &str,
     ) -> Result<(StateCharge, StateCharge)> {
+        if let Some(slab) = &self.slab {
+            return slab.charge_change(base, node_id);
+        }
         if let Some(in_place) = &self.in_place {
             return in_place.charge_change(base, node_id);
         }
@@ -530,6 +653,10 @@ impl StreamKernelUpdate {
     }
 
     pub(super) fn rollback(&mut self, base: &mut RollingKernelState) {
+        if let Some(slab) = self.slab.take() {
+            slab.rollback(base);
+            return;
+        }
         if let Some(in_place) = &mut self.in_place {
             in_place.rollback(base);
             self.in_place = None;
@@ -538,6 +665,14 @@ impl StreamKernelUpdate {
 
     pub(super) fn commit(self, base: &mut RollingKernelState) {
         let local = self.execution.state;
+        if let Some(slab) = self.slab {
+            slab.commit(base);
+            base.kernel_fingerprint = local.kernel_fingerprint;
+            if local.last_identity.is_some() {
+                base.last_identity = local.last_identity;
+            }
+            return;
+        }
         if self.in_place.is_some() {
             base.kernel_fingerprint = local.kernel_fingerprint;
             if local.last_identity.is_some() {
@@ -612,6 +747,7 @@ pub(super) struct RollingKernelState {
     entities: HashMap<Vec<u8>, usize>,
     direct_entities: HashMap<String, (usize, usize)>,
     states: Vec<Arc<TypedEntityState>>,
+    slab: Option<crate::state::StateTable>,
     last_identity: Option<Vec<u8>>,
 }
 
@@ -694,6 +830,7 @@ impl RollingKernelPlan {
             .map(|execution| StreamKernelUpdate {
                 execution,
                 in_place: None,
+                slab: None,
             })
     }
 
@@ -754,61 +891,47 @@ impl RollingKernelPlan {
         })
     }
 
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the compiler boundary keeps every rolling semantic explicit"
-    )]
     pub(super) fn compile(
         input_schema: &Schema,
-        state_layout_version: u32,
-        numerical_profile: RollingNumericalProfile,
-        event_time_index: usize,
-        partition_columns: &[CompiledKeyColumn],
-        sequence_columns: &[CompiledKeyColumn],
+        order: KernelOrder,
         outputs: &[CompiledRollingOutput],
         window_groups: &[CompiledWindowGroup],
+        indicator_groups: &[super::indicators::Group],
     ) -> Self {
-        let order_columns = std::iter::once(event_time_index)
-            .chain(partition_columns.iter().map(|column| column.index))
-            .chain(sequence_columns.iter().map(|column| column.index))
-            .collect::<Vec<_>>();
-        let partition_columns = partition_columns
-            .iter()
-            .map(|column| column.index)
-            .collect::<Vec<_>>();
-        let sequence_columns = sequence_columns
-            .iter()
-            .map(|column| column.index)
+        let order_columns = std::iter::once(order.event_time_index)
+            .chain(order.partition_columns.iter().copied())
+            .chain(order.sequence_columns.iter().copied())
             .collect::<Vec<_>>();
         Self::compile_with_order(
             input_schema,
+            KernelOrder::new(
+                order.state_layout_version,
+                order.event_time_index,
+                order_columns,
+                order.partition_columns,
+                order.sequence_columns,
+            ),
+            outputs,
+            window_groups,
+            indicator_groups,
+        )
+    }
+
+    pub(super) fn compile_with_order(
+        input_schema: &Schema,
+        order: KernelOrder,
+        outputs: &[CompiledRollingOutput],
+        window_groups: &[CompiledWindowGroup],
+        indicator_groups: &[super::indicators::Group],
+    ) -> Self {
+        let KernelOrder {
             state_layout_version,
-            numerical_profile,
             event_time_index,
             order_columns,
             partition_columns,
             sequence_columns,
-            outputs,
-            window_groups,
-        )
-    }
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "the compiler boundary keeps every ordering semantic explicit"
-    )]
-    pub(super) fn compile_with_order(
-        input_schema: &Schema,
-        state_layout_version: u32,
-        numerical_profile: RollingNumericalProfile,
-        event_time_index: usize,
-        order_columns: Vec<usize>,
-        partition_columns: Vec<usize>,
-        sequence_columns: Vec<usize>,
-        outputs: &[CompiledRollingOutput],
-        window_groups: &[CompiledWindowGroup],
-    ) -> Self {
-        let compiled = compile_typed_plan(input_schema, outputs, window_groups);
+        } = order;
+        let compiled = compile_typed_plan(input_schema, outputs, window_groups, indicator_groups);
         let allow_order_peers = order_columns.first() != Some(&event_time_index);
         let (selection, complexity, groups, typed_outputs, fallback_reason) = match compiled {
             Ok((groups, typed_outputs)) => (
@@ -841,7 +964,6 @@ impl RollingKernelPlan {
         let fingerprint_input = KernelFingerprintInput {
             input_schema,
             state_layout_version,
-            numerical_profile,
             selection,
             complexity,
             event_time_index,
@@ -863,6 +985,7 @@ impl RollingKernelPlan {
                     group,
                     TypedGroupPlan::Scan {
                         kind: ScanKind::Decay,
+                        storage: OutputStorage::Float64,
                         ..
                     }
                 )
@@ -871,7 +994,6 @@ impl RollingKernelPlan {
         let mut plan = Self {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version,
-            numerical_profile,
             selection,
             complexity,
             event_time_index,
@@ -889,7 +1011,8 @@ impl RollingKernelPlan {
             decay_pool,
         };
         plan.shared_rows = plan.shared_rows_shape().filter(|_| {
-            matches!(plan.groups.first(), Some(TypedGroupPlan::Numeric { input_index, .. })
+            matches!(plan.groups.first(), Some(TypedGroupPlan::Numeric { input_index, dispersion: _, ..
+            })
                 if input_schema.field(*input_index).data_type() == &DataType::Float64)
         });
         plan
@@ -931,20 +1054,16 @@ impl RollingKernelPlan {
             .unwrap_or(&self.fingerprint)
     }
 
+    pub(super) const fn numeric_contract() -> &'static str {
+        "compensated-sliding-1"
+    }
+
     pub(super) fn with_nan_as_value(mut self) -> Self {
         self.nan_as_value = true;
         self.fingerprint = hex::encode(Sha256::digest(
             format!("{}|nan=value", self.fingerprint).as_bytes(),
         ));
         self
-    }
-
-    pub(super) const fn numerical_profile(&self) -> &'static str {
-        self.numerical_profile.name()
-    }
-
-    pub(super) const fn numerical_profile_kind(&self) -> RollingNumericalProfile {
-        self.numerical_profile
     }
 
     pub(super) const fn version(&self) -> u32 {
@@ -974,7 +1093,7 @@ impl RollingKernelPlan {
             && self
                 .groups
                 .iter()
-                .all(|group| matches!(group, TypedGroupPlan::Numeric { .. }))
+                .all(|group| matches!(group, TypedGroupPlan::Numeric { dispersion: _, .. }))
     }
 
     pub(super) fn typed_group_count(&self) -> usize {
@@ -1068,11 +1187,8 @@ impl RollingKernelPlan {
         entity: &mut TypedEntityState,
         transition_count: u64,
         values: &[Option<RecurrenceSeed>],
-        node_id: &str,
+        _node_id: &str,
     ) -> Result<()> {
-        if self.numerical_profile == RollingNumericalProfile::StableV2Preview {
-            entity.force_stable_v2_rebase(node_id)?;
-        }
         entity.transition_count = transition_count;
         self.seed_recurrence_entity(entity, values)
     }
@@ -1184,6 +1300,7 @@ impl RollingKernelPlan {
                 Some(StreamKernelUpdate {
                     execution,
                     in_place: None,
+                    slab: None,
                 })
             })
     }
@@ -1504,8 +1621,8 @@ impl RollingKernelPlan {
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new(*output, row_count))
-            .collect::<Vec<_>>();
+            .map(|output| DerivedBuilder::new_with_inputs(*output, row_count, inputs.columns))
+            .collect::<Result<Vec<_>>>()?;
         drop(arrow_stage);
 
         let kernel_start = Instant::now();
@@ -1567,13 +1684,30 @@ fn typed_group_input(
             input_index,
             storage,
             ..
+        }
+        | TypedGroupPlan::Scan {
+            input_index,
+            storage,
+            ..
+        }
+        | TypedGroupPlan::DurationScan {
+            input_index,
+            storage,
+            ..
         } => extrema_group_input(input.column(input_index), storage, node_id),
-        TypedGroupPlan::Signed { input_index, .. } => {
-            cast_signed(input.column(input_index), node_id).map(TypedGroupInput::Signed)
+        TypedGroupPlan::Count { input_index, .. } => {
+            Ok(TypedGroupInput::Values(input.column(input_index).clone()))
         }
-        TypedGroupPlan::Unsigned { input_index, .. } => {
-            cast_unsigned(input.column(input_index), node_id).map(TypedGroupInput::Unsigned)
-        }
+        TypedGroupPlan::Signed {
+            input_index,
+            dispersion: _,
+            ..
+        } => cast_signed(input.column(input_index), node_id).map(TypedGroupInput::Signed),
+        TypedGroupPlan::Unsigned {
+            input_index,
+            dispersion: _,
+            ..
+        } => cast_unsigned(input.column(input_index), node_id).map(TypedGroupInput::Unsigned),
         TypedGroupPlan::Pair {
             left_index,
             right_index,
@@ -1582,12 +1716,110 @@ fn typed_group_input(
             cast_float64(input.column(left_index), node_id)?,
             cast_float64(input.column(right_index), node_id)?,
         )),
-        TypedGroupPlan::Numeric { input_index, .. }
+        TypedGroupPlan::Numeric {
+            input_index,
+            dispersion: _,
+            ..
+        }
         | TypedGroupPlan::Ewma { input_index, .. }
-        | TypedGroupPlan::Scan { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
+        | TypedGroupPlan::Macd { input_index, .. } => Ok(TypedGroupInput::Single(cast_float64(
             input.column(input_index),
             node_id,
         )?)),
+        TypedGroupPlan::Rsi {
+            input_index,
+            period,
+        } => Ok(TypedGroupInput::Rsi(
+            cast_float64(input.column(input_index), node_id)?,
+            input.schema().field(input_index).name().to_owned(),
+            period,
+        )),
+        TypedGroupPlan::Atr { inputs, period } => Ok(TypedGroupInput::Atr(
+            [
+                cast_float64(input.column(inputs[0]), node_id)?,
+                cast_float64(input.column(inputs[1]), node_id)?,
+                cast_float64(input.column(inputs[2]), node_id)?,
+            ],
+            inputs.map(|index| input.schema().field(index).name().to_owned()),
+            period,
+        )),
+        TypedGroupPlan::Lag {
+            input_index,
+            storage,
+            ..
+        } => lag_group_input(input.column(input_index), storage, node_id),
+    }
+}
+
+fn lag_group_input(
+    input: &ArrayRef,
+    storage: OutputStorage,
+    node_id: &str,
+) -> Result<TypedGroupInput> {
+    match storage {
+        OutputStorage::Date32 => {
+            return input
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .map(|values| {
+                    TypedGroupInput::Signed(
+                        values.iter().map(|value| value.map(i64::from)).collect(),
+                    )
+                })
+                .ok_or_else(|| internal_error("typed Date32 lag input type mismatch"));
+        }
+        OutputStorage::Date64 => {
+            return input
+                .as_any()
+                .downcast_ref::<Date64Array>()
+                .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+                .ok_or_else(|| internal_error("typed Date64 lag input type mismatch"));
+        }
+        OutputStorage::Time64Microsecond => {
+            return input
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+                .ok_or_else(|| internal_error("typed Time64 lag input type mismatch"));
+        }
+        OutputStorage::DurationMicrosecond => {
+            return input
+                .as_any()
+                .downcast_ref::<DurationMicrosecondArray>()
+                .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+                .ok_or_else(|| internal_error("typed Duration lag input type mismatch"));
+        }
+        _ => {}
+    }
+    if matches!(
+        storage,
+        OutputStorage::TimestampMicrosecond | OutputStorage::TimestampMicrosecondUtc
+    ) {
+        return input
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .map(|values| TypedGroupInput::Signed(values.iter().collect()))
+            .ok_or_else(|| internal_error("typed timestamp lag input type mismatch"));
+    }
+    if storage == OutputStorage::Value {
+        return Ok(TypedGroupInput::Values(input.clone()));
+    }
+    if storage == OutputStorage::Utf8 {
+        return input
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .cloned()
+            .map(TypedGroupInput::Utf8)
+            .ok_or_else(|| internal_error("typed Utf8 lag input did not produce StringArray"));
+    }
+    if storage.is_signed() {
+        cast_signed(input, node_id).map(TypedGroupInput::Signed)
+    } else if storage.is_unsigned() {
+        cast_unsigned(input, node_id).map(TypedGroupInput::Unsigned)
+    } else if storage.is_float() {
+        cast_float64(input, node_id).map(TypedGroupInput::Single)
+    } else {
+        Err(internal_error("typed lag/delta has non-primitive storage"))
     }
 }
 
@@ -1596,7 +1828,9 @@ fn extrema_group_input(
     storage: OutputStorage,
     node_id: &str,
 ) -> Result<TypedGroupInput> {
-    if storage.is_signed() {
+    if storage == OutputStorage::Value {
+        Ok(TypedGroupInput::Values(input.clone()))
+    } else if storage.is_signed() {
         cast_signed(input, node_id).map(TypedGroupInput::Signed)
     } else if storage.is_unsigned() {
         cast_unsigned(input, node_id).map(TypedGroupInput::Unsigned)
@@ -1658,6 +1892,10 @@ impl RollingKernelState {
                 &self.kernel_fingerprint,
                 entities,
                 &self.states,
+                &self
+                    .slab
+                    .as_ref()
+                    .map(crate::state::StateTable::canonical_state_for_test),
                 &self.last_identity
             )
         )
@@ -1757,6 +1995,7 @@ impl RollingKernelState {
                 entities,
                 direct_entities: HashMap::new(),
                 states,
+                slab: None,
                 last_identity: None,
             },
             entity_ids,
@@ -1850,7 +2089,6 @@ fn fill_typed_rows_impl<const HAS_DECAY: bool>(
                 inputs.event_times.value(row_index),
                 entity,
                 row_index,
-                plan.numerical_profile,
                 plan.nan_as_value,
                 node_id,
             )?;
@@ -1889,7 +2127,6 @@ fn update_typed_groups(
     event_time: i64,
     entity: &mut TypedEntityState,
     row_index: usize,
-    numerical_profile: RollingNumericalProfile,
     nan_as_value: bool,
     node_id: &str,
 ) -> Result<()> {
@@ -1898,21 +2135,12 @@ fn update_typed_groups(
             entity,
             inputs,
             row_index,
-            numerical_profile,
             nan_as_value,
             node_id,
         );
     }
     for (state, input) in entity.groups.iter_mut().zip(inputs) {
-        state.update(
-            event_time,
-            input,
-            row_index,
-            numerical_profile,
-            nan_as_value,
-            entity.transition_count,
-            node_id,
-        )?;
+        state.update(event_time, input, row_index, nan_as_value, node_id)?;
     }
     Ok(())
 }
@@ -1941,49 +2169,190 @@ fn append_typed_outputs<const HAS_DECAY: bool>(
     Ok(())
 }
 
+fn lag_storage(data_type: &DataType, delta: bool) -> std::result::Result<OutputStorage, String> {
+    match data_type {
+        DataType::Utf8 if !delta => Ok(OutputStorage::Utf8),
+        DataType::Utf8 => Err("typed delta requires a numeric input".into()),
+        DataType::Timestamp(TimeUnit::Microsecond, timezone)
+            if timezone.as_deref() == Some("UTC") && !delta =>
+        {
+            Ok(OutputStorage::TimestampMicrosecondUtc)
+        }
+        DataType::Timestamp(TimeUnit::Microsecond, None) if !delta => {
+            Ok(OutputStorage::TimestampMicrosecond)
+        }
+        DataType::Date32 if !delta => Ok(OutputStorage::Date32),
+        DataType::Date64 if !delta => Ok(OutputStorage::Date64),
+        DataType::Time64(TimeUnit::Microsecond) if !delta => Ok(OutputStorage::Time64Microsecond),
+        DataType::Duration(TimeUnit::Microsecond) if !delta => {
+            Ok(OutputStorage::DurationMicrosecond)
+        }
+        _ => Ok(extrema_storage(data_type)),
+    }
+}
+
+fn compile_lag_group(
+    output: &CompiledRollingOutput,
+    periods: u64,
+    groups: &mut Vec<TypedGroupPlan>,
+    delta: bool,
+) -> std::result::Result<(), String> {
+    if output.input_type != output.output_type {
+        return Err("typed lag/delta requires matching input and output types".into());
+    }
+    let storage = lag_storage(&output.input_type, delta)?;
+    let periods =
+        usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
+    if !groups.iter().any(|group| {
+        matches!(group,
+            TypedGroupPlan::Lag { input_index, periods: existing, .. }
+            if *input_index == output.input_index && *existing == periods
+        )
+    }) {
+        groups.push(TypedGroupPlan::Lag {
+            input_index: output.input_index,
+            periods,
+            storage,
+        });
+    }
+    Ok(())
+}
+
+fn compile_scan_group(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    groups: &mut Vec<TypedGroupPlan>,
+) -> std::result::Result<(), String> {
+    let storage = extrema_storage(&output.input_type);
+    if storage == OutputStorage::Value && scan.kind != ScanKind::UniqueCount {
+        return Err("typed non-numeric scans require unique_count".into());
+    }
+    match scan.frame {
+        CompiledFrame::Rows(rows) => compile_rows_scan_group(output, scan, rows, storage, groups),
+        CompiledFrame::Duration(duration) => {
+            compile_duration_scan_group(output, scan, duration, storage, groups);
+            Ok(())
+        }
+    }
+}
+
+fn compile_rows_scan_group(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    rows: u64,
+    storage: OutputStorage,
+    groups: &mut Vec<TypedGroupPlan>,
+) -> std::result::Result<(), String> {
+    let window = usize::try_from(rows)
+        .map_err(|_| "scan row window does not fit the platform usize")?
+        .max(1);
+    if !groups.iter().any(|group| {
+        matches!(group,
+            TypedGroupPlan::Scan { input_index, kind, window: existing, .. }
+            if *input_index == output.input_index && *kind == scan.kind && *existing == window
+        )
+    }) {
+        groups.push(TypedGroupPlan::Scan {
+            input_index: output.input_index,
+            kind: scan.kind,
+            window,
+            storage,
+        });
+    }
+    Ok(())
+}
+
+fn compile_duration_scan_group(
+    output: &CompiledRollingOutput,
+    scan: super::CompiledScan,
+    duration: u64,
+    storage: OutputStorage,
+    groups: &mut Vec<TypedGroupPlan>,
+) {
+    if !groups.iter().any(|group| {
+        matches!(group,
+            TypedGroupPlan::DurationScan { input_index, kind, duration: existing, .. }
+            if *input_index == output.input_index && *kind == scan.kind && *existing == duration
+        )
+    }) {
+        groups.push(TypedGroupPlan::DurationScan {
+            input_index: output.input_index,
+            kind: scan.kind,
+            duration,
+            storage,
+        });
+    }
+}
+
+fn compile_indicator_group(group: &super::indicators::Group) -> TypedGroupPlan {
+    match group {
+        super::indicators::Group::Macd(group) => TypedGroupPlan::Macd {
+            input_index: group.input(),
+            options: group.options(),
+        },
+        super::indicators::Group::Rsi { input, period, .. } => TypedGroupPlan::Rsi {
+            input_index: *input,
+            period: *period,
+        },
+        super::indicators::Group::Atr { inputs, period, .. } => TypedGroupPlan::Atr {
+            inputs: *inputs,
+            period: *period,
+        },
+    }
+}
+
 fn compile_typed_plan(
     input_schema: &Schema,
     outputs: &[CompiledRollingOutput],
     window_groups: &[CompiledWindowGroup],
+    indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<(Vec<TypedGroupPlan>, Vec<TypedOutputPlan>), String> {
     let mut groups = compile_typed_groups(input_schema, window_groups)?;
+    for group in indicator_groups {
+        groups.push(compile_indicator_group(group));
+    }
     for output in outputs {
-        let CompiledEvaluation::Scan(scan) = output.evaluation else {
-            continue;
-        };
-        if output.input_type != DataType::Float64 {
-            return Err("typed scan requires Float64 input".into());
-        }
-        let CompiledFrame::Rows(rows) = scan.frame else {
-            return Err("typed scan requires a row frame".into());
-        };
-        let window = usize::try_from(rows)
-            .map_err(|_| "scan row window does not fit the platform usize")?
-            .max(1);
-        if !matches!(
-            scan.kind,
-            ScanKind::Argmax | ScanKind::Argmin | ScanKind::UniqueCount | ScanKind::Decay
-        ) {
-            return Err("typed scan requires argmax, argmin, or unique_count".into());
-        }
-        if !groups.iter().any(|group| {
-            matches!(group,
-                TypedGroupPlan::Scan { input_index, kind, window: existing }
-                if *input_index == output.input_index && *kind == scan.kind && *existing == window
-            )
-        }) {
-            groups.push(TypedGroupPlan::Scan {
-                input_index: output.input_index,
-                kind: scan.kind,
-                window,
-            });
+        match &output.evaluation {
+            CompiledEvaluation::Lag { periods } => {
+                compile_lag_group(output, *periods, &mut groups, false)?;
+            }
+            CompiledEvaluation::Delta { periods } => {
+                compile_lag_group(output, *periods, &mut groups, true)?;
+            }
+            CompiledEvaluation::Scan(scan) => compile_scan_group(output, *scan, &mut groups)?,
+            _ => {}
         }
     }
-    let typed_outputs = compile_typed_outputs(outputs, &groups)?;
+    let typed_outputs = compile_typed_outputs(outputs, &groups, indicator_groups)?;
+    mark_dispersion_groups(&mut groups, &typed_outputs);
     if groups.is_empty() || typed_outputs.is_empty() {
         return Err("requires at least one typed rolling output".into());
     }
     Ok((groups, typed_outputs))
+}
+
+fn mark_dispersion_groups(groups: &mut [TypedGroupPlan], outputs: &[TypedOutputPlan]) {
+    for output in outputs {
+        match output.kind {
+            TypedOutputKind::Statistic(Statistic::Variance | Statistic::Stddev) => {
+                if let Some(dispersion) = groups[output.group].dispersion_mut() {
+                    *dispersion = true;
+                }
+            }
+            TypedOutputKind::Difference { left, right } => {
+                for readout in [left, right] {
+                    if matches!(
+                        readout.kind,
+                        TypedFloatReadoutKind::Variance | TypedFloatReadoutKind::Stddev
+                    ) && let Some(dispersion) = groups[readout.group].dispersion_mut()
+                    {
+                        *dispersion = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn compile_typed_groups(
@@ -2050,11 +2419,24 @@ fn compile_numeric_group(
                 DataType::Float32 | DataType::Float64
             ) =>
         {
-            Ok(TypedGroupPlan::Numeric { input_index, frame })
+            Ok(TypedGroupPlan::Numeric {
+                input_index,
+                frame,
+                dispersion: false,
+            })
         }
-        SumClass::Signed => Ok(TypedGroupPlan::Signed { input_index, frame }),
-        SumClass::Unsigned => Ok(TypedGroupPlan::Unsigned { input_index, frame }),
-        _ => Err("requires primitive numeric window groups".into()),
+        SumClass::Signed => Ok(TypedGroupPlan::Signed {
+            input_index,
+            frame,
+            dispersion: false,
+        }),
+        SumClass::Unsigned => Ok(TypedGroupPlan::Unsigned {
+            input_index,
+            frame,
+            dispersion: false,
+        }),
+        SumClass::CountOnly => Ok(TypedGroupPlan::Count { input_index, frame }),
+        SumClass::Float => Err("requires primitive numeric window groups".into()),
     }
 }
 
@@ -2069,23 +2451,23 @@ fn compile_extrema_group(
         input_index,
         frame,
         descending,
-        storage: extrema_storage(input_schema.field(input_index).data_type())?,
+        storage: extrema_storage(input_schema.field(input_index).data_type()),
     })
 }
 
-fn extrema_storage(data_type: &DataType) -> std::result::Result<OutputStorage, String> {
+fn extrema_storage(data_type: &DataType) -> OutputStorage {
     match data_type {
-        DataType::Int8 => Ok(OutputStorage::Int8),
-        DataType::Int16 => Ok(OutputStorage::Int16),
-        DataType::Int32 => Ok(OutputStorage::Int32),
-        DataType::Int64 => Ok(OutputStorage::Int64),
-        DataType::UInt8 => Ok(OutputStorage::UInt8),
-        DataType::UInt16 => Ok(OutputStorage::UInt16),
-        DataType::UInt32 => Ok(OutputStorage::UInt32),
-        DataType::UInt64 => Ok(OutputStorage::UInt64),
-        DataType::Float32 => Ok(OutputStorage::Float32),
-        DataType::Float64 => Ok(OutputStorage::Float64),
-        _ => Err("requires primitive numeric extrema input".into()),
+        DataType::Int8 => OutputStorage::Int8,
+        DataType::Int16 => OutputStorage::Int16,
+        DataType::Int32 => OutputStorage::Int32,
+        DataType::Int64 => OutputStorage::Int64,
+        DataType::UInt8 => OutputStorage::UInt8,
+        DataType::UInt16 => OutputStorage::UInt16,
+        DataType::UInt32 => OutputStorage::UInt32,
+        DataType::UInt64 => OutputStorage::UInt64,
+        DataType::Float32 => OutputStorage::Float32,
+        DataType::Float64 => OutputStorage::Float64,
+        _ => OutputStorage::Value,
     }
 }
 
@@ -2127,10 +2509,11 @@ fn require_numeric_type(input_schema: &Schema, index: usize) -> std::result::Res
 fn compile_typed_outputs(
     outputs: &[CompiledRollingOutput],
     groups: &[TypedGroupPlan],
+    indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<Vec<TypedOutputPlan>, String> {
     let mut typed_outputs = Vec::with_capacity(outputs.len());
     for output in outputs {
-        let plan = compile_typed_output(output, groups)?;
+        let plan = compile_typed_output(output, groups, indicator_groups)?;
         if !typed_output_groups_are_valid(&plan, groups.len()) {
             return Err("aggregate group index is outside the typed plan".into());
         }
@@ -2142,6 +2525,7 @@ fn compile_typed_outputs(
 fn compile_typed_output(
     output: &CompiledRollingOutput,
     groups: &[TypedGroupPlan],
+    indicator_groups: &[super::indicators::Group],
 ) -> std::result::Result<TypedOutputPlan, String> {
     match &output.evaluation {
         CompiledEvaluation::Cumulative(aggregate) => cumulative::compile_output(output, aggregate),
@@ -2149,9 +2533,82 @@ fn compile_typed_output(
         CompiledEvaluation::Pair(pair) => compile_pair_output(pair),
         CompiledEvaluation::Ewma(ewma) => compile_ewma_output(ewma, groups),
         CompiledEvaluation::Difference(difference) => compile_difference_output(difference),
+        CompiledEvaluation::Lag { periods } => compile_lag_output(output, *periods, groups, false),
+        CompiledEvaluation::Delta { periods } => compile_lag_output(output, *periods, groups, true),
         CompiledEvaluation::Scan(scan) => compile_scan_output(output, *scan, groups),
-        _ => Err("requires aggregate, pair, EWMA, or fused difference outputs".into()),
+        CompiledEvaluation::Indicator(readout) => {
+            compile_indicator_output(*readout, groups, indicator_groups)
+        }
     }
+}
+
+fn compile_indicator_output(
+    readout: usize,
+    groups: &[TypedGroupPlan],
+    indicator_groups: &[super::indicators::Group],
+) -> std::result::Result<TypedOutputPlan, String> {
+    let base = groups.len() - indicator_groups.len();
+    let mut remaining = readout;
+    for (index, group) in indicator_groups.iter().enumerate() {
+        let width = if matches!(group, super::indicators::Group::Macd(_)) {
+            3
+        } else {
+            1
+        };
+        if remaining < width {
+            let kind = match group {
+                super::indicators::Group::Macd(_) => TypedOutputKind::Macd(remaining),
+                super::indicators::Group::Rsi { .. } => TypedOutputKind::Rsi,
+                super::indicators::Group::Atr { .. } => TypedOutputKind::Atr,
+            };
+            return Ok(TypedOutputPlan {
+                group: base + index,
+                kind,
+                storage: OutputStorage::Float64,
+                min_periods: 0,
+                ddof: 0,
+            });
+        }
+        remaining -= width;
+    }
+    Err("indicator readout is outside the typed plan".into())
+}
+
+fn compile_lag_output(
+    output: &CompiledRollingOutput,
+    periods: u64,
+    groups: &[TypedGroupPlan],
+    delta: bool,
+) -> std::result::Result<TypedOutputPlan, String> {
+    require_generated_transition(
+        if delta { "delta" } else { "lag" },
+        GeneratedTransition::Lag,
+    )?;
+    let periods =
+        usize::try_from(periods).map_err(|_| "lag/delta periods do not fit the platform usize")?;
+    let group = groups
+        .iter()
+        .position(|group| {
+            matches!(group,
+                TypedGroupPlan::Lag { input_index, periods: existing, .. }
+                if *input_index == output.input_index && *existing == periods
+            )
+        })
+        .ok_or_else(|| "typed lag/delta group is missing".to_owned())?;
+    let TypedGroupPlan::Lag { storage, .. } = groups[group] else {
+        unreachable!("typed lag/delta group kind was checked")
+    };
+    Ok(TypedOutputPlan {
+        group,
+        kind: if delta {
+            TypedOutputKind::Delta
+        } else {
+            TypedOutputKind::Lag
+        },
+        storage,
+        min_periods: 0,
+        ddof: 0,
+    })
 }
 
 fn compile_scan_output(
@@ -2159,22 +2616,19 @@ fn compile_scan_output(
     scan: super::CompiledScan,
     groups: &[TypedGroupPlan],
 ) -> std::result::Result<TypedOutputPlan, String> {
-    let primitive = scan_primitive(scan.kind)?;
-    require_generated_transition(primitive, GeneratedTransition::Scan)?;
-    let CompiledFrame::Rows(rows) = scan.frame else {
-        return Err("typed scan requires a row frame".into());
-    };
-    let window = usize::try_from(rows)
-        .map_err(|_| "scan row window does not fit the platform usize")?
-        .max(1);
+    let primitive = scan_primitive(scan.kind);
+    if !matches!(scan.kind, ScanKind::Rank | ScanKind::Quantile) {
+        require_generated_transition(primitive, GeneratedTransition::Scan)?;
+    }
+    let frame = TypedFrame::try_from(scan.frame)?;
     let group = groups
         .iter()
-        .position(|group| scan_group_matches(group, output.input_index, scan.kind, window))
+        .position(|group| scan_group_matches(group, output.input_index, scan.kind, frame))
         .ok_or_else(|| "typed scan group is missing".to_owned())?;
     Ok(TypedOutputPlan {
         group,
         kind: TypedOutputKind::Scan(scan.kind),
-        storage: if scan.kind == ScanKind::Decay {
+        storage: if matches!(scan.kind, ScanKind::Decay | ScanKind::Quantile) {
             OutputStorage::Float64
         } else {
             OutputStorage::Count
@@ -2184,26 +2638,44 @@ fn compile_scan_output(
     })
 }
 
-fn scan_primitive(kind: ScanKind) -> std::result::Result<&'static str, String> {
-    Ok(match kind {
+fn scan_primitive(kind: ScanKind) -> &'static str {
+    match kind {
         ScanKind::Argmax => "argmax",
         ScanKind::Argmin => "argmin",
+        ScanKind::Rank => "rank",
+        ScanKind::Quantile => "quantile",
         ScanKind::UniqueCount => "unique_count",
         ScanKind::Decay => "decay",
-        _ => return Err("unsupported typed scan".into()),
-    })
+    }
 }
 
 fn scan_group_matches(
     group: &TypedGroupPlan,
     input_index: usize,
     kind: ScanKind,
-    window: usize,
+    frame: TypedFrame,
 ) -> bool {
-    matches!(group,
-        TypedGroupPlan::Scan { input_index: existing_input, kind: existing_kind, window: existing_window }
-        if *existing_input == input_index && *existing_kind == kind && *existing_window == window
-    )
+    match (group, frame) {
+        (
+            TypedGroupPlan::Scan {
+                input_index: existing_input,
+                kind: existing_kind,
+                window,
+                ..
+            },
+            TypedFrame::Rows(rows),
+        ) => *existing_input == input_index && *existing_kind == kind && *window == rows.max(1),
+        (
+            TypedGroupPlan::DurationScan {
+                input_index: existing_input,
+                kind: existing_kind,
+                duration,
+                ..
+            },
+            TypedFrame::Duration(expected),
+        ) => *existing_input == input_index && *existing_kind == kind && *duration == expected,
+        _ => false,
+    }
 }
 
 fn compile_aggregate_output(
@@ -2368,9 +2840,9 @@ fn output_storage(
         return Ok(OutputStorage::Float64);
     }
     match groups.get(aggregate.group) {
-        Some(TypedGroupPlan::Signed { .. }) => Ok(OutputStorage::Int64),
-        Some(TypedGroupPlan::Unsigned { .. }) => Ok(OutputStorage::UInt64),
-        Some(TypedGroupPlan::Numeric { .. }) => Ok(OutputStorage::Float64),
+        Some(TypedGroupPlan::Signed { dispersion: _, .. }) => Ok(OutputStorage::Int64),
+        Some(TypedGroupPlan::Unsigned { dispersion: _, .. }) => Ok(OutputStorage::UInt64),
+        Some(TypedGroupPlan::Numeric { dispersion: _, .. }) => Ok(OutputStorage::Float64),
         _ => Err("typed rolling sum does not reference a numeric group".into()),
     }
 }
@@ -2401,7 +2873,6 @@ fn duplicate_identity_error(
 struct KernelFingerprintInput<'a> {
     input_schema: &'a Schema,
     state_layout_version: u32,
-    numerical_profile: RollingNumericalProfile,
     selection: KernelSelection,
     complexity: KernelComplexity,
     event_time_index: usize,
@@ -2443,7 +2914,7 @@ fn kernel_fingerprint(input: &KernelFingerprintInput<'_>) -> String {
     let descriptor = format!(
         "version={ROLLING_KERNEL_PLAN_VERSION}|state={}|numeric={}|selection={:?}|complexity={:?}|schema={schema:?}|event_time={}|order={:?}|partition={:?}|duplicates={:?}|groups={:?}|outputs={:?}|fallback={:?}",
         input.state_layout_version,
-        input.numerical_profile.name(),
+        "compensated-sliding-1",
         input.selection,
         input.complexity,
         input.event_time_index,
@@ -2659,16 +3130,6 @@ impl TypedEntityState {
         }
     }
 
-    fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
-        if self.shared_rows.is_some() {
-            return self.rebase_shared_rows(node_id);
-        }
-        for group in &mut self.groups {
-            group.force_stable_v2_rebase(node_id)?;
-        }
-        Ok(())
-    }
-
     fn estimated_bytes(&self) -> usize {
         size_of::<Self>()
             + self
@@ -2706,58 +3167,660 @@ impl TypedEntityState {
 enum TypedWindowState {
     Cumulative(TypedCumulativeState),
     Numeric(Float64NumericState),
+    Count(TypedCountState),
     Exact(ExactNumericState),
     Extrema(TypedExtremaState),
+    ValueExtrema(TypedValueExtremaState),
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
+    ValueScan(TypedValueScanState),
+    Lag(TypedLagState),
+    Utf8Lag(TypedUtf8LagState),
+    ValueLag(TypedValueLagState),
+    Macd(TypedMacdState),
+    Rsi(TypedRsiState),
+    Atr(TypedAtrState),
     Decay(Option<Arc<decay::OwnedDecay>>),
 }
 
 #[derive(Clone, Debug)]
-struct TypedScanState {
-    scan: IncrementalScanState,
-    next_index: usize,
-    latest: Option<u64>,
+struct TypedCountState {
+    samples: SlidingSampleQueue<()>,
+    valid_count: u64,
 }
 
-impl TypedScanState {
-    fn new(kind: ScanKind, window: usize) -> Self {
+impl TypedCountState {
+    fn new(frame: TypedFrame, entity_rows: usize) -> Self {
         Self {
-            scan: IncrementalScanState::new(kind, window, 1)
-                .expect("typed scan kind was validated at compilation"),
-            next_index: 0,
-            latest: None,
+            samples: SlidingSampleQueue::new(frame, entity_rows),
+            valid_count: 0,
         }
     }
 
-    fn update(&mut self, value: Option<f64>, node_id: &str) -> Result<()> {
-        self.latest = self.scan.advance_float(self.next_index, value);
-        self.next_index = self
-            .next_index
+    fn update(&mut self, event_time: i64, valid: bool, node_id: &str) -> Result<()> {
+        if valid {
+            self.valid_count = self
+                .valid_count
+                .checked_add(1)
+                .ok_or_else(|| operator_error(node_id, "typed rolling count overflowed"))?;
+        }
+        self.samples.push(event_time, valid.then_some(()));
+        self.samples.expire(event_time, |()| {
+            self.valid_count = self
+                .valid_count
+                .checked_sub(1)
+                .ok_or_else(|| internal_error("typed rolling count removal without an add"))?;
+            Ok(())
+        })
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.samples
+            .estimated_bytes(size_of::<Self>(), size_of::<TimedSample<()>>())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TypedScanValue {
+    Float(f64),
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl TypedScanValue {
+    fn compare(self, other: Self) -> Result<Ordering> {
+        match (self, other) {
+            (Self::Float(left), Self::Float(right)) => {
+                Ok(left.partial_cmp(&right).unwrap_or(Ordering::Equal))
+            }
+            (Self::Signed(left), Self::Signed(right)) => Ok(left.cmp(&right)),
+            (Self::Unsigned(left), Self::Unsigned(right)) => Ok(left.cmp(&right)),
+            _ => Err(internal_error(
+                "typed rolling scan values have mixed storage",
+            )),
+        }
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "decay readouts use the existing Float64 conversion contract"
+    )]
+    fn as_f64(self) -> f64 {
+        match self {
+            Self::Float(value) => value,
+            Self::Signed(value) => value as f64,
+            Self::Unsigned(value) => value as f64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum TypedScanKey {
+    Float(u64),
+    Signed(i64),
+    Unsigned(u64),
+}
+
+impl TypedScanKey {
+    fn new(value: TypedScanValue) -> Self {
+        match value {
+            TypedScanValue::Float(value) => {
+                Self::Float(if value == 0.0 { 0 } else { value.to_bits() })
+            }
+            TypedScanValue::Signed(value) => Self::Signed(value),
+            TypedScanValue::Unsigned(value) => Self::Unsigned(value),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TypedScanSample {
+    ordinal: u64,
+    event_time: i64,
+    value: Option<TypedScanValue>,
+}
+
+#[derive(Clone, Debug)]
+struct TypedScanState {
+    kind: ScanKind,
+    frame: TypedFrame,
+    recent: VecDeque<TypedScanSample>,
+    candidates: VecDeque<(u64, TypedScanValue)>,
+    counts: HashMap<TypedScanKey, usize>,
+    valid_count: u64,
+    next_ordinal: u64,
+    latest_count: Option<u64>,
+    latest_float: Option<f64>,
+}
+
+impl TypedScanState {
+    fn new(kind: ScanKind, frame: TypedFrame, entity_rows: usize) -> Self {
+        let capacity = frame.estimated_samples().min(entity_rows);
+        Self {
+            kind,
+            frame,
+            recent: VecDeque::with_capacity(capacity),
+            candidates: VecDeque::with_capacity(capacity),
+            counts: HashMap::new(),
+            valid_count: 0,
+            next_ordinal: 0,
+            latest_count: None,
+            latest_float: None,
+        }
+    }
+
+    fn update(
+        &mut self,
+        event_time: i64,
+        sample: Option<TypedScanValue>,
+        node_id: &str,
+    ) -> Result<()> {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal = self
+            .next_ordinal
             .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "typed rolling scan index overflowed"))?;
+            .ok_or_else(|| operator_error(node_id, "typed rolling scan ordinal overflowed"))?;
+        match self.kind {
+            ScanKind::Argmax | ScanKind::Argmin => self.add_extrema(ordinal, sample, node_id)?,
+            ScanKind::UniqueCount => self.add_unique(sample, node_id)?,
+            ScanKind::Rank | ScanKind::Quantile | ScanKind::Decay => {
+                if sample.is_some() {
+                    self.valid_count = self.valid_count.checked_add(1).ok_or_else(|| {
+                        operator_error(node_id, "typed rolling scan count overflowed")
+                    })?;
+                }
+            }
+        }
+        self.recent.push_back(TypedScanSample {
+            ordinal,
+            event_time,
+            value: sample,
+        });
+        self.expire(event_time, node_id)?;
+        self.refresh(sample, node_id)
+    }
+
+    fn add_extrema(
+        &mut self,
+        ordinal: u64,
+        sample: Option<TypedScanValue>,
+        node_id: &str,
+    ) -> Result<()> {
+        let Some(sample) = sample else {
+            return Ok(());
+        };
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "typed rolling scan count overflowed"))?;
+        while let Some((_, previous)) = self.candidates.back().copied() {
+            let ordering = previous.compare(sample)?;
+            let remove = if self.kind == ScanKind::Argmax {
+                ordering == Ordering::Less
+            } else {
+                ordering == Ordering::Greater
+            };
+            if !remove {
+                break;
+            }
+            self.candidates.pop_back();
+        }
+        self.candidates.push_back((ordinal, sample));
+        Ok(())
+    }
+
+    fn add_unique(&mut self, sample: Option<TypedScanValue>, node_id: &str) -> Result<()> {
+        let Some(key) = sample.map(TypedScanKey::new) else {
+            return Ok(());
+        };
+        self.valid_count = self
+            .valid_count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "typed rolling scan count overflowed"))?;
+        let count = self.counts.entry(key).or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or_else(|| operator_error(node_id, "typed rolling unique count overflowed"))?;
+        Ok(())
+    }
+
+    fn expire(&mut self, event_time: i64, _node_id: &str) -> Result<()> {
+        loop {
+            let remove = match self.frame {
+                TypedFrame::Rows(window) => self.recent.len() > window,
+                TypedFrame::Duration(micros) => {
+                    let bound = i128::from(event_time) - i128::from(micros);
+                    self.recent
+                        .front()
+                        .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                }
+            };
+            if !remove {
+                return Ok(());
+            }
+            let leaving = self.recent.pop_front().expect("recent sample exists");
+            if let Some(value) = leaving.value {
+                self.valid_count = self
+                    .valid_count
+                    .checked_sub(1)
+                    .ok_or_else(|| internal_error("typed rolling scan removal without an add"))?;
+                if self.kind == ScanKind::UniqueCount {
+                    let key = TypedScanKey::new(value);
+                    let count = self.counts.get_mut(&key).expect("recent key is counted");
+                    *count -= 1;
+                    if *count == 0 {
+                        self.counts.remove(&key);
+                    }
+                } else if self
+                    .candidates
+                    .front()
+                    .is_some_and(|(position, _)| *position == leaving.ordinal)
+                {
+                    self.candidates.pop_front();
+                }
+            }
+            if matches!(self.frame, TypedFrame::Rows(_)) {
+                return Ok(());
+            }
+        }
+    }
+
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "rank, quantile, and decay readouts are defined as Float64"
+    )]
+    fn refresh(&mut self, current: Option<TypedScanValue>, node_id: &str) -> Result<()> {
+        self.latest_count = None;
+        self.latest_float = None;
+        match self.kind {
+            ScanKind::Argmax | ScanKind::Argmin => {
+                self.latest_count = self
+                    .candidates
+                    .front()
+                    .map(|(position, _)| self.next_ordinal - 1 - position);
+            }
+            ScanKind::UniqueCount => {
+                self.latest_count = Some(
+                    u64::try_from(self.counts.len())
+                        .map_err(|_| operator_error(node_id, "rolling unique-count overflowed"))?,
+                );
+            }
+            ScanKind::Rank | ScanKind::Quantile => {
+                let Some(current) = current else {
+                    return Ok(());
+                };
+                let mut rank = 0_usize;
+                for value in self.recent.iter().filter_map(|sample| sample.value) {
+                    if value.compare(current)? == Ordering::Less {
+                        rank = rank.checked_add(1).ok_or_else(|| {
+                            operator_error(node_id, "typed rolling rank overflowed")
+                        })?;
+                    }
+                }
+                self.latest_count = Some(
+                    u64::try_from(rank)
+                        .map_err(|_| operator_error(node_id, "typed rolling rank overflowed"))?,
+                );
+                self.latest_float =
+                    (self.valid_count > 1).then_some(rank as f64 / (self.valid_count - 1) as f64);
+            }
+            ScanKind::Decay => {
+                let count = self
+                    .recent
+                    .iter()
+                    .filter(|sample| sample.value.is_some())
+                    .count();
+                if count == 0 {
+                    return Ok(());
+                }
+                let size = match self.frame {
+                    TypedFrame::Rows(window) => window,
+                    TypedFrame::Duration(_) => count,
+                };
+                let first_weight = size - count + 1;
+                let (weighted_sum, total_weight) = self
+                    .recent
+                    .iter()
+                    .filter_map(|sample| sample.value)
+                    .enumerate()
+                    .fold((0.0, 0.0), |(sum, total), (index, value)| {
+                        let weight = (first_weight + index) as f64;
+                        (sum + weight * value.as_f64(), total + weight)
+                    });
+                self.latest_float = Some(weighted_sum / total_weight);
+            }
+        }
+        Ok(())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(
+                self.recent
+                    .capacity()
+                    .saturating_mul(size_of::<TypedScanSample>()),
+            )
+            .saturating_add(
+                self.candidates
+                    .capacity()
+                    .saturating_mul(size_of::<(u64, TypedScanValue)>()),
+            )
+            .saturating_add(
+                self.counts
+                    .capacity()
+                    .saturating_mul(size_of::<(TypedScanKey, usize)>()),
+            )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LagValue {
+    Float(Option<f64>),
+    Signed(Option<i64>),
+    Unsigned(Option<u64>),
+}
+
+impl LagValue {
+    fn null_for(storage: OutputStorage) -> Self {
+        if storage.is_signed() {
+            Self::Signed(None)
+        } else if storage.is_unsigned() {
+            Self::Unsigned(None)
+        } else {
+            Self::Float(None)
+        }
+    }
+
+    const fn null(self) -> Self {
+        match self {
+            Self::Float(_) => Self::Float(None),
+            Self::Signed(_) => Self::Signed(None),
+            Self::Unsigned(_) => Self::Unsigned(None),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TypedLagState {
+    periods: usize,
+    history: VecDeque<LagValue>,
+    current: LagValue,
+    reference: LagValue,
+}
+
+impl TypedLagState {
+    fn new(periods: usize, storage: OutputStorage) -> Self {
+        Self {
+            periods,
+            history: VecDeque::with_capacity(periods),
+            current: LagValue::null_for(storage),
+            reference: LagValue::null_for(storage),
+        }
+    }
+
+    fn update(&mut self, sample: LagValue) {
+        self.current = sample;
+        self.reference = if self.periods == 0 {
+            sample
+        } else if self.history.len() >= self.periods {
+            self.history[self.history.len() - self.periods]
+        } else {
+            sample.null()
+        };
+        if self.periods > 0 {
+            self.history.push_back(sample);
+            if self.history.len() > self.periods {
+                self.history.pop_front();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TypedUtf8LagState {
+    periods: usize,
+    history: VecDeque<Option<String>>,
+    current: Option<String>,
+    reference: Option<String>,
+}
+
+impl TypedUtf8LagState {
+    fn new(periods: usize) -> Self {
+        Self {
+            periods,
+            history: VecDeque::with_capacity(periods),
+            current: None,
+            reference: None,
+        }
+    }
+
+    fn update(&mut self, sample: Option<String>) {
+        self.current.clone_from(&sample);
+        self.reference = if self.periods == 0 {
+            sample.clone()
+        } else if self.history.len() >= self.periods {
+            self.history[self.history.len() - self.periods].clone()
+        } else {
+            None
+        };
+        if self.periods > 0 {
+            self.history.push_back(sample);
+            if self.history.len() > self.periods {
+                self.history.pop_front();
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TypedValueLagState {
+    periods: usize,
+    history: VecDeque<ArrayRef>,
+    reference: Option<ArrayRef>,
+}
+
+impl TypedValueLagState {
+    fn new(periods: usize) -> Self {
+        Self {
+            periods,
+            history: VecDeque::with_capacity(periods),
+            reference: None,
+        }
+    }
+
+    fn update(&mut self, sample: ArrayRef) {
+        self.reference = if self.periods == 0 {
+            Some(sample.clone())
+        } else if self.history.len() >= self.periods {
+            Some(self.history[self.history.len() - self.periods].clone())
+        } else {
+            None
+        };
+        if self.periods > 0 {
+            self.history.push_back(sample);
+            if self.history.len() > self.periods {
+                self.history.pop_front();
+            }
+        }
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(
+                self.history
+                    .capacity()
+                    .saturating_mul(size_of::<ArrayRef>()),
+            )
+            .saturating_add(
+                self.history
+                    .iter()
+                    .chain(&self.reference)
+                    .map(Array::get_array_memory_size)
+                    .sum::<usize>(),
+            )
+    }
+}
+
+#[derive(Clone)]
+struct TypedMacdState {
+    kernel: MacdKernel,
+    parameters: MacdParameters,
+    latest: [Option<f64>; 3],
+}
+
+impl std::fmt::Debug for TypedMacdState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedMacdState")
+            .field("latest", &self.latest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedMacdState {
+    fn new(options: MacdOptions) -> Self {
+        Self {
+            kernel: MacdKernel::default(),
+            parameters: MacdParameters::new(options),
+            latest: [None; 3],
+        }
+    }
+
+    fn update(&mut self, sample: Option<f64>) -> Result<()> {
+        self.latest = self.kernel.push(sample, &self.parameters)?;
         Ok(())
     }
 }
 
+#[derive(Clone)]
+struct TypedRsiState {
+    kernel: RsiKernel,
+    latest: Option<f64>,
+}
+
+impl std::fmt::Debug for TypedRsiState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedRsiState")
+            .field("latest", &self.latest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedRsiState {
+    fn new() -> Self {
+        Self {
+            kernel: RsiKernel::default(),
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, sample: Option<f64>, period: u64, field: &str) -> Result<()> {
+        self.latest = self.kernel.push(sample, period, field)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct TypedAtrState {
+    kernel: AtrKernel,
+    latest: Option<f64>,
+}
+
+impl std::fmt::Debug for TypedAtrState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TypedAtrState")
+            .field("latest", &self.latest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TypedAtrState {
+    fn new() -> Self {
+        Self {
+            kernel: AtrKernel::default(),
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, values: [Option<f64>; 3], period: u64, fields: [&str; 3]) -> Result<()> {
+        self.latest = self.kernel.push(values, period, fields)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod lag_state_tests {
+    use super::{LagValue, OutputStorage, TypedLagState};
+
+    #[test]
+    fn lag_preserves_null_nan_and_zero_period_references() {
+        let mut state = TypedLagState::new(1, OutputStorage::Float64);
+        state.update(LagValue::Float(Some(1.0)));
+        assert_eq!(state.reference, LagValue::Float(None));
+        state.update(LagValue::Float(Some(f64::NAN)));
+        assert_eq!(state.reference, LagValue::Float(Some(1.0)));
+        state.update(LagValue::Float(None));
+        assert!(matches!(
+            state.reference,
+            LagValue::Float(Some(value)) if value.is_nan()
+        ));
+        state.update(LagValue::Float(Some(3.0)));
+        assert_eq!(state.reference, LagValue::Float(None));
+        assert_eq!(state.current, LagValue::Float(Some(3.0)));
+
+        let mut zero = TypedLagState::new(0, OutputStorage::Float64);
+        zero.update(LagValue::Float(Some(4.0)));
+        assert_eq!(zero.reference, LagValue::Float(Some(4.0)));
+        zero.update(LagValue::Float(Some(5.0)));
+        assert_eq!(zero.reference, LagValue::Float(Some(5.0)));
+    }
+}
+
 impl TypedWindowState {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "typed state construction is one explicit variant dispatch"
+    )]
     fn new(group: TypedGroupPlan, entity_rows: usize) -> Self {
         match group {
             TypedGroupPlan::Cumulative { statistic, .. } => {
                 Self::Cumulative(TypedCumulativeState::new(statistic))
             }
-            TypedGroupPlan::Numeric { frame, .. } => {
-                Self::Numeric(Float64NumericState::new(frame, entity_rows))
+            TypedGroupPlan::Numeric {
+                frame, dispersion, ..
+            } => Self::Numeric(Float64NumericState::with_dispersion(
+                frame,
+                entity_rows,
+                dispersion,
+            )),
+            TypedGroupPlan::Count { frame, .. } => {
+                Self::Count(TypedCountState::new(frame, entity_rows))
             }
-            TypedGroupPlan::Signed { frame, .. } => {
-                Self::Exact(ExactNumericState::new(frame, SumClass::Signed, entity_rows))
-            }
-            TypedGroupPlan::Unsigned { frame, .. } => Self::Exact(ExactNumericState::new(
+            TypedGroupPlan::Signed {
+                frame, dispersion, ..
+            } => Self::Exact(ExactNumericState::with_dispersion(
+                frame,
+                SumClass::Signed,
+                entity_rows,
+                dispersion,
+            )),
+            TypedGroupPlan::Unsigned {
+                frame, dispersion, ..
+            } => Self::Exact(ExactNumericState::with_dispersion(
                 frame,
                 SumClass::Unsigned,
                 entity_rows,
+                dispersion,
             )),
+            TypedGroupPlan::Extrema {
+                frame,
+                descending,
+                storage: OutputStorage::Value,
+                ..
+            } => Self::ValueExtrema(TypedValueExtremaState::new(frame, descending, entity_rows)),
             TypedGroupPlan::Extrema {
                 frame, descending, ..
             } => Self::Extrema(TypedExtremaState::new(frame, descending, entity_rows)),
@@ -2768,17 +3831,60 @@ impl TypedWindowState {
                 alpha, cumulative, ..
             } => Self::Ewma(TypedEwmaState::new(alpha, cumulative)),
             TypedGroupPlan::Scan {
+                kind: ScanKind::UniqueCount,
+                window,
+                storage: OutputStorage::Value,
+                ..
+            } => Self::ValueScan(TypedValueScanState::new(
+                TypedFrame::Rows(window),
+                entity_rows,
+            )),
+            TypedGroupPlan::DurationScan {
+                kind: ScanKind::UniqueCount,
+                duration,
+                storage: OutputStorage::Value,
+                ..
+            } => Self::ValueScan(TypedValueScanState::new(
+                TypedFrame::Duration(duration),
+                entity_rows,
+            )),
+            TypedGroupPlan::Scan {
                 kind: ScanKind::Decay,
+                storage: OutputStorage::Float64,
                 ..
             } => Self::Decay(None),
-            TypedGroupPlan::Scan { kind, window, .. } => {
-                Self::Scan(TypedScanState::new(kind, window))
-            }
+            TypedGroupPlan::Scan { kind, window, .. } => Self::Scan(TypedScanState::new(
+                kind,
+                TypedFrame::Rows(window),
+                entity_rows,
+            )),
+            TypedGroupPlan::DurationScan { kind, duration, .. } => Self::Scan(TypedScanState::new(
+                kind,
+                TypedFrame::Duration(duration),
+                entity_rows,
+            )),
+            TypedGroupPlan::Rsi { .. } => Self::Rsi(TypedRsiState::new()),
+            TypedGroupPlan::Atr { .. } => Self::Atr(TypedAtrState::new()),
+            TypedGroupPlan::Macd { options, .. } => Self::Macd(TypedMacdState::new(options)),
+            TypedGroupPlan::Lag {
+                periods,
+                storage: OutputStorage::Utf8,
+                ..
+            } => Self::Utf8Lag(TypedUtf8LagState::new(periods)),
+            TypedGroupPlan::Lag {
+                periods,
+                storage: OutputStorage::Value,
+                ..
+            } => Self::ValueLag(TypedValueLagState::new(periods)),
+            TypedGroupPlan::Lag {
+                periods, storage, ..
+            } => Self::Lag(TypedLagState::new(periods, storage)),
         }
     }
 
     #[allow(
         clippy::too_many_arguments,
+        clippy::too_many_lines,
         reason = "the typed transition keeps row, numerical, and DataFusion NaN policy explicit"
     )]
     fn update(
@@ -2786,9 +3892,7 @@ impl TypedWindowState {
         event_time: i64,
         input: &TypedGroupInput,
         row_index: usize,
-        numerical_profile: RollingNumericalProfile,
         nan_as_value: bool,
-        transition_count: u64,
         node_id: &str,
     ) -> Result<()> {
         match (self, input) {
@@ -2796,28 +3900,99 @@ impl TypedWindowState {
             (Self::Numeric(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
                 valid_float64(input, row_index, nan_as_value),
-                numerical_profile,
-                transition_count,
                 node_id,
             ),
+            (Self::Count(state), TypedGroupInput::Values(input)) => {
+                state.update(event_time, input.is_valid(row_index), node_id)
+            }
             (Self::Exact(state), input) => {
                 update_exact_input(state, input, event_time, row_index, node_id)
             }
             (Self::Extrema(state), input) => {
                 update_extrema_input(state, input, event_time, row_index, node_id)
             }
+            (Self::ValueExtrema(state), TypedGroupInput::Values(input)) => {
+                state.update(event_time, input.slice(row_index, 1), node_id)
+            }
             (Self::Pair(state), TypedGroupInput::Pair(left, right)) => state.update(
                 event_time,
                 valid_float64_pair(left, right, row_index),
-                numerical_profile,
-                transition_count,
                 node_id,
             ),
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
             }
-            (Self::Scan(state), TypedGroupInput::Single(input)) => {
-                state.update(valid_float64(input, row_index, false), node_id)
+            (Self::Scan(state), TypedGroupInput::Single(input)) => state.update(
+                event_time,
+                valid_float64(input, row_index, false).map(TypedScanValue::Float),
+                node_id,
+            ),
+            (Self::Scan(state), TypedGroupInput::Signed(input)) => state.update(
+                event_time,
+                input
+                    .is_valid(row_index)
+                    .then(|| TypedScanValue::Signed(input.value(row_index))),
+                node_id,
+            ),
+            (Self::Scan(state), TypedGroupInput::Unsigned(input)) => state.update(
+                event_time,
+                input
+                    .is_valid(row_index)
+                    .then(|| TypedScanValue::Unsigned(input.value(row_index))),
+                node_id,
+            ),
+            (Self::ValueScan(state), TypedGroupInput::Values(input)) => {
+                state.update(event_time, input.slice(row_index, 1), node_id)
+            }
+            (Self::Lag(state), TypedGroupInput::Single(input)) => {
+                state.update(LagValue::Float(
+                    input.is_valid(row_index).then_some(input.value(row_index)),
+                ));
+                Ok(())
+            }
+            (Self::Lag(state), TypedGroupInput::Signed(input)) => {
+                state.update(LagValue::Signed(
+                    input.is_valid(row_index).then_some(input.value(row_index)),
+                ));
+                Ok(())
+            }
+            (Self::Lag(state), TypedGroupInput::Unsigned(input)) => {
+                state.update(LagValue::Unsigned(
+                    input.is_valid(row_index).then_some(input.value(row_index)),
+                ));
+                Ok(())
+            }
+            (Self::Utf8Lag(state), TypedGroupInput::Utf8(input)) => {
+                state.update(
+                    input
+                        .is_valid(row_index)
+                        .then(|| input.value(row_index).to_owned()),
+                );
+                Ok(())
+            }
+            (Self::ValueLag(state), TypedGroupInput::Values(input)) => {
+                state.update(input.slice(row_index, 1));
+                Ok(())
+            }
+            (Self::Rsi(state), TypedGroupInput::Rsi(input, field, period)) => state.update(
+                input.is_valid(row_index).then_some(input.value(row_index)),
+                *period,
+                field,
+            ),
+            (Self::Atr(state), TypedGroupInput::Atr(inputs, fields, period)) => {
+                let [high, low, close] = inputs;
+                state.update(
+                    [
+                        high.is_valid(row_index).then_some(high.value(row_index)),
+                        low.is_valid(row_index).then_some(low.value(row_index)),
+                        close.is_valid(row_index).then_some(close.value(row_index)),
+                    ],
+                    *period,
+                    fields.each_ref().map(String::as_str),
+                )
+            }
+            (Self::Macd(state), TypedGroupInput::Single(input)) => {
+                state.update(input.is_valid(row_index).then_some(input.value(row_index)))
             }
             (Self::Decay(state), input) => {
                 if let Some(state) = state {
@@ -2838,30 +4013,43 @@ impl TypedWindowState {
         }
     }
 
-    fn force_stable_v2_rebase(&mut self, node_id: &str) -> Result<()> {
-        match self {
-            Self::Numeric(state) => state.rebase_stable_v2(node_id),
-            Self::Pair(state) => state.rebase_stable_v2(node_id),
-            Self::Exact(_)
-            | Self::Extrema(_)
-            | Self::Ewma(_)
-            | Self::Scan(_)
-            | Self::Decay(_)
-            | Self::Cumulative(_) => Ok(()),
-        }
-    }
-
     fn estimated_bytes(&self) -> usize {
         match self {
             Self::Cumulative(_) => size_of::<TypedCumulativeState>(),
             Self::Numeric(state) => state.estimated_bytes(),
+            Self::Count(state) => state.estimated_bytes(),
             Self::Exact(state) => state.estimated_bytes(),
             Self::Extrema(state) => state.estimated_bytes(),
+            Self::ValueExtrema(state) => state.estimated_bytes(),
             Self::Pair(state) => state.estimated_bytes(),
             Self::Ewma(_) => TypedEwmaState::estimated_bytes(),
-            Self::Scan(state) => {
-                size_of::<TypedScanState>().saturating_add(state.scan.estimated_bytes())
-            }
+            Self::Scan(state) => state.estimated_bytes(),
+            Self::ValueScan(state) => state.estimated_bytes(),
+            Self::Lag(state) => size_of::<TypedLagState>().saturating_add(
+                state
+                    .history
+                    .capacity()
+                    .saturating_mul(size_of::<LagValue>()),
+            ),
+            Self::Utf8Lag(state) => size_of::<TypedUtf8LagState>()
+                .saturating_add(
+                    state
+                        .history
+                        .capacity()
+                        .saturating_mul(size_of::<Option<String>>()),
+                )
+                .saturating_add(
+                    state
+                        .history
+                        .iter()
+                        .chain([&state.current, &state.reference])
+                        .map(|value| value.as_ref().map_or(0, String::capacity))
+                        .sum::<usize>(),
+                ),
+            Self::ValueLag(state) => state.estimated_bytes(),
+            Self::Rsi(_) => size_of::<TypedRsiState>(),
+            Self::Atr(_) => size_of::<TypedAtrState>(),
+            Self::Macd(_) => size_of::<TypedMacdState>(),
             Self::Decay(state) => state.as_ref().map_or(0, |state| state.bytes()),
         }
     }
@@ -2869,10 +4057,22 @@ impl TypedWindowState {
     fn retained_rows(&self) -> usize {
         match self {
             Self::Numeric(state) => state.samples.len(),
+            Self::Count(state) => state.samples.len(),
             Self::Exact(state) => state.samples.len(),
             Self::Extrema(state) => state.values.len(),
+            Self::ValueExtrema(state) => state.values.len(),
             Self::Pair(state) => state.samples.len(),
-            Self::Cumulative(_) | Self::Ewma(_) | Self::Scan(_) | Self::Decay(_) => 0,
+            Self::Lag(state) => state.history.len(),
+            Self::Scan(state) => state.recent.len(),
+            Self::ValueScan(state) => state.values.len(),
+            Self::Utf8Lag(state) => state.history.len(),
+            Self::ValueLag(state) => state.history.len(),
+            Self::Cumulative(_)
+            | Self::Ewma(_)
+            | Self::Decay(_)
+            | Self::Macd(_)
+            | Self::Rsi(_)
+            | Self::Atr(_) => 0,
         }
     }
 }
@@ -2915,7 +4115,12 @@ fn update_extrema_input(
         TypedGroupInput::Unsigned(input) => input
             .is_valid(row)
             .then(|| ExtremaValue::Unsigned(input.value(row))),
-        TypedGroupInput::Pair(..) | TypedGroupInput::DecayReference(_) => {
+        TypedGroupInput::Pair(..)
+        | TypedGroupInput::Values(_)
+        | TypedGroupInput::Utf8(_)
+        | TypedGroupInput::Rsi(..)
+        | TypedGroupInput::Atr(..)
+        | TypedGroupInput::DecayReference(_) => {
             return Err(internal_error(
                 "typed rolling group state does not match its input plan",
             ));
@@ -3056,19 +4261,75 @@ enum ExactValue {
 }
 
 impl ExactNumericState {
+    #[cfg(test)]
     fn new(frame: TypedFrame, sum_class: SumClass, entity_rows: usize) -> Self {
+        Self::with_dispersion(frame, sum_class, entity_rows, true)
+    }
+
+    fn with_dispersion(
+        frame: TypedFrame,
+        sum_class: SumClass,
+        entity_rows: usize,
+        dispersion: bool,
+    ) -> Self {
         Self {
             samples: SlidingSampleQueue::new(frame, entity_rows),
-            accumulator: WindowAccumulator::new(sum_class),
+            accumulator: WindowAccumulator::with_dispersion(sum_class, dispersion),
         }
     }
 
     fn update(&mut self, event_time: i64, value: Option<ExactValue>, node_id: &str) -> Result<()> {
         if let Some(value) = value {
-            add_exact(&mut self.accumulator, value, node_id)?;
+            add_exact_sum(&mut self.accumulator, value, node_id)?;
         }
-        self.samples.push(event_time, value);
-        self.expire(event_time)
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                let leaving = (self.samples.values.len() >= window)
+                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
+                    .flatten();
+                if let Some(leaving) = leaving {
+                    remove_exact_sum(&mut self.accumulator, leaving)?;
+                }
+                self.accumulator
+                    .numeric
+                    .rows(leaving.map(exact_as_f64), value.map(exact_as_f64))
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+                self.samples.push(event_time, value);
+                if self.samples.values.len() > window {
+                    self.samples.values.pop_front();
+                }
+                let history = self
+                    .samples
+                    .values
+                    .iter()
+                    .map(|sample| sample.value.map(exact_as_f64));
+                self.accumulator
+                    .numeric
+                    .finish_rows(window, history)
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
+            TypedFrame::Duration(_) => {
+                self.expire(event_time)?;
+                self.accumulator.numeric.reset_if_empty();
+                if let Some(value) = value {
+                    self.accumulator
+                        .numeric
+                        .insert(exact_as_f64(value))
+                        .map_err(|error| float_arithmetic_error(error, node_id))?;
+                }
+                self.samples.push(event_time, value);
+                let history = self
+                    .samples
+                    .values
+                    .iter()
+                    .map(|sample| sample.value.map(exact_as_f64));
+                self.accumulator
+                    .numeric
+                    .finish_duration(history)
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
+        }
+        Ok(())
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
@@ -3084,62 +4345,55 @@ impl ExactNumericState {
 }
 
 impl Float64NumericState {
+    #[cfg(test)]
     fn new(frame: TypedFrame, entity_rows: usize) -> Self {
+        Self::with_dispersion(frame, entity_rows, true)
+    }
+
+    fn with_dispersion(frame: TypedFrame, entity_rows: usize, dispersion: bool) -> Self {
         Self {
             samples: SlidingSampleQueue::new(frame, entity_rows),
-            accumulator: WindowAccumulator::new(SumClass::Float),
+            accumulator: WindowAccumulator::with_dispersion(SumClass::Float, dispersion),
         }
     }
 
     #[inline]
-    fn update(
-        &mut self,
-        event_time: i64,
-        sample: Option<f64>,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        if let Some(sample) = sample {
-            add_float64(&mut self.accumulator, sample, node_id)?;
+    fn update(&mut self, event_time: i64, sample: Option<f64>, node_id: &str) -> Result<()> {
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                let leaving = (self.samples.values.len() >= window)
+                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
+                    .flatten();
+                self.accumulator
+                    .numeric
+                    .rows(leaving, sample)
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+                self.samples.push(event_time, sample);
+                if self.samples.values.len() > window {
+                    self.samples.values.pop_front();
+                }
+                self.accumulator
+                    .numeric
+                    .finish_rows(
+                        window,
+                        self.samples.values.iter().map(|sample| sample.value),
+                    )
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
+            TypedFrame::Duration(_) => {
+                self.expire(event_time)?;
+                self.accumulator.numeric.reset_if_empty();
+                if let Some(sample) = sample {
+                    add_float64(&mut self.accumulator, sample, node_id)?;
+                }
+                self.samples.push(event_time, sample);
+                self.accumulator
+                    .numeric
+                    .finish_duration(self.samples.values.iter().map(|sample| sample.value))
+                    .map_err(|error| float_arithmetic_error(error, node_id))?;
+            }
         }
-        self.samples.push(event_time, sample);
-        self.expire(event_time)?;
-        self.repair_accumulator(numerical_profile, transition_count, node_id)
-    }
-
-    #[inline]
-    fn repair_accumulator(
-        &mut self,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        // DataFusion 54's sliding AVG accumulator remains NaN after a NaN has
-        // entered the partition, even after that row leaves a bounded frame.
-        // The compatibility plan preserves that observable behavior.
-        if self.accumulator.nan_count > 0 {
-            return Ok(());
-        }
-        if numerical_profile == RollingNumericalProfile::StableV2Preview
-            && stable_v2_rebase_due(
-                transition_count,
-                self.samples.len(),
-                self.accumulator.is_non_finite(),
-            )
-        {
-            self.rebase_stable_v2(node_id)?;
-        } else if self.accumulator.is_non_finite() {
-            refold_float64(&mut self.accumulator, &self.samples.values, node_id)?;
-        }
-        Ok(())
-    }
-
-    fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
-        self.accumulator = stable_v2_float64_accumulator(
-            self.samples.values.iter().filter_map(|sample| sample.value),
-            node_id,
-        )?;
+        self.accumulator.sync_float_sum();
         Ok(())
     }
 
@@ -3303,6 +4557,240 @@ impl TypedExtremaState {
 }
 
 #[derive(Clone, Debug)]
+struct TimedValueSample {
+    event_time: i64,
+    value: ArrayRef,
+}
+
+#[derive(Clone, Debug)]
+struct TypedValueExtremaState {
+    frame: TypedFrame,
+    descending: bool,
+    values: VecDeque<TimedValueSample>,
+    valid_count: u64,
+    latest: Option<ArrayRef>,
+}
+
+impl TypedValueExtremaState {
+    fn new(frame: TypedFrame, descending: bool, entity_rows: usize) -> Self {
+        Self {
+            frame,
+            descending,
+            values: VecDeque::with_capacity(frame.estimated_samples().min(entity_rows)),
+            valid_count: 0,
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, event_time: i64, sample: ArrayRef, node_id: &str) -> Result<()> {
+        if sample.is_valid(0) {
+            self.valid_count = self
+                .valid_count
+                .checked_add(1)
+                .ok_or_else(|| operator_error(node_id, "typed rolling extrema count overflowed"))?;
+        }
+        self.values.push_back(TimedValueSample {
+            event_time,
+            value: sample,
+        });
+        self.expire(event_time, node_id)?;
+        self.refresh(node_id)
+    }
+
+    fn expire(&mut self, event_time: i64, _node_id: &str) -> Result<()> {
+        loop {
+            let should_remove = match self.frame {
+                TypedFrame::Rows(window) => self.values.len() > window,
+                TypedFrame::Duration(micros) => {
+                    let bound = i128::from(event_time) - i128::from(micros);
+                    self.values
+                        .front()
+                        .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                }
+            };
+            if !should_remove {
+                return Ok(());
+            }
+            let removed = self.values.pop_front().expect("an expiring sample exists");
+            if removed.value.is_valid(0) {
+                self.valid_count = self.valid_count.checked_sub(1).ok_or_else(|| {
+                    internal_error("typed rolling extrema removal without an add")
+                })?;
+            }
+            if matches!(self.frame, TypedFrame::Rows(_)) {
+                return Ok(());
+            }
+        }
+    }
+
+    fn refresh(&mut self, node_id: &str) -> Result<()> {
+        let mut latest: Option<ArrayRef> = None;
+        for candidate in self
+            .values
+            .iter()
+            .map(|sample| &sample.value)
+            .filter(|value| value.is_valid(0))
+        {
+            let replace = match &latest {
+                None => true,
+                Some(current) => {
+                    arrow_value_ordering(candidate, current, self.descending, node_id)?
+                }
+            };
+            if replace {
+                latest = Some(candidate.clone());
+            }
+        }
+        self.latest = latest;
+        Ok(())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(
+                self.values
+                    .capacity()
+                    .saturating_mul(size_of::<TimedValueSample>()),
+            )
+            .saturating_add(
+                self.values
+                    .iter()
+                    .map(|sample| sample.value.get_array_memory_size())
+                    .sum::<usize>(),
+            )
+    }
+}
+
+fn arrow_value_ordering(
+    candidate: &ArrayRef,
+    current: &ArrayRef,
+    descending: bool,
+    node_id: &str,
+) -> Result<bool> {
+    let ordering = if descending {
+        datafusion::arrow::compute::kernels::cmp::gt(candidate, current)
+    } else {
+        datafusion::arrow::compute::kernels::cmp::lt(candidate, current)
+    }
+    .map_err(|error| {
+        operator_error(
+            node_id,
+            &format!("rolling value comparison failed: {error}"),
+        )
+    })?;
+    Ok(ordering.value(0))
+}
+
+#[derive(Clone, Debug)]
+struct TypedValueScanState {
+    frame: TypedFrame,
+    values: VecDeque<TimedValueSample>,
+    valid_count: u64,
+    latest: Option<u64>,
+}
+
+impl TypedValueScanState {
+    fn new(frame: TypedFrame, entity_rows: usize) -> Self {
+        Self {
+            frame,
+            values: VecDeque::with_capacity(frame.estimated_samples().min(entity_rows)),
+            valid_count: 0,
+            latest: None,
+        }
+    }
+
+    fn update(&mut self, event_time: i64, sample: ArrayRef, node_id: &str) -> Result<()> {
+        if sample.is_valid(0) {
+            self.valid_count = self
+                .valid_count
+                .checked_add(1)
+                .ok_or_else(|| operator_error(node_id, "typed rolling scan count overflowed"))?;
+        }
+        self.values.push_back(TimedValueSample {
+            event_time,
+            value: sample,
+        });
+        self.expire(event_time, node_id)?;
+        self.refresh(node_id)
+    }
+
+    fn expire(&mut self, event_time: i64, _node_id: &str) -> Result<()> {
+        loop {
+            let remove = match self.frame {
+                TypedFrame::Rows(window) => self.values.len() > window,
+                TypedFrame::Duration(micros) => {
+                    let bound = i128::from(event_time) - i128::from(micros);
+                    self.values
+                        .front()
+                        .is_some_and(|sample| i128::from(sample.event_time) <= bound)
+                }
+            };
+            if !remove {
+                return Ok(());
+            }
+            let removed = self.values.pop_front().expect("an expiring sample exists");
+            if removed.value.is_valid(0) {
+                self.valid_count = self
+                    .valid_count
+                    .checked_sub(1)
+                    .ok_or_else(|| internal_error("typed rolling scan removal without an add"))?;
+            }
+            if matches!(self.frame, TypedFrame::Rows(_)) {
+                return Ok(());
+            }
+        }
+    }
+
+    fn refresh(&mut self, node_id: &str) -> Result<()> {
+        let mut distinct = Vec::<ArrayRef>::new();
+        for candidate in self
+            .values
+            .iter()
+            .map(|sample| &sample.value)
+            .filter(|value| value.is_valid(0))
+        {
+            let mut duplicate = false;
+            for existing in &distinct {
+                let equal = datafusion::arrow::compute::kernels::cmp::eq(candidate, existing)
+                    .map_err(|error| {
+                        operator_error(
+                            node_id,
+                            &format!("rolling unique-count comparison failed: {error}"),
+                        )
+                    })?;
+                if equal.value(0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if !duplicate {
+                distinct.push(candidate.clone());
+            }
+        }
+        self.latest = Some(
+            u64::try_from(distinct.len())
+                .map_err(|_| operator_error(node_id, "rolling unique-count overflowed"))?,
+        );
+        Ok(())
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        size_of::<Self>()
+            .saturating_add(
+                self.values
+                    .capacity()
+                    .saturating_mul(size_of::<TimedValueSample>()),
+            )
+            .saturating_add(
+                self.values
+                    .iter()
+                    .map(|sample| sample.value.get_array_memory_size())
+                    .sum::<usize>(),
+            )
+    }
+}
+
+#[derive(Clone, Debug)]
 struct Float64PairState {
     samples: SlidingSampleQueue<(f64, f64)>,
     accumulator: PairAccumulator,
@@ -3316,54 +4804,40 @@ impl Float64PairState {
         }
     }
 
-    fn update(
-        &mut self,
-        event_time: i64,
-        value: Option<(f64, f64)>,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        if let Some((left, right)) = value {
-            add_pair_float64(&mut self.accumulator, left, right, node_id)?;
+    fn update(&mut self, event_time: i64, value: Option<(f64, f64)>, node_id: &str) -> Result<()> {
+        match self.samples.frame {
+            TypedFrame::Rows(window) => {
+                let leaving = (self.samples.values.len() >= window)
+                    .then(|| self.samples.values.front().and_then(|sample| sample.value))
+                    .flatten();
+                self.accumulator.rows_values(leaving, value, node_id)?;
+                self.samples.push(event_time, value);
+                if self.samples.values.len() > window {
+                    self.samples.values.pop_front();
+                }
+                self.accumulator.finish_rows(
+                    window,
+                    self.samples.values.iter().map(|sample| sample.value),
+                )?;
+            }
+            TypedFrame::Duration(_) => {
+                self.expire(event_time)?;
+                self.accumulator.reset_if_empty();
+                if let Some((left, right)) = value {
+                    self.accumulator.add_values(left, right, node_id)?;
+                }
+                self.samples.push(event_time, value);
+                self.accumulator
+                    .finish_duration(self.samples.values.iter().map(|sample| sample.value))?;
+            }
         }
-        self.samples.push(event_time, value);
-        self.expire(event_time)?;
-        self.repair_accumulator(numerical_profile, transition_count, node_id)
-    }
-
-    fn repair_accumulator(
-        &mut self,
-        numerical_profile: RollingNumericalProfile,
-        transition_count: u64,
-        node_id: &str,
-    ) -> Result<()> {
-        if numerical_profile == RollingNumericalProfile::StableV2Preview
-            && stable_v2_rebase_due(
-                transition_count,
-                self.samples.len(),
-                self.accumulator.is_non_finite(),
-            )
-        {
-            self.rebase_stable_v2(node_id)?;
-        } else if self.accumulator.is_non_finite() {
-            refold_pair_float64(&mut self.accumulator, &self.samples.values, node_id)?;
-        }
-        Ok(())
-    }
-
-    fn rebase_stable_v2(&mut self, node_id: &str) -> Result<()> {
-        self.accumulator = stable_v2_pair_accumulator(
-            self.samples.values.iter().filter_map(|sample| sample.value),
-            node_id,
-        )?;
         Ok(())
     }
 
     fn expire(&mut self, event_time: i64) -> Result<()> {
         let accumulator = &mut self.accumulator;
         self.samples.expire(event_time, |(left, right)| {
-            remove_pair_float64(accumulator, left, right)
+            accumulator.remove_values(left, right)
         })
     }
 
@@ -3410,23 +4884,10 @@ impl TypedEwmaState {
     }
 }
 
-#[inline]
-fn float_summary_mut(accumulator: &mut WindowAccumulator) -> SummaryMut<'_> {
-    SummaryMut {
-        valid_count: &mut accumulator.valid_count,
-        sum: match &mut accumulator.sum {
-            Some(SumState::Float(total)) => Some(total),
-            _ => None,
-        },
-        mean: &mut accumulator.mean,
-        m2: &mut accumulator.m2,
-        nan_count: &mut accumulator.nan_count,
-        pos_inf: &mut accumulator.pos_inf,
-        neg_inf: &mut accumulator.neg_inf,
-    }
-}
-
-fn float_arithmetic_error(error: ArithmeticError, node_id: &str) -> crate::CalcFlowError {
+pub(super) fn float_arithmetic_error(
+    error: ArithmeticError,
+    node_id: &str,
+) -> crate::CalcFlowError {
     match error {
         ArithmeticError::CountOverflow => {
             operator_error(node_id, "rolling valid sample count overflowed")
@@ -3445,45 +4906,30 @@ fn float_arithmetic_error(error: ArithmeticError, node_id: &str) -> crate::CalcF
 
 #[inline]
 fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
-    float_summary_mut(accumulator)
-        .add(sample)
-        .map_err(|error| float_arithmetic_error(error, node_id))
+    if !matches!(accumulator.sum, Some(SumState::Float(_))) {
+        return Err(float_arithmetic_error(
+            ArithmeticError::NonFloatingSum,
+            node_id,
+        ));
+    }
+    accumulator
+        .numeric
+        .insert(sample)
+        .map_err(|error| float_arithmetic_error(error, node_id))?;
+    accumulator.sync_float_sum();
+    Ok(())
 }
 
 #[inline]
 fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
-    float_summary_mut(accumulator)
-        .remove(sample)
-        .map_err(|error| float_arithmetic_error(error, ""))
-}
-
-fn refold_float64(
-    accumulator: &mut WindowAccumulator,
-    values: &VecDeque<TimedSample<f64>>,
-    node_id: &str,
-) -> Result<()> {
-    *accumulator = WindowAccumulator::new(SumClass::Float);
-    for sample in values.iter().filter_map(|sample| sample.value) {
-        add_float64(accumulator, sample, node_id)?;
+    if !matches!(accumulator.sum, Some(SumState::Float(_))) {
+        return Err(float_arithmetic_error(ArithmeticError::NonFloatingSum, ""));
     }
-    Ok(())
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen integer mean and variance output type is Float64"
-)]
-fn add_exact(accumulator: &mut WindowAccumulator, value: ExactValue, node_id: &str) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
-    add_exact_sum(accumulator, value, node_id)?;
-    let sample = exact_as_f64(value);
-    let count = accumulator.valid_count as f64;
-    let delta = sample - accumulator.mean;
-    accumulator.mean += delta / count;
-    accumulator.m2 += delta * (sample - accumulator.mean);
+    accumulator
+        .numeric
+        .evict(sample)
+        .map_err(|error| float_arithmetic_error(error, ""))?;
+    accumulator.sync_float_sum();
     Ok(())
 }
 
@@ -3512,27 +4958,12 @@ fn add_exact_sum(
     Ok(())
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen integer mean and variance output type is Float64"
-)]
 fn remove_exact(accumulator: &mut WindowAccumulator, value: ExactValue) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_sub(1)
-        .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
     remove_exact_sum(accumulator, value)?;
-    if accumulator.valid_count == 0 {
-        accumulator.mean = 0.0;
-        accumulator.m2 = 0.0;
-        return Ok(());
-    }
-    let sample = exact_as_f64(value);
-    let count = accumulator.valid_count as f64;
-    let delta = sample - accumulator.mean;
-    accumulator.mean -= delta / count;
-    accumulator.m2 -= delta * (sample - accumulator.mean);
-    Ok(())
+    accumulator
+        .numeric
+        .evict(exact_as_f64(value))
+        .map_err(|error| float_arithmetic_error(error, ""))
 }
 
 fn remove_exact_sum(accumulator: &mut WindowAccumulator, value: ExactValue) -> Result<()> {
@@ -3567,206 +4998,14 @@ fn exact_as_f64(value: ExactValue) -> f64 {
     }
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen covariance/correlation output type is Float64"
-)]
+#[cfg(test)]
 fn add_pair_float64(
     accumulator: &mut PairAccumulator,
     left: f64,
     right: f64,
     node_id: &str,
 ) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_add(1)
-        .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
-    update_pair_infinity_counts(accumulator, left, right, true);
-    let count = accumulator.valid_count as f64;
-    let delta_x = left - accumulator.mean_x;
-    accumulator.mean_x += delta_x / count;
-    let delta_y = right - accumulator.mean_y;
-    accumulator.mean_y += delta_y / count;
-    accumulator.co_moment += delta_x * (right - accumulator.mean_y);
-    accumulator.m2_x += delta_x * (left - accumulator.mean_x);
-    accumulator.m2_y += delta_y * (right - accumulator.mean_y);
-    Ok(())
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the frozen covariance/correlation output type is Float64"
-)]
-fn remove_pair_float64(accumulator: &mut PairAccumulator, left: f64, right: f64) -> Result<()> {
-    accumulator.valid_count = accumulator
-        .valid_count
-        .checked_sub(1)
-        .ok_or_else(|| internal_error("rolling pair removal without a matching add"))?;
-    update_pair_infinity_counts(accumulator, left, right, false);
-    if accumulator.valid_count == 0 {
-        reset_pair_values(accumulator);
-        return Ok(());
-    }
-    let count = accumulator.valid_count as f64;
-    let delta_x = left - accumulator.mean_x;
-    accumulator.mean_x -= delta_x / count;
-    let delta_y = right - accumulator.mean_y;
-    accumulator.mean_y -= delta_y / count;
-    accumulator.co_moment -= delta_x * (right - accumulator.mean_y);
-    accumulator.m2_x -= delta_x * (left - accumulator.mean_x);
-    accumulator.m2_y -= delta_y * (right - accumulator.mean_y);
-    Ok(())
-}
-
-fn update_pair_infinity_counts(
-    accumulator: &mut PairAccumulator,
-    left: f64,
-    right: f64,
-    add: bool,
-) {
-    update_infinity_count(
-        &mut accumulator.pos_inf_x,
-        &mut accumulator.neg_inf_x,
-        left,
-        add,
-    );
-    update_infinity_count(
-        &mut accumulator.pos_inf_y,
-        &mut accumulator.neg_inf_y,
-        right,
-        add,
-    );
-}
-
-fn update_infinity_count(positive: &mut u64, negative: &mut u64, value: f64, add: bool) {
-    if !value.is_infinite() {
-        return;
-    }
-    let count = if value > 0.0 { positive } else { negative };
-    *count = if add {
-        count.saturating_add(1)
-    } else {
-        count.saturating_sub(1)
-    };
-}
-
-fn reset_pair_values(accumulator: &mut PairAccumulator) {
-    accumulator.mean_x = 0.0;
-    accumulator.mean_y = 0.0;
-    accumulator.co_moment = 0.0;
-    accumulator.m2_x = 0.0;
-    accumulator.m2_y = 0.0;
-}
-
-fn refold_pair_float64(
-    accumulator: &mut PairAccumulator,
-    values: &VecDeque<TimedSample<(f64, f64)>>,
-    node_id: &str,
-) -> Result<()> {
-    *accumulator = PairAccumulator::default();
-    for (left, right) in values.iter().filter_map(|sample| sample.value) {
-        add_pair_float64(accumulator, left, right, node_id)?;
-    }
-    Ok(())
-}
-
-pub(super) fn stable_v2_rebase_due(
-    transition_count: u64,
-    retained_samples: usize,
-    numerical_risk: bool,
-) -> bool {
-    rolling_mean_math::rebase_due(transition_count, retained_samples, numerical_risk)
-}
-
-fn float_summary_accumulator(summary: FloatSummary) -> WindowAccumulator {
-    WindowAccumulator {
-        valid_count: summary.valid_count,
-        sum: Some(SumState::Float(summary.sum)),
-        mean: summary.mean,
-        m2: summary.m2,
-        nan_count: summary.nan_count,
-        pos_inf: summary.pos_inf,
-        neg_inf: summary.neg_inf,
-        expired_through: i128::MIN,
-    }
-}
-
-pub(super) fn stable_v2_float64_accumulator(
-    values: impl Iterator<Item = f64>,
-    node_id: &str,
-) -> Result<WindowAccumulator> {
-    rolling_mean_math::stable_fold(values)
-        .map(float_summary_accumulator)
-        .map_err(|error| float_arithmetic_error(error, node_id))
-}
-
-#[derive(Default)]
-struct StablePairFold {
-    accumulator: PairAccumulator,
-    origin: Option<(f64, f64)>,
-    finite_count: u64,
-    left_offsets: CompensatedSum,
-    right_offsets: CompensatedSum,
-    left_squares: CompensatedSum,
-    right_squares: CompensatedSum,
-    cross_products: CompensatedSum,
-}
-
-impl StablePairFold {
-    fn push(&mut self, left: f64, right: f64, node_id: &str) -> Result<()> {
-        self.accumulator.valid_count = self
-            .accumulator
-            .valid_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
-        update_pair_infinity_counts(&mut self.accumulator, left, right, true);
-        if !left.is_finite() || !right.is_finite() {
-            return Ok(());
-        }
-        let (origin_x, origin_y) = *self.origin.get_or_insert((left, right));
-        let x = left - origin_x;
-        let y = right - origin_y;
-        self.left_offsets.add(x);
-        self.right_offsets.add(y);
-        self.left_squares.add(x * x);
-        self.right_squares.add(y * y);
-        self.cross_products.add(x * y);
-        self.finite_count = self
-            .finite_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling finite pair count overflowed"))?;
-        Ok(())
-    }
-
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the stable_v2 preview retains the frozen Float64 output type"
-    )]
-    fn finish(mut self) -> PairAccumulator {
-        if let Some((origin_x, origin_y)) = self.origin {
-            let count = self.finite_count as f64;
-            self.accumulator.mean_x = origin_x + self.left_offsets.value / count;
-            self.accumulator.mean_y = origin_y + self.right_offsets.value / count;
-            self.accumulator.m2_x =
-                self.left_squares.value - self.left_offsets.value * self.left_offsets.value / count;
-            self.accumulator.m2_y = self.right_squares.value
-                - self.right_offsets.value * self.right_offsets.value / count;
-            self.accumulator.co_moment = self.cross_products.value
-                - self.left_offsets.value * self.right_offsets.value / count;
-        }
-        self.accumulator
-    }
-}
-
-pub(super) fn stable_v2_pair_accumulator(
-    values: impl Iterator<Item = (f64, f64)>,
-    node_id: &str,
-) -> Result<PairAccumulator> {
-    let mut fold = StablePairFold::default();
-    for (left, right) in values {
-        fold.push(left, right, node_id)?;
-    }
-    Ok(fold.finish())
+    accumulator.add_values(left, right, node_id)
 }
 
 enum DerivedBuilder {
@@ -3774,12 +5013,42 @@ enum DerivedBuilder {
     Signed(Int64Builder, OutputStorage),
     Unsigned(UInt64Builder, OutputStorage),
     Float(Float64Builder, OutputStorage),
+    Utf8(StringBuilder),
+    Values {
+        null: ArrayRef,
+        values: Vec<ArrayRef>,
+        indices: Vec<(usize, usize)>,
+    },
 }
 
 impl DerivedBuilder {
+    #[cfg(test)]
     fn new(output: TypedOutputPlan, capacity: usize) -> Self {
+        Self::new_with_inputs(output, capacity, &[])
+            .expect("non-value test output does not need an input array")
+    }
+
+    fn new_with_inputs(
+        output: TypedOutputPlan,
+        capacity: usize,
+        inputs: &[TypedGroupInput],
+    ) -> Result<Self> {
         let storage = output.storage;
-        if storage == OutputStorage::Count {
+        if storage == OutputStorage::Value {
+            let Some(TypedGroupInput::Values(input)) = inputs.get(output.group) else {
+                return Err(internal_error(
+                    "typed Arrow value output does not reference its value input",
+                ));
+            };
+            return Ok(Self::Values {
+                null: new_null_array(input.data_type(), 1),
+                values: Vec::with_capacity(capacity),
+                indices: Vec::with_capacity(capacity),
+            });
+        }
+        Ok(if storage == OutputStorage::Utf8 {
+            Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 8))
+        } else if storage == OutputStorage::Count {
             Self::Count(UInt64Builder::with_capacity(capacity))
         } else if storage.is_signed() {
             Self::Signed(Int64Builder::with_capacity(capacity), storage)
@@ -3787,7 +5056,7 @@ impl DerivedBuilder {
             Self::Unsigned(UInt64Builder::with_capacity(capacity), storage)
         } else {
             Self::Float(Float64Builder::with_capacity(capacity), storage)
-        }
+        })
     }
 
     fn append(
@@ -3827,11 +5096,79 @@ impl DerivedBuilder {
         match state {
             TypedWindowState::Cumulative(state) => state.append(self, output, node_id),
             TypedWindowState::Numeric(state) => self.append_numeric(state, output),
+            TypedWindowState::Count(state) => match (self, output.kind) {
+                (Self::Count(builder), TypedOutputKind::Statistic(Statistic::Count)) => {
+                    builder.append_value(state.valid_count);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Exact(state) => self.append_exact(state, output, node_id),
             TypedWindowState::Extrema(state) => self.append_extrema(state, output),
+            TypedWindowState::ValueExtrema(state) => match (self, output.kind) {
+                (
+                    builder @ Self::Values { .. },
+                    TypedOutputKind::Statistic(Statistic::Min | Statistic::Max),
+                ) => {
+                    builder.append_value_array(state.latest.as_ref());
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
             TypedWindowState::Scan(state) => self.append_scan(state, output),
+            TypedWindowState::ValueScan(state) => match (self, output.kind) {
+                (Self::Count(builder), TypedOutputKind::Scan(ScanKind::UniqueCount)) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::Lag(state) => self.append_lag(state, output, node_id),
+            TypedWindowState::Utf8Lag(state) => match (self, output.kind) {
+                (Self::Utf8(builder), TypedOutputKind::Lag) => {
+                    if let Some(value) = state.reference.as_deref() {
+                        builder.append_value(value);
+                    } else {
+                        builder.append_null();
+                    }
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::ValueLag(state) => match (self, output.kind) {
+                (builder @ Self::Values { .. }, TypedOutputKind::Lag) => {
+                    builder.append_value_array(state.reference.as_ref());
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::Rsi(state) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Rsi) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::Atr(state) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Atr) => {
+                    builder.append_option(state.latest);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
+            TypedWindowState::Macd(state) => match (self, output.kind) {
+                (Self::Float(builder, _), TypedOutputKind::Macd(component)) => {
+                    let value = state
+                        .latest
+                        .get(component)
+                        .ok_or_else(|| internal_error("typed MACD component is out of bounds"))?;
+                    builder.append_option(*value);
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Decay(Some(state)) => match (self, output.kind) {
                 (Self::Float(builder, _), TypedOutputKind::Scan(ScanKind::Decay)) => {
                     builder.append_option(state.latest);
@@ -3901,7 +5238,7 @@ impl DerivedBuilder {
             Self::Float(builder, _) => append_float_extrema(builder, state),
             Self::Signed(builder, _) => append_signed_extrema(builder, state),
             Self::Unsigned(builder, _) => append_unsigned_extrema(builder, state),
-            Self::Count(_) => Err(typed_output_mismatch()),
+            Self::Count(_) | Self::Utf8(_) | Self::Values { .. } => Err(typed_output_mismatch()),
         }
     }
 
@@ -3925,10 +5262,83 @@ impl DerivedBuilder {
         }
     }
 
+    fn append_lag(
+        &mut self,
+        state: &TypedLagState,
+        output: &TypedOutputPlan,
+        node_id: &str,
+    ) -> Result<()> {
+        match (self, output.kind, state.current, state.reference) {
+            (Self::Float(builder, _), TypedOutputKind::Lag, _, LagValue::Float(reference)) => {
+                builder.append_option(reference);
+            }
+            (Self::Signed(builder, _), TypedOutputKind::Lag, _, LagValue::Signed(reference)) => {
+                builder.append_option(reference);
+            }
+            (
+                Self::Unsigned(builder, _),
+                TypedOutputKind::Lag,
+                _,
+                LagValue::Unsigned(reference),
+            ) => {
+                builder.append_option(reference);
+            }
+            (
+                Self::Float(builder, _),
+                TypedOutputKind::Delta,
+                LagValue::Float(current),
+                LagValue::Float(reference),
+            ) => match current.zip(reference) {
+                Some((current, reference)) => builder.append_value(current - reference),
+                None => builder.append_null(),
+            },
+            (
+                Self::Signed(builder, _),
+                TypedOutputKind::Delta,
+                LagValue::Signed(current),
+                LagValue::Signed(reference),
+            ) => match current.zip(reference) {
+                Some((current, reference)) => {
+                    builder.append_value(current.checked_sub(reference).ok_or_else(|| {
+                        operator_error(node_id, "rolling signed delta overflowed")
+                    })?);
+                }
+                None => builder.append_null(),
+            },
+            (
+                Self::Unsigned(builder, _),
+                TypedOutputKind::Delta,
+                LagValue::Unsigned(current),
+                LagValue::Unsigned(reference),
+            ) => match current.zip(reference) {
+                Some((current, reference)) => {
+                    builder.append_value(current.checked_sub(reference).ok_or_else(|| {
+                        operator_error(node_id, "rolling unsigned delta underflowed")
+                    })?);
+                }
+                None => builder.append_null(),
+            },
+            _ => return Err(typed_output_mismatch()),
+        }
+        Ok(())
+    }
+
     fn append_scan(&mut self, state: &TypedScanState, output: &TypedOutputPlan) -> Result<()> {
         match (self, output.kind) {
-            (Self::Count(builder), TypedOutputKind::Scan(_)) => {
-                builder.append_option(state.latest);
+            (
+                Self::Count(builder),
+                TypedOutputKind::Scan(
+                    ScanKind::Argmax | ScanKind::Argmin | ScanKind::Rank | ScanKind::UniqueCount,
+                ),
+            ) => {
+                builder.append_option(state.latest_count);
+                Ok(())
+            }
+            (
+                Self::Float(builder, _),
+                TypedOutputKind::Scan(ScanKind::Quantile | ScanKind::Decay),
+            ) => {
+                builder.append_option(state.latest_float);
                 Ok(())
             }
             _ => Err(typed_output_mismatch()),
@@ -3954,11 +5364,28 @@ impl DerivedBuilder {
         Ok(())
     }
 
+    fn append_value_array(&mut self, value: Option<&ArrayRef>) {
+        let Self::Values {
+            null,
+            values,
+            indices,
+        } = self
+        else {
+            unreachable!("Arrow value append requires the value builder");
+        };
+        let value = value.cloned().unwrap_or_else(|| null.clone());
+        let array_index = values.len();
+        values.push(value);
+        indices.push((array_index, 0));
+    }
+
     fn append_null(&mut self) {
         match self {
             Self::Count(builder) | Self::Unsigned(builder, _) => builder.append_null(),
             Self::Signed(builder, _) => builder.append_null(),
             Self::Float(builder, _) => builder.append_null(),
+            Self::Utf8(builder) => builder.append_null(),
+            Self::Values { .. } => self.append_value_array(None),
         }
     }
 
@@ -3973,6 +5400,20 @@ impl DerivedBuilder {
             }
             Self::Float(mut builder, storage) => {
                 finish_with_storage(Arc::new(builder.finish()), storage)
+            }
+            Self::Utf8(mut builder) => Ok(Arc::new(builder.finish())),
+            Self::Values {
+                null,
+                values,
+                indices,
+            } => {
+                if indices.is_empty() {
+                    return Ok(new_null_array(null.data_type(), 0));
+                }
+                let values = values.iter().map(AsRef::as_ref).collect::<Vec<_>>();
+                interleave(&values, &indices).map_err(|error| {
+                    internal_error(format!("typed rolling value interleave failed: {error}"))
+                })
             }
         }
     }
@@ -4077,13 +5518,20 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
     match state {
         TypedWindowState::Cumulative(state) => state.accumulator.valid_count(),
         TypedWindowState::Numeric(state) => state.accumulator.valid_count,
+        TypedWindowState::Count(state) => state.valid_count,
         TypedWindowState::Exact(state) => state.accumulator.valid_count,
         TypedWindowState::Extrema(state) => state.valid_count,
+        TypedWindowState::ValueExtrema(state) => state.valid_count,
         TypedWindowState::Pair(state) => state.accumulator.valid_count,
         TypedWindowState::Ewma(state) => state.valid_count,
-        TypedWindowState::Scan(state) => {
-            u64::try_from(state.scan.valid_count()).unwrap_or(u64::MAX)
-        }
+        TypedWindowState::Scan(state) => state.valid_count,
+        TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
+        TypedWindowState::ValueScan(state) => state.valid_count,
+        TypedWindowState::Utf8Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
+        TypedWindowState::ValueLag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
+        TypedWindowState::Rsi(state) => state.kernel.positions,
+        TypedWindowState::Atr(state) => state.kernel.positions,
+        TypedWindowState::Macd(state) => state.kernel.positions,
         TypedWindowState::Decay(state) => state.as_ref().map_or(0, |state| state.valid_count()),
     }
 }
@@ -4137,10 +5585,7 @@ fn dispersion_value(
     if divisor == 0 {
         return None;
     }
-    if accumulator.nan_count > 0 || accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
-        return Some(f64::NAN);
-    }
-    let variance = accumulator.m2.max(0.0) / divisor as f64;
+    let variance = accumulator.numeric.variance(ddof);
     Some(if standard_deviation {
         variance.sqrt()
     } else {
@@ -4188,7 +5633,7 @@ fn append_exact_float(
 ) -> Result<()> {
     match statistic {
         Statistic::Mean => {
-            builder.append_value(accumulator.mean);
+            builder.append_value(accumulator.mean_value());
             Ok(())
         }
         Statistic::Variance | Statistic::Stddev => {
@@ -4221,7 +5666,11 @@ fn append_pair(
     }
     match output.kind {
         TypedOutputKind::Covariance => {
-            builder.append_value(accumulator.co_moment / divisor as f64);
+            builder.append_value(
+                accumulator
+                    .family
+                    .covariance(accumulator.valid_count, output.ddof),
+            );
         }
         TypedOutputKind::Correlation => {
             append_correlation(builder, accumulator);
@@ -4234,8 +5683,15 @@ fn append_pair(
         TypedOutputKind::Ewma => {
             return Err(internal_error("typed pair state received an EWMA output"));
         }
-        TypedOutputKind::Scan(_) => {
-            return Err(internal_error("typed pair state received a scan output"));
+        TypedOutputKind::Scan(_)
+        | TypedOutputKind::Lag
+        | TypedOutputKind::Delta
+        | TypedOutputKind::Macd(_)
+        | TypedOutputKind::Rsi
+        | TypedOutputKind::Atr => {
+            return Err(internal_error(
+                "typed pair state received a non-pair output",
+            ));
         }
         TypedOutputKind::Difference { .. } => {
             return Err(internal_error(
@@ -4247,12 +5703,10 @@ fn append_pair(
 }
 
 fn append_correlation(builder: &mut Float64Builder, accumulator: &PairAccumulator) {
-    let m2_x = accumulator.m2_x.max(0.0);
-    let m2_y = accumulator.m2_y.max(0.0);
-    if m2_x == 0.0 || m2_y == 0.0 {
-        builder.append_null();
+    if let Some(value) = accumulator.family.correlation(accumulator.valid_count) {
+        builder.append_value(value);
     } else {
-        builder.append_value(accumulator.co_moment / (m2_x.sqrt() * m2_y.sqrt()));
+        builder.append_null();
     }
 }
 
@@ -4279,23 +5733,18 @@ fn append_float(
 }
 
 fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> Result<()> {
-    let Some(SumState::Float(total)) = accumulator.sum else {
+    let Some(SumState::Float(_)) = accumulator.sum else {
         return Err(internal_error(
             "typed Float64 sum has a non-floating accumulator",
         ));
     };
-    builder.append_value(total);
+    builder.append_value(accumulator.numeric.sum());
     Ok(())
 }
 
 #[inline]
 fn float_mean(accumulator: &WindowAccumulator) -> f64 {
-    rolling_mean_math::read_mean(
-        accumulator.nan_count,
-        accumulator.pos_inf,
-        accumulator.neg_inf,
-        accumulator.mean,
-    )
+    accumulator.mean_value()
 }
 
 #[allow(
@@ -4338,7 +5787,7 @@ mod tests {
 
     #[test]
     fn batch_update_preserves_untouched_resident_entities() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(
             vec![Some(1), Some(2)],
             vec![Some(1), Some(2)],
@@ -4362,7 +5811,7 @@ mod tests {
 
     #[test]
     fn stream_update_copies_only_touched_entities_until_commit() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(
             vec![Some(1), Some(2)],
             vec![Some(1), Some(2)],
@@ -4408,7 +5857,7 @@ mod tests {
 
     #[test]
     fn prepared_stream_entities_are_owned_before_parallel_admission() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(
             vec![Some(1), Some(2)],
             vec![Some(1), Some(2)],
@@ -4492,15 +5941,10 @@ mod tests {
         .unwrap()
     }
 
-    fn plan(
-        groups: Vec<TypedGroupPlan>,
-        outputs: Vec<TypedOutputPlan>,
-        numerical_profile: RollingNumericalProfile,
-    ) -> RollingKernelPlan {
+    fn plan(groups: Vec<TypedGroupPlan>, outputs: Vec<TypedOutputPlan>) -> RollingKernelPlan {
         let mut plan = RollingKernelPlan {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version: 3,
-            numerical_profile,
             selection: KernelSelection::OrderedPrimitive,
             complexity: KernelComplexity::AmortizedConstant,
             event_time_index: 0,
@@ -4521,11 +5965,12 @@ mod tests {
         plan
     }
 
-    fn numeric_plan(profile: RollingNumericalProfile) -> RollingKernelPlan {
+    fn numeric_plan() -> RollingKernelPlan {
         plan(
             vec![TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Rows(2),
+                dispersion: true,
             }],
             vec![TypedOutputPlan {
                 group: 0,
@@ -4534,14 +5979,13 @@ mod tests {
                 min_periods: 1,
                 ddof: 0,
             }],
-            profile,
         )
     }
 
     #[test]
     fn ordered_stream_key_allocations_depend_on_entities_instead_of_rows() {
         fn allocations(row_count: usize, warm: bool) -> u64 {
-            let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+            let kernel = numeric_plan();
             let input = batch(
                 (0..row_count)
                     .map(|index| Some(i64::try_from(index).unwrap()))
@@ -4585,7 +6029,7 @@ mod tests {
     fn stream_order_plan() -> RollingKernelPlan {
         RollingKernelPlan {
             order_columns: vec![0, 2, 1],
-            ..numeric_plan(RollingNumericalProfile::StableV1)
+            ..numeric_plan()
         }
     }
 
@@ -4914,7 +6358,7 @@ mod tests {
             }
             let input = order_rows(&rows);
             assert_order_parity(&stream_order_plan(), &input);
-            assert_order_parity(&numeric_plan(RollingNumericalProfile::StableV1), &input);
+            assert_order_parity(&numeric_plan(), &input);
             for plan in redundant_stream_order_plans() {
                 assert_order_parity(&plan, &input);
             }
@@ -5071,30 +6515,22 @@ mod tests {
         let mut resident = Float64NumericState::new(TypedFrame::Rows(20), 32);
         for index in 1..=32_u32 {
             resident
-                .update(
-                    i64::from(index),
-                    Some(f64::from(index)),
-                    RollingNumericalProfile::StableV1,
-                    u64::from(index),
-                    "rolling",
-                )
+                .update(i64::from(index), Some(f64::from(index)), "rolling")
                 .unwrap();
         }
         let measured = allocation_counter::measure(|| {
             let mut prepared = resident.clone();
-            prepared
-                .update(
-                    33,
-                    Some(33.0),
-                    RollingNumericalProfile::StableV1,
-                    33,
-                    "rolling",
-                )
-                .unwrap();
+            prepared.update(33, Some(33.0), "rolling").unwrap();
             assert_eq!(prepared.accumulator.valid_count, 20);
-            assert_eq!(prepared.accumulator.mean.to_bits(), 23.5_f64.to_bits());
+            assert_eq!(
+                prepared.accumulator.mean_value().to_bits(),
+                23.5_f64.to_bits()
+            );
         });
-        assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
+        assert_eq!(
+            resident.accumulator.mean_value().to_bits(),
+            22.5_f64.to_bits()
+        );
         println!("prepared row-window copy allocations: {measured:?}");
         assert_eq!(measured.count_total, 1, "{measured:?}");
     }
@@ -5104,30 +6540,22 @@ mod tests {
         let mut resident = Float64NumericState::new(TypedFrame::Duration(20), 32);
         for index in 1..=32_u32 {
             resident
-                .update(
-                    i64::from(index),
-                    Some(f64::from(index)),
-                    RollingNumericalProfile::StableV1,
-                    u64::from(index),
-                    "rolling",
-                )
+                .update(i64::from(index), Some(f64::from(index)), "rolling")
                 .unwrap();
         }
         let measured = allocation_counter::measure(|| {
             let mut prepared = resident.clone();
-            prepared
-                .update(
-                    33,
-                    Some(33.0),
-                    RollingNumericalProfile::StableV1,
-                    33,
-                    "rolling",
-                )
-                .unwrap();
+            prepared.update(33, Some(33.0), "rolling").unwrap();
             assert_eq!(prepared.accumulator.valid_count, 20);
-            assert_eq!(prepared.accumulator.mean.to_bits(), 23.5_f64.to_bits());
+            assert_eq!(
+                prepared.accumulator.mean_value().to_bits(),
+                23.5_f64.to_bits()
+            );
         });
-        assert_eq!(resident.accumulator.mean.to_bits(), 22.5_f64.to_bits());
+        assert_eq!(
+            resident.accumulator.mean_value().to_bits(),
+            22.5_f64.to_bits()
+        );
         assert_eq!(measured.count_total, 1, "{measured:?}");
     }
 
@@ -5144,65 +6572,34 @@ mod tests {
     #[test]
     fn duration_clone_releases_unused_burst_capacity() {
         let mut resident = Float64NumericState::new(TypedFrame::Duration(20), 4096);
-        for count in 1..=4096_u64 {
-            resident
-                .update(
-                    0,
-                    Some(1.0),
-                    RollingNumericalProfile::StableV1,
-                    count,
-                    "rolling",
-                )
-                .unwrap();
+        for _count in 1..=4096_u64 {
+            resident.update(0, Some(1.0), "rolling").unwrap();
         }
-        resident
-            .update(
-                1000,
-                Some(2.0),
-                RollingNumericalProfile::StableV1,
-                4097,
-                "rolling",
-            )
-            .unwrap();
+        resident.update(1000, Some(2.0), "rolling").unwrap();
         let copied = resident.clone();
         assert_eq!(copied.samples.len(), 1);
         assert!(copied.samples.values.capacity() < resident.samples.values.capacity() / 2);
         assert_eq!(
-            copied.accumulator.mean.to_bits(),
-            resident.accumulator.mean.to_bits()
+            copied.accumulator.mean_value().to_bits(),
+            resident.accumulator.mean_value().to_bits()
         );
     }
 
     #[test]
-    fn mean_only_state_still_requires_the_m2_refold_trigger() {
-        let mut current = Float64NumericState::new(TypedFrame::Rows(2), 4);
-        let mut without_m2 = current.clone();
-        for (index, sample) in [1e155, 1e155, 1e155, -1e155].into_iter().enumerate() {
+    fn typed_dispersion_overflow_does_not_change_mean_bits() {
+        let mut full = Float64NumericState::new(TypedFrame::Rows(2), 4);
+        let mut mean_only = full.clone();
+        mean_only.accumulator.numeric = crate::accumulate::NumericAccumulator::mean_only();
+        for (index, sample) in [1e200, -1e200].into_iter().enumerate() {
             let time = i64::try_from(index).unwrap();
-            let count = u64::try_from(index + 1).unwrap();
-            current
-                .update(
-                    time,
-                    Some(sample),
-                    RollingNumericalProfile::StableV1,
-                    count,
-                    "r",
-                )
-                .unwrap();
-            add_float64(&mut without_m2.accumulator, sample, "r").unwrap();
-            without_m2.samples.push(time, Some(sample));
-            without_m2.expire(time).unwrap();
-            without_m2.accumulator.m2 = 0.0;
-            without_m2
-                .repair_accumulator(RollingNumericalProfile::StableV1, count, "r")
-                .unwrap();
+            full.update(time, Some(sample), "r").unwrap();
+            mean_only.update(time, Some(sample), "r").unwrap();
+            assert_eq!(
+                full.accumulator.mean_value().to_bits(),
+                mean_only.accumulator.mean_value().to_bits()
+            );
         }
-        println!(
-            "mean-only specialization counterexample: current={}, without_m2={}",
-            current.accumulator.mean, without_m2.accumulator.mean
-        );
-        assert_eq!(current.accumulator.mean.to_bits(), 0.0_f64.to_bits());
-        assert!(without_m2.accumulator.mean.abs() > 1e130);
+        assert!(full.accumulator.numeric.variance(0).is_nan());
     }
 
     #[test]
@@ -5217,20 +6614,8 @@ mod tests {
             #[allow(clippy::cast_precision_loss, reason = "fixture values 0..4")]
             let step = index as f64;
             let _ = exact.update(index, Some(ExactValue::Signed(index)), "node");
-            let _ = float.update(
-                index,
-                Some(step),
-                RollingNumericalProfile::StableV1,
-                0,
-                "node",
-            );
-            let _ = pair.update(
-                index,
-                Some((step, 1.0)),
-                RollingNumericalProfile::StableV1,
-                0,
-                "node",
-            );
+            let _ = float.update(index, Some(step), "node");
+            let _ = pair.update(index, Some((step, 1.0)), "node");
         }
 
         // The exact and pair states size by the full timed sample; the float
@@ -5260,6 +6645,7 @@ mod tests {
                 TypedGroupPlan::Numeric {
                     input_index: 3,
                     frame: TypedFrame::Rows(64),
+                    dispersion: true,
                 },
                 TypedGroupPlan::Ewma {
                     input_index: 3,
@@ -5268,7 +6654,6 @@ mod tests {
                 },
             ],
             Vec::new(),
-            RollingNumericalProfile::StableV2Preview,
         );
         let entities = batch(
             vec![Some(1), Some(2)],
@@ -5349,7 +6734,7 @@ mod tests {
 
     #[test]
     fn canonical_order_contract_covers_batch_and_stream_boundaries() {
-        let kernel = numeric_plan(RollingNumericalProfile::StableV1);
+        let kernel = numeric_plan();
         let first = batch(vec![Some(1)], vec![Some(1)], vec!["a"], vec![Some(1.0)]);
         let first_output = kernel.open_and_fill(&first, "r").unwrap().unwrap();
 
@@ -5389,75 +6774,36 @@ mod tests {
     }
 
     #[test]
-    fn stable_preview_refolds_numeric_and_pair_windows() {
-        assert!(stable_v2_rebase_due(1, 1, true));
-        assert!(!stable_v2_rebase_due(1, 1, false));
-        assert!(stable_v2_rebase_due(64, 64, false));
-
-        let finite =
-            stable_v2_float64_accumulator([1.0e12, 1.0e12 + 0.25, 1.0e12 + 0.5].into_iter(), "r")
-                .unwrap();
-        assert_eq!(finite.valid_count, 3);
-        assert!(finite.m2 > 0.0);
-        assert!(matches!(
-            stable_v2_float64_accumulator([f64::INFINITY].into_iter(), "r")
-                .unwrap()
-                .sum,
-            Some(SumState::Float(value)) if value == f64::INFINITY
-        ));
-        assert!(matches!(
-            stable_v2_float64_accumulator([f64::NEG_INFINITY].into_iter(), "r")
-                .unwrap()
-                .sum,
-            Some(SumState::Float(value)) if value == f64::NEG_INFINITY
-        ));
-        let mixed =
-            stable_v2_float64_accumulator([f64::INFINITY, f64::NEG_INFINITY].into_iter(), "r")
-                .unwrap();
-        assert!(matches!(mixed.sum, Some(SumState::Float(value)) if value.is_nan()));
-
-        let pair = stable_v2_pair_accumulator(
-            [
-                (1.0e12, -1.0e12),
-                (1.0e12 + 1.0, -1.0e12 + 2.0),
-                (f64::INFINITY, 3.0),
-            ]
-            .into_iter(),
-            "r",
-        )
-        .unwrap();
-        assert_eq!(pair.valid_count, 3);
-        assert_eq!(pair.pos_inf_x, 1);
-        assert!(pair.co_moment > 0.0);
-
-        let mut numeric = Float64NumericState::new(TypedFrame::Rows(64), 64);
-        for transition in 1_i32..=64 {
+    fn typed_rebuilds_preserve_constant_and_pair_readouts() {
+        let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 70);
+        let mut pairs = Float64PairState::new(TypedFrame::Rows(2), 70);
+        for transition in 1_i32..=70 {
             numeric
-                .update(
-                    i64::from(transition),
-                    Some(1.0e12 + f64::from(transition)),
-                    RollingNumericalProfile::StableV2Preview,
-                    u64::try_from(transition).unwrap(),
-                    "r",
-                )
+                .update(i64::from(transition), Some(7.0), "r")
                 .unwrap();
-        }
-        assert_eq!(numeric.samples.len(), 64);
-
-        let mut pairs = Float64PairState::new(TypedFrame::Rows(64), 64);
-        for transition in 1_i32..=64 {
             pairs
                 .update(
                     i64::from(transition),
                     Some((f64::from(transition), f64::from(transition * 2))),
-                    RollingNumericalProfile::StableV2Preview,
-                    u64::try_from(transition).unwrap(),
                     "r",
                 )
                 .unwrap();
         }
-        assert_eq!(pairs.samples.len(), 64);
-        assert!(pairs.accumulator.co_moment > 0.0);
+        assert_eq!(
+            numeric.accumulator.mean_value().to_bits(),
+            7.0_f64.to_bits()
+        );
+        assert_eq!(
+            numeric.accumulator.numeric.variance(0).to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert!(
+            pairs
+                .accumulator
+                .family
+                .covariance(pairs.accumulator.valid_count, 0)
+                > 0.0
+        );
     }
 
     #[test]
@@ -5504,22 +6850,8 @@ mod tests {
         assert_eq!((ewma.valid_count, ewma.value), (2, 12.0));
 
         let mut pair = Float64PairState::new(TypedFrame::Duration(2), 0);
-        pair.update(
-            1,
-            Some((1.0, 2.0)),
-            RollingNumericalProfile::StableV1,
-            1,
-            "r",
-        )
-        .unwrap();
-        pair.update(
-            3,
-            Some((3.0, 6.0)),
-            RollingNumericalProfile::StableV1,
-            2,
-            "r",
-        )
-        .unwrap();
+        pair.update(1, Some((1.0, 2.0)), "r").unwrap();
+        pair.update(3, Some((3.0, 6.0)), "r").unwrap();
         assert_eq!(pair.accumulator.valid_count, 1);
     }
 
@@ -5542,7 +6874,7 @@ mod tests {
         assert!(remove_float64(&mut wrong_remove, 1.0).is_err());
 
         let mut signed = WindowAccumulator::new(SumClass::Signed);
-        assert!(add_exact(&mut signed, ExactValue::Unsigned(1), "r").is_err());
+        assert!(add_exact_sum(&mut signed, ExactValue::Unsigned(1), "r").is_err());
         let mut unsigned = WindowAccumulator::new(SumClass::Unsigned);
         assert!(remove_exact(&mut unsigned, ExactValue::Unsigned(1)).is_err());
         unsigned.valid_count = 1;
@@ -5557,21 +6889,14 @@ mod tests {
         };
         assert!(add_pair_float64(&mut pair, 1.0, 2.0, "r").is_err());
         let mut empty_pair = PairAccumulator::default();
-        assert!(remove_pair_float64(&mut empty_pair, 1.0, 2.0).is_err());
+        assert!(empty_pair.remove_values(1.0, 2.0).is_err());
         add_pair_float64(&mut empty_pair, f64::INFINITY, f64::NEG_INFINITY, "r").unwrap();
-        remove_pair_float64(&mut empty_pair, f64::INFINITY, f64::NEG_INFINITY).unwrap();
+        empty_pair
+            .remove_values(f64::INFINITY, f64::NEG_INFINITY)
+            .unwrap();
         assert_eq!(empty_pair.valid_count, 0);
+        assert_eq!(empty_pair.finite_count, 0);
         assert_eq!((empty_pair.pos_inf_x, empty_pair.neg_inf_y), (0, 0));
-        assert_eq!(
-            (
-                empty_pair.mean_x,
-                empty_pair.mean_y,
-                empty_pair.co_moment,
-                empty_pair.m2_x,
-                empty_pair.m2_y,
-            ),
-            (0.0, 0.0, 0.0, 0.0, 0.0)
-        );
     }
 
     #[test]
@@ -5584,9 +6909,7 @@ mod tests {
             ddof: 0,
         };
         let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 2);
-        numeric
-            .update(1, Some(4.0), RollingNumericalProfile::StableV1, 1, "r")
-            .unwrap();
+        numeric.update(1, Some(4.0), "r").unwrap();
         let states = vec![TypedWindowState::Numeric(numeric.clone())];
 
         let mut wrong_builder = DerivedBuilder::new(
@@ -5678,9 +7001,7 @@ mod tests {
     #[test]
     fn typed_pair_and_float_builders_reject_invalid_output_kinds() {
         let mut numeric = Float64NumericState::new(TypedFrame::Rows(2), 2);
-        numeric
-            .update(1, Some(4.0), RollingNumericalProfile::StableV1, 1, "r")
-            .unwrap();
+        numeric.update(1, Some(4.0), "r").unwrap();
         let bad_ewma_readout = TypedFloatReadout {
             group: 0,
             kind: TypedFloatReadoutKind::Ewma,
@@ -5794,16 +7115,13 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            assert_eq!(
-                extrema_storage(all_types.field(index).data_type()).unwrap(),
-                storage
-            );
+            assert_eq!(extrema_storage(all_types.field(index).data_type()), storage);
             require_numeric_type(&all_types, index).unwrap();
         }
-        assert!(extrema_storage(&DataType::Utf8).is_err());
+        assert_eq!(extrema_storage(&DataType::Utf8), OutputStorage::Value);
         assert!(require_numeric_type(&all_types, 10).is_err());
         assert!(
-            compile_typed_plan(&all_types, &[], &[])
+            compile_typed_plan(&all_types, &[], &[], &[])
                 .unwrap_err()
                 .contains("at least one")
         );

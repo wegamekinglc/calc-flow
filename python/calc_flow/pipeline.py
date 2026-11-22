@@ -217,20 +217,27 @@ class Runtime:
             return inferred
 
     def _infer_symbolic_sql_schema(
-        self, query: str, schemas: Mapping[str, Any], /
+        self,
+        query: str,
+        schemas: Mapping[str, Any],
+        aggregate_output: str | None = None,
+        /,
     ) -> Any:
         """Cache schema-only SQL planning within the current registration revision."""
         ordered = tuple(sorted(schemas.items()))
         key = (
             "sql",
             query,
+            aggregate_output,
             tuple((name, schema.serialize().to_pybytes()) for name, schema in ordered),
         )
         with self._registration_lock:
             cached = self._symbolic_schema_cache.get(key)
             if cached is not None:
                 return cached
-            inferred = self._inner._infer_sql_schema(query, dict(ordered))
+            inferred = self._inner._infer_sql_schema(
+                query, dict(ordered), aggregate_output
+            )
             if len(self._symbolic_schema_cache) >= _SYMBOLIC_COMPILE_CACHE_MAX_ENTRIES:
                 del self._symbolic_schema_cache[next(iter(self._symbolic_schema_cache))]
             self._symbolic_schema_cache[key] = inferred

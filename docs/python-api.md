@@ -6,9 +6,10 @@ For a guided first calculation, read [batch calculations](batch-guide.md).
 This page describes the Python application API and its contracts; the full
 expression catalog has its own [reference](symbolic-api.md).
 
-The `calc-flow-python` package exposes Python expressions and Arrow
-execution over the internal Rust runtime through PyO3. CPython 3.9 or newer
-is required. This page describes version `2026.11.14` in the current checkout;
+The `calc-flow-python` and explicitly installed `calc-flow-python-v3`
+distributions expose the same Python expressions and Arrow execution over the
+internal Rust runtime through PyO3. CPython 3.9 or newer is required. This page
+describes version `2026.11.14` in the current checkout;
 use a source build when the published package has a different version.
 
 On this page:
@@ -19,6 +20,7 @@ On this page:
 - [Reusable programs and collection](#reusable-programs-and-collection)
 - [SQL and pipeline composition](#sql-and-pipeline-composition)
 - [Streaming results](#streaming-results)
+- [Stream sessions](#stream-sessions)
 - [LateOutputs and local late policy](#lateoutputs-and-local-late-policy)
 - [Bounded backward ASOF Join](#bounded-backward-asof-join)
 - [Choosing an integration API](#choosing-an-integration-api)
@@ -49,6 +51,13 @@ The default Python dependencies are `pyarrow` and `typing-extensions`. The
 requirements. Project-document validation uses the native Rust runtime and does
 not require Pydantic. Maturin is required for source builds, not for installing
 a prebuilt wheel.
+
+On x86-64 processors with x86-64-v3 support, use
+`uv add calc-flow-python-v3` instead in a clean environment. The two
+distributions have the same version and `calc_flow` import package and are
+mutually exclusive; do not install both or one over the other. See
+[getting started](getting-started.md#install-published-packages) for supported
+platforms, optional-provider extras, and the coexistence error.
 
 From a source checkout:
 
@@ -136,6 +145,7 @@ be inferred.
 | `t.filter(predicate)`                          | Keep rows matching a boolean `ColumnExpr` over that table           |
 | `expression.pipe(function, *args, **kwargs)`   | Apply a synchronous declaration function once                       |
 | `t.sql(query)`                                 | Add SQL using this table as the local alias `input`                 |
+| `t.changelog_sql(query)`                       | Declare compact stream changelog SQL using local alias `input`      |
 | `expression.identical(other)`                  | Compare structural identity as a Python boolean                     |
 
 Use `&`, `|`, and `~` instead of `and`, `or`, and `not`; converting an expression
@@ -277,10 +287,33 @@ and standalone array Program outputs are unsupported; the
 
 Batch SQL accepts multiple aliases. Append stream SQL accepts one alias or the
 exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
-Queries with ordinary aggregates or `GROUP BY` accumulate state across batches and emit the full
-current result after each batch: `SELECT SUM(value) AS total` emits `1`, then
-`6` for input batches `[1]` and `[2, 3]`. A grouped result includes unchanged
-groups in each snapshot. By default, retained SQL input has no fixed row or
+By default, queries with ordinary aggregates or `GROUP BY` accumulate state
+across batches and emit the full current result after each batch:
+`SELECT SUM(value) AS total` emits `1`, then `6` for input batches `[1]` and
+`[2, 3]`. A grouped result includes unchanged groups in each snapshot.
+
+`cf.changelog_sql(query: str, /, **tables: TableExpr) -> TableExpr` and
+`t.changelog_sql(query, /)` explicitly select changelog output for one
+single-alias stream aggregate. This mode requires compact execution; batch,
+multi-alias, latest-relation, non-aggregate, and unsupported aggregate shapes
+are rejected rather than falling back to retained input. Outer
+`ORDER BY`/`LIMIT` is unsupported. Every `GROUP BY` expression must appear
+exactly once in the final projection as the same typed expression or an alias,
+without a cast; a global aggregate uses the singleton empty key.
+
+The projected SQL fields are followed by non-null Utf8 `_cf_op`, whose values
+are `"retract"` and `"upsert"`; a user output field with that name is rejected.
+Both operations carry the complete projected row. Changes use ascending
+internal group-ID order, with the old-row retract before the new-row upsert.
+Newly visible groups upsert only, groups leaving `HAVING` retract only, and
+unchanged visible rows emit no operations. Comparison includes nulls and exact
+floating-point bit patterns. Restore continues from committed state without
+bootstrap upserts. See
+[changelog aggregate output](streaming-guide.md#changelog-aggregate-output)
+for flush and delivery boundaries. Existing `cf.sql`, `TableExpr.sql`, and
+`snapshot_sql` declarations are unchanged.
+
+By default, retained SQL input has no fixed row or
 byte cap. Set `StreamRuntimeConfig.sql_state_budget` to
 `StateBudget(20_000_000, 8 << 30)` to limit cumulative accepted input, including
 compact execution. Eligible aggregates keep compact state; unsupported shapes
@@ -310,8 +343,8 @@ Ordering uses the parsed per-term direction/null placement: defaults are
 `ASC NULLS LAST` and `DESC NULLS FIRST`. Equal complete tuples keep the first
 encountered winner. Default/`RESPECT NULLS` can select null; `IGNORE NULLS`
 skips null values but preserves null-only groups. Declare a business sequence
-in the SQL ordering tuple if needed; no tie-breaker is implicit. Full snapshots
-still cost O(keys) output work, without delta output or fixed RSS guarantees.
+in the SQL ordering tuple if needed; no tie-breaker is implicit. Default full
+snapshots still cost O(keys) output work and have no fixed RSS guarantee.
 See [ordered LAST_VALUE](streaming-guide.md#compact-ordered-last_value) for
 the exact MVP shape and existing runtime evidence.
 
@@ -324,7 +357,7 @@ rejecting unknown/corrupt state atomically. See
 and [SQL stream boundaries](streaming-guide.md#stream-ownership-and-sql-boundaries).
 SQL without aggregation remains batch-local,
 as do SQL window functions when used without a grouped or ordinary aggregate.
-`ORDER BY` and `LIMIT` apply to each emitted snapshot.
+In default mode, `ORDER BY` and `LIMIT` apply to each emitted snapshot.
 
 `cf.snapshot_sql(query: str, /, **tables: TableExpr) -> TableExpr` provides
 stream-only SQL over complete replacement relations, including multiple
@@ -399,12 +432,15 @@ its actual capabilities and watermark policy.
 With `watermarks=None`, an iterable or materialized input declaring `event_time` must have
 non-null, nondecreasing timestamps in arrival order across rows, batches, and
 all entities in that source. The native runtime generates a watermark at
-`max_seen - 1 microsecond`, with a 100 ms emission interval. Equal timestamps
-may span batches; the latest timestamp stays open until a larger one arrives,
-explicit progress is supplied, or the source ends. This allows finalized rolling
-results to arrive before EOF. A decrease fails; the adapter does not sort or
-drop rows. Inputs without event time use disabled watermarks, and stateless
-expressions and SQL produce results as batches arrive.
+`max_seen - 1 microsecond` with a zero emission interval: it arms no watermark
+timer and publishes the watermark behind each data batch that advances the
+observed maximum. Equal timestamps may span batches; the latest timestamp stays
+open until a larger one arrives, explicit progress is supplied, or the source
+ends. Finalized rolling results for earlier timestamps therefore follow each
+advancing batch without waiting for a timer or EOF. A decrease fails; the
+adapter does not sort or drop rows. Inputs without event time use disabled
+watermarks, and stateless expressions and SQL produce results as batches
+arrive.
 
 `watermarks` accepts an existing `WatermarkPolicy` for one dynamic input or a
 mapping by logical dynamic input name. Omitted mapping entries use the default.
@@ -428,7 +464,8 @@ Each runner has an independent cursor; the reusable binding retains its imported
 buffers until released. Jobs release their own references on close, including
 failure and cancellation. Slices can retain larger backing allocations: logical
 edge byte limits do not bound input storage or process RSS. Neither this cursor
-nor temporary checkpoints provide persistent replay or exactly-once delivery.
+nor opt-in temporary convenience checkpoints provide persistent replay or
+exactly-once delivery.
 Readers and arbitrary Arrow stream providers are not accepted by this factory.
 
 `StreamResults` supports async context management, async iteration, idempotent
@@ -445,12 +482,167 @@ combined order or synchronized dictionary. Do not assume one result table per
 source batch. Results omit native `Batch` metadata and do not acknowledge
 application delivery.
 
-Every convenience stream owns temporary managed checkpoint storage removed
-after native cleanup. Ordinary iterables have best-effort delivery, and neither
-the iterator nor its temporary checkpoints provide durable restart or
-exactly-once processing. For those contracts, use explicit source/sink bindings,
-`Program.compile_stream`, `StreamingRunner`, and `ManagedCheckpointRuntime`.
+`StreamRuntimeConfig.checkpointing` is `bool | None` and defaults to `None`,
+which selects the entry point's mode. Convenience streams (`TableExpr.stream`,
+`Program.stream`, and streaming `Program.execute`) resolve `None` to
+checkpointing off, so a config that only tunes other fields, such as
+`StreamRuntimeConfig(edge_budget=...)`, also runs without checkpoints. These
+jobs create no checkpoint storage, take no snapshots, and admit operators
+without a proven checkpoint lifecycle. Set `checkpointing=True` to run a
+convenience stream with temporary managed checkpoint storage, which is removed
+after native cleanup; checkpointed admission rules then apply. Any other value
+raises `TypeError` with the message `checkpointing must be a bool or None` at
+context entry, before compilation.
+
+Ordinary iterables have best-effort delivery, and neither the iterator nor
+temporary checkpoints provide durable restart or exactly-once processing. For
+those contracts, use explicit source/sink bindings, `Program.compile_stream`,
+`StreamingRunner`, and `ManagedCheckpointRuntime`.
 See [explicit connectors and recovery](streaming-guide.md#explicit-connectors-and-recovery).
+
+## Stream sessions
+
+`TableExpr.session(*, runtime=None, config=None, watermarks=None,
+checkpoints: ManagedCheckpointRuntime | None = None, restore: bool = False)`
+returns `StreamSession[pyarrow.Table]`. `Program.session(*, runtime=None,
+config=None, watermarks=None,
+checkpoints: ManagedCheckpointRuntime | None = None, restore: bool = False)`
+returns `StreamSession[dict[str, pyarrow.Table]]` and requires a stream-mode
+Program. A session compiles one fresh native stream plan. Each ordinary call
+runs synchronously on the calling thread, passes its batch and watermark through
+every operator, and returns the rows emitted by that call. There is no source,
+sink, job, progress driver, or async bridge. Use `stream` for async sources and
+`StreamingRunner` for connectors and sink delivery contracts; see
+[choose batch or stream](streaming-guide.md#choose-batch-or-stream). Run
+[example 37](../examples/37_stream_session.py) for a checked in-memory table
+session with ordered rows, explicit progress, and finalization.
+
+| Member                               | Contract                                                                    |
+|--------------------------------------|-----------------------------------------------------------------------------|
+| `push(inputs, /, *, watermark=None)` | Run one batch, then an optional completeness watermark; return emitted rows |
+| `advance(watermark)`                 | Advance the input watermark without data; return the rows it closes         |
+| `checkpoint() -> int`                | Persist durable state and return its epoch; managed storage required        |
+| `finish()`                           | End the input, flush every operator, and finish the session                 |
+| `close()`                            | Release native state without flushing; repeated calls do nothing            |
+| `with ... as session`                | Context exit calls `close()`; rows that are still open are discarded        |
+
+A table session's `push` takes one `pa.Table`, `pa.RecordBatch`, or table
+`Batch`, and `watermark` is a timezone-aware `datetime` or `Watermark`. A
+program session takes a mapping that contains exactly its one dynamic input by
+logical name; its `watermark` may also be a one-entry mapping by that name.
+Input data must have the declared exact Arrow schema; schema metadata is
+normalized as for ordinary stream iterables. Each pushed batch is stamped like
+a runner source batch, with the input binding ID, a sequence starting at 0, and
+the original `Batch` attributes.
+
+A table session returns one `pa.Table` per call: the emitted rows, or an empty
+table with the declared output schema. A program session returns a dictionary
+with every declared output name, empty tables included; aliases of one physical
+output share one table. Rows keep emission order within each output; outputs
+have no combined order. A call can emit no rows until progress closes them.
+
+Construction, including `restore=True`, compiles and rejects a running event
+loop with `RuntimeError`. A session admits one dynamic table input feeding
+rolling `cf.ts` features, row-local expressions such as `with_columns`,
+`select`, and `filter`, and `union_all`. Static parameters and native array
+inputs to these table declarations raise `ValueError` before compilation.
+Native admission rejects other
+node kinds, including SQL, snapshot SQL, cross-section, window, join, ASOF,
+DISTINCT, ordering, and external-provider nodes, and outputs that request
+ExactlyOnce delivery, with `ConfigError`; use `stream` or `StreamingRunner`
+for those graphs. An explicitly compiled `native:array_sequence@1` plan can
+instead use the native `_StreamSession` binding with a NativeArray, a native
+array `Batch`, or an exact `numpy.ndarray`. It returns NativeArray outputs;
+other external providers remain rejected. This low-level path does not add an
+`ArrayExpr.session` convenience API. Native admission and call errors name the
+physical binding and node IDs of the compiled plan, which can differ from
+logical declaration names. Python-side checks name logical inputs.
+
+`watermarks` accepts one policy or a mapping by logical dynamic input name, as
+for `stream`. Each policy maps to caller-driven progress:
+
+| Policy for the input                                  | Session progress                                                      |
+|-------------------------------------------------------|-----------------------------------------------------------------------|
+| `None`, with declared `event_time`                    | Ordered: `max(event_time) - 1 microsecond` after each push            |
+| `None`, without `event_time`                          | Disabled: no watermark                                                |
+| `SourceProvidedWatermarks()`                          | Explicit: only `watermark=` and `advance`                             |
+| `BoundedOutOfOrderness(column, delay, emit_interval)` | `max(event_time) - delay` after each push; `emit_interval` is ignored |
+| `DisabledWatermarks()`                                | Disabled: no watermark                                                |
+
+Sessions have no idle timers: a policy with a non-`None` `idle_timeout` raises
+`ValueError`. The ordered default requires non-null, nondecreasing event time
+across rows and pushes, and rejects a push whose rows are at or before the
+current watermark. An explicit `watermark=` declares the input complete up to
+that time and combines with a generated watermark as their maximum. A
+regressing watermark, or any explicit watermark under a disabled policy, raises
+`ConfigError`; an equal watermark adds nothing. See
+[session watermarks](streaming-guide.md#session-watermarks) for the complete
+rules.
+
+Under `SourceProvidedWatermarks` and `BoundedOutOfOrderness`, the session does
+not check order, so late rows reach the operators and follow their late
+policies. Rows dropped by `late_policy="drop"` are not observable: sessions
+expose no `status()` or late-row metrics.
+
+`config=None` uses `StreamRuntimeConfig()`. With `checkpoints=None`, sessions
+retain in-memory behavior and checkpoint configuration is ignored, including
+`checkpointing=True`; no state survives the session. Passing a public
+`ManagedCheckpointRuntime` enables durable v4 capture and requires effective
+`checkpointing=True`: the default `None` resolves to enabled, while `False`
+rejects storage. The adapter unwraps the public storage wrapper at the native
+boundary. Fresh durable construction rejects a lineage that already contains a
+manifest. `restore=True` requires storage and selects the highest complete
+session epoch after validating `job_kind="session"` and the plan recovery
+fingerprint. Restore opens no connectors and replays no earlier input or output;
+the caller resumes with later batches.
+
+`checkpoint()` requires managed storage and an open, non-failed session. It
+synchronously persists operator state plus the next input sequence and watermark
+progress, publishes the v4 manifest, and returns the integer epoch. Checkpoint
+timing fields do not schedule automatic session captures. A failure after
+capture begins fails the live session; a manifest that already finished
+publication remains available to restore.
+
+Generated watermark state is restored with explicit units. Ordered inputs keep
+the largest raw event time in its declared Arrow unit; the generator separately
+keeps the observed maximum and last emitted watermark as actual microseconds.
+This preserves seconds, milliseconds, microseconds and nanoseconds, including
+negative values and empty or non-advancing pushes, across repeated checkpoints.
+
+`config.edge_budget` bounds each input and internal message. Internal edges have
+no queue backpressure: a call buffers whatever each operator emits during its
+turn and returns only after every queue is empty, so memory per call is bounded
+by the operators' output chunking rather than by queue capacity.
+
+`push`, `advance`, `finish`, and `close` may run inside a running event loop.
+They run the admitted operators on the calling thread with no I/O and no
+cross-thread waits, so a large push blocks the loop for its duration.
+`checkpoint()` performs blocking durable capture, rejects a running event loop
+with `RuntimeError`, and has no async alternative. Native calls release the GIL.
+A session runs one call at a time: a concurrent call from another thread, or a
+re-entrant call from a UDF, raises `RuntimeError` naming the busy state.
+`close()` during an in-flight call returns immediately; that call still returns
+its rows or raises its own error, and later calls raise `RuntimeError` naming
+the closed state.
+
+| Condition                                                         | Exception                                                  | Session afterwards |
+|-------------------------------------------------------------------|------------------------------------------------------------|--------------------|
+| Input schema differs from the declaration                         | `ValueError`                                               | Usable             |
+| Wrong input name, watermark type, or naive `datetime`             | `ValueError` or `TypeError`                                | Usable             |
+| Regressing or disabled-policy watermark, ordered event-time error | `ConfigError`                                              | Usable             |
+| Input batch above `config.edge_budget`                            | `ExecutionError`                                           | Usable             |
+| Operator failure or panic during a call                           | Native error class, usually `ExecutionError`               | Failed             |
+| Call on a failed, finished, closed, or busy session               | `RuntimeError`                                             | Unchanged          |
+| Unsupported graph at construction                                 | `ConfigError`, or `ValueError` for static and array inputs | Not created        |
+| Construction or restore inside a running event loop               | `RuntimeError`                                             | Not created        |
+| Checkpoint inside a running event loop                            | `RuntimeError`                                             | Unchanged          |
+
+A failed call discards rows that operators emitted earlier in that call. Later
+calls on a failed session raise `RuntimeError` with the original message and
+ask for a new session; calls after `finish()` raise `RuntimeError` naming the
+finished state. Session errors are ordinary native errors, like collection
+errors. They are not redacted the way payload-safe `StreamingRuntimeError`
+values are, because the caller is in-process and owns the data.
 
 ## LateOutputs and local late policy
 
@@ -520,14 +712,15 @@ dialect; see the [finite ASOF example](../examples/finite_asof_join.py).
 
 ## Choosing an integration API
 
-Use root `calc_flow` expressions, SQL, `pipe`, collection, and streams for
-application calculations. Use the explicit controls below for operational needs:
+Use root `calc_flow` expressions, SQL, `pipe`, collection, streams, and stream
+sessions for application calculations. Use the explicit controls below for
+operational needs:
 
 | Need                                     | Interface                                                      |
 |------------------------------------------|----------------------------------------------------------------|
 | Plan state and execution diagnostics     | `Program.compile_batch`, `BatchExecutionPlan`, and `RunResult` |
 | Typed runtime UDF or provider selection  | `Runtime` registrations and explicitly selected builder nodes  |
-| Durable recovery or transactional sinks  | `Program.compile_stream`, explicit bindings, and managed state |
+| Runner recovery or transactional sinks   | `Program.compile_stream`, explicit bindings, and managed state |
 | Native graph construction and inspection | `PipelineBuilder`, ports, and validated `ProjectDocument`      |
 
 These expose the same native graph and runtime. They do not introduce a table
@@ -793,18 +986,19 @@ The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
 with truths anchored in
 the engine implementation:
 
-| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts    |
-|----------------------|---------------|-------------------------|-----------------------|---------------|------------------|
-| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                |
-| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                |
-| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6 |
-| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4             |
-| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 10               |
-| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 1, 2, 3          |
-| `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2             |
+| Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts       |
+|----------------------|---------------|-------------------------|-----------------------|---------------|---------------------|
+| `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                   |
+| `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                   |
+| `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6, 7 |
+| `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4, 5, 6          |
+| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 11                  |
+| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 12                  |
+| `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2                |
 
-The rolling inventory includes retained-history and accumulator layouts as well
-as columnar layout `3` and cumulative layout `4`. See
+The rolling inventory includes retained-history, accumulator, indicator and
+shared typed-state layouts through layout `7`. The SQL inventory includes its
+compact and retained-input layouts `3` through `6`. See
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 
@@ -875,8 +1069,8 @@ The table bridge reports
 work and an optional
 latched static matrix RHS. Its stream mode does not add high-level ArrayExpr
 streaming. All three native factories report `deterministic=True` and
-`replay_safe=True` for identical inputs on the same implementation and numerical
-profile; these claims do not promise cross-platform bitwise equality or delivery
+`replay_safe=True` for identical inputs on the same implementation and numeric
+contract; these claims do not promise cross-platform bitwise equality or delivery
 guarantees. The sequence factory instead reports `modes=("stream",)`,
 `stateful=True`, `microbatch_invariant=True`, `requires_watermark=False`,
 `checkpoint_support="checkpointed_stateful"`, `state_version=1`,
@@ -1338,11 +1532,10 @@ seeds from the first valid value, and shares the table EWMA transition.
 Null and NaN observations are skipped; their readout carries prior state once
 the valid-observation warmup is met. `min_periods` may exceed `span`.
 
-`rolling_mean(values, window=..., min_periods=1, numerical_profile="stable_v1")`
-uses a row window: nulls and NaNs occupy positions without counting as valid
-samples. `min_periods` must be between one and the window size. The default
-retains the table `stable_v1` transition; `stable_v2` selects the existing
-preview profile explicitly. Both return aligned float64 vectors.
+`rolling_mean(values, window=..., min_periods=1)` uses a row window: nulls and
+NaNs occupy positions without counting as valid samples. `min_periods` must be
+between one and the window size. It returns an aligned float64 vector and shares
+the table rolling mean's compensated sliding sum, divided only at readout.
 
 `rsi(values, period=n)` and `atr(high, low, close, period=n)` use Wilder
 transitions and return nullable float64 vectors aligned to the inputs. Period
@@ -1480,16 +1673,19 @@ reordering continue to use table operators.
 
 The strict options object requires `ir_version`, `input_dtype` and `kernel`.
 IR1 accepts `{"function":"rolling_mean","window":20}` with optional
-`min_periods` and `numerical_profile`, or `{"function":"ewma","span":20}` with
-optional `min_periods`. IR2 retains those kernels and adds
+`min_periods`, or `{"function":"ewma","span":20}` with optional `min_periods`.
+IR2 retains those kernels and adds
 `{"function":"rsi","period":14}` and `{"function":"atr","period":14}` with
 mandatory positive-u64 period. Missing/NaN resets and finite-domain errors use
 the indicator contract above. `execution` holds output/allocation limits and `state`
 holds `max_state_bytes`; both are optional and reject unknown keys. These options
 use the sequence factory's schema, independently of array_expr IR1/IR2.
 Compile it through `PipelineBuilder.external` with an explicitly registered
-Runtime and run it through explicit native source/sink bindings. The old kernels
-retain checkpoint layout 1 in every IR; RSI and ATR use layout 2. IR3 additionally
+Runtime and run it through explicit native source/sink bindings. EWMA and
+rolling mean use checkpoint layout 1 in every IR; RSI and ATR use layout 2.
+Layout-1 rolling-mean state stores the compensated sum, correction and finite
+sample count and accepts only its compensated numeric marker; checkpoints
+carrying earlier mean markers are rejected rather than migrated. IR3 additionally
 accepts `{"function":"macd_components"}` with the five optional MACD parameters
 and their 12/26/9/1/1 defaults. Input is one float32/float64 vector; its single
 float64 output has shape `[n, 3]` in line/signal/histogram order. The element
@@ -1758,7 +1954,10 @@ The convenience `stream` methods translate logical declaration names.
 The plan records immutable source/sink binding IDs and optional per-output
 `StreamRequirements`; it cannot execute as a batch plan. A
 `StreamingRunner` owns that plan, all connector bindings, one
-`ManagedCheckpointRuntime`, and optional `StreamRuntimeConfig`:
+`ManagedCheckpointRuntime`, and optional `StreamRuntimeConfig`. The runner
+resolves `StreamRuntimeConfig.checkpointing=None` to checkpointing on, so a
+graph-only plan still requires a `ManagedCheckpointRuntime` unless the config
+sets `checkpointing=False`; disabled mode requires `checkpoints=None`.
 
 The explicit graph form is:
 

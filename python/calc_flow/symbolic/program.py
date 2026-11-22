@@ -38,7 +38,12 @@ if TYPE_CHECKING:
     from calc_flow.compute import TableData
     from calc_flow.config import ProjectDocument
     from calc_flow.pipeline import BatchExecutionPlan, Runtime, StreamExecutionPlan
-    from calc_flow.runtime import StreamRuntimeConfig, WatermarkPolicy
+    from calc_flow.runtime import (
+        ManagedCheckpointRuntime,
+        StreamRuntimeConfig,
+        WatermarkPolicy,
+    )
+    from calc_flow.session import StreamSession
     from calc_flow.stream import StreamInput, StreamOutput, StreamResults
     from calc_flow.symbolic.analyzer import AnalysisResult
     from calc_flow.symbolic.types import Field, LatePolicy
@@ -675,6 +680,36 @@ class Program:
 
         return _stream_program(
             _StreamRequest(self, inputs, runtime, config, watermarks, portability)
+        )
+
+    def session(
+        self,
+        *,
+        runtime: Runtime | None = None,
+        config: StreamRuntimeConfig | None = None,
+        watermarks: WatermarkPolicy | Mapping[str, WatermarkPolicy] | None = None,
+        checkpoints: ManagedCheckpointRuntime | None = None,
+        restore: bool = False,
+    ) -> StreamSession[dict[str, pa.Table]]:
+        """Compile a streaming program into a synchronous push session.
+
+        Pushes take a mapping with the one dynamic input; results map every
+        declared output name to a ``pa.Table``, empty tables included.
+        Watermark policies follow ``TableExpr.session``. Native admission
+        errors name physical node IDs.
+        """
+        self._require_engine("streaming")
+        from calc_flow.session import _open_session
+
+        return cast(
+            "StreamSession[dict[str, pa.Table]]",
+            _open_session(
+                self,
+                runtime,
+                config,
+                watermarks,
+                options=(False, checkpoints, restore),
+            ),
         )
 
     def output(self, name: str, value: TableExpr | ArrayExpr, /) -> Program:

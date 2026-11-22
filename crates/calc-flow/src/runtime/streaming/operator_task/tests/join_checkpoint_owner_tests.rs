@@ -64,7 +64,7 @@ fn row(time: i64) -> Batch {
     Batch::table(vec![record], BatchMetadata::default()).unwrap()
 }
 
-async fn fixture() -> Fixture {
+async fn fixture(native: bool) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let backend = LocalStateBackend::new(directory.path().join("state"))
         .await
@@ -77,6 +77,9 @@ async fn fixture() -> Fixture {
             .await
             .unwrap();
     let mut operator = operator();
+    if native {
+        operator.enable_native_checkpoint().unwrap();
+    }
     let pool = operator.checkpoint_preload_test_pool().unwrap();
     let port = operator.output_ports()[0].clone();
     let (sender, acks) = mpsc::channel(1);
@@ -130,6 +133,23 @@ async fn collect_barrier(harness: &mut Harness) {
     assert_eq!(output_rows, 1);
 }
 
+async fn drive_join(
+    harness: &mut Harness,
+    acks: &mut mpsc::Receiver<OperatorCheckpointAck>,
+) -> OperatorCheckpointAck {
+    start(harness).await;
+    send(harness, "left", StreamMessage::data(row(95))).await;
+    send(harness, "left", StreamMessage::barrier(Epoch::INITIAL)).await;
+    send(harness, "right", StreamMessage::data(row(100))).await;
+    send(harness, "right", StreamMessage::barrier(Epoch::INITIAL)).await;
+    let ack = tokio::time::timeout(Duration::from_secs(5), acks.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    collect_barrier(harness).await;
+    ack
+}
+
 fn assert_ack(ack: &OperatorCheckpointAck) {
     let metadata = &ack.state.inline_metadata;
     assert_eq!(ack.node_id, "node");
@@ -143,33 +163,15 @@ fn assert_ack(ack: &OperatorCheckpointAck) {
     assert_eq!(metadata["metrics"]["emitted_match_rows"], 1);
     assert_eq!(metadata["v2_inventory"]["base_epoch"], 1);
     assert_eq!(metadata["v2_inventory"]["deltas"], serde_json::json!([]));
-    assert_eq!(ack.state.segments.len(), 4);
+    assert!(ack.state.segments.is_empty());
+    assert_eq!(ack.snapshot.segments.len(), 4);
 }
 
 #[tokio::test]
 async fn test_join_checkpoint_ack_retains_metadata_credit_after_operator_exit() {
-    let mut fixture = fixture().await;
-    start(&mut fixture.harness).await;
-    send(&mut fixture.harness, "left", StreamMessage::data(row(95))).await;
-    send(
-        &mut fixture.harness,
-        "left",
-        StreamMessage::barrier(Epoch::INITIAL),
-    )
-    .await;
-    send(&mut fixture.harness, "right", StreamMessage::data(row(100))).await;
-    send(
-        &mut fixture.harness,
-        "right",
-        StreamMessage::barrier(Epoch::INITIAL),
-    )
-    .await;
-    let ack = tokio::time::timeout(Duration::from_secs(5), fixture.acks.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let mut fixture = fixture(false).await;
+    let ack = drive_join(&mut fixture.harness, &mut fixture.acks).await;
     assert_ack(&ack);
-    collect_barrier(&mut fixture.harness).await;
     assert!(fixture.pool.reserved() > 0);
     let gather = fixture.harness.gather.clone();
     fixture.harness.cancellation.cancel();
@@ -194,4 +196,31 @@ async fn test_join_checkpoint_ack_retains_metadata_credit_after_operator_exit() 
     );
     drop(ack);
     assert_eq!(fixture.pool.reserved(), 0);
+}
+
+#[tokio::test]
+async fn test_native_checkpoint_ack_omits_legacy_capture() {
+    let mut fixture = fixture(true).await;
+    let ack = drive_join(&mut fixture.harness, &mut fixture.acks).await;
+    assert!(ack.native.is_some());
+    assert!(ack.capture_credit.is_none());
+    assert!(ack.snapshot.segments.is_empty());
+    assert_eq!(ack.state.inline_metadata["layout_version"], 12);
+    assert!(!ack.state.inline_metadata.contains_key("v2_inventory"));
+    drop(ack);
+    let gather = fixture.harness.gather.clone();
+    fixture.harness.cancellation.cancel();
+    let report = tokio::time::timeout(
+        Duration::from_secs(5),
+        fixture.harness.supervisor.join_all(),
+    )
+    .await
+    .unwrap();
+    assert!(report.errors.is_empty(), "{report:?}");
+    drop(fixture.harness);
+    drop(fixture.acks);
+    let failures = tokio::time::timeout(Duration::from_secs(5), gather.close_and_drain())
+        .await
+        .unwrap();
+    assert!(failures.is_empty(), "{failures:?}");
 }

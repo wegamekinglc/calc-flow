@@ -15,9 +15,12 @@ mod checkpoint_runtime;
 mod checkpoint_status;
 mod context;
 mod edge_queue;
+#[cfg(test)]
 pub(crate) mod entity_work;
 pub(crate) mod failure;
+#[cfg(test)]
 pub(crate) mod gather_work;
+mod inline_pipeline;
 #[allow(
     dead_code,
     reason = "runtime completion is owned behind the safe continuous facade"
@@ -30,6 +33,11 @@ mod message;
     reason = "internal metrics include fields excluded from the public status projection"
 )]
 mod metrics;
+#[allow(
+    dead_code,
+    reason = "operator migration to the unified compute pool follows in P6"
+)]
+pub(crate) mod morsel_pool;
 #[allow(
     dead_code,
     reason = "operator task internals are exercised through the continuous facade"
@@ -51,6 +59,7 @@ mod registry;
     reason = "the internal runner is owned exclusively by the public one-shot facade"
 )]
 pub(crate) mod runner;
+mod session;
 #[allow(
     dead_code,
     reason = "ordinary sink tasks are exercised through public sink bindings"
@@ -65,6 +74,7 @@ mod soak;
 )]
 pub(crate) mod source_task;
 mod sql_recovery_work;
+pub(crate) mod stop;
 #[allow(
     dead_code,
     reason = "task supervision is an internal continuous-runtime detail"
@@ -76,6 +86,10 @@ mod test_seams;
 pub use channel::{ChannelMetrics, EdgeReceiver, EdgeSender, EnvelopeCost, edge_channel};
 pub use context::StreamJobContext;
 pub(crate) use context::StreamJobControl;
+pub(in crate::runtime::streaming) use inline_pipeline::{InlinePipeline, SharedInlinePipeline};
+pub(crate) use local_edge::OperatorEdgeSender;
 pub use message::{StreamMessage, StreamMessageKind};
 #[cfg(feature = "benchmark-internals")]
 pub(crate) use operator_task::benchmark_replay;
+pub use session::{SessionOutput, SessionWatermark, StreamSession};
+pub(crate) use supervisor::TaskId;

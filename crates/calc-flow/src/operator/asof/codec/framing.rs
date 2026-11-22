@@ -6,24 +6,20 @@ pub(super) fn validate_ipc_framing_rows(
     mut bytes: &[u8],
     rows: Option<usize>,
     max_rows: Option<u64>,
-) -> Result<u64> {
+) -> Result<()> {
     let mut stage = 0;
     let mut fields = 0;
-    let mut payload_body = 0;
     loop {
         let length = message_prefix(&mut bytes)?;
         if length == 0 {
             validate_end(stage, bytes)?;
-            return Ok(payload_body);
+            return Ok(());
         }
         if stage >= 2 {
             return Err(framing_error("unexpected additional row IPC message"));
         }
         let (message, body) = read_message(&mut bytes, length)?;
         fields = validate_stage(stage, &message, body, fields, rows, max_rows)?;
-        if stage == 1 {
-            payload_body = body as u64;
-        }
         bytes = &bytes[body..];
         stage += 1;
     }
@@ -37,10 +33,6 @@ pub(super) fn record_parts(mut bytes: &[u8], max_rows: u64) -> Result<(Message<'
     let record_length = message_prefix(&mut bytes)?;
     let (message, body) = read_message(&mut bytes, record_length)?;
     Ok((message, &bytes[..body]))
-}
-
-pub(super) fn payload_body_bytes(bytes: &[u8]) -> Result<u64> {
-    validate_ipc_framing_rows(bytes, None, None)
 }
 
 fn message_prefix(bytes: &mut &[u8]) -> Result<i32> {

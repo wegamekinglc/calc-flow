@@ -290,6 +290,9 @@ jobs:
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m pytest \
             scripts/test_profile_warm_stream_p3.py -q
+          PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
+            target/benchmark-venv/bin/python -m pytest \
+            scripts/test_profile_warm_stream_native.py -q
       - name: Verify RisingWave comparison support
         if: matrix.id == 'warm-10'
         run: |

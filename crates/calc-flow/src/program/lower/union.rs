@@ -109,6 +109,7 @@ impl Lowered {
                 query: arm.query.clone(),
                 aliases: vec![arm.alias.clone()],
                 udfs: vec![],
+                aggregate_output: crate::SqlAggregateOutputMode::Snapshot,
             },
             input_ports: vec![port_spec(&arm.alias, &input_schema)],
             output_ports: vec![port_spec("output", &arm.planned_schema)],

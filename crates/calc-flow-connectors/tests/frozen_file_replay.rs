@@ -5,11 +5,10 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use calc_flow::{
-    ArrowFieldSpec, AsofJoinSide, AsofStateLimits, CheckpointManifest, Cursor, JobState,
-    ManagedCheckpointRuntime, PipelineBuilder, Result, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceEvent, SourceSchema, StreamAsofJoinOperator, StreamAsofJoinSpec,
-    StreamExecutionPlan, StreamRequirements, StreamSource, StreamingRunner, UdfRegistry,
-    WatermarkPolicy,
+    ArrowFieldSpec, AsofJoinSide, AsofStateLimits, Cursor, JobState, ManagedCheckpointRuntime,
+    PipelineBuilder, Result, SinkBinding, SourceBinding, SourceCapabilities, SourceEvent,
+    SourceSchema, StreamAsofJoinOperator, StreamAsofJoinSpec, StreamExecutionPlan,
+    StreamRequirements, StreamSource, StreamingRunner, UdfRegistry, WatermarkPolicy,
 };
 use calc_flow_connectors::{
     FileSinkConfig, FileSourceConfig, FrozenFileSource, TransactionalParquetSink,
@@ -611,7 +610,7 @@ async fn test_frozen_asof_checkpoint_restart_uses_original_unconsumed_history() 
     assert_eq!(right_values(root.path()), [5, 9]);
 }
 
-fn find_manifest(root: &Path, name: &str) -> Option<CheckpointManifest> {
+fn find_manifest(root: &Path, name: &str) -> Option<serde_json::Value> {
     for entry in std::fs::read_dir(root).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
@@ -619,7 +618,7 @@ fn find_manifest(root: &Path, name: &str) -> Option<CheckpointManifest> {
                 return Some(manifest);
             }
         } else if path.file_name().and_then(|name| name.to_str()) == Some(name) {
-            return Some(CheckpointManifest::from_bytes(&std::fs::read(path).unwrap()).unwrap());
+            return Some(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap());
         }
     }
     None
@@ -654,14 +653,15 @@ async fn test_frozen_asof_checkpoint_stores_batch_coordinates_instead_of_rows() 
     assert_eq!(first.cancel().await.state, JobState::Cancelled);
     let manifest = find_manifest(
         &root.path().join("checkpoints"),
-        &format!("manifest-{:020}.json", epoch.as_u64()),
+        &format!("epoch-{}.json", epoch.as_u64()),
     )
     .unwrap();
-    let operator_bytes = manifest
-        .operators()
+    let operator_bytes = manifest["operators"]
+        .as_object()
+        .unwrap()
         .values()
-        .flat_map(|operator| &operator.segments)
-        .map(calc_flow::StateHandle::byte_len)
+        .flat_map(|operator| operator["blocks"].as_array().unwrap())
+        .map(|block| block["byte_len"].as_u64().unwrap())
         .sum::<u64>();
     println!("retained rows: 2000; checkpoint operator bytes: {operator_bytes}");
     assert!(
@@ -771,10 +771,17 @@ async fn test_frozen_asof_replay_compacts_and_resumes_after_33_cuts() {
         let epoch = first.trigger_checkpoint().await.unwrap();
         let manifest = find_manifest(
             &root.path().join("checkpoints"),
-            &format!("manifest-{:020}.json", epoch.as_u64()),
+            &format!("epoch-{}.json", epoch.as_u64()),
         )
         .unwrap();
-        let segments = &manifest.operators().values().next().unwrap().segments;
+        let segments = manifest["operators"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()["blocks"]
+            .as_array()
+            .unwrap();
         assert_replay_cut_segments(cut, segments);
         if cut < 33 {
             for gate in &gates {
@@ -799,22 +806,30 @@ async fn test_frozen_asof_replay_compacts_and_resumes_after_33_cuts() {
     assert_eq!(right_values(root.path()), vec![9; 35]);
 }
 
-fn assert_replay_cut_segments(cut: usize, segments: &[calc_flow::StateHandle]) {
+fn assert_replay_cut_segments(cut: usize, segments: &[serde_json::Value]) {
     if cut == 33 {
-        assert!(
-            segments
-                .iter()
-                .any(|handle| { handle.segment_id().starts_with("asof-replay-start-") })
-        );
-        assert!(
-            segments
-                .iter()
-                .any(|handle| { handle.segment_id().starts_with("asof-log-") })
-        );
+        assert!(segments.iter().any(|handle| {
+            handle["object_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("asof-replay-start-")
+        }));
+        assert!(segments.iter().any(|handle| {
+            handle["object_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("asof-columnar-v1-")
+        }));
         assert!(!segments.iter().any(|handle| {
-            handle.segment_id().starts_with("asof-replay-")
-                && handle.segment_id() != "asof-replay-control"
-                && !handle.segment_id().starts_with("asof-replay-start-")
+            handle["object_id"]
+                .as_str()
+                .unwrap()
+                .starts_with("asof-replay-")
+                && handle["object_id"].as_str().unwrap() != "asof-replay-control"
+                && !handle["object_id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("asof-replay-start-")
         }));
     } else {
         assert_eq!(segments.len(), cut + 1);

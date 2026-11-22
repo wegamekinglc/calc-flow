@@ -12,7 +12,7 @@ use super::super::{
 use super::{
     Check, Prepared, Result, Work, add, budget_error, generation_check, mismatch, outer, reserve,
 };
-use crate::operator::rolling::{DecodedRollingState, state_codec, state_v3};
+use crate::operator::rolling::{DecodedRollingState, RollingKernelPlan, state_codec, state_v3};
 
 struct Decoded {
     state: DecodedRollingState,
@@ -203,7 +203,7 @@ impl Work {
             configuration: &self.compiled.configuration_hash,
             state_schema: &self.compiled.state_schema_fingerprint,
             kernel: self.compiled.kernel_plan.fingerprint(),
-            numerical: self.compiled.kernel_plan.numerical_profile(),
+            numerical: RollingKernelPlan::numeric_contract(),
         })
     }
 }

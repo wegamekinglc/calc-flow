@@ -1,0 +1,67 @@
+{
+  "schema": "calc-flow.join-regression-diagnosis.v1",
+  "status": "completed",
+  "acceptance": "diagnostic observations only; not P50 measurements and not additional gate samples",
+  "regressed_implementation": {
+    "revision": "6a2abc0876e20a8fb1883555b85bd5652b17b506",
+    "tree": "698cd13ffae1b6a45ff1e94a44364f6616d2908d"
+  },
+  "diagnostic_build": {
+    "revision": "0e9ed0b8d458f5f260101eea105d2d2d0980880f",
+    "join_source_identical_to_regressed_implementation": true,
+    "features": "benchmark-internals",
+    "source_status_at_build": "clean",
+    "build_elapsed_seconds": 1289.05,
+    "wheel_sha256": "e5290a6323ef0e88ccc8e1f0d294f9b91b41c444245df9d2c9024e8e184ee494",
+    "loaded_native_sha256": "fe7e00e0cc3481895835ef96de48c92a3f5c66108f1b3e7cda48120d07792d9f"
+  },
+  "execution": {
+    "cpu_affinity": 0,
+    "single_thread_environment": true,
+    "observations_per_case": 1,
+    "total_budget_seconds": 600,
+    "timing_scope": "existing ready-source-to-Arrow timer plus job-owned Join CPU trace"
+  },
+  "cases": [
+    {
+      "scenario": "join",
+      "rows": 1000000,
+      "seconds": 0.675811993,
+      "correctness": {
+        "passed": true,
+        "rows": 1000000,
+        "max_abs_error": 0.0
+      },
+      "hot_path_executed": false,
+      "stages_ms": {
+        "run_route": 499.108921,
+        "run_materialize": 111.669226,
+        "run_probe": 33.798476,
+        "run_admit": 14.276451,
+        "run_emit": 6.58307,
+        "run_commit": 0.958228,
+        "run_build": 0.512204,
+        "run_merge": 0.000378
+      },
+      "finding": "retain_threshold returns i128::MAX when the opposite ingress has Ended, making every current row retain=false. prepare_hot_input requires every row to be retained, so the entire 1M-row quote batch incorrectly falls back to RunCore instead of using the previous hot path."
+    },
+    {
+      "scenario": "interval_join",
+      "rows": 1000000,
+      "seconds": 2.908147462,
+      "correctness": {
+        "passed": true,
+        "rows": 10998080,
+        "max_abs_error": 0.0
+      },
+      "hot_path_executed": true,
+      "stages_ms": {
+        "hot_execute": 775.573088,
+        "run_admit": 24.509926,
+        "hot_emit": 5.591682,
+        "uncovered_by_stage_timers": 2102.472766
+      },
+      "finding": "The native BandJoin still executes, so this is not a RunCore fallback. prepare_hot_input adds hot_batch_charge with production KeyStore routing for both 1M-row sides. The uncovered region includes that new charge and other uninstrumented runtime work; no separate hot_charge timer was present, so the exact per-function attribution is not claimed."
+    }
+  ]
+}

@@ -272,15 +272,12 @@ fn rolling_operand(node: &Node, operand: Operand<'_>) -> Result<Descriptor> {
         input,
         window,
         min_periods,
-        numerical_profile,
         ..
     } = node
     else {
         unreachable!("rolling node was selected")
     };
-    let _ = RollingMeanOptions::new(*window)?
-        .with_min_periods(*min_periods)?
-        .with_numerical_profile(numerical_profile.native());
+    let _ = RollingMeanOptions::new(*window)?.with_min_periods(*min_periods)?;
     rolling(operand(input)?)
 }
 fn ewma_operand(node: &Node, operand: Operand<'_>) -> Result<Descriptor> {

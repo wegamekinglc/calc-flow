@@ -1,0 +1,18 @@
+{
+  "schema": "calc-flow.checkpoint-v4-direct-plan.v1",
+  "protocol": "benchmarks/checkpoint-v4/protocol.md M2",
+  "candidate_revision": "7d0b4169",
+  "baseline": "checkpoint-off arm inside the same sealed evidence binary",
+  "case": "6400x64-dual",
+  "connection": "Measure enabled checkpoint state without an epoch versus checkpoint-off for direct Rolling plus mean5-mean projection over 64 entities and 6,400-row batches, with the recorder absent.",
+  "history_rows": 4096,
+  "recorder": "absent in both arms",
+  "rounds": 2,
+  "adjacent_ab_ba_pairs_per_round": 10,
+  "dispatches_per_arm_pair": 30,
+  "gate": "median(on/off - 1) <= 0.03 with per-round interval crossing classified inconclusive",
+  "budget_seconds": 50,
+  "build": "cargo test --release --locked -p calc-flow --lib --features benchmark-internals --no-run; recorded separately",
+  "correctness": "independent exact binary-fraction window oracle and matching on/off output digests on every dispatch",
+  "unmeasured": "M1, M3/M4 sustained runner throughput, other cases and remaining acceptance matrix"
+}

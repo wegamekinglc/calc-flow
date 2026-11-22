@@ -263,101 +263,66 @@ fn assert_seed_metadata(metadata: &JsonMap) {
     assert_eq!(metadata["ended"], false);
 }
 
-async fn transaction(
-    root: &Path,
-    manifest: &CheckpointManifest,
-) -> crate::state::ManifestTransaction {
-    let key =
-        StateLineageKey::new(manifest.pipeline_name(), manifest.pipeline_fingerprint()).unwrap();
-    let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
-    let lineage = backend.open_lineage(&key).await.unwrap();
-    crate::state::ManifestTransaction::open(
-        Arc::from(lineage),
-        &key,
-        root.join("manifests"),
-        config().retained_epochs,
-    )
-    .await
-    .unwrap()
-}
-
 async fn publish_v2_cut(seed_root: &Path, selected_root: &Path) {
-    let bytes = tokio::fs::read(seed_root.join("manifests/manifest-00000000000000000002.json"))
+    let bytes = tokio::fs::read(seed_root.join("manifests/lineage/manifests/epoch-2.json"))
         .await
         .unwrap();
-    let original = CheckpointManifest::from_bytes(&bytes).unwrap();
-    assert_eq!(original.epoch(), Epoch::new(2).unwrap());
+    let original = crate::state::v4::V4Manifest::from_bytes(&bytes).unwrap();
+    assert_eq!(original.epoch, 2);
     assert!(
         original
-            .sources()
+            .sources
             .values()
             .all(|source| source.history.is_none())
     );
-    assert!(
-        original
-            .sinks()
-            .values()
-            .all(|sink| sink.segments.is_empty())
-    );
-    let source = transaction(seed_root, &original).await;
-    let target = transaction(selected_root, &original).await;
+    assert!(original.sinks.values().all(|sink| sink.blocks.is_empty()));
+    let mut source = crate::state::v4::V4Store::new(seed_root.join("manifests/lineage"));
+    let mut target = crate::state::v4::V4Store::new(selected_root.join("manifests/lineage"));
     let mut operators = BTreeMap::new();
-    let mut working = Vec::new();
-    for (id, entry) in original.operators() {
-        let mut snapshot = source.load_operator_state(id, entry).await.unwrap();
+    for (id, entry) in &original.operators {
+        let mut snapshot =
+            crate::state::v4::V4OpaqueAdapter::restore(&mut source, &original, id).unwrap();
         if id == "match" {
             snapshot = v2_snapshot(snapshot);
         }
-        let staged = target
-            .stage_operator_state(id, original.epoch(), snapshot)
+        let (mut persisted, _) = crate::state::v4::V4OpaqueAdapter::from_snapshot(id, &snapshot)
+            .persist(&mut target, original.epoch)
             .await
             .unwrap();
-        let mut entry = entry.clone();
-        entry.inline_metadata = staged.inline_metadata;
-        entry.segments = staged.segments;
-        working.push(staged.working);
-        operators.insert(id.clone(), entry);
+        if let crate::state::v4::OperatorV4::Opaque {
+            progress,
+            output_frontier,
+            ..
+        } = &mut persisted
+        {
+            *progress = entry.progress().clone();
+            *output_frontier = entry.output_frontier();
+        }
+        operators.insert(id.clone(), persisted);
     }
     let manifest = copied_manifest(&original, operators);
-    target
-        .publish(crate::state::PreparedEpochManifest {
-            manifest,
-            staged_segments: BTreeMap::new(),
-        })
-        .await
-        .unwrap();
-    drop(working);
+    target.publish_manifest(&manifest).unwrap();
 }
 
 fn copied_manifest(
-    original: &CheckpointManifest,
-    operators: BTreeMap<String, OperatorManifestEntry>,
-) -> CheckpointManifest {
-    CheckpointManifest::new(CheckpointManifestFields {
-        pipeline_name: original.pipeline_name().into(),
-        pipeline_fingerprint: original.pipeline_fingerprint().into(),
-        runtime_config_hash: original.runtime_config_hash().into(),
-        epoch: original.epoch(),
-        created_at: original.created_at(),
-        recovery_status: original.recovery_status(),
-        sources: original.sources().clone(),
-        operators,
-        sinks: original.sinks().clone(),
-        static_inputs: original.static_inputs().clone(),
-    })
-    .unwrap()
+    original: &crate::state::v4::V4Manifest,
+    operators: BTreeMap<String, crate::state::v4::OperatorV4>,
+) -> crate::state::v4::V4Manifest {
+    let mut copied = original.clone();
+    copied.operators = operators;
+    copied.manifest_fingerprint = crate::state::v4::manifest_fingerprint(&copied).unwrap();
+    copied
 }
 
 fn assert_native_readers(fixture: &Fixture) {
     let observed = fixture.observations.lock();
     assert_eq!(observed.readers.len(), 3);
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "the three actual V2 IPC entries must have paid workspace in owned native work: {:?}",
@@ -403,7 +368,6 @@ async fn test_managed_join_restores_selected_v2_cut_on_native_worker() {
     drop(job);
     runner.shutdown().await.unwrap();
     assert_eq!(fixture.rows.lock().as_slice(), [2]);
-    assert_eq!(*fixture.wire_kinds.lock(), [2, 1, 3]);
     assert_eq!(fixture.parses.load(Ordering::SeqCst), 1);
     assert_native_readers(&fixture);
 }

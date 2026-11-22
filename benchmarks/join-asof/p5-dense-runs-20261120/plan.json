@@ -1,0 +1,56 @@
+{
+  "schema": "calc-flow.join-p5-performance-plan.v1",
+  "created_at": "2026-11-20T20:05:00+08:00",
+  "baseline": {
+    "kind": "previous_sealed_candidate",
+    "revision": "12d7759c",
+    "evidence": "benchmarks/join-asof/p5-probe-cache-20261120/result.json",
+    "join_p50_ms": 450.0378075,
+    "interval_p50_ms": 1167.624011,
+    "paired_comparison": false
+  },
+  "candidate": {
+    "kind": "sealed_default_feature_release_wheel",
+    "revision": "fcec2dc3",
+    "required_tracked_source_clean_before_build": true,
+    "build_budget": "separate from the 600-second acquisition budget",
+    "change": "reuse contiguous admitted Arrow slices and fully retained payloads; retain sparse and schema-converting gather fallbacks"
+  },
+  "execution": {
+    "cpu_affinity": 0,
+    "tokio_worker_threads": 1,
+    "blas_openmp_workers": 1,
+    "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+    "timing_scope": "ready-source enqueue through Arrow output",
+    "warmups_per_case": 2,
+    "measured_samples_per_case": 10,
+    "sample_order": "Join, interval; no retries or extensions",
+    "correctness": "maintained EngineCase full-output oracle on every sample",
+    "total_budget_seconds": 600,
+    "acquisition_stop_seconds": 570,
+    "owned_cleanup_reserve_seconds": 30,
+    "external_backstop": "timeout --kill-after=30s 600s",
+    "state_root_policy": "new empty root for every warmup and measured observation"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "dense ordinary Join morsel, key and payload buffer reuse",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 450.0378075
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "dense interval retained-run buffer reuse and complete output",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 1167.624011
+    }
+  ],
+  "unmeasured": "ASOF, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+}

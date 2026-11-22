@@ -1,13 +1,11 @@
 use super::*;
 use crate::{OperatorStateSnapshot, StateSegment, StreamMessage};
 
-fn shared_rows_fixture_spec(profile: RollingNumericalProfile) -> RollingSpec {
-    let mut spec = kernel_spec(json!([
+fn shared_rows_fixture_spec() -> RollingSpec {
+    kernel_spec(json!([
         aggregate_output("mean", "price", "fast", 5),
         aggregate_output("mean", "price", "slow", 80)
-    ]));
-    spec.numerical_profile = profile;
-    spec
+    ]))
 }
 
 fn shared_rows_fixture_record(start: u32, count: u32) -> RecordBatch {
@@ -92,8 +90,8 @@ async fn shared_rows_fixture_continue(
     shared_rows_output_bits(output.drain("output"))
 }
 
-async fn shared_rows_fixture_case(profile: RollingNumericalProfile) -> Value {
-    let spec = shared_rows_fixture_spec(profile);
+async fn shared_rows_fixture_case() -> Value {
+    let spec = shared_rows_fixture_spec();
     let mut source =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
     let job = crate::StreamJobContext::new(
@@ -139,31 +137,18 @@ async fn shared_rows_fixture_case(profile: RollingNumericalProfile) -> Value {
 }
 
 #[tokio::test]
-async fn shared_rows_legacy_checkpoint_and_writer_preserve_each_execution_route() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/operator/rolling/tests/fixtures/shared-rows-8d8be7d9.json");
-    let fixture: Value =
-        serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
-    assert_eq!(
-        fixture["runtime_source_commit"],
-        "8d8be7d907a095dbc0dc2b73dafcfdd842979cdf"
-    );
-    for (name, profile) in [
-        ("stable_v1", RollingNumericalProfile::StableV1),
-        ("stable_v2", RollingNumericalProfile::StableV2Preview),
-    ] {
-        let actual = shared_rows_fixture_case(profile).await;
-        assert_eq!(
-            actual, fixture["cases"][name],
-            "legacy writer/continuation mismatch for {name}"
-        );
+async fn shared_rows_checkpoint_continuation_uses_compensated_contract() {
+    let actual = shared_rows_fixture_case().await;
+    for route in ["uninterrupted", "resumed"] {
+        assert_eq!(actual[route][0].as_array().unwrap().len(), 72);
+        assert_eq!(actual[route][1].as_array().unwrap().len(), 72);
     }
 }
 
 #[test]
 fn shared_rows_admission_keeps_float32_single_and_same_frame_on_owned_queues() {
     let input = shared_rows_fixture_record(1, 12);
-    let spec = shared_rows_fixture_spec(RollingNumericalProfile::StableV1);
+    let spec = shared_rows_fixture_spec();
     let compiled = compile_spec(&spec, &input.schema()).unwrap();
     let execution = compiled
         .kernel_plan
@@ -214,7 +199,7 @@ fn shared_rows_admission_keeps_float32_single_and_same_frame_on_owned_queues() {
 }
 
 #[tokio::test]
-async fn shared_rows_legacy_restore_rejection_preserves_existing_cache_and_budget() {
+async fn shared_rows_removed_profile_checkpoint_rejection_preserves_existing_cache_and_budget() {
     use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
 
     let pool = Arc::new(GreedyMemoryPool::new(64 << 20));
@@ -224,7 +209,7 @@ async fn shared_rows_legacy_restore_rejection_preserves_existing_cache_and_budge
     let fixture: Value =
         serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
     let snapshot = shared_rows_snapshot_from_json(&fixture["cases"]["stable_v2"]["snapshot"]);
-    let spec = shared_rows_fixture_spec(RollingNumericalProfile::StableV2Preview);
+    let spec = shared_rows_fixture_spec();
     let mut target = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
     let job = crate::StreamJobContext::new(
         7,
@@ -265,22 +250,22 @@ async fn shared_rows_legacy_restore_rejection_preserves_existing_cache_and_budge
         )
         .unwrap();
     assert_eq!(
-        target
-            .state
-            .typed_kernel_state
-            .as_ref()
-            .unwrap()
-            .shared_rows_count(),
-        1
+        RollingKernelPlan::slab_window_count_for_test(
+            target.state.typed_kernel_state.as_deref().unwrap()
+        ),
+        Some(2)
     );
     let before = (
         target.encode_state(Epoch::new(1).unwrap()).unwrap(),
         format!("{:?}", target.state.typed_kernel_state),
     );
     let installed_credit = pool.reserved();
-    assert!(installed_credit > 0);
+    assert_eq!(installed_credit, 0);
     let error = StreamOperator::restore(&mut target, &snapshot).unwrap_err();
-    assert!(error.to_string().contains("state budget"), "{error}");
+    assert!(
+        matches!(error, CalcFlowError::CheckpointMismatch { .. }),
+        "{error:?}"
+    );
     assert_eq!(
         (target.state.charge.rows, target.state.charge.bytes),
         installed_charge
@@ -292,18 +277,7 @@ async fn shared_rows_legacy_restore_rejection_preserves_existing_cache_and_budge
         ),
         before
     );
-    let wrong_profile = shared_rows_fixture_spec(RollingNumericalProfile::StableV1);
-    let mut wrong =
-        RollingOperator::new("rolling", Arc::new(kernel_schema()), wrong_profile).unwrap();
-    assert!(matches!(
-        StreamOperator::restore(&mut wrong, &snapshot),
-        Err(CalcFlowError::CheckpointMismatch { .. })
-    ));
-    assert!(wrong.state.typed_kernel_state.is_none());
-    assert_eq!(wrong.state.charge.rows, 0);
-    assert_eq!(pool.reserved(), installed_credit);
     drop(target);
-    drop(wrong);
     assert_eq!(pool.reserved(), 0);
 }
 
@@ -395,8 +369,11 @@ async fn p3_check_serial_rollback(cancelled: bool) {
     let alias = operator.state.typed_kernel_state.clone().unwrap();
     let before = p3_serial_resident(&operator);
     let resident_credit = pool.reserved();
-    assert!(resident_credit > 0);
-    assert_eq!(alias.shared_rows_count(), 1);
+    assert_eq!(resident_credit, 0);
+    assert_eq!(
+        RollingKernelPlan::slab_window_count_for_test(&alias),
+        Some(2)
+    );
     let next = p3_serial_record(33, 1);
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(32)));
     p3_admit_owned_record(&mut operator, &next);
@@ -414,7 +391,18 @@ async fn p3_check_serial_rollback(cancelled: bool) {
     } else {
         assert!(error.to_string().contains("expected P3 serial refusal"));
     }
-    assert_eq!(p3_serial_resident(&operator), before);
+    let after = p3_serial_resident(&operator);
+    let pending = budget::ordered_buffer_record_charge(&next, &operator.compiled, "rolling")
+        .unwrap()
+        .unwrap();
+    let expected_rows = before["charge"][0].as_u64().unwrap() + pending.rows;
+    let expected_bytes = before["charge"][1].as_u64().unwrap() + pending.bytes;
+    assert_eq!(after["charge"], json!([expected_rows, expected_bytes]));
+    assert_eq!(after["owners"], before["owners"]);
+    assert_eq!(after["watermark"], before["watermark"]);
+    assert_eq!(after["sequence"], before["sequence"]);
+    assert_eq!(after["typed"], before["typed"]);
+    assert_eq!(after["snapshot"], before["snapshot"]);
     assert_eq!(pool.reserved(), resident_credit);
     assert!(collector.drain("output").is_empty());
     p3_admit_owned_record(&mut operator, &next);

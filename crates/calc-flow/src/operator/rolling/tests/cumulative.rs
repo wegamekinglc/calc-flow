@@ -31,47 +31,26 @@ fn mixed_cumulative_spec() -> RollingSpec {
 #[test]
 fn test_cumulative_single_and_mixed_stages_select_typed_transition() {
     let mut selections = Vec::new();
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let mut mixed = mixed_cumulative_spec();
-        mixed.numerical_profile = profile;
-        let mut cumulative = cumulative_spec();
-        cumulative.numerical_profile = profile;
-        let compiled = compile_spec(&cumulative, &kernel_schema()).unwrap();
-        let expected = match profile {
-            RollingNumericalProfile::StableV1 => {
-                "241fc56daeb51a3fea8f780c215658956b3b75437852305f4ac6c657bb4f131a"
-            }
-            RollingNumericalProfile::StableV2Preview => {
-                "37d8c3f0e6b451348349c5fd69da6346be96cbb0e69d584830f35ae1cd473646"
-            }
+    let mixed = mixed_cumulative_spec();
+    let cumulative = cumulative_spec();
+    for output in &cumulative.outputs {
+        let single = RollingSpec {
+            outputs: vec![output.clone()],
+            ..cumulative.clone()
         };
-        assert_eq!(
-            compiled.kernel_plan.fingerprint(),
-            expected,
-            "layout 4 identity at e59f26cb"
-        );
-        for output in &cumulative.outputs {
-            let single = RollingSpec {
-                outputs: vec![output.clone()],
-                ..cumulative.clone()
-            };
-            selections.push(
-                compile_spec(&single, &kernel_schema())
-                    .unwrap()
-                    .kernel_plan
-                    .selection(),
-            );
-        }
         selections.push(
-            compile_spec(&mixed, &kernel_schema())
+            compile_spec(&single, &kernel_schema())
                 .unwrap()
                 .kernel_plan
                 .selection(),
         );
     }
+    selections.push(
+        compile_spec(&mixed, &kernel_schema())
+            .unwrap()
+            .kernel_plan
+            .selection(),
+    );
     assert!(
         selections
             .iter()
@@ -80,14 +59,12 @@ fn test_cumulative_single_and_mixed_stages_select_typed_transition() {
     );
 }
 
-fn cumulative_volume_spec(profile: RollingNumericalProfile) -> RollingSpec {
+fn cumulative_volume_spec() -> RollingSpec {
     let mut value = serde_json::to_value(cumulative_spec()).unwrap();
     for output in value["outputs"].as_array_mut().unwrap() {
         output["input"] = json!("volume");
     }
-    let mut spec: RollingSpec = serde_json::from_value(value).unwrap();
-    spec.numerical_profile = profile;
-    spec
+    serde_json::from_value(value).unwrap()
 }
 
 #[test]
@@ -161,14 +138,9 @@ fn test_cumulative_typed_primitives_match_general() {
         Some(1.0),
     ])));
     cases.push(Arc::new(Float64Array::new_null(0)));
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        for values in &cases {
-            let (schema, input) = primitive_volume_record(Arc::clone(values));
-            assert_typed_matches_general(&cumulative_volume_spec(profile), &schema, &input);
-        }
+    for values in &cases {
+        let (schema, input) = primitive_volume_record(Arc::clone(values));
+        assert_typed_matches_general(&cumulative_volume_spec(), &schema, &input);
     }
 }
 
@@ -180,11 +152,7 @@ fn test_cumulative_typed_integer_overflow_matches_general() {
     ];
     for values in cases {
         let (schema, input) = primitive_volume_record(values);
-        let compiled = compile_spec(
-            &cumulative_volume_spec(RollingNumericalProfile::StableV1),
-            &schema,
-        )
-        .unwrap();
+        let compiled = compile_spec(&cumulative_volume_spec(), &schema).unwrap();
         let fast = compiled
             .kernel_plan
             .open_and_fill(&input, "rolling")
@@ -199,7 +167,7 @@ fn test_cumulative_typed_integer_overflow_matches_general() {
                 .unwrap();
         assert_eq!(fast.to_string(), general.to_string());
     }
-    let mut spec = cumulative_volume_spec(RollingNumericalProfile::StableV1);
+    let mut spec = cumulative_volume_spec();
     spec.outputs.truncate(1);
     let mut value = serde_json::to_value(spec).unwrap();
     value["outputs"][0]["min_periods"] = json!(3);
@@ -213,7 +181,7 @@ fn test_cumulative_typed_integer_overflow_matches_general() {
 }
 
 #[test]
-fn test_cumulative_preserves_unordered_and_unsupported_stage_fallback() {
+fn test_cumulative_preserves_unordered_and_typed_lag_execution() {
     let spec = mixed_cumulative_spec();
     let compiled = compile_spec(&spec, &kernel_schema()).unwrap();
     let input = float64_fast_record(&[(2, "a", 2, Some(2.0)), (1, "a", 1, Some(1.0))]);
@@ -225,14 +193,14 @@ fn test_cumulative_preserves_unordered_and_unsupported_stage_fallback() {
             .is_none()
     );
     let mut value = serde_json::to_value(spec).unwrap();
-    value["outputs"].as_array_mut().unwrap().push(lag_price(1));
+    value["outputs"].as_array_mut().unwrap().push(lag_label(1));
     let spec = serde_json::from_value(value).unwrap();
     assert_eq!(
-        compile_spec(&spec, &kernel_schema())
+        compile_spec(&spec, &general_schema())
             .unwrap()
             .kernel_plan
             .selection(),
-        KernelSelection::General
+        KernelSelection::OrderedPrimitive
     );
 }
 
@@ -260,9 +228,8 @@ async fn advance_cumulative_stream(
     drain(&mut output).remove(0)
 }
 
-async fn cumulative_stream_roundtrip(profile: RollingNumericalProfile, rolling: bool) {
+async fn cumulative_stream_roundtrip(rolling: bool) {
     let mut spec = mixed_cumulative_spec();
-    spec.numerical_profile = profile;
     if !rolling {
         spec.outputs.pop();
     }
@@ -328,13 +295,8 @@ async fn cumulative_stream_roundtrip(profile: RollingNumericalProfile, rolling: 
 
 #[tokio::test]
 async fn test_cumulative_ordered_and_fallback_streams_match_across_batches_and_restore() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        for rolling in [false, true] {
-            cumulative_stream_roundtrip(profile, rolling).await;
-        }
+    for rolling in [false, true] {
+        cumulative_stream_roundtrip(rolling).await;
     }
 }
 
@@ -370,18 +332,16 @@ async fn assert_cumulative_prefix_overflow_is_atomic(
 }
 
 #[tokio::test]
-async fn test_cumulative_mixed_integer_restore_replays_only_window_history() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let mut spec = cumulative_volume_spec(profile);
-        spec.outputs.truncate(1);
-        spec.outputs.push(
-            serde_json::from_value(aggregate_output("mean", "volume", "rolling_mean", 2)).unwrap(),
-        );
-        let mut source =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+async fn test_cumulative_primitive_slab_outputs_preserve_storage() {
+    for data_type in [DataType::Int8, DataType::UInt64, DataType::Float32] {
+        let values = datafusion::arrow::compute::cast(
+            &Int64Array::from(vec![Some(2), None, Some(3)]),
+            &data_type,
+        )
+        .unwrap();
+        let (schema, input) = primitive_volume_record(values);
+        let spec = cumulative_volume_spec();
+        let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
         let job = crate::StreamJobContext::new(
             7,
             TEST_FINGERPRINT,
@@ -389,38 +349,416 @@ async fn test_cumulative_mixed_integer_restore_replays_only_window_history() {
             None,
             crate::CancellationToken::new(),
         );
-        let input = int64_fast_record(&[
-            Some(-i64::MAX),
-            Some(i64::MAX),
-            Some(i64::MAX),
-            Some(0),
-            Some(1),
-        ]);
-        let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
-        let totals = prefix
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(totals.values().as_ref(), &[-i64::MAX, 0, i64::MAX]);
-        let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
-        let mut restored =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
-        let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
-        assert_eq!(actual, expected, "{profile:?}");
-        let total = actual
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .unwrap();
-        assert_eq!(total.value(0), i64::MAX);
-        for operator in [&mut source, &mut restored] {
-            assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
+        let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 2), 2, &job).await;
+        let sum_type = match data_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => DataType::Int64,
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                DataType::UInt64
+            }
+            DataType::Float32 | DataType::Float64 => DataType::Float64,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            prefix.column_by_name("total").unwrap().data_type(),
+            &sum_type
+        );
+        for name in ["low", "high"] {
+            assert_eq!(prefix.column_by_name(name).unwrap().data_type(), &data_type);
         }
+        for name in ["variance", "population"] {
+            assert_eq!(
+                prefix.column_by_name(name).unwrap().data_type(),
+                &DataType::Float64
+            );
+        }
+        let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+        let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let expected = advance_cumulative_stream(&mut source, &input.slice(2, 1), 3, &job).await;
+        let actual = advance_cumulative_stream(&mut restored, &input.slice(2, 1), 3, &job).await;
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.column_by_name("total").unwrap().data_type(),
+            &sum_type
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_count_slab_restore_accepts_nested_values() {
+    use datafusion::arrow::array::{Int32Builder, ListBuilder};
+
+    let spec = kernel_spec(json!([
+        aggregate_output("count", "volume", "two", 2),
+        {
+            "kind":"count", "primitive_version":1, "input":"volume", "output":"three",
+            "frame":{"kind":"rows", "size":3}, "min_periods":1
+        }
+    ]));
+    let mut values = ListBuilder::new(Int32Builder::new());
+    values.values().append_value(1);
+    values.append(true);
+    values.append(false);
+    values.values().append_value(4);
+    values.append(true);
+    let (schema, input) = primitive_volume_record(Arc::new(values.finish()));
+    let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 2), 2, &job).await;
+    assert_eq!(
+        prefix
+            .column_by_name("two")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[1, 1]
+    );
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(2, 1), 3, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(2, 1), 3, &job).await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_float64_lag_delta_slab_restore_preserves_reference_rows() {
+    let spec = kernel_spec(json!([
+        lag_price(1),
+        delta_price(1),
+        {
+            "kind":"lag", "primitive_version":1, "input":"price", "output":"lag_two",
+            "periods":2
+        }
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, None),
+        (1, "b", 1, Some(10.0)),
+        (2, "a", 2, Some(f64::NAN)),
+        (2, "b", 2, Some(20.0)),
+        (3, "a", 3, Some(1.0)),
+        (3, "b", 3, Some(30.0)),
+        (4, "a", 4, Some(3.0)),
+        (4, "b", 4, Some(40.0)),
+    ]);
+    let mut source = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 6), 3, &job).await;
+    let lag = prefix
+        .column_by_name("price_lag")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert!(lag.is_null(0) && lag.is_null(1) && lag.is_null(2));
+    assert!(lag.value(4).is_nan());
+    assert_eq!(lag.value(5).to_bits(), 20.0_f64.to_bits());
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(6, 2), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(6, 2), 4, &job).await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_float32_lag_delta_slab_restore_preserves_storage() {
+    let spec = kernel_spec(json!([
+        {"kind":"lag", "primitive_version":1, "input":"volume", "output":"lag", "periods":1},
+        {"kind":"delta", "primitive_version":1, "input":"volume", "output":"delta", "periods":1}
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(
+        datafusion::arrow::array::Float32Array::from(vec![Some(1.5), None, Some(3.0), Some(5.0)]),
+    ));
+    let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    let lag = prefix
+        .column_by_name("lag")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<datafusion::arrow::array::Float32Array>()
+        .unwrap();
+    assert!(lag.is_null(0));
+    assert_eq!(lag.value(1).to_bits(), 1.5_f32.to_bits());
+    assert!(lag.is_null(2));
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_int64_lag_delta_slab_restore_preserves_extremes_and_atomic_errors() {
+    let spec = kernel_spec(json!([
+        {"kind":"lag", "primitive_version":1, "input":"volume", "output":"lag", "periods":1},
+        {"kind":"delta", "primitive_version":1, "input":"volume", "output":"delta", "periods":1}
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(Int64Array::from(vec![
+        Some(i64::MAX),
+        Some(i64::MAX - 1),
+        Some(0),
+        Some(i64::MIN),
+        Some(1),
+    ])));
+    let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    let lag = prefix
+        .column_by_name("lag")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert!(lag.is_null(0));
+    assert_eq!(lag.value(1), i64::MAX);
+    assert_eq!(lag.value(2), i64::MAX - 1);
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(4)));
+    for operator in [&mut source, &mut restored] {
+        let before = format!("{:?}", operator.state.typed_kernel_state);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![input.slice(4, 1)], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        assert!(
+            operator
+                .on_watermark(EventTime::from_micros(5), &context, &mut output)
+                .await
+                .is_err()
+        );
+        assert_eq!(format!("{:?}", operator.state.typed_kernel_state), before);
+    }
+}
+
+#[tokio::test]
+async fn test_uint64_lag_delta_slab_rejects_underflow_atomically() {
+    let spec = kernel_spec(json!([
+        {"kind":"lag", "primitive_version":1, "input":"volume", "output":"lag", "periods":1},
+        {"kind":"delta", "primitive_version":1, "input":"volume", "output":"delta", "periods":1}
+    ]));
+    let (schema, input) = primitive_volume_record(Arc::new(UInt64Array::from(vec![0, 1, 0])));
+    let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let _ = advance_cumulative_stream(&mut source, &input.slice(0, 2), 2, &job).await;
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(2)));
+    for operator in [&mut source, &mut restored] {
+        let before = format!("{:?}", operator.state.typed_kernel_state);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "input",
+                Batch::table(vec![input.slice(2, 1)], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        assert!(
+            operator
+                .on_watermark(EventTime::from_micros(3), &context, &mut output)
+                .await
+                .is_err()
+        );
+        assert_eq!(format!("{:?}", operator.state.typed_kernel_state), before);
+    }
+}
+
+#[tokio::test]
+async fn test_temporal_lag_slab_preserves_exact_storage() {
+    let cases: Vec<ArrayRef> = vec![
+        Arc::new(datafusion::arrow::array::Int8Array::from(vec![1, 2, 3])),
+        Arc::new(datafusion::arrow::array::Date32Array::from(vec![1, 2, 3])),
+        Arc::new(
+            datafusion::arrow::array::TimestampMicrosecondArray::from(vec![
+                9_007_199_254_740_993,
+                9_007_199_254_740_994,
+                9_007_199_254_740_995,
+            ])
+            .with_timezone("UTC"),
+        ),
+    ];
+    for values in cases {
+        let (schema, input) = primitive_volume_record(values);
+        let data_type = input.column(4).data_type().clone();
+        let spec = kernel_spec(json!([
+            {"kind":"lag", "primitive_version":1, "input":"volume", "output":"lag", "periods":1}
+        ]));
+        let mut source = RollingOperator::new("rolling", Arc::new(schema), spec.clone()).unwrap();
+        assert_eq!(source.state_layout_version(), 7);
+        let job = crate::StreamJobContext::new(
+            7,
+            TEST_FINGERPRINT,
+            JsonMap::new(),
+            None,
+            crate::CancellationToken::new(),
+        );
+        let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 2), 2, &job).await;
+        let lag = prefix.column_by_name("lag").unwrap();
+        assert_eq!(lag.data_type(), &data_type);
+        assert_eq!(
+            ScalarValue::try_from_array(lag, 1).unwrap(),
+            ScalarValue::try_from_array(input.column(4), 0).unwrap()
+        );
+        let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        let expected = advance_cumulative_stream(&mut source, &input.slice(2, 1), 3, &job).await;
+        let actual = advance_cumulative_stream(&mut restored, &input.slice(2, 1), 3, &job).await;
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn test_cumulative_integer_slab_restore_and_overflow_are_atomic() {
+    let spec = cumulative_volume_spec();
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    assert_eq!(source.state_layout_version(), 7);
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let input = int64_fast_record(&[
+        Some(-i64::MAX),
+        Some(i64::MAX),
+        Some(i64::MAX),
+        Some(0),
+        Some(1),
+    ]);
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    assert_eq!(
+        prefix
+            .column_by_name("total")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .as_ref(),
+        &[-i64::MAX, 0, i64::MAX]
+    );
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+    for operator in [&mut source, &mut restored] {
+        assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
+    }
+}
+
+#[tokio::test]
+async fn test_cumulative_mixed_integer_restore_replays_only_window_history() {
+    let mut spec = cumulative_volume_spec();
+    spec.outputs.truncate(1);
+    spec.outputs.push(
+        serde_json::from_value(aggregate_output("mean", "volume", "rolling_mean", 2)).unwrap(),
+    );
+    let mut source =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
+    let job = crate::StreamJobContext::new(
+        7,
+        TEST_FINGERPRINT,
+        JsonMap::new(),
+        None,
+        crate::CancellationToken::new(),
+    );
+    let input = int64_fast_record(&[
+        Some(-i64::MAX),
+        Some(i64::MAX),
+        Some(i64::MAX),
+        Some(0),
+        Some(1),
+    ]);
+    let prefix = advance_cumulative_stream(&mut source, &input.slice(0, 3), 3, &job).await;
+    let totals = prefix
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(totals.values().as_ref(), &[-i64::MAX, 0, i64::MAX]);
+    let snapshot = source.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut restored = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let expected = advance_cumulative_stream(&mut source, &input.slice(3, 1), 4, &job).await;
+    let actual = advance_cumulative_stream(&mut restored, &input.slice(3, 1), 4, &job).await;
+    assert_eq!(actual, expected);
+    let total = actual
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(total.value(0), i64::MAX);
+    for operator in [&mut source, &mut restored] {
+        assert_cumulative_prefix_overflow_is_atomic(operator, &input.slice(4, 1), &job).await;
     }
 }
 
@@ -440,55 +778,22 @@ fn drain(collector: &mut crate::EdgeCollector) -> Vec<RecordBatch> {
         .collect()
 }
 
-fn remove_cumulative_summaries(
+fn remove_cumulative_prefix(
     snapshot: &crate::OperatorStateSnapshot,
 ) -> crate::OperatorStateSnapshot {
-    use datafusion::arrow::{array::BooleanArray, compute::filter_record_batch};
-
     let mut snapshot = snapshot.clone();
-    let (segment_id, segment) = snapshot.segments.iter().next().unwrap();
-    let segment_id = segment_id.clone();
-    let mut reader = FileReader::try_new(Cursor::new(segment.bytes()), None).unwrap();
-    let record = reader.next().unwrap().unwrap();
-    let kinds = record
-        .column(0)
-        .as_any()
-        .downcast_ref::<UInt8Array>()
-        .unwrap();
-    let keep = kinds
-        .values()
-        .iter()
-        .map(|kind| *kind != 4)
-        .collect::<BooleanArray>();
-    let stripped = filter_record_batch(&record, &keep).unwrap();
-    assert!(stripped.num_rows() < record.num_rows());
-    let mut bytes = Vec::new();
-    {
-        let mut writer = FileWriter::try_new(&mut bytes, stripped.schema().as_ref()).unwrap();
-        writer.write(&stripped).unwrap();
-        writer.finish().unwrap();
-    }
-    let replacement = crate::StateSegment::new(bytes);
-    let handle = &mut snapshot
-        .inline_metadata
-        .get_mut("segment_inventory")
-        .unwrap()[0]["handle"];
-    handle["byte_len"] = json!(replacement.bytes().len());
-    handle["sha256"] = json!(replacement.sha256());
-    snapshot.segments.insert(segment_id, replacement);
+    snapshot.segments.clear();
     snapshot
 }
 
 async fn pending_checkpoint(
-    profile: RollingNumericalProfile,
     prefix: bool,
 ) -> (
     RollingOperator,
     crate::OperatorStateSnapshot,
     crate::StreamJobContext,
 ) {
-    let mut spec = cumulative_spec();
-    spec.numerical_profile = profile;
+    let spec = cumulative_spec();
     let mut source = RollingOperator::new("rolling", Arc::new(kernel_schema()), spec).unwrap();
     let job = crate::StreamJobContext::new(
         7,
@@ -526,73 +831,61 @@ async fn pending_checkpoint(
 
 #[tokio::test]
 async fn test_cumulative_snapshot_rejects_missing_prefix_inventory() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let (mut source, snapshot, job) = pending_checkpoint(profile, true).await;
-        let mut restored =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone())
-                .unwrap();
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        let corrupted = remove_cumulative_summaries(&snapshot);
-        assert!(
-            StreamOperator::restore(&mut restored, &corrupted).is_err(),
-            "{profile:?}: restore accepted a processed prefix without any cumulative summaries"
-        );
-        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
-        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
-        for operator in [&mut source, &mut restored] {
-            operator
-                .on_watermark(EventTime::from_micros(2), &context, &mut output)
-                .await
-                .unwrap();
-        }
-        let output = drain(&mut output);
-        assert_eq!(output[0], output[1]);
-        let total = output[1]
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
+    let (mut source, snapshot, job) = pending_checkpoint(true).await;
+    let mut restored =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone()).unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    let corrupted = remove_cumulative_prefix(&snapshot);
+    assert!(
+        StreamOperator::restore(&mut restored, &corrupted).is_err(),
+        "restore accepted a processed prefix without any cumulative summaries"
+    );
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+    let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    for operator in [&mut source, &mut restored] {
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut output)
+            .await
             .unwrap();
-        assert_eq!(total.value(0).to_bits(), 30.0_f64.to_bits());
     }
+    let output = drain(&mut output);
+    assert_eq!(output[0], output[1]);
+    let total = output[1]
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(total.value(0).to_bits(), 30.0_f64.to_bits());
 }
 
 #[tokio::test]
 async fn test_cumulative_snapshot_restores_pending_only_entity() {
-    for profile in [
-        RollingNumericalProfile::StableV1,
-        RollingNumericalProfile::StableV2Preview,
-    ] {
-        let (mut source, snapshot, job) = pending_checkpoint(profile, false).await;
-        let mut restored =
-            RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone())
-                .unwrap();
-        restored
-            .set_state_budget(StateBudget::new(1, 1 << 20).unwrap())
+    let (mut source, snapshot, job) = pending_checkpoint(false).await;
+    let mut restored =
+        RollingOperator::new("rolling", Arc::new(kernel_schema()), source.spec().clone()).unwrap();
+    restored
+        .set_state_budget(StateBudget::new(1, 1 << 20).unwrap())
+        .unwrap();
+    StreamOperator::restore(&mut restored, &snapshot).unwrap();
+    assert!(restored.state.histories.by_entity.is_empty());
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
+    let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
+    for operator in [&mut source, &mut restored] {
+        operator
+            .on_watermark(EventTime::from_micros(2), &context, &mut output)
+            .await
             .unwrap();
-        StreamOperator::restore(&mut restored, &snapshot).unwrap();
-        assert!(restored.state.histories.by_entity.is_empty());
-        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1)));
-        let mut output = crate::EdgeCollector::new(source.output_ports().to_vec());
-        for operator in [&mut source, &mut restored] {
-            operator
-                .on_watermark(EventTime::from_micros(2), &context, &mut output)
-                .await
-                .unwrap();
-        }
-        let output = drain(&mut output);
-        assert_eq!(output[0], output[1]);
-        let total = output[1]
-            .column_by_name("total")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .unwrap();
-        assert_eq!(total.value(0).to_bits(), 20.0_f64.to_bits());
     }
+    let output = drain(&mut output);
+    assert_eq!(output[0], output[1]);
+    let total = output[1]
+        .column_by_name("total")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+    assert_eq!(total.value(0).to_bits(), 20.0_f64.to_bits());
 }
 
 #[tokio::test]
@@ -601,7 +894,7 @@ async fn test_cumulative_snapshot_restores_summaries_and_pending_rows() {
     let spec = cumulative_spec();
     let mut source =
         RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
-    assert_eq!(source.state_layout_version(), 4);
+    assert_eq!(source.state_layout_version(), 7);
     let job = StreamJobContext::new(
         7,
         TEST_FINGERPRINT,

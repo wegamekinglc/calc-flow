@@ -183,8 +183,10 @@ def test_lag_delta_lower_to_one_rolling_node_with_the_frozen_shape() -> None:
         }
     ) in graph["edges"]  # type: ignore[index]
     explanation = program.explain(Runtime(), mode="batch")
-    assert "rolling kernel signals__cf_rolling selected=general" in explanation
-    assert "fallback=primitive_lag_has_no_typed_transition" in explanation
+    assert (
+        "rolling kernel signals__cf_rolling selected=ordered_primitive" in explanation
+    )
+    assert "fallback=none" in explanation
 
 
 def test_ewma_and_macd_lower_to_shared_layout_two_state() -> None:

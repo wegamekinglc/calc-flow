@@ -956,17 +956,6 @@ fn run_native_component(arguments: &[String]) {
                 native_join_components::Component::LayoutControls => {
                     native_join_components::layout_controls().await
                 }
-                native_join_components::Component::DictionaryRefusalRetention => {
-                    calc_flow::benchmark_internals::join_dictionary_refusal_retention_evidence()
-                        .await
-                        .unwrap()
-                }
-                #[cfg(feature = "benchmark-checkpoint-diagnostic")]
-                native_join_components::Component::CheckpointHistory => {
-                    calc_flow::benchmark_internals::join_checkpoint_history_4m()
-                        .await
-                        .unwrap()
-                }
             }
         });
         observation["check_only"] = check.into();

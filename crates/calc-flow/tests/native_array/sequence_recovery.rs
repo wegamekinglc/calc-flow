@@ -10,12 +10,11 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchKind, BatchMetadata, CheckpointManifest, CheckpointManifestFields, Cursor,
-    ExternalOperatorSpec, JobState, JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability,
-    PipelineBuilder, Port, ReplayPositioning, Result, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StateHandle,
-    StreamOperatorFactory, StreamRequirements, StreamSink, StreamSource, StreamingRunner,
-    UdfRegistry,
+    Batch, BatchKind, BatchMetadata, Cursor, ExternalOperatorSpec, JobState, JsonMap,
+    ManagedCheckpointRuntime, NativeWatermarkCapability, PipelineBuilder, Port, ReplayPositioning,
+    Result, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent,
+    SourceSchema, StreamOperatorFactory, StreamRequirements, StreamSink, StreamSource,
+    StreamingRunner, UdfRegistry,
     array::{NativeArray, NativeArraySequenceFactory},
 };
 use sha2::{Digest as _, Sha256};
@@ -147,57 +146,50 @@ async fn complete(runner: StreamingRunner) {
     assert_eq!(outcome.state, JobState::Completed);
 }
 
-fn updated_manifest(original: &CheckpointManifest, handle: StateHandle) -> CheckpointManifest {
-    let mut operators = original.operators().clone();
-    operators.get_mut("sequence").unwrap().segments = vec![handle];
-    CheckpointManifest::new(CheckpointManifestFields {
-        pipeline_name: original.pipeline_name().into(),
-        pipeline_fingerprint: original.pipeline_fingerprint().into(),
-        runtime_config_hash: original.runtime_config_hash().into(),
-        epoch: original.epoch(),
-        created_at: original.created_at(),
-        recovery_status: original.recovery_status(),
-        sources: original.sources().clone(),
-        operators,
-        sinks: original.sinks().clone(),
-        static_inputs: original.static_inputs().clone(),
-    })
-    .unwrap()
+fn sequence_block(manifest: &serde_json::Value) -> &serde_json::Value {
+    &manifest["operators"]["sequence"]["blocks"][0]
 }
-async fn saved(root: &Path) -> (PathBuf, CheckpointManifest, Vec<u8>) {
-    let manifest_path = root.join("manifests/manifest-00000000000000000001.json");
-    let manifest =
-        CheckpointManifest::from_bytes(&tokio::fs::read(&manifest_path).await.unwrap()).unwrap();
-    let handle = &manifest.operators()["sequence"].segments[0];
-    let bytes = tokio::fs::read(root.join("state").join(handle.relative_path()))
-        .await
-        .unwrap();
+async fn saved(root: &Path) -> (PathBuf, serde_json::Value, Vec<u8>) {
+    let storage_root = root.join("manifests");
+    let manifest_path = storage_root.join("lineage/manifests/epoch-1.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&tokio::fs::read(&manifest_path).await.unwrap()).unwrap();
+    assert_eq!(manifest["format_version"], 4);
+    assert_eq!(manifest["operators"]["sequence"]["kind"], "opaque");
+    let object_path =
+        storage_root.join(sequence_block(&manifest)["relative_path"].as_str().unwrap());
+    let bytes = tokio::fs::read(object_path).await.unwrap();
     (manifest_path, manifest, bytes)
 }
 async fn replace_state(
     root: &Path,
     manifest_path: PathBuf,
-    manifest: &CheckpointManifest,
+    manifest: &serde_json::Value,
     bytes: Vec<u8>,
 ) {
-    let handle = &manifest.operators()["sequence"].segments[0];
-    let checksum = hex::encode(Sha256::digest(&bytes));
-    let replacement = StateHandle::new(
-        handle.operator_id(),
-        handle.epoch(),
-        handle.segment_id(),
-        handle.relative_path(),
-        u64::try_from(bytes.len()).unwrap(),
-        &checksum,
+    let object_path = root
+        .join("manifests")
+        .join(sequence_block(manifest)["relative_path"].as_str().unwrap());
+    let mut changed = manifest.clone();
+    let block = &mut changed["operators"]["sequence"]["blocks"][0];
+    block["byte_len"] = u64::try_from(bytes.len()).unwrap().into();
+    block["sha256"] = hex::encode(Sha256::digest(&bytes)).into();
+    let mut unsigned = changed.clone();
+    unsigned
+        .as_object_mut()
+        .unwrap()
+        .remove("manifest_fingerprint");
+    changed["manifest_fingerprint"] = hex::encode(Sha256::digest(
+        calc_flow::canonical_json(&unsigned).unwrap().as_bytes(),
+    ))
+    .into();
+    tokio::fs::write(object_path, bytes).await.unwrap();
+    tokio::fs::write(
+        manifest_path,
+        calc_flow::canonical_json(&changed).unwrap().into_bytes(),
     )
+    .await
     .unwrap();
-    let changed = updated_manifest(manifest, replacement);
-    tokio::fs::write(root.join("state").join(handle.relative_path()), bytes)
-        .await
-        .unwrap();
-    tokio::fs::write(manifest_path, changed.canonical_bytes().unwrap())
-        .await
-        .unwrap();
 }
 async fn corrupt_layout_with_valid_managed_checksum(root: &Path) {
     let (path, manifest, mut bytes) = saved(root).await;
@@ -468,7 +460,7 @@ fn test_native_sequence_static_ingress_is_rejected_for_every_declared_backend() 
     }
 }
 
-const LEGACY_SECRET: &str = "native-lookalike-credential-canary";
+const LOOKALIKE_SECRET: &str = "native-lookalike-credential-canary";
 struct Lookalike(Box<dyn calc_flow::StreamOperator>, Arc<AtomicUsize>);
 impl calc_flow::OperatorMetadata for Lookalike {
     fn name(&self) -> &str {
@@ -531,14 +523,14 @@ impl calc_flow::StreamOperator for Lookalike {
     ) -> Result<()> {
         self.1.fetch_add(1, Ordering::SeqCst);
         Err(calc_flow::CalcFlowError::CheckpointMismatch {
-            message: LEGACY_SECRET.into(),
+            message: LOOKALIKE_SECRET.into(),
         })
     }
     fn reset(&mut self) -> Result<()> {
         self.0.reset()
     }
 }
-fn legacy_runner(
+fn lookalike_runner(
     root: &Path,
     restores: Arc<AtomicUsize>,
     events: tokio::sync::mpsc::UnboundedReceiver<()>,
@@ -552,13 +544,13 @@ fn legacy_runner(
     replay_with_plan(root, plan, Arc::new(Mutex::new(Vec::new())), events, output)
 }
 #[tokio::test]
-async fn test_native_name_lookalike_retains_legacy_managed_restore_redaction() {
+async fn test_native_name_lookalike_retains_managed_restore_redaction() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("managed");
     let (send, events) = tokio::sync::mpsc::unbounded_channel();
     let (output, mut received) = tokio::sync::mpsc::unbounded_channel();
     let restores = Arc::new(AtomicUsize::new(0));
-    let first = legacy_runner(&root, Arc::clone(&restores), events, output)
+    let first = lookalike_runner(&root, Arc::clone(&restores), events, output)
         .start()
         .await
         .unwrap();
@@ -570,7 +562,7 @@ async fn test_native_name_lookalike_retains_legacy_managed_restore_redaction() {
     let (_send, events) = tokio::sync::mpsc::unbounded_channel();
     let (output, _received) = tokio::sync::mpsc::unbounded_channel();
     let Err(calc_flow::CalcFlowError::Streaming(error)) =
-        legacy_runner(&root, Arc::clone(&restores), events, output)
+        lookalike_runner(&root, Arc::clone(&restores), events, output)
             .start()
             .await
     else {
@@ -579,10 +571,10 @@ async fn test_native_name_lookalike_retains_legacy_managed_restore_redaction() {
     assert_eq!(restores.load(Ordering::SeqCst), 1);
     assert_eq!(
         error.category(),
-        calc_flow::StreamingErrorCategory::Internal
+        calc_flow::StreamingErrorCategory::CheckpointMismatch
     );
-    assert!(!error.message().contains(LEGACY_SECRET));
-    assert!(!format!("{error:?}").contains(LEGACY_SECRET));
+    assert!(!error.message().contains(LOOKALIKE_SECRET));
+    assert!(!format!("{error:?}").contains(LOOKALIKE_SECRET));
 }
 
 fn indicator_kernel(atr: bool) -> serde_json::Value {

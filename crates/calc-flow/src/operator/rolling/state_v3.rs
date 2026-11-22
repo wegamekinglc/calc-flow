@@ -24,10 +24,9 @@ use datafusion::{
 
 use super::{
     BufferedRow, CompiledEvaluation, CompiledRollingSpec, CompiledWindowGroup, DecodedRollingState,
-    EntityRollingState, KeyValue, RollingHistories, RollingNumericalProfile,
-    RollingSnapshotMetadata, WindowState, buffered_row_from_values, ewma_entity_from_values,
-    ewma_entity_values, internal_error, state_format, state_schema, typed_null,
-    validate_segment_schema_metadata,
+    EntityRollingState, KeyValue, RollingHistories, RollingSnapshotMetadata, WindowState,
+    buffered_row_from_values, ewma_entity_from_values, ewma_entity_values, internal_error,
+    state_format, state_schema, typed_null, validate_segment_schema_metadata,
 };
 use crate::Result;
 
@@ -95,9 +94,7 @@ pub(super) fn encode(
 
     for (entity, &entity_id) in &entity_ids {
         let transition_count = (compiled.state_layout_version
-            >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION
-            || compiled.kernel_plan.numerical_profile_kind()
-                == RollingNumericalProfile::StableV2Preview)
+            >= super::ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION)
             .then(|| {
                 histories
                     .by_entity
@@ -820,17 +817,12 @@ impl<'a> StateDecoder<'a> {
                 )
             });
         }
-        match self.compiled.kernel_plan.numerical_profile_kind() {
-            RollingNumericalProfile::StableV1 if position.is_none() => Ok(0),
-            RollingNumericalProfile::StableV2Preview => position.ok_or_else(|| {
-                state_format(
-                    "stable_v2 rolling entity row is missing its transition count".to_owned(),
-                )
-            }),
-            RollingNumericalProfile::StableV1 => Err(state_format(
-                "stable_v1 rolling entity row carries a transition count".to_owned(),
-            )),
+        if position.is_some() {
+            return Err(state_format(
+                "rolling entity row carries an unexpected transition count".to_owned(),
+            ));
         }
+        Ok(0)
     }
 
     fn validate_entity_identity(&self, entity_id: u64, entity: &[Option<KeyValue>]) -> Result<()> {
@@ -1390,7 +1382,7 @@ mod tests {
         ])
     }
 
-    fn compiled(output: &Value, stable_v2: bool) -> CompiledRollingSpec {
+    fn compiled(output: &Value) -> CompiledRollingSpec {
         let state_layout_version = if output["kind"]
             .as_str()
             .is_some_and(|kind| kind.starts_with("cumulative_"))
@@ -1401,7 +1393,7 @@ mod tests {
         } else {
             1
         };
-        let mut document = json!({
+        let document = json!({
             "configuration_version": 1,
             "state_layout_version": state_layout_version,
             "partition_by": ["symbol"],
@@ -1412,39 +1404,30 @@ mod tests {
             "late_policy": {"kind": "error", "scope": "envelope"},
             "value_policy": "stateful_numeric_v1"
         });
-        if stable_v2 {
-            document["numerical_profile"] = json!("stable_v2");
-        }
         let spec: RollingSpec = serde_json::from_value(document).unwrap();
         compile_spec(&spec, &input_schema()).unwrap()
     }
 
-    fn mean_compiled(stable_v2: bool) -> CompiledRollingSpec {
-        compiled(
-            &json!({
-                "kind": "mean",
-                "primitive_version": 1,
-                "input": "price",
-                "output": "mean_price",
-                "frame": {"kind": "rows", "size": 2},
-                "min_periods": 1
-            }),
-            stable_v2,
-        )
+    fn mean_compiled() -> CompiledRollingSpec {
+        compiled(&json!({
+            "kind": "mean",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "mean_price",
+            "frame": {"kind": "rows", "size": 2},
+            "min_periods": 1
+        }))
     }
 
     fn ewma_compiled() -> CompiledRollingSpec {
-        compiled(
-            &json!({
-                "kind": "ewma",
-                "primitive_version": 1,
-                "input": "price",
-                "output": "ema_price",
-                "span": 3,
-                "min_periods": 1
-            }),
-            false,
-        )
+        compiled(&json!({
+            "kind": "ewma",
+            "primitive_version": 1,
+            "input": "price",
+            "output": "ema_price",
+            "span": 3,
+            "min_periods": 1
+        }))
     }
 
     fn entity_values(symbol: &str) -> Vec<ScalarValue> {
@@ -1527,13 +1510,10 @@ mod tests {
     #[test]
     fn test_cumulative_rows_require_complete_unique_group_summaries() {
         let schema = input_schema();
-        let compiled = compiled(
-            &json!({
-                "kind": "cumulative_sum", "primitive_version": 1,
-                "input": "price", "output": "total", "min_periods": 1
-            }),
-            false,
-        );
+        let compiled = compiled(&json!({
+            "kind": "cumulative_sum", "primitive_version": 1,
+            "input": "price", "output": "total", "min_periods": 1
+        }));
         let mut state = decoder(&schema, &compiled);
         assert!(
             state
@@ -1572,7 +1552,7 @@ mod tests {
             .insert(entity, EntityRollingState::fresh(&compiled));
         missing.mark_used(0).unwrap();
         assert!(missing.finish().is_err());
-        let old = mean_compiled(false);
+        let old = mean_compiled();
         let mut old_state = decoder(&schema, &old);
         old_state
             .decode_entity(0, None, None, entity_values("a"))
@@ -1585,9 +1565,9 @@ mod tests {
     }
 
     #[test]
-    fn entity_dictionary_is_fail_closed_and_profile_aware() {
+    fn entity_dictionary_is_fail_closed_and_layout_aware() {
         let schema = input_schema();
-        let stable = mean_compiled(false);
+        let stable = mean_compiled();
         let mut state = decoder(&schema, &stable);
         state
             .decode_entity(0, None, None, entity_values("b"))
@@ -1617,8 +1597,11 @@ mod tests {
                 .is_err()
         );
 
-        let preview = mean_compiled(true);
-        let mut missing_count = decoder(&schema, &preview);
+        let cumulative = compiled(&json!({
+            "kind": "cumulative_sum", "primitive_version": 1,
+            "input": "price", "output": "total", "min_periods": 1
+        }));
+        let mut missing_count = decoder(&schema, &cumulative);
         assert!(
             missing_count
                 .decode_entity(0, None, None, entity_values("a"))
@@ -1633,7 +1616,7 @@ mod tests {
     #[test]
     fn history_rows_validate_projection_identity_order_and_position() {
         let schema = input_schema();
-        let compiled = mean_compiled(false);
+        let compiled = mean_compiled();
         let mut missing_position = decoder(&schema, &compiled);
         missing_position
             .decode_entity(0, None, None, entity_values("a"))
@@ -1706,7 +1689,7 @@ mod tests {
     #[test]
     fn buffer_rows_validate_payload_partition_and_canonical_identity() {
         let schema = input_schema();
-        let compiled = mean_compiled(false);
+        let compiled = mean_compiled();
         let mut state = decoder(&schema, &compiled);
         state
             .decode_entity(0, None, None, entity_values("a"))
@@ -1800,7 +1783,7 @@ mod tests {
     #[test]
     fn row_decoder_rejects_null_keys_unknown_kind_and_partial_ewma_payload() {
         let input_schema = input_schema();
-        let compiled = mean_compiled(false);
+        let compiled = mean_compiled();
         let schema = Arc::new(Schema::new(state_fields(&input_schema)));
         let mut columns = EncodedColumns::new(&input_schema);
         columns.push(99, 0, None, entity_values("a"), None);

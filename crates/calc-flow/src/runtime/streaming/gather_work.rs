@@ -9,16 +9,15 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, Utc};
-use datafusion::{
-    arrow::array::ArrayRef, common::DataFusionError, execution::memory_pool::MemoryReservation,
-};
+#[cfg(test)]
+use datafusion::arrow::array::ArrayRef;
+use datafusion::{common::DataFusionError, execution::memory_pool::MemoryReservation};
 use parking_lot::{Condvar, Mutex};
 use tokio::sync::Notify;
 
 use super::supervisor::TaskFailure;
 pub(crate) use super::supervisor::TaskId;
-use crate::{CalcFlowError, CancellationToken, Result};
+use crate::{CalcFlowError, Result};
 
 fn launch_registration(registered: process::Registration, workers: usize) -> Result<()> {
     catch_unwind(AssertUnwindSafe(|| registered.launch(workers))).unwrap_or_else(|payload| {
@@ -48,20 +47,30 @@ const _: () = assert!(
 
 #[cfg(test)]
 pub(crate) mod admission_probe;
+#[cfg(test)]
 mod cleanup;
+#[cfg(test)]
 mod columns;
-pub(crate) use cleanup::{AttemptCleanup, ObservedTicket, cleanup_control_bytes};
+#[cfg(test)]
+pub(crate) use cleanup::AttemptCleanup;
+#[cfg(test)]
+pub(crate) use cleanup::{ObservedTicket, cleanup_control_bytes};
+#[cfg(test)]
 mod parallel;
+#[cfg(test)]
 pub(crate) use parallel::ParallelCpuWork;
 mod process;
+#[cfg(test)]
 mod row_gather;
 #[cfg(test)]
 pub(crate) use process::TestService;
+#[cfg(test)]
 pub(crate) use row_gather::RowGather;
 #[cfg(test)]
 mod tests;
 mod worker;
 
+#[cfg(test)]
 pub(crate) trait GatherPlan: Send + Sync {
     fn column_count(&self) -> usize;
     fn gather(&self, ordinal: usize, stop: &GatherStop) -> Result<ArrayRef>;
@@ -164,12 +173,14 @@ impl<W: OwnedCpuWork> ErasedWork for WorkAdapter<W> {
     }
 }
 
+#[cfg(test)]
 struct ColumnsWork {
     plan: Arc<dyn GatherPlan>,
     workers: usize,
     rows: Option<RowGather>,
 }
 
+#[cfg(test)]
 impl ColumnsWork {
     fn new(plan: Arc<dyn GatherPlan>, capacity: usize) -> Result<Self> {
         let workers = plan.parallelism().max(1).min(capacity);
@@ -186,6 +197,7 @@ impl ColumnsWork {
     }
 }
 
+#[cfg(test)]
 impl WorkPackage for ColumnsWork {
     type Output = Vec<ArrayRef>;
 
@@ -210,6 +222,7 @@ impl WorkPackage for ColumnsWork {
     }
 }
 
+#[cfg(test)]
 impl OwnedCpuWork for ColumnsWork {
     type Output = Vec<ArrayRef>;
 
@@ -233,7 +246,9 @@ enum ReadyWork {
         outcome: Option<Result<ErasedOutput>>,
         running: bool,
     },
+    #[cfg(test)]
     Columns(columns::Columns),
+    #[cfg(test)]
     Parallel(parallel::Units),
 }
 
@@ -249,7 +264,9 @@ impl ReadyWork {
     fn units(&self) -> usize {
         match self {
             Self::Single { .. } => 1,
+            #[cfg(test)]
             Self::Columns(columns) => columns.count(),
+            #[cfg(test)]
             Self::Parallel(units) => units.count(),
         }
     }
@@ -257,7 +274,9 @@ impl ReadyWork {
     fn workers(&self) -> usize {
         match self {
             Self::Single { .. } => 1,
+            #[cfg(test)]
             Self::Columns(columns) => columns.workers(),
+            #[cfg(test)]
             Self::Parallel(units) => units.workers(),
         }
     }
@@ -265,7 +284,9 @@ impl ReadyWork {
     fn active(&self) -> usize {
         match self {
             Self::Single { running, .. } => usize::from(*running),
+            #[cfg(test)]
             Self::Columns(columns) => columns.active(),
+            #[cfg(test)]
             Self::Parallel(units) => units.active(),
         }
     }
@@ -278,12 +299,16 @@ impl ReadyWork {
                 Some(ClaimedWork::Single(work))
             }
             Self::Single { .. } => None,
+            #[cfg(test)]
             Self::Columns(columns) => columns.claim(ordinal),
+            #[cfg(test)]
             Self::Parallel(units) => units.claim(ordinal),
         }
     }
 
     fn complete(&mut self, ordinal: usize, value: Result<ErasedOutput>) -> bool {
+        #[cfg(not(test))]
+        let _ = ordinal;
         match self {
             Self::Single {
                 outcome, running, ..
@@ -292,14 +317,20 @@ impl ReadyWork {
                 *running = false;
                 true
             }
+            #[cfg(test)]
             Self::Columns(columns) => columns.complete(ordinal, value),
+            #[cfg(test)]
             Self::Parallel(units) => units.complete(ordinal, value),
         }
     }
 
     fn cancel_pending(&mut self, run_id: &str) {
+        #[cfg(not(test))]
+        let _ = run_id;
         match self {
+            #[cfg(test)]
             Self::Columns(columns) => columns.cancel_pending(run_id),
+            #[cfg(test)]
             Self::Parallel(units) => units.cancel_pending(run_id),
             Self::Single { .. } => {}
         }
@@ -311,11 +342,15 @@ impl ReadyWork {
         operator: &GatherOperatorId,
         stop: &GatherStop,
     ) -> Result<ErasedOutput> {
+        #[cfg(not(test))]
+        let _ = (home, operator, stop);
         match self {
             Self::Single { outcome, .. } => {
                 outcome.ok_or_else(|| internal("missing unit outcome"))?
             }
+            #[cfg(test)]
             Self::Columns(columns) => columns.finish(home, operator, stop),
+            #[cfg(test)]
             Self::Parallel(units) => units.finish(home, operator),
         }
     }
@@ -323,6 +358,7 @@ impl ReadyWork {
 
 enum ClaimedWork {
     Single(Box<dyn ErasedWork>),
+    #[cfg(test)]
     Column {
         plan: Arc<dyn GatherPlan>,
         ordinal: usize,
@@ -335,6 +371,7 @@ impl ClaimedWork {
     fn run(self, stop: &GatherStop) -> Result<ErasedOutput> {
         match self {
             Self::Single(work) => work.run(stop),
+            #[cfg(test)]
             Self::Column {
                 plan,
                 ordinal,
@@ -343,7 +380,7 @@ impl ClaimedWork {
             } => {
                 stop.check()?;
                 if siblings.load(Ordering::Acquire) {
-                    return Err(cancelled(&stop.run_id));
+                    return Err(cancelled(stop.run_id()));
                 }
                 let value = match range {
                     Some(range) => plan.gather_range(ordinal, range, stop),
@@ -360,32 +397,23 @@ impl ClaimedWork {
 pub(crate) struct GatherOperatorId {
     token: Arc<()>,
     name: Arc<str>,
-    #[cfg(feature = "benchmark-internals")]
+    #[cfg(all(test, feature = "benchmark-internals"))]
     join_cpu_name: Arc<str>,
     task: Option<TaskId>,
-    _reservation: Option<Arc<MemoryReservation>>,
 }
 
 impl GatherOperatorId {
     pub(crate) fn new(name: Arc<str>) -> Self {
         Self {
             token: Arc::new(()),
-            _reservation: None,
-            #[cfg(feature = "benchmark-internals")]
+            #[cfg(all(test, feature = "benchmark-internals"))]
             join_cpu_name: name.clone(),
             name,
             task: None,
         }
     }
 
-    pub(crate) fn with_reservation_owner(self, owner: Arc<MemoryReservation>) -> Self {
-        Self {
-            _reservation: Some(owner),
-            ..self
-        }
-    }
-
-    #[cfg(feature = "benchmark-internals")]
+    #[cfg(all(test, feature = "benchmark-internals"))]
     pub(crate) fn with_join_cpu_name(mut self, name: Arc<str>) -> Self {
         self.join_cpu_name = name;
         self
@@ -397,145 +425,7 @@ impl GatherOperatorId {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct GatherStop {
-    #[cfg(feature = "benchmark-internals")]
-    trace: crate::benchmark_internals::JoinCpuTraceOwner,
-    #[cfg(feature = "benchmark-internals")]
-    operator: Arc<str>,
-    run_id: Arc<str>,
-    cancellation: CancellationToken,
-    deadline: Option<DateTime<Utc>>,
-    #[cfg(test)]
-    deadline_clock: Option<tokio::sync::watch::Receiver<DateTime<Utc>>>,
-    abandoned: Arc<AtomicBool>,
-    #[cfg(test)]
-    check_hook: Option<Arc<dyn Fn(bool) + Send + Sync>>,
-}
-
-impl GatherStop {
-    pub(crate) fn from_job(job: &super::StreamJobContext) -> Self {
-        Self {
-            #[cfg(feature = "benchmark-internals")]
-            trace: job.join_cpu_trace().clone(),
-            #[cfg(feature = "benchmark-internals")]
-            operator: "".into(),
-            run_id: job.job_id().to_string().into(),
-            cancellation: job.cancellation().clone(),
-            deadline: job.deadline().copied(),
-            #[cfg(test)]
-            deadline_clock: job.deadline_clock_for_test(),
-            abandoned: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            check_hook: None,
-        }
-    }
-
-    pub(crate) fn from_run(run: &crate::RunContext) -> Self {
-        Self {
-            #[cfg(feature = "benchmark-internals")]
-            trace: crate::benchmark_internals::JoinCpuTraceOwner::default(),
-            #[cfg(feature = "benchmark-internals")]
-            operator: "".into(),
-            run_id: run.run_id().into(),
-            cancellation: run.cancellation().clone(),
-            deadline: run.deadline().copied(),
-            #[cfg(test)]
-            deadline_clock: None,
-            abandoned: Arc::new(AtomicBool::new(false)),
-            #[cfg(test)]
-            check_hook: None,
-        }
-    }
-
-    #[cfg(feature = "benchmark-internals")]
-    pub(crate) fn join_cpu_trace(&self) -> &crate::benchmark_internals::JoinCpuTraceOwner {
-        &self.trace
-    }
-
-    #[cfg(feature = "benchmark-internals")]
-    pub(crate) fn join_cpu_operator(&self) -> &str {
-        &self.operator
-    }
-
-    pub(crate) fn check(&self) -> Result<()> {
-        #[cfg(test)]
-        if let Some(hook) = &self.check_hook {
-            hook(false);
-        }
-        if self.abandoned.load(Ordering::Acquire)
-            || self.cancellation.is_cancelled()
-            || self.deadline.is_some_and(|deadline| {
-                #[cfg(test)]
-                if let Some(clock) = &self.deadline_clock {
-                    return *clock.borrow() >= deadline;
-                }
-                Utc::now() >= deadline
-            })
-        {
-            return Err(cancelled(&self.run_id));
-        }
-        Ok(())
-    }
-
-    /// Polls only the attempt's shared stop flag. The ticket owner must drive
-    /// cancellation/deadline waiting and drop the ticket on stop; admission and
-    /// result settlement must still use `check`.
-    pub(crate) fn check_abandoned(&self) -> Result<()> {
-        #[cfg(test)]
-        if let Some(hook) = &self.check_hook {
-            hook(true);
-        }
-        if self.abandoned.load(Ordering::Acquire) {
-            return Err(cancelled(&self.run_id));
-        }
-        Ok(())
-    }
-
-    fn abandon(&self) {
-        self.abandoned.store(true, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_check_hook(mut self, hook: Arc<dyn Fn(bool) + Send + Sync>) -> Self {
-        self.check_hook = Some(hook);
-        self
-    }
-
-    #[cfg(test)]
-    pub(crate) fn abandon_for_test(&self) {
-        self.abandon();
-    }
-
-    async fn wait(&self) {
-        let deadline = deadline_wait(self.deadline);
-        #[cfg(test)]
-        let deadline = async {
-            if let (Some(mut clock), Some(expires)) = (self.deadline_clock.clone(), self.deadline) {
-                clock
-                    .wait_for(|now| *now >= expires)
-                    .await
-                    .expect("deadline clock outlives its wait");
-            } else {
-                deadline.await;
-            }
-        };
-        tokio::select! {
-            () = self.cancellation.cancelled() => {},
-            () = deadline => {},
-        }
-    }
-}
-
-async fn deadline_wait(deadline: Option<DateTime<Utc>>) {
-    match deadline {
-        Some(deadline) => {
-            let delay = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-            tokio::time::sleep(delay).await;
-        }
-        None => std::future::pending().await,
-    }
-}
+pub(crate) use super::stop::GatherStop;
 
 #[derive(Clone)]
 pub(crate) struct JobGatherOwner(Arc<ExternalLease>);
@@ -562,6 +452,7 @@ pub(crate) struct GatherScope {
     reuse_only: bool,
 }
 
+#[cfg(test)]
 pub(crate) type GatherTicket = WorkTicket<Vec<ArrayRef>>;
 
 pub(crate) struct WorkTicket<T: Send + 'static> {
@@ -574,6 +465,10 @@ pub(crate) struct WorkTicket<T: Send + 'static> {
 
 pub(crate) struct WorkOutput<T> {
     pub(crate) value: T,
+    #[allow(
+        dead_code,
+        reason = "the reservation owns worker memory until the output is dropped"
+    )]
     pub(crate) credit: MemoryReservation,
 }
 
@@ -718,6 +613,7 @@ impl JobGatherOwner {
         self.0.home.close();
     }
 
+    #[cfg(test)]
     pub(crate) fn retain_retirement(&self) -> Result<RetirementGuard> {
         let mut state = self.0.home.state.lock();
         if !state.open {
@@ -739,8 +635,10 @@ impl JobGatherOwner {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct RetirementGuard(PendingHomeOwner);
 
+#[cfg(test)]
 impl Drop for RetirementGuard {
     fn drop(&mut self) {
         let mut state = self.0.state.lock();
@@ -799,11 +697,13 @@ impl Drop for GatherScope {
 }
 
 impl GatherScope {
+    #[cfg(test)]
     pub(crate) fn reuse_only(mut self) -> Self {
         self.reuse_only = true;
         self
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit_parallel_work<W: ParallelCpuWork>(
         &self,
         work: Arc<W>,
@@ -814,6 +714,7 @@ impl GatherScope {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn submit(
         &self,
         plan: Arc<dyn GatherPlan>,
@@ -1018,11 +919,8 @@ impl GatherHome {
         }
         state.next_attempt = next_attempt;
         let id = state.next_attempt;
-        #[cfg(feature = "benchmark-internals")]
-        let stop = GatherStop {
-            operator: scope.operator.join_cpu_name.clone(),
-            ..stop
-        };
+        #[cfg(all(test, feature = "benchmark-internals"))]
+        let stop = stop.with_join_cpu_operator(scope.operator.join_cpu_name.clone());
         state.slot = Slot::Active(Attempt {
             id,
             generation: 0,
@@ -1368,6 +1266,7 @@ impl JobGatherOwner {
         loop {
             let completed = match &state.slot {
                 Slot::Active(record) => match &record.work {
+                    #[cfg(test)]
                     Some(ReadyWork::Parallel(units)) => units.unit_completed(ordinal),
                     _ => false,
                 },

@@ -378,17 +378,18 @@ impl IncrementalSql {
             work.update_batch(tail, &mut accumulators, check)?;
         }
         let actual = work.values(&mut accumulators, check)?;
-        let expected = self.groups[0]
-            .aggregates
-            .generic_states()
-            .expect("global coalesced state is generic");
+        let expected = self
+            .keyed_state
+            .as_ref()
+            .expect("typed global state")
+            .global_states();
         if actual.len() != expected.len()
             || actual.iter().zip(expected).any(|(actual, expected)| {
                 actual.len() != expected.len()
                     || actual
                         .iter()
                         .zip(expected)
-                        .any(|(a, b)| !scalar_equal(a, b))
+                        .any(|(a, b)| !scalar_equal(a, &b))
             })
         {
             return Err(df_error(

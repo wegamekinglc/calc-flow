@@ -54,6 +54,31 @@ def test_native_numpy_snapshot_is_owned_and_deeply_readonly(dtype: str) -> None:
         array.shape = (2, 2)
 
 
+def test_native_valid_numpy_export_avoids_python_arrow_roundtrip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import calc_flow._native_array as native_array
+
+    def unexpected_roundtrip(*args: object) -> None:
+        raise AssertionError(f"unexpected Python Arrow conversion: {args}")
+
+    monkeypatch.setattr(native_array, "_to_numpy", unexpected_roundtrip)
+    for shape in ((4,), (2, 2), ()):
+        for dtype in (np.float32, np.float64):
+            expected = np.arange(np.prod(shape, dtype=int), dtype=dtype).reshape(shape)
+            result = cfa.from_numpy(expected).to_numpy()
+            np.testing.assert_array_equal(result, expected)
+            assert result.dtype == expected.dtype
+            assert result.shape == shape
+            while isinstance(result, np.ndarray):
+                with pytest.raises(ValueError):
+                    result.setflags(write=True)
+                result = result.base
+            assert isinstance(result, bytes)
+    sliced = cfa.from_arrow(pa.array([1.0, 2.0, 3.0, 4.0]).slice(1, 2))
+    np.testing.assert_array_equal(sliced.to_numpy(), [2.0, 3.0])
+
+
 def test_native_arrow_slice_preserves_nulls_and_shares_buffers() -> None:
     source = pa.array([9.0, None, float("nan"), -0.0, 5.0]).slice(1, 3)
     array = cfa.from_arrow(source)
@@ -267,16 +292,15 @@ def test_native_where_and_shape_errors_use_core_rules() -> None:
         cfa.add(left, scalar, execution=cfa.ArrayExecutionOptions(max_elements=0))
 
 
-@pytest.mark.parametrize("profile", ["stable_v1", "stable_v2"])
-def test_native_rolling_mean_preserves_row_window_and_profile(profile: str) -> None:
+def test_native_rolling_mean_preserves_row_window_and_rejects_removed_profile() -> None:
     array = cfa.from_arrow(pa.array([1.0, None, 3.0, float("nan"), 5.0]))
-    result = cfa.rolling_mean(array, window=3, min_periods=2, numerical_profile=profile)
+    result = cfa.rolling_mean(array, window=3, min_periods=2)
     assert result.to_arrow().to_pylist() == [None, None, 2.0, None, 4.0]
     assert result.dtype == "float64"
     with pytest.raises(ConfigError, match="options.min_periods"):
         cfa.rolling_mean(array, window=2, min_periods=3)
-    with pytest.raises(ConfigError, match="options.numerical_profile"):
-        cfa.rolling_mean(array, window=2, numerical_profile="unknown")
+    with pytest.raises(TypeError, match="numerical_profile"):
+        cfa.rolling_mean(array, window=2, **{"numerical_profile": "stable_v1"})
 
 
 def test_native_arrow_path_does_not_import_optional_array_backends() -> None:

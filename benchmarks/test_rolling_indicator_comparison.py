@@ -18,6 +18,7 @@ from benchmarks.rolling_indicator_comparison import (
     ta_lib_iterations_per_sample,
     ta_lib_valid_rows,
 )
+from benchmarks.ta_lib_bounded_history import BoundedHistoryTaLibMethod
 
 
 def test_native_benchmark_program_selects_engine_before_compilation() -> None:
@@ -57,6 +58,21 @@ def test_ta_lib_sma_matches_oracle_after_its_warmup() -> None:
     )
     assert ta_lib_valid_rows(rows=257, entities=8, window=20) == 105
     assert ta_lib_valid_rows(rows=1_000, entities=64, window=20) == 0
+
+
+def test_ta_lib_warm_history_returns_only_valid_appended_rows() -> None:
+    workload = rolling_workload(rows=257, entities=8)
+    actual = BoundedHistoryTaLibMethod(
+        workload.prices,
+        entities=8,
+        window=20,
+        history_rows=250,
+    ).run()
+    expected = ta_lib_expected_rolling_mean(workload.prices, entities=8, window=20)[
+        250:
+    ]
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+    assert np.isfinite(actual).all()
 
 
 def test_dual_sma_spread_matches_partial_and_full_window_oracles() -> None:

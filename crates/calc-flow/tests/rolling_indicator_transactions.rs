@@ -126,8 +126,19 @@ async fn test_finite_indicator_output_rows_do_not_consume_retained_row_budget() 
     );
 }
 
+fn legacy_indicator_operator() -> RollingOperator {
+    let mut spec = operator(32, false).spec().clone();
+    spec.outputs.push(
+        serde_json::from_value(json!({
+            "kind":"lag","primitive_version":1,"input":"price","output":"previous","periods":1
+        }))
+        .unwrap(),
+    );
+    RollingOperator::new("features", schema(), spec).unwrap()
+}
+
 async fn assert_empty_control_invalidates_preparation(ending: bool) {
-    let mut operator = operator(32, false);
+    let mut operator = legacy_indicator_operator();
     let job = StreamJobContext::new(
         11,
         "a".repeat(64),

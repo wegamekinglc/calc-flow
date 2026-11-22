@@ -1,0 +1,56 @@
+{
+  "schema": "calc-flow.join-p5-performance-plan.v1",
+  "created_at": "2026-11-21T14:02:18+08:00",
+  "baseline": {
+    "kind": "previous_sealed_candidate",
+    "revision": "1bd3b3ce",
+    "evidence": "benchmarks/join-asof/p5-band-output-batch-20261121/result.json and benchmarks/join-asof/p5-fused-projection-20261121/result.json",
+    "join_p50_ms": 17.047102000000002,
+    "interval_p50_ms": 282.3963435,
+    "paired_comparison": false
+  },
+  "candidate": {
+    "kind": "sealed_default_feature_release_wheel",
+    "revision": "d6e49ddc",
+    "required_tracked_source_clean_before_build": true,
+    "build_budget": "separate from the 600-second acquisition budget",
+    "change": "Retain hot history for live continuation and non-terminal recovery, but release it instead of rebuilding run state for terminal checkpoints; preserve the single-pair fast path and fused output."
+  },
+  "execution": {
+    "cpu_affinity": 0,
+    "tokio_worker_threads": 1,
+    "blas_openmp_workers": 1,
+    "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+    "timing_scope": "ready-source enqueue through Arrow output",
+    "warmups_per_case": 2,
+    "measured_samples_per_case": 10,
+    "sample_order": "static Join then interval; both paths share the modified hot core",
+    "correctness": "maintained EngineCase full-output oracle on every sample",
+    "total_budget_seconds": 600,
+    "acquisition_stop_seconds": 570,
+    "owned_cleanup_reserve_seconds": 30,
+    "external_backstop": "timeout --kill-after=30s 600s",
+    "state_root_policy": "new empty root for every warmup and measured observation"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Verify that retaining hot history and the continuation guard do not regress the passing single-pair static Join path.",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 17.047102000000002
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "Verify that the same continuation and native-checkpoint migration changes do not regress the passing single-pair BandJoin path.",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 282.3963435
+    }
+  ],
+  "unmeasured": "No paired significance claim, multi-batch throughput, ASOF, other row counts/types/modes, partitioned execution, or remaining acceptance matrix. Multi-batch and durable correctness are covered separately by native disk round-trip unit tests."
+}

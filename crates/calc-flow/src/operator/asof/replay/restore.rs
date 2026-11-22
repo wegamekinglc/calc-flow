@@ -73,7 +73,7 @@ impl StreamAsofJoinOperator {
                 )
                 .await?;
             self.clear_anchor_bookkeeping();
-            self.status.state_bytes = self.current_inventory(None)?.bytes;
+            self.status.state_bytes = self.current_inventory()?.bytes;
         }
         Ok(self)
     }
@@ -125,14 +125,17 @@ impl StreamAsofJoinOperator {
         self.observe(progress);
         log.cut = log.records.len();
         self.replay = Some(Box::new(log));
-        self.status.state_bytes = self.current_inventory(None)?.bytes;
+        self.status.state_bytes = self.current_inventory()?.bytes;
         self.status.output_watermark_micros = control.status.output_watermark_micros;
         self.check_rebuilt_replay(control)?;
-        self.check_inventory_limits(&self.current_inventory(None)?)
+        self.check_inventory_limits(&self.current_inventory()?)
     }
 
     fn check_rebuilt_replay(&self, control: &Control) -> Result<()> {
-        if self.status != control.status
+        let mut rebuilt = self.status.clone();
+        rebuilt.state_bytes = control.status.state_bytes;
+        if rebuilt != control.status
+            || self.status.state_bytes > control.status.state_bytes
             || self.terminal != control.terminal
             || self.next_output_sequence != control.next_output_sequence
         {

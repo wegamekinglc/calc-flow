@@ -1,0 +1,351 @@
+{
+  "schema": "calc-flow.join-p5-performance-result.v1",
+  "plan": {
+    "schema": "calc-flow.join-p5-performance-plan.v1",
+    "created_at": "2026-11-20T18:30:00+08:00",
+    "baseline": {
+      "kind": "previous_sealed_candidate",
+      "revision": "dfc077ebae272da6be13f16d3e60b3ca8df16a62",
+      "evidence": "benchmarks/join-asof/p5-morsel-state-20261120/result.json",
+      "join_p50_ms": 461.092764,
+      "interval_p50_ms": 3699.0853909999996,
+      "paired_comparison": false
+    },
+    "candidate": {
+      "kind": "sealed_default_feature_release_wheel",
+      "revision": "6f15e8fc",
+      "required_tracked_source_clean_before_build": true,
+      "build_budget": "separate from the 600-second acquisition budget",
+      "change": "native-run admission uses synchronous bulk quanta, eliminating per-64-row Tokio budget boundaries while retaining cancellation and sink backpressure"
+    },
+    "execution": {
+      "cpu_affinity": 0,
+      "tokio_worker_threads": 1,
+      "blas_openmp_workers": 1,
+      "checkpoint": "enabled with a 24-hour interval; no trigger in the timed path",
+      "timing_scope": "ready-source enqueue through Arrow output",
+      "warmups_per_case": 2,
+      "measured_samples_per_case": 10,
+      "sample_order": "Join, interval; no retries or extensions",
+      "correctness": "maintained EngineCase full-output oracle on every sample",
+      "total_budget_seconds": 600,
+      "acquisition_stop_seconds": 570,
+      "owned_cleanup_reserve_seconds": 30,
+      "external_backstop": "timeout --kill-after=30s 600s",
+      "state_root_policy": "new empty root for every warmup and measured observation"
+    },
+    "cases": [
+      {
+        "id": "join-1m-single-cpu",
+        "scenario": "join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "ordinary Join production admission scheduling and native run execution",
+        "threshold_p50_ms": 30,
+        "baseline_p50_ms": 461.092764
+      },
+      {
+        "id": "interval-1m-single-cpu",
+        "scenario": "interval_join",
+        "backend": "calc-flow-stream",
+        "rows": 1000000,
+        "connection": "interval production admission scheduling and complete multi-morsel output",
+        "threshold_p50_ms": 350,
+        "baseline_p50_ms": 3699.0853909999996
+      }
+    ],
+    "unmeasured": "ASOF, other row counts/types/modes, partitioned execution and remaining acceptance matrix"
+  },
+  "candidate": {
+    "wheel": "target/p5-join-wheel-6f15e8fc/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+    "wheel_sha256": "03baa9ed86a3d8aefffe835b9df8e9061eeefd4f9b59e546529c413d070acef0",
+    "loaded_native": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/worktrees/streaming-core-rearchitecture/target/p5-join-venv/lib/python3.13/site-packages/calc_flow/_native.cpython-313-x86_64-linux-gnu.so",
+    "loaded_native_sha256": "7b84a77e4ec7617f22f3deb557df26df7ded2f3ba49aab2ef392f8e06fa0fd0a",
+    "distribution_version": "2026.11.14"
+  },
+  "environment": {
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "tokio_worker_threads": "1",
+    "openblas_num_threads": "1",
+    "omp_num_threads": "1",
+    "taskset": "cpu0",
+    "cpus_allowed": "Cpus_allowed_list:\t0"
+  },
+  "cases": [
+    {
+      "id": "join-1m-single-cpu",
+      "scenario": "join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "ordinary Join production admission scheduling and native run execution",
+      "threshold_p50_ms": 30,
+      "baseline_p50_ms": 461.092764,
+      "samples": [
+        {
+          "seconds": 0.45690229,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.447928961,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.447570003,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.445097778,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.448743772,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.449369284,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.468822174,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.453891425,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.442695483,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 0.449700987,
+          "correctness": {
+            "passed": true,
+            "rows": 1000000,
+            "finite_rows": 1000000,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 449.05652799999996,
+      "p95_ms": 463.4582262,
+      "threshold_pass": false,
+      "output_rows": 1000000,
+      "all_oracles_passed": true
+    },
+    {
+      "id": "interval-1m-single-cpu",
+      "scenario": "interval_join",
+      "backend": "calc-flow-stream",
+      "rows": 1000000,
+      "connection": "interval production admission scheduling and complete multi-morsel output",
+      "threshold_p50_ms": 350,
+      "baseline_p50_ms": 3699.0853909999996,
+      "samples": [
+        {
+          "seconds": 3.957884549,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.662764531,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.45366585,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.784791326,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.486823174,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.669983303,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.400429558,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.456160213,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 3.455968339,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        },
+        {
+          "seconds": 4.378634119,
+          "correctness": {
+            "passed": true,
+            "rows": 10998080,
+            "finite_rows": 10998080,
+            "max_abs_error": 0.0
+          },
+          "completion": {
+            "state": "completed"
+          }
+        }
+      ],
+      "p50_ms": 3574.7938525,
+      "p95_ms": 4189.2968125,
+      "threshold_pass": false,
+      "output_rows": 10998080,
+      "all_oracles_passed": true
+    }
+  ],
+  "wall_seconds": 84.06377913203323,
+  "within_budget": true,
+  "error": null
+}

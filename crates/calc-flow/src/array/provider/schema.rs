@@ -127,10 +127,6 @@ fn aggregates(version: u8) -> Vec<Value> {
                 ("input", identifier()),
                 ("window", positive()),
                 ("min_periods", optional_count()),
-                (
-                    "numerical_profile",
-                    json!({"enum":["stable_v1","stable_v2"],"default":"stable_v1"}),
-                ),
             ],
             &["input", "window"],
         ),

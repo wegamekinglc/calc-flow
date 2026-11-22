@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use datafusion::arrow::array::TimestampMicrosecondArray;
 
-use crate::runtime::streaming::entity_work::JobEntityWorkOwner;
+use crate::runtime::streaming::morsel_pool::JobMorselOwner;
 
 use super::*;
 
@@ -12,19 +12,23 @@ async fn test_work_invariant_parallel_preparation_qualifies_each_entity_once() {
 
     let input = parallel_rollback_record(0, 64_000);
     let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
+    let supports_slab = RollingOperator::new("rolling", input.schema(), spec.clone())
+        .unwrap()
+        .compiled
+        .kernel_plan
+        .supports_slab();
     QUALIFICATION_ENTITY_VISITS.set(0);
     assert_cold_parallel(spec, input).await;
     assert_eq!(
         QUALIFICATION_ENTITY_VISITS.replace(0),
-        64,
-        "the same private preparation must qualify each touched entity once"
+        if supports_slab { 0 } else { 64 },
+        "slab plans bypass legacy lane qualification; other plans qualify each touched entity once"
     );
 }
 
 #[tokio::test]
 async fn test_capability_parallel_cold_rows37_matches_serial_output_and_state() {
-    let mut spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
-    spec.numerical_profile = RollingNumericalProfile::StableV1;
+    let spec = kernel_spec(json!([aggregate_output("mean", "price", "mean", 37)]));
     let input = parallel_rollback_record(0, 64_000);
     assert_cold_parallel(spec, input).await;
 }
@@ -126,18 +130,14 @@ async fn assert_cold_parallel(spec: RollingSpec, input: RecordBatch) -> RecordBa
     let serial_context = StreamOperatorContext::new(&job, "rolling", None);
     let expected = close(&mut serial, &serial_context, input.clone()).await;
     let launches = Arc::new(AtomicU64::new(0));
-    let owner = JobEntityWorkOwner::new(7, Arc::clone(&launches));
+    let owner = JobMorselOwner::new(7, 2, Arc::clone(&launches));
     owner.set_worker_limit_for_test(2);
-    let task = owner.test_client(3, "operator:rolling".into());
-    let scope = task.callback_scope();
-    let context = StreamOperatorContext::new(&job, "rolling", None)
-        .with_entity_work(task.context_client().unwrap());
+    let parallel_job = job.with_morsel_owner(owner.clone());
+    let context = StreamOperatorContext::new(&parallel_job, "rolling", None)
+        .with_task_id(Some(crate::runtime::streaming::gather_work::TaskId::new(0)));
     let actual = close(&mut parallel, &context, input).await;
-    scope.settle_abandoned().await;
     drop(context);
-    drop(scope);
-    owner.close_admission();
-    assert!(owner.drain().await.is_empty());
+    owner.close_and_drain().await.unwrap();
     assert_eq!(actual, expected);
     for (actual, expected) in actual.columns()[input_columns..]
         .iter()
@@ -178,10 +178,15 @@ async fn assert_cold_parallel(spec: RollingSpec, input: RecordBatch) -> RecordBa
         serial.encode_state(epoch).unwrap()
     );
     assert_eq!(parallel.state.charge, serial.state.charge);
+    let expected_launches = if parallel.compiled.kernel_plan.supports_slab() {
+        0
+    } else {
+        2
+    };
     assert_eq!(
         launches.load(AtomicOrdering::SeqCst),
-        2,
-        "a cold, independently executable plan must execute two owned lanes"
+        expected_launches,
+        "slab plans bypass morsels; legacy typed plans retain owned morsel execution"
     );
     actual
 }

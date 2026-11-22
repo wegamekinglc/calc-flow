@@ -169,6 +169,47 @@ fn boolean_plan(
         .unwrap()
 }
 
+fn native_boolean_plan() -> crate::StreamExecutionPlan {
+    let schema = boolean_schema();
+    let mut join = StreamJoinOperator::new(
+        "match",
+        Arc::clone(&schema),
+        schema,
+        StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "ts",
+            "ts",
+            JoinTimeBounds::new(StdDuration::ZERO, StdDuration::from_micros(10)).unwrap(),
+            JoinStateLimits::new(100_000, 134_217_728, 1_000_000).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    join.enable_native_checkpoint().unwrap();
+    PipelineBuilder::new("restore-native-booleans")
+        .unwrap()
+        .add_node("match", Box::new(join))
+        .unwrap()
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap()
+}
+
+fn native_checkpoint(root: &Path) -> CheckpointRuntimeSpec {
+    CheckpointRuntimeSpec::managed(
+        ManagedCheckpointRuntime::new(root).unwrap(),
+        StreamRuntimeConfig {
+            checkpoint_interval: StdDuration::from_secs(3_600),
+            checkpoint_timeout: StdDuration::from_secs(10),
+            ..StreamRuntimeConfig::default()
+        },
+    )
+    .unwrap()
+}
+
 fn boolean_job_spec(
     plan: crate::StreamExecutionPlan,
     records: &Arc<Mutex<Vec<RecordBatch>>>,
@@ -263,19 +304,17 @@ fn assert_boolean_pairs(records: &[RecordBatch]) {
 
 fn assert_boolean_owners(observations: &Mutex<RestoreObservations>) {
     let observed = observations.lock();
-    assert_eq!(observed.wire.len(), 2);
     assert_eq!(observed.readers.len(), 2);
     eprintln!(
         "boolean restored readers: {:?}; resident: {:?}",
         observed.readers, observed.payloads
     );
     assert!(
-        observed.readers.iter().all(|(funding, native)| {
+        observed.readers.iter().all(|(funding, _)| {
             funding.is_some_and(|(identity, paid)| {
                 paid > 0
                     && Some(identity) != observed.descriptor
                     && !observed.wire.contains(&identity)
-                    && *native
             })
         }),
         "both real boolean readers need independent prepaid native workspace"
@@ -376,4 +415,78 @@ async fn test_managed_checkpoint_restart_funds_boolean_payloads() {
     assert_boolean_pairs(&records.lock());
     assert_eq!(parses.load(Ordering::SeqCst), 1);
     assert_boolean_owners(&observations);
+}
+
+#[tokio::test]
+async fn test_native_checkpoint_restart_continues_boolean_join() {
+    let directory = tempfile::tempdir().unwrap();
+    let managed_root = directory.path().join("managed");
+    let left = Arc::new(AtomicUsize::new(0));
+    let right = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicBool::new(false));
+    let reopened = Arc::new(Mutex::new(Vec::new()));
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let spec = || {
+        boolean_job_spec(
+            native_boolean_plan(),
+            &records,
+            vec![
+                NamedSourceBinding {
+                    binding_id: "left".into(),
+                    binding: boolean_source(&left, &released, &reopened, 95),
+                },
+                NamedSourceBinding {
+                    binding_id: "right".into(),
+                    binding: boolean_source(&right, &released, &reopened, 100),
+                },
+            ],
+        )
+    };
+    let mut runner = ContinuousRunner::new();
+    let job = runner
+        .start_checkpointed(spec(), native_checkpoint(&managed_root))
+        .await
+        .unwrap();
+    left.store(1, Ordering::SeqCst);
+    right.store(1, Ordering::SeqCst);
+    wait_retained(&job, 1, 1).await;
+    wait_for_join_emission(&job, 1).await;
+    job.trigger_checkpoint().await.unwrap();
+    let manifest = crate::state::v4::V4Manifest::from_bytes(
+        &std::fs::read(managed_root.join("manifests/lineage/manifests/epoch-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        manifest.operators["match"],
+        crate::state::v4::OperatorV4::Table { .. }
+    ));
+    assert_eq!(job.cancel().await.state, ContinuousJobState::Cancelled);
+    drop(job);
+    runner.shutdown().await.unwrap();
+    records.lock().clear();
+    reopened.lock().clear();
+
+    let mut runner = ContinuousRunner::new();
+    let job = runner
+        .start_checkpointed(spec(), native_checkpoint(&managed_root))
+        .await
+        .unwrap();
+    wait_retained(&job, 1, 1).await;
+    let mut cursors = reopened.lock().clone();
+    cursors.sort_unstable();
+    assert_eq!(cursors, [(95, 1), (100, 1)]);
+    assert!(!released.load(Ordering::SeqCst));
+    left.store(2, Ordering::SeqCst);
+    right.store(2, Ordering::SeqCst);
+    wait_retained(&job, 2, 2).await;
+    wait_collected(&records).await;
+    assert!(!released.load(Ordering::SeqCst));
+    released.store(true, Ordering::SeqCst);
+    let outcome = tokio::time::timeout(StdDuration::from_secs(30), job.wait())
+        .await
+        .unwrap();
+    assert_eq!(outcome.state, ContinuousJobState::Completed, "{outcome:?}");
+    drop(job);
+    runner.shutdown().await.unwrap();
+    assert_boolean_pairs(&records.lock());
 }

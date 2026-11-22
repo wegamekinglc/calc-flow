@@ -44,7 +44,8 @@ pages explain how the implementation provides those behaviors.
 1. [API reference](api-reference.md): public surfaces, errors,
    and package/protocol versions.
 2. [Python API](python-api.md): `compute`, SQL, `pipe`, named table expressions,
-   `Program`, collection, streams, and advanced execution/provider/runner contracts.
+   `Program`, collection, streams, stream sessions, and advanced
+   execution/provider/runner contracts.
 3. [Expression API](symbolic-api.md): declarations, ordering requirements,
    analysis, and compilation.
 4. [Rust runtime reference](rust-api.md): internal types, operator traits, and
@@ -85,6 +86,9 @@ project contract.
 9. [TA-Lib and Arroyo performance development plan, dated 2026-11-08](plans/2026-11-08-ta-lib-arroyo-performance.md):
    runtime fusion, incremental rolling kernels, shared history, and conditional
    output and checkpoint work with compatibility and measurement gates.
+10. [Streaming core re-architecture plan, dated 2026-11-15](plans/2026-11-15-streaming-core-rearchitecture.md):
+    the review findings, synchronous compute core, runtime-owned state tables,
+    new rolling arithmetic, checkpoint protocol, and phased acceptance gates.
 
 ## History and maintenance
 

@@ -1157,11 +1157,8 @@ async fn checkpoint_manifest_scan_skips_entry_removed_after_enumeration() {
     let entry = entries.next_entry().await.unwrap().unwrap();
     tokio::fs::remove_file(entry.path()).await.unwrap();
 
-    assert!(
-        read_checkpoint_manifest_document(&entry.path())
-            .await
-            .is_none()
-    );
+    let error = tokio::fs::read(entry.path()).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
 }
 
 #[test]
@@ -1446,7 +1443,7 @@ fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
     std::fs::write(state_staging.join("segment.tmp"), b"temporary state").unwrap();
     std::fs::write(state_committed.join("segment.segment"), b"durable state").unwrap();
     std::fs::write(
-        manifest_root.join("manifest-00000000000000000001.json"),
+        manifest_root.join("epoch-00000000000000000001.json"),
         b"durable manifest",
     )
     .unwrap();

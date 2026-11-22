@@ -2,8 +2,8 @@ mod checkpoint_tests;
 
 use super::*;
 use crate::runtime::streaming::{
-    entity_work::TestHooks,
     failure::{FailureOrigin, TerminalCause},
+    morsel_pool::MorselTestHooks,
 };
 use std::{
     sync::{Condvar, atomic::AtomicU64},
@@ -147,12 +147,12 @@ async fn wait_until(condition: impl Fn() -> bool) {
 }
 
 fn block_after_numeric(job: &super::super::ContinuousJob, gate: &Arc<WorkerGate>) {
-    job.core.entity_work.set_hooks(TestHooks {
+    job.core.morsels.set_hooks(MorselTestHooks {
         after_run: Some({
             let gate = gate.clone();
             Arc::new(move |_| gate.block())
         }),
-        ..TestHooks::default()
+        ..MorselTestHooks::default()
     });
 }
 
@@ -168,7 +168,7 @@ async fn cancelled_managed_pair_joins_before_terminal_and_never_emits_stale_cand
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     let outcome = job.cancel();
@@ -189,7 +189,7 @@ async fn cancelled_managed_pair_joins_before_terminal_and_never_emits_stale_cand
     );
     assert_eq!(rows(&f.records), PRELOAD);
     assert!(job.core.runtime_status.lock().tasks.snapshot().is_empty());
-    assert_eq!(job.core.entity_work.active_bytes(), 0);
+    assert_eq!(job.core.morsels.active_bytes(), 0);
     drop(job);
     runner.shutdown().await.unwrap();
 }
@@ -202,7 +202,7 @@ async fn driver_abort_drains_real_lanes_then_resolves_the_claimed_job_waiter() {
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     job.core.abort_driver_for_test();
@@ -225,7 +225,7 @@ async fn driver_abort_drains_real_lanes_then_resolves_the_claimed_job_waiter() {
     );
     assert_eq!(rows(&f.records), PRELOAD);
     assert!(job.core.runtime_status.lock().tasks.snapshot().is_empty());
-    assert_eq!(job.core.entity_work.active_bytes(), 0);
+    assert_eq!(job.core.morsels.active_bytes(), 0);
     drop(job);
     runner.shutdown().await.unwrap();
 }
@@ -236,7 +236,7 @@ async fn prepared_completed_report_survives_a_real_driver_panic_before_publicati
     let mut runner = ContinuousRunner::new();
     let job = runner.start(f.spec).await.unwrap();
     job.core.panic_after_prepared_report_for_test();
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
         .await
@@ -257,13 +257,13 @@ async fn worker_panic_preserves_original_operator_id_and_interrupted_p2_work() {
     let f = fixture(true);
     let mut runner = ContinuousRunner::new();
     let job = runner.start(f.spec).await.unwrap();
-    job.core.entity_work.set_hooks(TestHooks {
+    job.core.morsels.set_hooks(MorselTestHooks {
         after_run: Some(Arc::new(|lane| {
             assert!(lane != 1, "real numeric worker panic");
         })),
-        ..TestHooks::default()
+        ..MorselTestHooks::default()
     });
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     let outcome = tokio::time::timeout(Duration::from_secs(5), job.wait())
         .await
@@ -274,7 +274,9 @@ async fn worker_panic_preserves_original_operator_id_and_interrupted_p2_work() {
     };
     assert_eq!(primary_task_id.as_u64(), 0);
     assert!(
-        matches!(&outcome.errors[0].origin, FailureOrigin::Task { task_id, task_name } if task_id == &primary_task_id && task_name == "operator:rolling")
+        matches!(&outcome.errors[0].origin, FailureOrigin::Task { task_id, task_name } if task_id == &primary_task_id && task_name == "operator:rolling"),
+        "{:?}",
+        outcome.errors
     );
     assert!(
         matches!(&outcome.errors[0].error, crate::CalcFlowError::TaskPanicked { task_id: 0, message } if message == "real numeric worker panic")
@@ -298,7 +300,7 @@ async fn last_job_owner_drop_keeps_the_reaper_alive_until_the_real_workers_exit(
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     drop(job);
@@ -323,13 +325,13 @@ async fn driver_takeover_preserves_settled_tasks_while_only_cpu_work_remains() {
     let gate = Arc::new(WorkerGate::default());
     let _release = Release(gate.clone());
     block_after_numeric(&job, &gate);
-    job.core.entity_work.set_worker_limit_for_test(2);
+    job.core.morsels.set_worker_limit_for_test(2);
     f.start.notify_one();
     wait_until(|| gate.entered.load(Ordering::SeqCst) == 2).await;
     let tasks = job.core.runtime_status.lock().tasks.clone();
     tasks.abort_all_for_test();
     wait_until(|| tasks.snapshot().is_empty()).await;
-    assert!(job.core.entity_work.active_bytes() > 0);
+    assert!(job.core.morsels.active_bytes() > 0);
     assert_eq!(
         job.rolling_metrics()["rolling"].watermark.numeric_rows,
         PRELOAD as u64
@@ -352,7 +354,7 @@ async fn driver_takeover_preserves_settled_tasks_while_only_cpu_work_remains() {
         job.rolling_metrics()["rolling"].watermark.numeric_rows,
         TOTAL as u64
     );
-    assert_eq!(job.core.entity_work.active_bytes(), 0);
+    assert_eq!(job.core.morsels.active_bytes(), 0);
     assert_eq!(rows(&f.records), PRELOAD);
     assert!(tasks.snapshot().is_empty());
     drop(job);

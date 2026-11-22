@@ -1,11 +1,15 @@
 //! Frozen V1 payload fees, evaluated columnwise in bounded stack storage.
 
+#[cfg(test)]
 use super::{
     STREAM_JOIN_STATE_ROW_OVERHEAD_BYTES_V1, admitted::AdmittedGroup, charge_overflow,
     charge_type_mismatch, columnar::Quantum, counter_overflow, fixed_cell_charge,
     fixed_size_binary_charge, state_columns_charge_with_key,
 };
-use crate::{Result, StreamOperatorContext};
+use crate::Result;
+#[cfg(test)]
+use crate::StreamOperatorContext;
+#[cfg(test)]
 use datafusion::arrow::{
     array::{
         Array, BinaryArray, BinaryViewArray, LargeBinaryArray, LargeStringArray, StringArray,
@@ -14,14 +18,18 @@ use datafusion::arrow::{
     datatypes::DataType,
     util::bit_chunk_iterator::BitChunks,
 };
+#[cfg(test)]
 use std::ops::Range;
 
+#[cfg(test)]
 mod nested;
 
+#[cfg(test)]
 const BLOCK: usize = 64;
 
 /// Errors are replayed with the V1 oracle at their original row, after its key.
 /// No speculative column error can hide an earlier row/key failure.
+#[cfg(test)]
 pub(super) struct PayloadCharges {
     positions: [usize; BLOCK],
     charges: [u64; BLOCK],
@@ -30,6 +38,7 @@ pub(super) struct PayloadCharges {
     len: usize,
 }
 
+#[cfg(test)]
 impl PayloadCharges {
     pub(super) fn on_worker(
         rows: AdmittedGroup<'_>,

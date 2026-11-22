@@ -10,10 +10,11 @@ use futures::{Future, FutureExt, future::select_all};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
+#[cfg(test)]
+use super::entity_work::TaskEntityWorkClient;
 use super::{
     EnvelopeCost, StreamMessage, StreamMessageKind,
     context::{StreamTaskContext, wait_for_task_gate},
-    entity_work::TaskEntityWorkClient,
     failure::{indicator_diagnostic::SafeIndicatorDiagnostic, panic_message},
     local_edge::{LocalEdgeOwner, OperatorEdgeReceiver, OperatorEdgeSender},
     metrics::OperatorMetricsHandle,
@@ -51,8 +52,11 @@ use super::{
     supervisor::{PreparedPair, TaskSupervisor},
 };
 
+pub(in crate::runtime::streaming) mod caller_driven;
+mod control;
 mod ingress_admission;
 pub(in crate::runtime::streaming) mod join_checkpoint_credit;
+mod sync_adapter;
 
 #[cfg(test)]
 mod performance_evidence;
@@ -75,8 +79,12 @@ pub(crate) struct OperatorCheckpointAck {
     pub(crate) node_id: String,
     pub(crate) epoch: Epoch,
     pub(crate) state: crate::OperatorManifestEntry,
+    pub(crate) snapshot: crate::OperatorStateSnapshot,
+    pub(crate) native: Option<crate::state::v4::native::NativeCapture>,
+    pub(crate) output_frontier: Option<EventTime>,
     pub(crate) working: Option<Arc<crate::state::WorkingStatePins>>,
     pub(crate) capture_credit: Option<OperatorCheckpointCredit>,
+    pub(crate) reservation: crate::state::v4::V4CaptureReservation,
 }
 
 pub(crate) struct OperatorCheckpointPort {
@@ -252,11 +260,11 @@ impl OperatorProgress {
         self.0.lock().datafusion_runtime_created |= created;
     }
 
-    fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
+    pub(crate) fn observe_stream_join(&self, status: crate::StreamJoinStatus) {
         self.0.lock().stream_join = Some(status);
     }
 
-    fn observe_stream_asof_join(&self, status: crate::StreamAsofJoinStatus) {
+    pub(crate) fn observe_stream_asof_join(&self, status: crate::StreamAsofJoinStatus) {
         self.0.lock().stream_asof_join = Some(status);
     }
 }
@@ -304,6 +312,7 @@ impl LateMetricSink for OperatorProgress {
 }
 
 pub(crate) struct OperatorTaskInputs {
+    #[cfg(test)]
     pub(crate) entity_work: Option<TaskEntityWorkClient>,
     pub(crate) sql_recovery: Option<SqlRecoveryClient>,
     pub(crate) node_id: String,
@@ -325,6 +334,7 @@ pub(crate) struct OperatorTaskInputs {
 }
 
 struct OperatorEntryFrame {
+    #[cfg(test)]
     entity_work: Option<TaskEntityWorkClient>,
     sql_recovery: Option<SqlRecoveryClient>,
     node_id: String,
@@ -363,6 +373,7 @@ impl RetainedOperatorInputs {
             };
         }
         let OperatorTaskInputs {
+            #[cfg(test)]
             entity_work,
             sql_recovery,
             node_id,
@@ -385,6 +396,7 @@ impl RetainedOperatorInputs {
         Self {
             inputs: None,
             frame: Some(OperatorEntryFrame {
+                #[cfg(test)]
                 entity_work,
                 sql_recovery,
                 node_id,
@@ -408,6 +420,7 @@ impl RetainedOperatorInputs {
     }
     fn assemble(&mut self) {
         let OperatorEntryFrame {
+            #[cfg(test)]
             entity_work,
             sql_recovery,
             node_id,
@@ -428,6 +441,7 @@ impl RetainedOperatorInputs {
         } = self.frame.take().expect("owned operator frame");
         let operator = self.operator.take().expect("returned actual operator");
         self.inputs = Some(OperatorTaskInputs {
+            #[cfg(test)]
             entity_work,
             sql_recovery,
             node_id,
@@ -791,6 +805,7 @@ async fn run_after_operator_entry(
         return Ok(());
     }
     inputs.context.bind_task_id(task_id);
+    #[cfg(test)]
     if let Some(client) = &mut inputs.entity_work {
         client.activate(task_id);
     }
@@ -805,18 +820,24 @@ async fn reset_and_acknowledge(
     inputs: &mut OperatorTaskInputs,
     task_id: TaskId,
 ) -> Result<Option<OperatorInputProgress>> {
-    let preparation_result =
-        reset_operator(inputs, task_id)
-            .await
-            .and_then(|()| match &inputs.restore {
-                Some(restore) => OperatorInputProgress::restore(
-                    inputs.ingresses.keys(),
-                    &restore.progress,
-                    restore.output_frontier,
-                ),
-                None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
-            });
+    let preparation_result = prepare_operator_for_entry(inputs, task_id).await;
     acknowledge_entry(inputs, preparation_result)
+}
+
+async fn prepare_operator_for_entry(
+    inputs: &mut OperatorTaskInputs,
+    task_id: TaskId,
+) -> Result<OperatorInputProgress> {
+    reset_operator(inputs, task_id).await?;
+    sync_adapter::prepare(inputs).await?;
+    match &inputs.restore {
+        Some(restore) => OperatorInputProgress::restore(
+            inputs.ingresses.keys(),
+            &restore.progress,
+            restore.output_frontier,
+        ),
+        None => Ok(OperatorInputProgress::new(inputs.ingresses.keys())),
+    }
 }
 
 fn acknowledge_entry(
@@ -948,19 +969,25 @@ fn reset_legacy_operator(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Re
 async fn reset_join_metadata(inputs: &mut OperatorTaskInputs, task_id: TaskId) -> Result<()> {
     inputs.context.bind_task_id(task_id);
     let restore = inputs.restore.as_mut().expect("restore presence checked");
+    #[cfg(test)]
     let job = inputs.context.job();
     let operation = async {
         inputs.operator.reset()?;
         let CompiledStreamOperator::StreamJoin(operator) = &mut inputs.operator else {
             unreachable!("Join dispatch checked");
         };
-        operator
+        #[cfg(test)]
+        return operator
             .restore_managed_snapshot(
                 crate::state::PreloadedSnapshot::legacy_mut(&mut restore.snapshot)?,
                 job,
                 Some(task_id),
             )
-            .await
+            .await;
+        #[cfg(not(test))]
+        operator.restore_native(crate::state::PreloadedSnapshot::legacy_mut(
+            &mut restore.snapshot,
+        )?)
     };
     match AssertUnwindSafe(operation).catch_unwind().await {
         Ok(result) => result,
@@ -1076,6 +1103,7 @@ pub(super) async fn restore_terminal_owned_join<'a>(
             message: "terminal Join recovery requires a Join operator".into(),
         });
     };
+    #[cfg(test)]
     operator
         .restore_managed_snapshot(
             crate::state::PreloadedSnapshot::legacy_mut(&mut restore.snapshot)?,
@@ -1083,6 +1111,10 @@ pub(super) async fn restore_terminal_owned_join<'a>(
             None,
         )
         .await?;
+    #[cfg(not(test))]
+    operator.restore_native(crate::state::PreloadedSnapshot::legacy_mut(
+        &mut restore.snapshot,
+    )?)?;
     operator.validate_terminal_recovery_state()?;
     job.check_cancelled()?;
     let status = operator.status().with_ingress_progress(&restored_progress);
@@ -1219,6 +1251,9 @@ async fn finish_operator(
     input_progress: &OperatorInputProgress,
     completed_epoch: Option<Epoch>,
 ) -> Result<()> {
+    if sync_adapter::is_sync(&inputs.operator) {
+        return finish_sync_operator(inputs, input_progress, completed_epoch).await;
+    }
     let input_watermark = input_progress.input_watermark();
     let cancellation = inputs.context.job().cancellation().clone();
     let output_budget = inputs.progress.output_budget(&inputs.outputs);
@@ -1237,6 +1272,7 @@ async fn finish_operator(
         .progress
         .begin_rolling(RollingCallback::End, &cancellation);
     let context = attach_rolling_context(context, callback.as_ref());
+    #[cfg(test)]
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
@@ -1257,12 +1293,14 @@ async fn finish_operator(
         if let Some(callback) = callback {
             callback.complete(&result);
         }
+        #[cfg(test)]
         if let Some(task) = &inputs.entity_work {
             task.settle_current_scope().await;
         }
         result?;
     } else {
         drop(callback);
+        #[cfg(test)]
         if let Some(task) = &inputs.entity_work {
             task.settle_current_scope().await;
         }
@@ -1275,6 +1313,38 @@ async fn finish_operator(
         inputs.context.job(),
     )
     .await?;
+    inputs.progress.mark_ended();
+    complete_terminal_checkpoint(inputs, input_progress, completed_epoch).await
+}
+
+async fn finish_sync_operator(
+    inputs: &mut OperatorTaskInputs,
+    input_progress: &OperatorInputProgress,
+    completed_epoch: Option<Epoch>,
+) -> Result<()> {
+    inputs.progress.record_on_end()?;
+    let callback = inputs
+        .progress
+        .begin_rolling(RollingCallback::End, inputs.context.job().cancellation());
+    let rolling = callback
+        .as_ref()
+        .map(|callback| callback.recorder().clone());
+    let result = sync_adapter::end(
+        inputs,
+        input_progress.input_watermark(),
+        input_progress.snapshot()?,
+        rolling,
+    )
+    .await;
+    if let Some(callback) = callback {
+        callback.complete(&result);
+    }
+    #[cfg(test)]
+    if let Some(task) = &inputs.entity_work {
+        task.settle_current_scope().await;
+    }
+    result?;
+    sync_adapter::forward_control(inputs, StreamMessage::end_of_input()).await?;
     inputs.progress.mark_ended();
     complete_terminal_checkpoint(inputs, input_progress, completed_epoch).await
 }
@@ -1420,6 +1490,7 @@ async fn dispatch_or_cancel(
     } else {
         result
     };
+    #[cfg(test)]
     if let Some(task) = &inputs.entity_work {
         task.settle_current_scope().await;
     }
@@ -1528,15 +1599,14 @@ async fn dispatch_progress(
     input: AggregateInput,
     input_progress: &mut OperatorInputProgress,
 ) -> Result<()> {
-    let previous = input_progress.input_watermark();
-    let emissions = input_progress.evaluate(ingress_name, input)?;
+    let transition = control::evaluate_progress(input_progress, ingress_name, input)?;
     dispatch_progress_transition(
         inputs,
         ingress_name,
-        emissions,
-        previous,
-        input_progress.snapshot()?,
-        input_progress.input_watermark(),
+        transition.emissions,
+        transition.previous_watermark,
+        transition.ingress_progress,
+        transition.aggregate_input_frontier,
         &mut input_progress.output_frontier,
     )
     .await
@@ -1559,14 +1629,13 @@ async fn dispatch_message_inner(
     }
     match message.kind() {
         StreamMessageKind::Data => {
-            let watermark = input_progress.input_watermark();
-            input_progress.evaluate(ingress_name, AggregateInput::Data)?;
+            let transition = control::evaluate_data(input_progress, ingress_name)?;
             dispatch_data(
                 inputs,
                 ingress_name,
                 message,
-                watermark,
-                input_progress.snapshot()?,
+                transition.input_watermark,
+                transition.ingress_progress,
             )
             .await
         }
@@ -1589,15 +1658,15 @@ async fn dispatch_message_inner(
             dispatch_barrier(inputs, ingress_name, &message, barrier_alignment)
         }
         StreamMessageKind::EndOfInput => {
-            let previous = input_progress.input_watermark();
-            let emissions = input_progress.evaluate(ingress_name, AggregateInput::End)?;
+            let transition =
+                control::evaluate_progress(input_progress, ingress_name, AggregateInput::End)?;
             dispatch_progress_transition(
                 inputs,
                 ingress_name,
-                emissions,
-                previous,
-                input_progress.snapshot()?,
-                input_progress.input_watermark(),
+                transition.emissions,
+                transition.previous_watermark,
+                transition.ingress_progress,
+                transition.aggregate_input_frontier,
                 &mut input_progress.output_frontier,
             )
             .await?;
@@ -1733,13 +1802,17 @@ async fn complete_barrier_if_ready(
     let next_epoch = epoch.next()?;
     let ack = capture_operator_checkpoint(inputs, input_progress, epoch).await?;
     send_operator_checkpoint_ack(inputs, ack).await?;
-    forward_control(
-        &mut inputs.outputs,
-        &inputs.late_output_ports,
-        StreamMessage::barrier(epoch),
-        inputs.context.job(),
-    )
-    .await?;
+    if sync_adapter::is_sync(&inputs.operator) {
+        sync_adapter::forward_control(inputs, StreamMessage::barrier(epoch)).await?;
+    } else {
+        forward_control(
+            &mut inputs.outputs,
+            &inputs.late_output_ports,
+            StreamMessage::barrier(epoch),
+            inputs.context.job(),
+        )
+        .await?;
+    }
     alignment.complete(epoch, next_epoch);
     Ok(())
 }
@@ -1800,8 +1873,8 @@ async fn capture_prepared_asof(
     crate::OperatorStateSnapshot,
     Option<OperatorCheckpointCredit>,
 )> {
+    #[cfg(test)]
     if let CompiledStreamOperator::StreamJoin(join) = operator {
-        #[cfg(test)]
         if join.checkpoint_v1_test_producer() {
             return crate::StreamOperator::checkpoint(join.as_mut(), epoch)
                 .map(|snapshot| (snapshot, None));
@@ -1809,6 +1882,12 @@ async fn capture_prepared_asof(
         return join
             .capture_v2_checkpoint_owned(epoch)
             .map(|(snapshot, credit)| (snapshot, Some(credit)));
+    }
+    #[cfg(not(test))]
+    if matches!(operator, CompiledStreamOperator::StreamJoin(_)) {
+        return Err(CalcFlowError::CheckpointMismatch {
+            message: "native Join capture is required before opaque checkpoint assembly".into(),
+        });
     }
     if !matches!(operator, CompiledStreamOperator::StreamAsofJoin(_)) {
         return operator.checkpoint(epoch).map(|snapshot| (snapshot, None));
@@ -1828,31 +1907,114 @@ async fn capture_operator_checkpoint(
     epoch: Epoch,
 ) -> Result<OperatorCheckpointAck> {
     let cancellation = inputs.context.job().cancellation().clone();
-    let (snapshot, capture_credit) = tokio::select! {
-        biased;
-        result = prepare_operator_snapshot(inputs, input_progress, epoch) => result?,
-        () = cancellation.cancelled() => return Err(CalcFlowError::Cancelled {
-            run_id: inputs.context.job().job_id().to_string(),
-        }),
+    inputs.context.job().check_cancelled()?;
+    let native = inputs.operator.native_checkpoint(epoch)?;
+    inputs.context.job().check_cancelled()?;
+    let (snapshot, capture_credit) = if let Some(capture) = &native {
+        (
+            crate::OperatorStateSnapshot {
+                inline_metadata: capture.metadata(),
+                segments: BTreeMap::new(),
+            },
+            None,
+        )
+    } else {
+        tokio::select! {
+            biased;
+            result = prepare_operator_snapshot(inputs, input_progress, epoch) => result?,
+            () = cancellation.cancelled() => return Err(CalcFlowError::Cancelled {
+                run_id: inputs.context.job().job_id().to_string(),
+            }),
+        }
     };
-    let transaction = inputs
-        .checkpoint
-        .as_ref()
-        .and_then(|checkpoint| checkpoint.transaction.clone());
     let snapshot =
         encode_operator_snapshot(inputs, input_progress, snapshot, capture_credit.as_ref())?;
-    let staged = stage_operator_snapshot(inputs, epoch, snapshot, transaction).await?;
+    let native = native
+        .map(|capture| {
+            let mut metadata = capture.metadata();
+            for key in [
+                crate::pipeline::OPERATOR_STATE_VERSION_KEY,
+                crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1,
+            ] {
+                if let Some(value) = snapshot.inline_metadata.get(key) {
+                    metadata.insert(key.into(), value.clone());
+                }
+            }
+            capture.with_metadata(metadata)
+        })
+        .transpose()?;
+    let snapshot = if let Some(capture) = &native {
+        crate::OperatorStateSnapshot {
+            inline_metadata: capture.metadata(),
+            ..snapshot
+        }
+    } else {
+        snapshot
+    };
+    let native_bytes = native.as_ref().map_or(
+        Ok(0),
+        crate::state::v4::native::NativeCapture::reservation_bytes,
+    )?;
+    let reservation_bytes = opaque_capture_reservation(&snapshot)?
+        .checked_add(native_bytes)
+        .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+            message: "native checkpoint reservation overflow".into(),
+        })?;
+    let reservation = inputs
+        .context
+        .job()
+        .checkpoint_budget()
+        .reserve(reservation_bytes)?;
+    let state = crate::OperatorManifestEntry {
+        progress: input_progress.manifest_entries()?,
+        inline_metadata: snapshot.inline_metadata.clone(),
+        segments: Vec::new(),
+    };
     Ok(OperatorCheckpointAck {
         node_id: inputs.node_id.clone(),
         epoch,
-        working: staged.working,
-        state: crate::OperatorManifestEntry {
-            progress: input_progress.manifest_entries()?,
-            inline_metadata: staged.inline_metadata,
-            segments: staged.segments,
+        state,
+        snapshot,
+        native,
+        output_frontier: if inputs.operator.requires_output_frontier_state() {
+            input_progress.output_frontier
+        } else {
+            None
         },
+        working: None,
         capture_credit,
+        reservation,
     })
+}
+
+fn opaque_capture_reservation(snapshot: &crate::OperatorStateSnapshot) -> Result<u64> {
+    let metadata =
+        serde_json::to_value(&snapshot.inline_metadata).map_err(|error| CalcFlowError::Format {
+            message: format!("operator checkpoint metadata is not JSON: {error}"),
+        })?;
+    let metadata_bytes = crate::canonical_json(&metadata)?.len() as u64;
+    let segments = snapshot
+        .segments
+        .iter()
+        .try_fold(0_u64, |total, (id, segment)| {
+            let bytes = (segment.bytes().len() as u64)
+                .checked_add(id.len() as u64)
+                .and_then(|bytes| bytes.checked_add(segment.sha256().len() as u64))
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "opaque checkpoint reservation overflow".into(),
+                })?;
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                    message: "opaque checkpoint reservation overflow".into(),
+                })
+        })?;
+    metadata_bytes
+        .checked_add(segments)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+            message: "opaque checkpoint reservation overflow".into(),
+        })
 }
 
 async fn prepare_operator_snapshot(
@@ -1929,37 +2091,6 @@ fn encode_operator_snapshot(
     Ok(snapshot)
 }
 
-async fn stage_operator_snapshot(
-    inputs: &OperatorTaskInputs,
-    epoch: Epoch,
-    snapshot: crate::OperatorStateSnapshot,
-    transaction: Option<Arc<crate::state::ManifestTransaction>>,
-) -> Result<crate::state::StagedOperatorState> {
-    match transaction {
-        Some(transaction) => {
-            transaction
-                .stage_operator_state_cancellable(
-                    &inputs.node_id,
-                    epoch,
-                    snapshot,
-                    inputs.context.job().cancellation(),
-                )
-                .await
-        }
-        None if snapshot.segments.is_empty() => Ok(crate::state::StagedOperatorState {
-            inline_metadata: snapshot.inline_metadata,
-            segments: Vec::new(),
-            working: None,
-        }),
-        None => Err(CalcFlowError::Internal {
-            message: format!(
-                "operator {:?} produced state segments without a state transaction",
-                inputs.node_id
-            ),
-        }),
-    }
-}
-
 async fn send_operator_checkpoint_ack(
     inputs: &OperatorTaskInputs,
     ack: OperatorCheckpointAck,
@@ -2027,8 +2158,6 @@ async fn dispatch_data(
     inputs.metrics.record_input(cost)?;
     inputs.progress.record_input()?;
     let processing_timer = inputs.metrics.timer();
-    let output_budget = inputs.progress.output_budget(&inputs.outputs);
-    let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let callback = inputs
         .progress
         .begin_rolling(RollingCallback::Data, inputs.context.job().cancellation());
@@ -2037,32 +2166,42 @@ async fn dispatch_data(
             .recorder()
             .add(RollingWork::InputRows, batch.num_rows());
     }
-    let context = StreamOperatorContext::for_task(
-        inputs.context.job(),
-        &inputs.node_id,
-        input_watermark,
-        ingress_progress,
-        output_budget,
-        late_metrics,
-    )
-    .with_task_id(inputs.context.task_id());
-    let context = attach_rolling_context(context, callback.as_ref());
-    let context = context.with_ingress_preparation(preparation.as_ref());
-    let context = attach_entity_context(context, inputs.entity_work.as_ref());
-    let mut collector = ChannelStreamCollector::new(
-        &inputs.node_id,
-        inputs.context.job().job_id(),
-        &inputs.output_ports,
-        &mut inputs.outputs,
-        inputs.context.job().cancellation(),
-        &inputs.progress,
-        &inputs.metrics,
-    )
-    .with_rolling_metrics(context.rolling_metrics());
-    let result = inputs
-        .operator
-        .process_data(ingress_name, batch, &context, &mut collector)
-        .await;
+    let result = if sync_adapter::is_sync(&inputs.operator) {
+        let rolling = callback
+            .as_ref()
+            .map(|callback| callback.recorder().clone());
+        sync_adapter::data(inputs, batch, input_watermark, ingress_progress, rolling).await
+    } else {
+        let output_budget = inputs.progress.output_budget(&inputs.outputs);
+        let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
+        let context = StreamOperatorContext::for_task(
+            inputs.context.job(),
+            &inputs.node_id,
+            input_watermark,
+            ingress_progress,
+            output_budget,
+            late_metrics,
+        )
+        .with_task_id(inputs.context.task_id());
+        let context = attach_rolling_context(context, callback.as_ref());
+        let context = context.with_ingress_preparation(preparation.as_ref());
+        #[cfg(test)]
+        let context = attach_entity_context(context, inputs.entity_work.as_ref());
+        let mut collector = ChannelStreamCollector::new(
+            &inputs.node_id,
+            inputs.context.job().job_id(),
+            &inputs.output_ports,
+            &mut inputs.outputs,
+            inputs.context.job().cancellation(),
+            &inputs.progress,
+            &inputs.metrics,
+        )
+        .with_rolling_metrics(context.rolling_metrics());
+        inputs
+            .operator
+            .process_data(ingress_name, batch, &context, &mut collector)
+            .await
+    };
     if let Some(callback) = callback {
         callback.complete(&result);
     }
@@ -2107,6 +2246,7 @@ async fn dispatch_watermark_handler(
     )
     .with_task_id(inputs.context.task_id());
     let context = attach_rolling_context(context, callback.as_ref());
+    #[cfg(test)]
     let context = attach_entity_context(context, inputs.entity_work.as_ref());
     let mut collector = ChannelStreamCollector::new(
         &inputs.node_id,
@@ -2147,6 +2287,7 @@ fn attach_rolling_context<'a>(
     }
 }
 
+#[cfg(test)]
 fn attach_entity_context<'a>(
     context: StreamOperatorContext<'a>,
     task: Option<&'a TaskEntityWorkClient>,
@@ -2192,6 +2333,17 @@ async fn dispatch_progress_transition(
     aggregate_input_frontier: Option<EventTime>,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
+    if sync_adapter::is_sync(&inputs.operator) {
+        return sync_adapter::progress(
+            inputs,
+            emissions,
+            previous_watermark,
+            ingress_progress,
+            aggregate_input_frontier,
+            output_frontier,
+        )
+        .await;
+    }
     let output_budget = inputs.progress.output_budget(&inputs.outputs);
     let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
     let context = StreamOperatorContext::for_task(
@@ -2287,18 +2439,17 @@ async fn forward_join_output_frontier(
     ingress_progress: &IngressProgressSnapshot,
     output_frontier: &mut Option<EventTime>,
 ) -> Result<()> {
-    if inputs
+    let has_non_late_output = inputs
         .output_ports
         .keys()
-        .all(|port| inputs.late_output_ports.contains(port))
-    {
-        return Ok(());
-    }
-    if let Some(candidate) = inputs
-        .operator
-        .output_frontier_candidate(aggregate_input_frontier, ingress_progress)?
-        .filter(|candidate| output_frontier.is_none_or(|previous| *candidate > previous))
-    {
+        .any(|port| !inputs.late_output_ports.contains(port));
+    if let Some(candidate) = control::advancing_output_frontier(
+        &inputs.operator,
+        has_non_late_output,
+        aggregate_input_frontier,
+        ingress_progress,
+        *output_frontier,
+    )? {
         forward_control(
             &mut inputs.outputs,
             &inputs.late_output_ports,
@@ -2520,9 +2671,7 @@ async fn forward_control(
     context: &super::StreamJobContext,
 ) -> Result<()> {
     for (port, senders) in outputs {
-        if late_output_ports.contains(port)
-            && (message.as_watermark().is_some() || message.is_idle())
-        {
+        if !control::forwards_control(late_output_ports.contains(port), &message) {
             continue;
         }
         for sender in senders {
@@ -2691,7 +2840,7 @@ pub(super) mod tests {
         collections::BTreeMap,
         sync::{
             Arc,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         },
         task::Poll,
         time::Duration,
@@ -2715,6 +2864,14 @@ pub(super) mod tests {
         pipeline::{CompiledStreamOperator, OperatorCheckpointCapability},
         runtime::streaming::supervisor::{TaskId, TaskSupervisor},
     };
+
+    fn job_morsels() -> crate::runtime::streaming::morsel_pool::JobMorselOwner {
+        crate::runtime::streaming::morsel_pool::JobMorselOwner::new(
+            7,
+            2,
+            Arc::new(AtomicU64::new(0)),
+        )
+    }
 
     fn batch(source: &str, sequence: u64) -> Batch {
         let record = RecordBatch::try_from_iter(vec![(
@@ -3696,7 +3853,7 @@ pub(super) mod tests {
             finish_benchmark_alignment_harness(&mut self.harness).await?;
             Ok(BenchmarkAlignmentReport {
                 data_before_barrier,
-                state_segments: ack.state.segments.len(),
+                state_segments: ack.snapshot.segments.len(),
                 barriers,
             })
         }
@@ -3773,7 +3930,8 @@ pub(super) mod tests {
     ) -> Harness {
         let cancellation = CancellationToken::new();
         let context =
-            StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone());
+            StreamJobContext::new(7, "fingerprint", JsonMap::new(), None, cancellation.clone())
+                .with_morsel_owner(job_morsels());
         let edge_ids = input_names
             .iter()
             .map(|name| format!("source->{name}"))
@@ -4410,7 +4568,7 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
-    async fn stateful_snapshot_without_transaction_forwards_no_barrier() {
+    async fn opaque_capture_without_transaction_acks_and_forwards_barrier() {
         let output_port = Port::new("output", BatchKind::Table, false, None).unwrap();
         let operator = ProbeOperator {
             input_ports: vec![Port::new("input", BatchKind::Table, true, None).unwrap()],
@@ -4441,19 +4599,22 @@ pub(super) mod tests {
             .send(StreamMessage::barrier(crate::Epoch::INITIAL))
             .await
             .unwrap();
-        sender.send(StreamMessage::end_of_input()).await.unwrap();
 
-        let report = harness.supervisor.join_all().await;
-
-        assert_eq!(report.errors.len(), 1);
-        assert!(
-            report.errors[0]
-                .error
-                .to_string()
-                .contains("state transaction")
+        let ack = checkpoint_rx.recv().await.unwrap();
+        assert_eq!(ack.snapshot.segments.len(), 1);
+        assert!(ack.state.segments.is_empty());
+        assert_eq!(
+            harness.outputs[0]
+                .recv()
+                .await
+                .unwrap()
+                .unwrap()
+                .as_barrier(),
+            Some(crate::Epoch::INITIAL)
         );
-        assert!(checkpoint_rx.recv().await.is_none());
-        assert!(harness.outputs[0].recv().await.unwrap().is_none());
+
+        harness.cancellation.cancel();
+        assert!(harness.supervisor.join_all().await.errors.is_empty());
     }
 
     #[tokio::test]

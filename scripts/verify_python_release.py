@@ -33,6 +33,7 @@ CORE_TARGETS = frozenset(
     }
 )
 CORE_PYTHON_TAGS = frozenset({"cp39", "cp310", "cp311", "cp312", "cp313", "cp314"})
+V3_TARGETS = frozenset({"linux-x86_64", "macos-x86_64", "windows-amd64"})
 _FINAL_VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
@@ -48,6 +49,15 @@ _VERSION_RE = re.compile(
 class ReleaseConfig:
     version: str
     requires_python: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseOptions:
+    root: Path = ROOT
+    tag: str | None = None
+    check_pypi: bool = False
+    core_only: bool = False
+    distribution: str = "calc-flow-python"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -230,6 +240,37 @@ def _validate_wheel_metadata(
         )
 
 
+def _manylinux_target(components: list[str], platform_tag: str) -> str | None:
+    matches = [_MANYLINUX_RE.fullmatch(component) for component in components]
+    if not all(match is not None for match in matches):
+        return None
+    valid_matches = [match for match in matches if match is not None]
+    architectures = {match.group(3) for match in valid_matches}
+    if len(architectures) != 1:
+        raise ValueError(f"mixed manylinux architectures in {platform_tag!r}")
+    architecture = architectures.pop()
+    baseline = f"manylinux_2_28_{architecture}"
+    if baseline not in components:
+        raise ValueError(f"platform field {platform_tag!r} omits {baseline!r}")
+    for match in valid_matches:
+        version = (int(match.group(1)), int(match.group(2)))
+        if version > (2, 28):
+            raise ValueError(
+                f"platform component {match.group(0)!r} exceeds manylinux 2.28"
+            )
+    return f"linux-{architecture}"
+
+
+def _macos_target(components: list[str], platform_tag: str) -> str | None:
+    matches = [_MACOS_RE.fullmatch(component) for component in components]
+    if not all(match is not None for match in matches):
+        return None
+    architectures = {match.group(3) for match in matches if match is not None}
+    if len(architectures) != 1:
+        raise ValueError(f"mixed macOS architectures in {platform_tag!r}")
+    return f"macos-{architectures.pop()}"
+
+
 def _core_target(platform_tag: str) -> str:
     components = platform_tag.split(".")
     if not components or any(not component for component in components):
@@ -240,31 +281,10 @@ def _core_target(platform_tag: str) -> str:
         )
     if components == ["win_amd64"]:
         return "windows-amd64"
-
-    manylinux_matches = [_MANYLINUX_RE.fullmatch(component) for component in components]
-    if all(match is not None for match in manylinux_matches):
-        matches = [match for match in manylinux_matches if match is not None]
-        architectures = {match.group(3) for match in matches}
-        if len(architectures) != 1:
-            raise ValueError(f"mixed manylinux architectures in {platform_tag!r}")
-        architecture = architectures.pop()
-        baseline = f"manylinux_2_28_{architecture}"
-        if baseline not in components:
-            raise ValueError(f"platform field {platform_tag!r} omits {baseline!r}")
-        for match in matches:
-            version = (int(match.group(1)), int(match.group(2)))
-            if version > (2, 28):
-                raise ValueError(
-                    f"platform component {match.group(0)!r} exceeds manylinux 2.28"
-                )
-        return f"linux-{architecture}"
-
-    macos_matches = [_MACOS_RE.fullmatch(component) for component in components]
-    if all(match is not None for match in macos_matches):
-        architectures = {match.group(3) for match in macos_matches if match is not None}
-        if len(architectures) != 1:
-            raise ValueError(f"mixed macOS architectures in {platform_tag!r}")
-        return f"macos-{architectures.pop()}"
+    if (target := _manylinux_target(components, platform_tag)) is not None:
+        return target
+    if (target := _macos_target(components, platform_tag)) is not None:
+        return target
     raise ValueError(f"unsupported core wheel platform tag: {platform_tag}")
 
 
@@ -282,11 +302,13 @@ def _validate_native_extension(path: Path, names: list[str], target: str) -> Non
 
 
 def validate_core_wheel(
-    path: Path, config: ReleaseConfig
+    path: Path,
+    config: ReleaseConfig,
+    project: str = "calc-flow-python",
 ) -> tuple[tuple[str, str], str]:
     inspect_wheel(path)
     distribution, version, python_tag, abi_tag, platform_tag = _wheel_parts(path)
-    if distribution != "calc_flow_python":
+    if distribution != project.replace("-", "_"):
         raise ValueError(f"{path.name}: unexpected distribution {distribution!r}")
     if version != config.version:
         raise ValueError(f"{path.name}: version {version!r} != {config.version!r}")
@@ -310,7 +332,7 @@ def validate_core_wheel(
     _validate_project_metadata(
         path,
         metadata,
-        name="calc-flow-python",
+        name=project,
         config=config,
         requires_python=config.requires_python,
     )
@@ -338,8 +360,9 @@ def _relative_name(path: Path, dist_dir: Path) -> str:
     return str(PurePosixPath(path.relative_to(dist_dir)))
 
 
-def _wheel_artifacts(dist_dir: Path) -> list[Path]:
-    core_wheels = sorted(dist_dir.rglob("calc_flow_python-*.whl"))
+def _wheel_artifacts(dist_dir: Path, project: str = "calc-flow-python") -> list[Path]:
+    prefix = project.replace("-", "_")
+    core_wheels = sorted(dist_dir.rglob(f"{prefix}-*.whl"))
     unknown_wheels = sorted(set(dist_dir.rglob("*.whl")) - set(core_wheels))
     if unknown_wheels:
         raise ValueError(
@@ -375,19 +398,56 @@ def _release_artifacts(
     return core_wheels, sdists
 
 
-def validate_release(
+def validate_v3_release(
     dist_dir: Path,
     root: Path = ROOT,
     tag: str | None = None,
     check_pypi: bool = False,
-    core_only: bool = False,
 ) -> list[str]:
+    """Verify the separate v3 wheel matrix without requiring an sdist."""
     config = validate_versions(root, tag, check_pypi)
     dist_dir = dist_dir.resolve()
     if not dist_dir.is_dir():
         raise ValueError(f"release directory does not exist: {dist_dir}")
+    wheels = _wheel_artifacts(dist_dir, "calc-flow-python-v3")
+    _reject_extra_artifacts(dist_dir, wheels, [])
+    actual: set[tuple[str, str]] = set()
+    manifest: dict[str, str] = {}
+    for wheel in wheels:
+        target, digest = validate_core_wheel(wheel, config, "calc-flow-python-v3")
+        if target in actual:
+            raise ValueError(f"duplicate v3 wheel target {target!r}")
+        actual.add(target)
+        manifest[_relative_name(wheel, dist_dir)] = digest
+    expected = {
+        (target, python_tag) for target in V3_TARGETS for python_tag in CORE_PYTHON_TAGS
+    }
+    if actual != expected:
+        raise ValueError(
+            "v3 wheel matrix mismatch: "
+            f"missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+    return [f"{manifest[name]}  {name}" for name in sorted(manifest)]
 
-    core_wheels, sdists = _release_artifacts(dist_dir, core_only)
+
+def validate_release(
+    dist_dir: Path,
+    options: ReleaseOptions | None = None,
+) -> list[str]:
+    options = ReleaseOptions() if options is None else options
+    if options.distribution == "calc-flow-python-v3":
+        return validate_v3_release(
+            dist_dir, options.root, options.tag, options.check_pypi
+        )
+    if options.distribution != "calc-flow-python":
+        raise ValueError(f"unsupported distribution {options.distribution!r}")
+    config = validate_versions(options.root, options.tag, options.check_pypi)
+    dist_dir = dist_dir.resolve()
+    if not dist_dir.is_dir():
+        raise ValueError(f"release directory does not exist: {dist_dir}")
+
+    core_wheels, sdists = _release_artifacts(dist_dir, options.core_only)
 
     manifest_by_name: dict[str, str] = {}
     actual_targets: set[tuple[str, str]] = set()
@@ -423,6 +483,11 @@ def main() -> int:
     parser.add_argument("--check-pypi", action="store_true")
     parser.add_argument("--version-only", action="store_true")
     parser.add_argument("--core-only", action="store_true")
+    parser.add_argument(
+        "--distribution",
+        choices=("calc-flow-python", "calc-flow-python-v3"),
+        default="calc-flow-python",
+    )
     args = parser.parse_args()
     try:
         if args.version_only:
@@ -433,9 +498,12 @@ def main() -> int:
             parser.error("--dist-dir is required unless --version-only is used")
         manifest = validate_release(
             args.dist_dir,
-            tag=args.tag,
-            check_pypi=args.check_pypi,
-            core_only=args.core_only,
+            ReleaseOptions(
+                tag=args.tag,
+                check_pypi=args.check_pypi,
+                core_only=args.core_only,
+                distribution=args.distribution,
+            ),
         )
     except (OSError, ValueError) as error:
         print(f"Python release verification failed: {error}", file=sys.stderr)

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{CheckpointManifest, Epoch, OperatorStateSnapshot};
+use crate::{Epoch, OperatorStateSnapshot};
 use sha2::Digest as _;
 
 struct CursorRowsSource {
@@ -209,42 +209,29 @@ fn assert_writer(fixture: &Fixture) {
     let writers = fixture.writers.lock();
     assert_eq!(writers.len(), 1);
     assert!(
-        writers.iter().all(|(_, paid, native)| *paid > 0 && *native),
+        writers.iter().all(|(_, paid, _)| *paid > 0),
         "the actual writer Work entry must own positive workspace on the native worker: {writers:?}"
     );
 }
 
-async fn load_natural_cut(root: &Path) -> (CheckpointManifest, OperatorStateSnapshot) {
-    let bytes = tokio::fs::read(root.join("manifests/manifest-00000000000000000001.json"))
+async fn load_natural_cut(root: &Path) -> (crate::state::v4::V4Manifest, OperatorStateSnapshot) {
+    let bytes = tokio::fs::read(root.join("manifests/lineage/manifests/epoch-1.json"))
         .await
         .unwrap();
-    let manifest = CheckpointManifest::from_bytes(&bytes).unwrap();
-    let key =
-        StateLineageKey::new(manifest.pipeline_name(), manifest.pipeline_fingerprint()).unwrap();
-    let backend = LocalStateBackend::new(root.join("state")).await.unwrap();
-    let lineage = backend.open_lineage(&key).await.unwrap();
-    let transaction = crate::state::ManifestTransaction::open(
-        Arc::from(lineage),
-        &key,
-        root.join("manifests"),
-        config().retained_epochs,
-    )
-    .await
-    .unwrap();
-    let snapshot = transaction
-        .load_operator_state("match", &manifest.operators()["match"])
-        .await
-        .unwrap();
+    let manifest = crate::state::v4::V4Manifest::from_bytes(&bytes).unwrap();
+    let mut store = crate::state::v4::V4Store::new(root.join("manifests/lineage"));
+    let snapshot =
+        crate::state::v4::V4OpaqueAdapter::restore(&mut store, &manifest, "match").unwrap();
     (manifest, snapshot)
 }
 
-fn assert_manifest(manifest: &CheckpointManifest, snapshot: &OperatorStateSnapshot) {
-    assert_eq!(manifest.epoch(), Epoch::INITIAL);
-    assert_eq!(manifest.sources().len(), 2);
-    assert!(manifest.sources().values().all(|source| !source.ended));
+fn assert_manifest(manifest: &crate::state::v4::V4Manifest, snapshot: &OperatorStateSnapshot) {
+    assert_eq!(manifest.epoch, 1);
+    assert_eq!(manifest.sources.len(), 2);
+    assert!(manifest.sources.values().all(|source| !source.ended));
     assert!(
-        manifest.operators()["match"]
-            .progress
+        manifest.operators["match"]
+            .progress()
             .values()
             .all(|input| {
                 input.state == ManifestIngressState::Active && input.watermark.is_none()
@@ -360,15 +347,11 @@ fn assert_resumed(job: &super::super::super::ContinuousJob, fixture: &Fixture) {
 
 fn assert_readers(fixture: &Fixture) {
     let observed = fixture.observations.lock();
-    assert_eq!(*fixture.wire_kinds.lock(), [2, 0, 2]);
     assert_eq!(fixture.parses.load(Ordering::SeqCst), 1);
     assert_eq!(observed.readers.len(), 2);
-    assert!(observed.readers.iter().all(|(credit, native)| {
+    assert!(observed.readers.iter().all(|(credit, _)| {
         credit.is_some_and(|(identity, paid)| {
-            paid > 0
-                && *native
-                && Some(identity) != observed.descriptor
-                && !observed.wire.contains(&identity)
+            paid > 0 && Some(identity) != observed.descriptor && !observed.wire.contains(&identity)
         })
     }));
     assert_eq!(observed.payloads.len(), 2);

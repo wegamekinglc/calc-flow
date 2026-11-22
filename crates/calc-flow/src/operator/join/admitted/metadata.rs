@@ -1,6 +1,7 @@
+#[cfg(test)]
 use std::ops::Range;
 
-use super::super::columnar::Quantum;
+use super::super::columnar_quantum::Quantum;
 use crate::{Result, StreamOperatorContext};
 
 pub(super) enum Values<T, const N: usize> {
@@ -149,6 +150,7 @@ impl RetainBits {
     }
     /// Retained bits for a window of at most 64 rows; bit `i` marks row
     /// `start + i`. Windows may straddle two words.
+    #[cfg(test)]
     pub(super) fn bits(&self, start: usize, length: usize) -> u64 {
         debug_assert!(start + length <= self.len);
         if length == 0 {
@@ -164,6 +166,7 @@ impl RetainBits {
         };
         bits & low_bits(length)
     }
+    #[cfg(test)]
     pub(super) fn any(&self, range: Range<usize>) -> bool {
         if range.is_empty() {
             return false;

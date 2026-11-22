@@ -132,6 +132,11 @@ pub(crate) trait TransactionalStreamSink: Send {
         }
         self.recover(manifest).await
     }
+    async fn recover_scoped(&mut self, _recovery: crate::SinkRecovery) -> Result<()> {
+        Err(CalcFlowError::CheckpointMismatch {
+            message: "sink implementation does not accept scoped v4 recovery".into(),
+        })
+    }
     async fn close(&mut self) -> Result<()>;
 }
 
@@ -251,6 +256,12 @@ impl OrdinarySinkBinding {
     ) -> Result<()> {
         self.transactional_mut("recover")?
             .recover_with_segments(manifest, segments)
+            .await
+    }
+
+    pub(crate) async fn recover_scoped(&mut self, recovery: crate::SinkRecovery) -> Result<()> {
+        self.transactional_mut("recover")?
+            .recover_scoped(recovery)
             .await
     }
 

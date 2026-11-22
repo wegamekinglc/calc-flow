@@ -68,7 +68,7 @@ fn case() -> (RollingOperator, Batch) {
     let spec = serde_json::from_value(serde_json::json!({
         "configuration_version":1, "state_layout_version":5,
         "partition_by":["entity"], "event_time":"ts", "sequence_by":["seq"],
-        "outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":1}],
+        "outputs":[{"kind":"rsi","primitive_version":1,"input":"price","output":"rsi","period":1},{"kind":"ewma","primitive_version":1,"input":"price","output":"ewma","span":2,"min_periods":1}],
         "allowed_lateness_micros":0, "late_policy":{"kind":"error","scope":"envelope"},
         "value_policy":"stateful_numeric_v1"
     }))

@@ -1,0 +1,68 @@
+{
+  "schema": "calc-flow.sum-state-absolute-result.v1",
+  "candidate_revision": "439395a5",
+  "build_receipt_revision": "e205b0bf",
+  "binary": "target/p6-vector-sums-cargo/release/examples/30_streaming_stock_positions",
+  "rows": 10000000,
+  "batch_rows": 1000000,
+  "cpu_affinity": 0,
+  "warmups": 2,
+  "samples": [
+    {
+      "wall_seconds": 1.526169151009526,
+      "example_elapsed_seconds": 1.502,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.5332403220236301,
+      "example_elapsed_seconds": 1.513,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.5425171229871921,
+      "example_elapsed_seconds": 1.523,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.5577472560107708,
+      "example_elapsed_seconds": 1.535,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.5464474729960784,
+      "example_elapsed_seconds": 1.526,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.5593527079909109,
+      "example_elapsed_seconds": 1.536,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.6223565340042114,
+      "example_elapsed_seconds": 1.598,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.543571053945925,
+      "example_elapsed_seconds": 1.521,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.5334393319790252,
+      "example_elapsed_seconds": 1.509,
+      "correctness": true
+    },
+    {
+      "wall_seconds": 1.556948188052047,
+      "example_elapsed_seconds": 1.537,
+      "correctness": true
+    }
+  ],
+  "p50_ms": 1524.5,
+  "p95_ms": 1598.0,
+  "threshold_p50_ms": 500,
+  "threshold_pass": false,
+  "wall_seconds": 18.693302976025734,
+  "within_budget": true
+}

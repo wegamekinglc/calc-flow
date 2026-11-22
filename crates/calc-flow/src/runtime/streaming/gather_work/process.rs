@@ -401,7 +401,7 @@ async fn acquire(
     });
     tokio::select! {
         biased;
-        () = stop.wait() => Err(super::cancelled(&stop.run_id)),
+        () = stop.wait() => Err(super::cancelled(stop.run_id())),
         permit = queued => permit,
     }
 }
@@ -712,17 +712,6 @@ impl TestService {
             .service
             .pressure
             .load(Ordering::Acquire)
-    }
-
-    pub(crate) fn hold_worker_permit(&self) -> OwnedSemaphorePermit {
-        self.control
-            .as_ref()
-            .unwrap()
-            .service
-            .workers
-            .clone()
-            .try_acquire_owned()
-            .unwrap()
     }
 
     pub(crate) fn available_capacity(&self) -> (usize, usize, usize) {

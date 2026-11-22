@@ -10,6 +10,21 @@ use super::{
 };
 use crate::{CalcFlowError, Result};
 
+fn split_u128(value: u128) -> (u64, u64) {
+    let bytes = value.to_le_bytes();
+    (
+        u64::from_le_bytes(bytes[..8].try_into().expect("eight low bytes")),
+        u64::from_le_bytes(bytes[8..].try_into().expect("eight high bytes")),
+    )
+}
+
+fn join_u128(low: u64, high: u64) -> [u8; 16] {
+    let mut bytes = [0; 16];
+    bytes[..8].copy_from_slice(&low.to_le_bytes());
+    bytes[8..].copy_from_slice(&high.to_le_bytes());
+    bytes
+}
+
 fn inconsistent_summary() -> CalcFlowError {
     state_format("cumulative summary is inconsistent with its group".to_owned())
 }
@@ -151,6 +166,78 @@ pub(super) struct CumulativeAccumulator {
 }
 
 impl CumulativeAccumulator {
+    pub(super) fn columns(&self) -> [u64; 8] {
+        let (tag, low, high) = match self.value.as_ref() {
+            None => (0, 0, 0),
+            Some(NumericValue::Signed(value)) => (1, u64::from_le_bytes(value.to_le_bytes()), 0),
+            Some(NumericValue::SignedTotal(value)) => {
+                let (low, high) = split_u128(u128::from_le_bytes(*value));
+                (2, low, high)
+            }
+            Some(NumericValue::Unsigned(value)) => (3, *value, 0),
+            Some(NumericValue::UnsignedTotal(value)) => {
+                let (low, high) = split_u128(u128::from_le_bytes(*value));
+                (4, low, high)
+            }
+            Some(NumericValue::Float(value)) => (5, *value, 0),
+        };
+        [
+            self.valid_count,
+            tag,
+            low,
+            high,
+            self.origin_bits,
+            self.mean_bits,
+            self.m2_bits,
+            u64::from(self.has_infinity),
+        ]
+    }
+
+    pub(super) fn from_columns(
+        columns: [u64; 8],
+        statistic: Statistic,
+        input_type: &DataType,
+    ) -> Result<Self> {
+        let value = match columns[1] {
+            0 if columns[2] == 0 && columns[3] == 0 => None,
+            1 if columns[3] == 0 => Some(NumericValue::Signed(i64::from_le_bytes(
+                columns[2].to_le_bytes(),
+            ))),
+            2 => Some(NumericValue::SignedTotal(join_u128(columns[2], columns[3]))),
+            3 if columns[3] == 0 => Some(NumericValue::Unsigned(columns[2])),
+            4 => Some(NumericValue::UnsignedTotal(join_u128(
+                columns[2], columns[3],
+            ))),
+            5 if columns[3] == 0 => Some(NumericValue::Float(columns[2])),
+            _ => return Err(inconsistent_summary()),
+        };
+        let state = Self {
+            valid_count: columns[0],
+            value,
+            origin_bits: columns[4],
+            mean_bits: columns[5],
+            m2_bits: columns[6],
+            has_infinity: match columns[7] {
+                0 => false,
+                1 => true,
+                _ => return Err(inconsistent_summary()),
+            },
+        };
+        if state.valid_count == 0 {
+            return if state == Self::default() {
+                Ok(state)
+            } else {
+                Err(inconsistent_summary())
+            };
+        }
+        if statistic == Statistic::Variance {
+            state.validate_variance()?;
+        } else {
+            state.validate_value(statistic, input_type)?;
+        }
+        Ok(state)
+    }
+
     pub(super) fn add(
         &mut self,
         value: &ScalarValue,
@@ -431,6 +518,16 @@ mod tests {
                     _ => ScalarValue::UInt64(Some(u64::MAX)),
                 }
             );
+            let columns = state.columns();
+            assert_eq!(
+                CumulativeAccumulator::from_columns(columns, Statistic::Sum, &dtype).unwrap(),
+                state
+            );
+            let mut noncanonical = columns;
+            noncanonical[1] = 1;
+            assert!(
+                CumulativeAccumulator::from_columns(noncanonical, Statistic::Sum, &dtype).is_err()
+            );
             state.add(&last, Statistic::Sum, "test").unwrap();
             assert!(
                 state
@@ -438,6 +535,24 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn test_cumulative_columns_require_canonical_absent_values() {
+        let mut state = CumulativeAccumulator::default();
+        state
+            .add(
+                &ScalarValue::Float64(Some(1.0)),
+                Statistic::Variance,
+                "test",
+            )
+            .unwrap();
+        let mut columns = state.columns();
+        columns[2] = 1;
+        assert!(
+            CumulativeAccumulator::from_columns(columns, Statistic::Variance, &DataType::Float64)
+                .is_err()
+        );
     }
 
     #[test]

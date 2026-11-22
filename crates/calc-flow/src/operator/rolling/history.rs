@@ -254,14 +254,6 @@ impl RetainedRows {
             Self::Scalar(rows) => HistoryChunkRef::Scalar(rows),
         }
     }
-
-    #[cfg(test)]
-    pub(super) fn columnar_record(&self) -> &RecordBatch {
-        let Self::Columnar(record) = self else {
-            panic!("expected a columnar retained block")
-        };
-        record
-    }
 }
 
 #[derive(Clone, Copy)]

@@ -163,6 +163,27 @@ pub(crate) struct PreparedLogicalTask {
     reservation: ReservationGuard,
 }
 
+impl PreparedLogicalTask {
+    pub(crate) fn task_id(&self) -> TaskId {
+        self.task.task_id
+    }
+
+    pub(crate) async fn fail(self, error: CalcFlowError) -> TaskId {
+        let task_id = self.task.task_id;
+        let error = match error {
+            CalcFlowError::Operator { message, .. } => CalcFlowError::TaskPanicked {
+                task_id: task_id.as_u64(),
+                message: message
+                    .strip_prefix("panicked: ")
+                    .unwrap_or(&message)
+                    .to_owned(),
+            },
+            other => other,
+        };
+        self.task.run(true, std::future::ready(Err(error))).await
+    }
+}
+
 pub(crate) struct BoundLogicalTask {
     task_id: TaskId,
     child: Pin<Box<dyn Future<Output = TaskId> + Send + 'static>>,
@@ -689,6 +710,10 @@ impl TaskSupervisor {
                     .expect("a joined task publishes its exit before returning");
                 self.record_settled(exit);
             }
+        }
+        let inline_exits = std::mem::take(&mut *self.settled.lock());
+        for (_, exit) in inline_exits {
+            self.record_settled(exit);
         }
     }
 

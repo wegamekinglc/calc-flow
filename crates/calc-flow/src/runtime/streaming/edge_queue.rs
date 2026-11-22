@@ -127,17 +127,22 @@ impl EdgeQueueCore {
     }
 
     fn reject_oversize(&self, cost: &EnvelopeCost) -> Result<()> {
-        if cost.rows() > self.budget.max_rows || cost.bytes() > self.budget.max_bytes {
-            return Err(CalcFlowError::EdgeBudgetExceeded {
-                edge: self.edge.clone(),
-                rows: cost.rows(),
-                bytes: cost.bytes(),
-                max_rows: self.budget.max_rows,
-                max_bytes: self.budget.max_bytes,
-            });
-        }
-        Ok(())
+        reject_oversize(&self.edge, self.budget, cost)
     }
+}
+
+/// Rejects one envelope whose rows or bytes alone exceed the edge budget.
+pub(super) fn reject_oversize(edge: &str, budget: EdgeBudget, cost: &EnvelopeCost) -> Result<()> {
+    if cost.rows() > budget.max_rows || cost.bytes() > budget.max_bytes {
+        return Err(CalcFlowError::EdgeBudgetExceeded {
+            edge: edge.into(),
+            rows: cost.rows(),
+            bytes: cost.bytes(),
+            max_rows: budget.max_rows,
+            max_bytes: budget.max_bytes,
+        });
+    }
+    Ok(())
 }
 
 impl EdgeQueueCore {

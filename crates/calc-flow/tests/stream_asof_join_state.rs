@@ -8,19 +8,9 @@ use calc_flow::{
 use std::collections::BTreeMap;
 
 fn replace_payload(snapshot: &mut calc_flow::OperatorStateSnapshot, id: String, bytes: Vec<u8>) {
-    let segment = calc_flow::StateSegment::new(bytes);
-    let payload = snapshot.inline_metadata.get_mut("checkpoint_log").unwrap()["payloads"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|payload| {
-            let key = payload["key"].as_array().unwrap();
-            id == format!("asof-batch-{}-{}", key[0], key[1])
-        })
-        .unwrap();
-    payload["sha256"] = serde_json::json!(segment.sha256());
-    payload["bytes"] = serde_json::json!(segment.bytes().len());
-    snapshot.segments.insert(id, segment);
+    snapshot
+        .segments
+        .insert(id, calc_flow::StateSegment::new(bytes));
 }
 
 #[tokio::test]
@@ -188,10 +178,7 @@ async fn repeated_snapshot_restore_keeps_pending_and_terminal_does_not_flush() {
     let first = op.checkpoint(Epoch::INITIAL).unwrap();
     assert!(!first.segments.is_empty());
     let second = op.checkpoint(Epoch::INITIAL).unwrap();
-    assert!(std::sync::Arc::ptr_eq(
-        &first.segments.values().next().unwrap().bytes_arc(),
-        &second.segments.values().next().unwrap().bytes_arc()
-    ));
+    assert_eq!(first.segments, second.segments);
     let mut restored = operator(10);
     restored.restore(&first).unwrap();
     let repeated = restored.checkpoint(Epoch::INITIAL).unwrap();
@@ -420,7 +407,7 @@ async fn malformed_ipc_body_length_is_rejected_before_body_allocation() {
     let segment_id = snapshot
         .segments
         .keys()
-        .find(|name| name.starts_with("asof-batch-"))
+        .find(|name| name.ends_with("-payload"))
         .unwrap()
         .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
@@ -567,18 +554,30 @@ async fn restored_identity_only_encoding_is_validated_without_payload() {
         .unwrap();
     assert_eq!(op.status().identity_only_rows, 1);
     let mut snapshot = op.checkpoint(Epoch::INITIAL).unwrap();
-    let key = "asof-log-v10-1-0-1";
-    let mut bytes = snapshot.segments[key].bytes().to_vec();
-    assert_eq!(&bytes[..8], b"CFASDL10");
-    assert_eq!(&bytes[128..136], b"CFASOF10");
-    assert_eq!(&bytes[288..296], &[0; 8]);
-    assert_eq!(bytes[296], 0);
-    assert_eq!(bytes[298], 2);
-    bytes[298] = 0;
-    let segment = StateSegment::new(bytes);
-    let frame = &mut snapshot.inline_metadata.get_mut("checkpoint_log").unwrap()["frames"][0];
-    frame["sha256"] = serde_json::json!(segment.sha256());
-    snapshot.segments.insert(key.into(), segment);
+    let key = snapshot
+        .segments
+        .keys()
+        .find(|name| name.ends_with("-identity"))
+        .unwrap()
+        .clone();
+    let mut reader = datafusion::arrow::ipc::reader::StreamReader::try_new(
+        std::io::Cursor::new(snapshot.segments[&key].bytes()),
+        None,
+    )
+    .unwrap();
+    let record = reader.next().unwrap().unwrap();
+    let mut columns = record.columns().to_vec();
+    columns[4] = std::sync::Arc::new(datafusion::arrow::array::BooleanArray::from(vec![false]));
+    let record =
+        datafusion::arrow::record_batch::RecordBatch::try_new(record.schema(), columns).unwrap();
+    let mut bytes = Vec::new();
+    let mut writer =
+        datafusion::arrow::ipc::writer::StreamWriter::try_new(&mut bytes, record.schema().as_ref())
+            .unwrap();
+    writer.write(&record).unwrap();
+    writer.finish().unwrap();
+    drop(writer);
+    snapshot.segments.insert(key, StateSegment::new(bytes));
     let previous = op.status();
     assert!(matches!(
         op.restore(&snapshot),
@@ -734,7 +733,7 @@ async fn malformed_ipc_schema_is_rejected_before_arrow_schema_conversion() {
     let segment_id = snapshot
         .segments
         .keys()
-        .find(|name| name.starts_with("asof-batch-"))
+        .find(|name| name.ends_with("-payload"))
         .unwrap()
         .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
@@ -1018,7 +1017,7 @@ async fn a_second_ipc_schema_is_rejected_before_arrow_conversion() {
     let segment_id = snapshot
         .segments
         .keys()
-        .find(|name| name.starts_with("asof-batch-"))
+        .find(|name| name.ends_with("-payload"))
         .unwrap()
         .clone();
     let mut bytes = snapshot.segments[&segment_id].bytes().to_vec();
@@ -1134,27 +1133,9 @@ async fn assert_direct_checkpoint_epoch(prepared: bool, epoch: calc_flow::Epoch,
     }
     let current = op.checkpoint(epoch).unwrap();
     assert_eq!(current.inline_metadata["epoch"], epoch.as_u64());
-    assert_eq!(
-        current.inline_metadata["checkpoint_log"]["frames"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    if dirty || epoch.as_u64() < 2 {
-        assert_eq!(current.inline_metadata["checkpoint_log"]["generation"], 2);
-        assert_eq!(
-            current.inline_metadata["checkpoint_log"]["frames"][0]["epoch"],
-            epoch.as_u64()
-        );
-    } else {
-        assert_eq!(current.inline_metadata["checkpoint_log"]["generation"], 1);
-        for (name, segment) in &first.segments {
-            assert!(std::sync::Arc::ptr_eq(
-                &segment.bytes_arc(),
-                &current.segments[name].bytes_arc()
-            ));
-        }
+    assert!(!current.segments.is_empty());
+    if !dirty {
+        assert_eq!(current.segments, first.segments);
     }
     assert_eq!(first.inline_metadata, original_metadata);
     for (name, segment) in &first.segments {

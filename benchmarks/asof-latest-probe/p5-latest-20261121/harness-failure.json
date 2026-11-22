@@ -1,0 +1,28 @@
+{
+  "schema": "calc-flow.asof-latest-probe-harness-failure.v1",
+  "status": "preexisting-independent-check-stopped",
+  "initial_debug": {
+    "binary": "target/debug/deps/stream_asof_perf-48eef5a9aadd04b5",
+    "arguments": "--paired-latest --check",
+    "stage": "strict_frontiers_cancel_restore_check cancellation call",
+    "observation": "about three minutes with no process CPU activity",
+    "action": "owned process stopped; no performance samples collected"
+  },
+  "ordinary_mode_control": {
+    "arguments": "--check",
+    "timeout_seconds": 45,
+    "exit_code": 124
+  },
+  "legacy_algorithm_control": {
+    "arguments": "--paired-latest --check with strict check forced to legacy lookup",
+    "timeout_seconds": 30,
+    "exit_code": 124,
+    "last_logs": [
+      "asof-check: strict seed start",
+      "asof-check: strict seed done",
+      "asof-check: strict cancellation start"
+    ]
+  },
+  "conclusion": "the cancellation-check hang is not introduced by the latest-row fast path; it is excluded from paired mode, ordinary mode remains unchanged, and this check is not claimed as passing",
+  "temporary_diagnostics_removed": true
+}

@@ -456,7 +456,8 @@ def test_cancellation_closes_snapshot_feeds_tasks_and_temporary_checkpoints(
         results = output.stream(
             feed(),
             config=cf.StreamRuntimeConfig(
-                sql_snapshot_state_budget=cf.StateBudget(10, 1 << 20)
+                sql_snapshot_state_budget=cf.StateBudget(10, 1 << 20),
+                checkpointing=True,
             ),
         )
         async with results:

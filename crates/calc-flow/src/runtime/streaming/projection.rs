@@ -816,6 +816,18 @@ fn static_input_null_message(error: &CalcFlowError) -> Option<String> {
     crate::operator::is_portable_identifier(name).then(|| message.clone())
 }
 
+fn native_sequence_mismatch_node(message: &str) -> Option<&str> {
+    if !message.starts_with("native:array_sequence@1 state.") {
+        return None;
+    }
+    let suffix = message.split_once("; native:array_sequence@1 operator ")?.1;
+    let node = suffix
+        .strip_suffix(", ingress input")?
+        .strip_prefix('"')?
+        .strip_suffix('"')?;
+    crate::operator::is_portable_identifier(node).then_some(node)
+}
+
 fn edge_budget_detail(error: &CalcFlowError) -> Option<String> {
     let CalcFlowError::EdgeBudgetExceeded {
         rows,
@@ -883,6 +895,11 @@ fn preflight_failure_fields(
             error,
             format!("operator {node_id:?} execution failed"),
         );
+    }
+    if let CalcFlowError::CheckpointMismatch { message } = error
+        && let Some(node_id) = native_sequence_mismatch_node(message)
+    {
+        return native_sequence_recovery_fields(node_id, error);
     }
     let category = match error {
         CalcFlowError::Compile { .. } => StreamingErrorCategory::Compile,

@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "legacy lane execution remains for its focused tests until final P6 cleanup"
+)]
 //! One job-owned numeric work group; observers never own its blocking handles.
 
 use std::{
@@ -42,8 +46,6 @@ struct OwnerCell {
     launches: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(test)]
     hooks: Mutex<TestHooks>,
-    #[cfg(test)]
-    worker_limit: std::sync::atomic::AtomicUsize,
 }
 
 struct OwnerState {
@@ -138,8 +140,6 @@ impl JobEntityWorkOwner {
             launches,
             #[cfg(test)]
             hooks: Mutex::new(TestHooks::default()),
-            #[cfg(test)]
-            worker_limit: std::sync::atomic::AtomicUsize::new(0),
         }))
     }
 
@@ -157,11 +157,6 @@ impl JobEntityWorkOwner {
         let mut client = self.unbound_client(task_name);
         client.activate(task_id);
         client
-    }
-
-    #[cfg(test)]
-    pub(crate) fn test_client(&self, task_id: u64, task_name: Arc<str>) -> TaskEntityWorkClient {
-        self.client(TaskId::new(task_id), task_name)
     }
 
     pub(crate) fn close_admission(&self) {
@@ -229,11 +224,6 @@ impl TaskEntityWorkClient {
         CallbackWorkScope(scope)
     }
 
-    #[cfg(test)]
-    pub(crate) fn context_client(&self) -> Option<ScopedEntityWorkClient> {
-        self.scope.lock().clone().map(ScopedEntityWorkClient)
-    }
-
     pub(crate) async fn settle_current_scope(&self) {
         let scope = self.scope.lock().take();
         if let Some(scope) = scope {
@@ -297,17 +287,6 @@ pub(crate) enum ReservePair {
 }
 
 impl ScopedEntityWorkClient {
-    #[cfg(test)]
-    pub(crate) fn parallelism(&self, available: usize) -> usize {
-        if let Some(owner) = self.0.owner.upgrade() {
-            let configured = owner.worker_limit.load(Ordering::SeqCst);
-            if configured > 0 {
-                return configured;
-            }
-        }
-        available
-    }
-
     pub(crate) fn try_reserve(&self, scratch: ScratchPlan) -> ReservePair {
         let Some(owner) = self.0.owner.upgrade() else {
             return ReservePair::Stopped;
@@ -625,11 +604,6 @@ pub(crate) struct TestHooks {
 
 #[cfg(test)]
 impl JobEntityWorkOwner {
-    pub(crate) fn set_worker_limit_for_test(&self, workers: usize) {
-        assert!(workers > 0);
-        self.0.worker_limit.store(workers, Ordering::SeqCst);
-    }
-
     pub(crate) fn set_hooks(&self, hooks: TestHooks) {
         *self.0.hooks.lock() = hooks;
     }

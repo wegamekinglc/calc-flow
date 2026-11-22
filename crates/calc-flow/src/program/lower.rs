@@ -704,6 +704,7 @@ impl Lowered {
                 query: query.to_owned(),
                 aliases: inputs.keys().cloned().collect(),
                 udfs: vec![],
+                aggregate_output: crate::SqlAggregateOutputMode::Snapshot,
             },
             input_ports: inputs.iter().map(|(name, s)| port_spec(name, s)).collect(),
             output_ports: vec![port_spec("output", &schema)],

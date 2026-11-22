@@ -16,7 +16,7 @@ use std::{
 use async_trait::async_trait;
 use datafusion::arrow::{
     array::{Array, ArrayRef, Float64Array, UInt8Array, UInt64Array, new_null_array},
-    compute::concat_batches,
+    compute::{cast as arrow_cast, concat_batches},
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -61,6 +61,7 @@ mod late;
 mod ordered_stream;
 mod state_codec;
 mod state_v3;
+pub(crate) mod sync;
 
 use compile::{
     compile_aggregate, compile_spec, compile_spec_full, configuration, format_error,
@@ -80,18 +81,19 @@ use super::checkpoint::{checkpoint_mismatch, compile_error, internal_error, stat
 use budget::StateCharge;
 #[cfg(test)]
 use kernel::KernelSelection;
+pub(crate) use kernel::entity_parallel::{
+    ActualNumericWork, LaneProgress, LocatedPanic, NumericLaneExit, NumericLaneOutcome,
+    NumericLaneRequest, NumericLaneStop, merge_numeric_results, run_numeric_lane,
+};
 #[cfg(test)]
 pub(crate) use kernel::entity_parallel_tests::{
     entity_parallel_test_pair, entity_parallel_test_work,
 };
 use kernel::{RollingKernelPlan, RollingKernelState, TypedStreamTransition};
+#[cfg(test)]
 pub(crate) use kernel::{
     StreamKernelUpdate,
-    entity_parallel::{
-        ActualNumericWork, LaneProgress, LocatedPanic, NumericJoinSeed, NumericLaneExit,
-        NumericLaneOutcome, NumericLaneRequest, NumericLaneStop, ScratchPlan,
-        merge_numeric_results, run_numeric_lane,
-    },
+    entity_parallel::{NumericJoinSeed, ScratchPlan},
 };
 
 /// Semantic configuration version of the first rolling operator release.
@@ -108,39 +110,8 @@ pub const ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION: u32 = 4;
 pub const ROLLING_INDICATOR_STATE_LAYOUT_VERSION: u32 = 5;
 /// Columnar indicator state additionally admitting complete MACD recurrences.
 pub const ROLLING_MACD_STATE_LAYOUT_VERSION: u32 = 6;
-
-/// Versioned floating-point behavior for rolling numeric transitions.
-///
-/// `StableV1` remains the default and preserves the released operation order.
-/// `StableV2Preview` is an explicit opt-in experiment whose serialized name is
-/// `stable_v2`; it may not replace the default without a separate migration.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum RollingNumericalProfile {
-    /// Released West/Welford add/remove behavior.
-    #[default]
-    StableV1,
-    /// Deterministically rebased, shifted-sum preview behavior.
-    #[serde(rename = "stable_v2")]
-    StableV2Preview,
-}
-
-impl RollingNumericalProfile {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::StableV1 => "stable_v1",
-            Self::StableV2Preview => "stable_v2",
-        }
-    }
-
-    #[allow(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "serde skip_serializing_if requires a borrowed field predicate"
-    )]
-    const fn is_stable_v1(&self) -> bool {
-        matches!(self, Self::StableV1)
-    }
-}
+/// State-table layout with bit-identical typed accumulator continuation.
+pub(crate) const ROLLING_STATE_TABLE_LAYOUT_VERSION: u32 = 7;
 
 /// One SQL rolling window accepted by the crate-private `DataFusion` physical planner.
 #[derive(Clone, Debug)]
@@ -253,14 +224,16 @@ impl DataFusionRollingKernel {
             .collect::<Vec<_>>();
         let plan = RollingKernelPlan::compile_with_order(
             input_schema,
-            ROLLING_STATE_LAYOUT_VERSION,
-            RollingNumericalProfile::StableV1,
-            event_time_index,
-            physical_order,
-            partition_indices.to_vec(),
-            sequence_columns.iter().map(|column| column.index).collect(),
+            kernel::KernelOrder::new(
+                ROLLING_STATE_LAYOUT_VERSION,
+                event_time_index,
+                physical_order,
+                partition_indices.to_vec(),
+                sequence_columns.iter().map(|column| column.index).collect(),
+            ),
             &outputs,
             &groups,
+            &[],
         )
         .with_nan_as_value();
         plan.supports_typed_transition().then_some(Self { plan })
@@ -1335,18 +1308,14 @@ pub struct RollingSpec {
     /// Semantic configuration version; must equal
     /// [`ROLLING_CONFIGURATION_VERSION`].
     pub configuration_version: u32,
-    /// Durable state-layout version. Existing primitives use
+    /// Project-document declaration level for the rolling feature set. This is
+    /// distinct from the durable checkpoint encoding. Existing primitives use
     /// [`ROLLING_STATE_LAYOUT_VERSION`]; EWMA requires
     /// [`ROLLING_EWMA_STATE_LAYOUT_VERSION`]. Cumulative sum/min/max/variance
     /// require [`ROLLING_CUMULATIVE_STATE_LAYOUT_VERSION`]. RSI and ATR require
     /// [`ROLLING_INDICATOR_STATE_LAYOUT_VERSION`]; MACD components require
     /// [`ROLLING_MACD_STATE_LAYOUT_VERSION`].
     pub state_layout_version: u32,
-    /// Versioned floating-point behavior. `stable_v1` is omitted from the
-    /// canonical configuration so existing project and checkpoint hashes stay
-    /// compatible; `stable_v2` is an explicit preview opt-in.
-    #[serde(default, skip_serializing_if = "RollingNumericalProfile::is_stable_v1")]
-    pub numerical_profile: RollingNumericalProfile,
     /// Ordered non-empty entity partition key.
     pub partition_by: Vec<String>,
     /// Non-null UTC `timestamp[us]` event-time column.
@@ -1412,7 +1381,8 @@ impl RollingOperator {
         let output_schema = Arc::new(output_schema(&input_schema, &compiled.outputs));
         let output_ports =
             super::late_output::output_ports(spec.late_policy, &input_schema, output_schema)?;
-        let (state, indicator_resources) = indicators::initial_state(&compiled, name)?;
+        let (state, indicator_resources) =
+            indicators::initial_state(&compiled, name, &input_schema)?;
         Ok(Self {
             name: name.into(),
             spec,
@@ -1428,7 +1398,13 @@ impl RollingOperator {
                 indicator_resources.as_ref(),
             ),
             checkpoint_pending: indicators::pending_for_layout(compiled.state_layout_version, name),
-            state_layout_version: compiled.state_layout_version,
+            state_layout_version: if indicator_resources.is_none()
+                && compiled.kernel_plan.supports_slab()
+            {
+                ROLLING_STATE_TABLE_LAYOUT_VERSION
+            } else {
+                compiled.state_layout_version
+            },
             compiled,
             state,
             state_budget: StateBudget::default(),
@@ -1535,10 +1511,6 @@ impl std::fmt::Debug for RollingOperator {
                 &self.compiled.kernel_plan.fingerprint(),
             )
             .field(
-                "numerical_profile",
-                &self.compiled.kernel_plan.numerical_profile(),
-            )
-            .field(
                 "kernel_fallback_reason",
                 &self.compiled.kernel_plan.fallback_reason(),
             )
@@ -1588,7 +1560,7 @@ impl BatchOperator for RollingOperator {
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
         let table = input.table_payload()?;
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return Ok(BTreeMap::from([(
                 "output".into(),
                 self.process_indicator_finite(input.clone(), context)
@@ -1598,12 +1570,32 @@ impl BatchOperator for RollingOperator {
         let output_schema = self.output_ports[0]
             .schema()
             .expect("rolling output always has an exact schema");
-        let record = if let Some(record) =
-            build_typed_batch_output(table, &self.compiled, output_schema, &self.name)?
-        {
+        let record = if let Some(record) = build_typed_batch_output(
+            table,
+            &self.compiled,
+            output_schema,
+            &self.name,
+            self.state_budget,
+        )? {
             record
         } else {
             let rows = read_buffered_rows(table, &self.compiled, &self.name)?;
+            if !self.compiled.indicator_groups.is_empty() {
+                for (index, row) in rows.iter().enumerate() {
+                    indicators::validate_row(
+                        &self.compiled.indicator_groups,
+                        &row.values,
+                        &self.name,
+                        indicators::Coordinate::InputRow(index),
+                    )
+                    .map_err(|error| match error {
+                        CalcFlowError::InvalidArgument { field, message } => {
+                            operator_error(&self.name, &format!("{field}: {message}"))
+                        }
+                        other => other,
+                    })?;
+                }
+            }
             let ordered = sort_and_validate(rows, &self.name)?;
             let computed = compute_output_columns(
                 &ordered,
@@ -1677,8 +1669,8 @@ struct RollingSnapshotMetadata {
     state_schema_fingerprint: String,
     #[serde(default)]
     kernel_fingerprint: Option<String>,
-    #[serde(default)]
-    numerical_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    typed_last_identity: Option<Vec<u8>>,
     epoch: Epoch,
     #[serde(deserialize_with = "deserialize_required_option")]
     pipeline_fingerprint: Option<String>,
@@ -1698,6 +1690,79 @@ struct RollingSnapshotMetadata {
     late_output: Option<super::late_output::LateOutputSnapshot>,
 }
 
+impl RollingOperator {
+    fn validate_indicator_record(&self, record: &RecordBatch) -> Result<()> {
+        if self.indicator_resources.is_some() {
+            return Ok(());
+        }
+        for group in &self.compiled.indicator_groups {
+            match group {
+                indicators::Group::Rsi { input, field, .. } => {
+                    let values = arrow_cast(record.column(*input), &DataType::Float64)
+                        .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+                    let values = values
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("indicator cast produces Float64");
+                    for row in 0..values.len() {
+                        crate::array::indicators::validate_rsi_sample(
+                            values.is_valid(row).then_some(values.value(row)),
+                            field,
+                        )
+                        .map_err(|error| {
+                            indicators::numeric_error(
+                                error,
+                                &self.name,
+                                indicators::Coordinate::InputRow(row),
+                            )
+                        })?;
+                    }
+                }
+                indicators::Group::Atr { inputs, fields, .. } => {
+                    let columns = inputs.map(|index| {
+                        arrow_cast(record.column(index), &DataType::Float64)
+                            .map_err(|error| operator_error(&self.name, &error.to_string()))
+                    });
+                    let columns = columns
+                        .into_iter()
+                        .collect::<Result<Vec<_>>>()?
+                        .into_iter()
+                        .map(|array| {
+                            array
+                                .as_any()
+                                .downcast_ref::<Float64Array>()
+                                .expect("indicator cast produces Float64")
+                                .clone()
+                        })
+                        .collect::<Vec<_>>();
+                    let [high, low, close] = columns.as_slice() else {
+                        unreachable!("ATR has three inputs")
+                    };
+                    for row in 0..high.len() {
+                        crate::array::indicators::validate_atr_samples(
+                            [
+                                high.is_valid(row).then_some(high.value(row)),
+                                low.is_valid(row).then_some(low.value(row)),
+                                close.is_valid(row).then_some(close.value(row)),
+                            ],
+                            fields.each_ref().map(String::as_str),
+                        )
+                        .map_err(|error| {
+                            indicators::numeric_error(
+                                error,
+                                &self.name,
+                                indicators::Coordinate::InputRow(row),
+                            )
+                        })?;
+                    }
+                }
+                indicators::Group::Macd(_) => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl StreamOperator for RollingOperator {
     /// Classifies and buffers one input envelope atomically (SCE-00 D7): the
@@ -1713,9 +1778,7 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if !self.compiled.indicator_groups.is_empty() {
-            context.check_cancelled()?;
-        }
+        context.check_cancelled()?;
         let checkpoint_guard = self.try_native_checkpoint_guard(context.operator_id())?;
         let observer = context.rolling_metrics();
         let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
@@ -1735,7 +1798,7 @@ impl StreamOperator for RollingOperator {
         }
         let watermark = context.input_watermark();
         drop(validation);
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return self
                 .process_indicator_input_worker(
                     batch,
@@ -1800,7 +1863,7 @@ impl StreamOperator for RollingOperator {
         // emission leaves the buffered rows available for a retry.
         context.check_cancelled()?;
         self.observe_context(context)?;
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return self
                 .finalize_indicator_worker(Some(watermark), context, output)
                 .await;
@@ -1857,7 +1920,7 @@ impl StreamOperator for RollingOperator {
         if self.state.ended {
             return Ok(());
         }
-        if !self.compiled.indicator_groups.is_empty() {
+        if self.indicator_resources.is_some() {
             return self.finalize_indicator_worker(None, context, output).await;
         }
         if self.state.ordered.is_empty() {
@@ -1932,6 +1995,14 @@ impl StreamOperator for RollingOperator {
     }
 }
 
+struct EmissionPreparation {
+    record: RecordBatch,
+    next_kernel_state: Option<TypedStreamTransition>,
+    touched: PreparedHistoryUpdate,
+    current_charge: StateCharge,
+    next_charge: StateCharge,
+}
+
 impl RollingOperator {
     fn check_state_budget(&self, charge: StateCharge, node: &str) -> Result<()> {
         if self.state_budget.allows(charge.rows, charge.bytes) {
@@ -1996,7 +2067,10 @@ impl RollingOperator {
             self.state.late_output_failed || self.indicator_late_failed,
             context.operator_id(),
         )?;
-        if self.state.deferred_history && context.job().checkpointing() {
+        if self.state.deferred_history
+            && context.job().checkpointing()
+            && !self.compiled.kernel_plan.supports_slab()
+        {
             return Err(operator_error(
                 context.operator_id(),
                 "checkpointing cannot be enabled after deferred rolling history was installed",
@@ -2154,10 +2228,6 @@ impl RollingOperator {
         Ok(())
     }
 
-    // Final emission keeps compute, record building, chunking, sequence
-    // accounting, and history application in one ordered pass so a partial
-    // failure leaves consistent in-memory state.
-    // #lizard forgives
     async fn emit_rows(
         &mut self,
         rows: Vec<BufferedRow>,
@@ -2167,6 +2237,64 @@ impl RollingOperator {
         if rows.is_empty() {
             return Ok(());
         }
+        if self.compiled.kernel_plan.supports_slab()
+            && self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .is_none_or(|state| self.compiled.kernel_plan.can_use_slab(state))
+        {
+            return self.emit_slab_rows(rows, context, output).await;
+        }
+        let EmissionPreparation {
+            record,
+            next_kernel_state,
+            touched,
+            current_charge,
+            next_charge,
+        } = self.prepare_emission(rows, context)?;
+        let observer = context.rolling_metrics();
+        self.state.owned_mut()?.charge = current_charge;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
+        }
+        let budget_stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
+        let batches = chunk_output_record(
+            &record,
+            context.operator_id(),
+            self.state.next_output_sequence,
+            context.output_budget(),
+        )?;
+        let chunk_count = u64::try_from(batches.len()).map_err(|_| {
+            operator_error(
+                context.operator_id(),
+                "output chunk count does not fit the sequence range",
+            )
+        })?;
+        if let Some(recorder) = observer {
+            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
+        }
+        drop(budget_stage);
+        let state = self.state.owned_mut()?;
+        for batch in batches {
+            output.emit("output", batch).await?;
+        }
+        state.next_output_sequence = state
+            .next_output_sequence
+            .checked_add(chunk_count)
+            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
+        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
+        touched.commit(&mut state.histories);
+        TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
+        state.charge = next_charge;
+        Ok(())
+    }
+
+    fn prepare_emission(
+        &mut self,
+        rows: Vec<BufferedRow>,
+        context: &StreamOperatorContext<'_>,
+    ) -> Result<EmissionPreparation> {
         let observer = context.rolling_metrics();
         self.materialize_histories_with_charge(context.operator_id(), observer)?;
         let output_schema = self.output_ports[0]
@@ -2227,45 +2355,36 @@ impl RollingOperator {
                 return Err(error);
             }
         };
-        self.state.owned_mut()?.charge = current_charge;
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::OutputRowsPrepared, record.num_rows());
-        }
-        let budget_stage = observer.map(|recorder| recorder.stage(RollingStage::BudgetPreparation));
-        let batches = chunk_output_record(
-            &record,
-            context.operator_id(),
-            self.state.next_output_sequence,
-            context.output_budget(),
-        )?;
-        let chunk_count = u64::try_from(batches.len()).map_err(|_| {
-            operator_error(
-                context.operator_id(),
-                "output chunk count does not fit the sequence range",
-            )
-        })?;
-        if let Some(recorder) = observer {
-            recorder.add(RollingWork::OutputChunksPrepared, batches.len());
-        }
-        drop(budget_stage);
-        let state = self.state.owned_mut()?;
-        for batch in batches {
-            output.emit("output", batch).await?;
-        }
-        state.next_output_sequence = state
-            .next_output_sequence
-            .checked_add(chunk_count)
-            .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        touched.commit(&mut state.histories);
-        TypedStreamTransition::replace(next_kernel_state, &mut state.typed_kernel_state);
-        state.charge = next_charge;
-        Ok(())
+        Ok(EmissionPreparation {
+            record,
+            next_kernel_state,
+            touched,
+            current_charge,
+            next_charge,
+        })
     }
 }
 
 impl RollingOperator {
     fn encode_state(&self, epoch: Epoch) -> Result<Option<(String, Vec<u8>)>> {
+        if self.state.deferred_history {
+            let _pipeline_fingerprint =
+                self.state.pipeline_fingerprint.clone().ok_or_else(|| {
+                    internal_error("rolling state is missing its pipeline fingerprint")
+                })?;
+            let _operator_id =
+                self.state.operator_id.clone().ok_or_else(|| {
+                    internal_error("rolling state is missing its operator identity")
+                })?;
+            let typed = self
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .ok_or_else(|| internal_error("rolling layout-7 typed state is absent"))?;
+            let segment_id = format!("base-{:020}-00000000", epoch.as_u64());
+            let bytes = RollingKernelPlan::encode_slab_state(typed)?;
+            return Ok(Some((segment_id, bytes)));
+        }
         let row_count = self
             .state
             .histories
@@ -2319,6 +2438,64 @@ impl RollingOperator {
         Ok(Some((segment_id, bytes)))
     }
 
+    fn encode_layout7_pending(&self, epoch: Epoch) -> Result<Option<(String, Vec<u8>)>> {
+        if !self.state.deferred_history {
+            return Ok(None);
+        }
+        let mut records = self.state.ordered.records().cloned().collect::<Vec<_>>();
+        if !self.state.buffer.is_empty() {
+            let rows = self.state.buffer.values().cloned().collect::<Vec<_>>();
+            records.push(self.slab_input_record(&rows, &self.name)?);
+        }
+        if records.is_empty() {
+            return Ok(None);
+        }
+        let record = if records.len() == 1 {
+            records[0].clone()
+        } else {
+            concat_batches(&records[0].schema(), &records)
+                .map_err(|error| operator_error(&self.name, &error.to_string()))?
+        };
+        let mut bytes = Vec::new();
+        let mut writer = FileWriter::try_new(&mut bytes, record.schema().as_ref())
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+        writer
+            .write(&record)
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+        writer
+            .finish()
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+        drop(writer);
+        Ok(Some((
+            format!("pending-{:020}-00000001", epoch.as_u64()),
+            bytes,
+        )))
+    }
+
+    fn decode_layout7_pending(&self, bytes: &[u8]) -> Result<Vec<RecordBatch>> {
+        let mut reader = FileReader::try_new(Cursor::new(bytes), None)
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?;
+        let mut records = Vec::new();
+        while let Some(record) = reader
+            .next()
+            .transpose()
+            .map_err(|error| operator_error(&self.name, &error.to_string()))?
+        {
+            if record.schema().as_ref()
+                != self.input_ports[0]
+                    .schema()
+                    .expect("rolling input schema")
+                    .as_ref()
+            {
+                return Err(checkpoint_mismatch(
+                    "rolling layout-7 pending schema does not match the input",
+                ));
+            }
+            records.push(record);
+        }
+        Ok(records)
+    }
+
     fn snapshot_segment_descriptor(
         &self,
         epoch: Epoch,
@@ -2335,8 +2512,16 @@ impl RollingOperator {
         let byte_len = u64::try_from(segment.bytes().len())
             .map_err(|_| internal_error("rolling segment length does not fit u64"))?;
         Ok(SegmentDescriptor {
-            kind: SegmentKind::Base,
-            state_layout_version: self.compiled.state_layout_version,
+            kind: if segment_id.starts_with("pending-") {
+                SegmentKind::Delta
+            } else {
+                SegmentKind::Base
+            },
+            state_layout_version: if self.state.deferred_history {
+                ROLLING_STATE_TABLE_LAYOUT_VERSION
+            } else {
+                self.compiled.state_layout_version
+            },
             schema_fingerprint: self.compiled.state_schema_fingerprint.clone(),
             handle: StateHandle::new(
                 operator_id,
@@ -2355,7 +2540,38 @@ impl RollingOperator {
         snapshot: &crate::OperatorStateSnapshot,
     ) -> Result<DecodedRollingState> {
         let segments = snapshot_segments(snapshot, &metadata.segment_inventory)?;
-        let Some(bytes) = segments.into_iter().next() else {
+        let mut segments = segments.into_iter();
+        if metadata.state_layout_version == ROLLING_STATE_TABLE_LAYOUT_VERSION {
+            let bytes = segments.next().ok_or_else(|| {
+                checkpoint_mismatch("rolling layout-7 snapshot is missing its state-table segment")
+            })?;
+            let typed = self
+                .compiled
+                .kernel_plan
+                .decode_slab_state(&bytes, metadata.typed_last_identity.clone())?;
+            let mut ordered = ordered_stream::OrderedStreamBuffer::default();
+            if let Some(pending) = segments.next() {
+                let records = self.decode_layout7_pending(&pending)?;
+                let last_identity = records
+                    .last()
+                    .map(|record| {
+                        self.compiled
+                            .kernel_plan
+                            .ordered_stream_bounds(record, &self.name, None)
+                    })
+                    .transpose()?
+                    .flatten()
+                    .map(|(_, end)| end);
+                ordered.restore_pending(records, last_identity);
+            }
+            return Ok(DecodedRollingState {
+                ordered,
+                typed_kernel_state: Some(Box::new(typed)),
+                deferred_history: true,
+                ..DecodedRollingState::default()
+            });
+        }
+        let Some(bytes) = segments.next() else {
             return Ok(DecodedRollingState::default());
         };
         decode_state_segment(
@@ -2372,7 +2588,10 @@ impl RollingOperator {
 #[derive(Default)]
 struct DecodedRollingState {
     buffer: BTreeMap<RowIdentity, BufferedRow>,
+    ordered: ordered_stream::OrderedStreamBuffer,
     histories: RollingHistories,
+    typed_kernel_state: Option<Box<RollingKernelState>>,
+    deferred_history: bool,
 }
 
 /// Serialized state-row ordering key: row kind, entity, identity, and the
@@ -2854,28 +3073,30 @@ impl RollingHistories {
     }
 }
 
-/// Reversible sliding-window accumulator (SCE-00 D5): exact checked integer
-/// sums, `f64` sums, and West-style add/remove mean and M2 variance state.
-/// The ordered add/remove sequence is the one frozen algorithm shared by the
-/// batch and stream lifecycles. ±inf sample counts make the mean and
-/// variance classifications pure multiset functions of the window (SCE-07
-/// defect 1 ruling): a window's IEEE classification must not depend on where
-/// the infinity sat in arrival order.
+/// Reversible sliding-window state. Integer sums remain exact; all floating
+/// mean and dispersion arithmetic is owned by the shared compensated families.
 #[derive(Clone, Copy, Debug)]
 struct WindowAccumulator {
-    valid_count: u64,
     sum: Option<SumState>,
-    mean: f64,
-    m2: f64,
-    /// Retained IEEE NaN samples. The normal rolling surface filters NaNs,
-    /// while the `DataFusion` compatibility plan counts and propagates them.
-    nan_count: u64,
-    pos_inf: u64,
-    neg_inf: u64,
+    numeric: crate::accumulate::NumericAccumulator,
     /// Duration frames only: event-time bound (exclusive) whose rows this
     /// accumulator has already expired, kept so each slide removes only the
     /// newly expired prefix (SCE-08). `i128::MIN` while nothing expired.
     expired_through: i128,
+}
+
+impl std::ops::Deref for WindowAccumulator {
+    type Target = crate::accumulate::NumericAccumulator;
+
+    fn deref(&self) -> &Self::Target {
+        &self.numeric
+    }
+}
+
+impl std::ops::DerefMut for WindowAccumulator {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.numeric
+    }
 }
 
 /// Constant-state unadjusted exponential average. A zero valid count is the
@@ -2934,6 +3155,10 @@ enum SumState {
 
 impl WindowAccumulator {
     fn new(sum_class: SumClass) -> Self {
+        Self::with_dispersion(sum_class, true)
+    }
+
+    fn with_dispersion(sum_class: SumClass, dispersion: bool) -> Self {
         let sum = match sum_class {
             SumClass::Signed => Some(SumState::Signed(0)),
             SumClass::Unsigned => Some(SumState::Unsigned(0)),
@@ -2941,134 +3166,156 @@ impl WindowAccumulator {
             SumClass::CountOnly => None,
         };
         Self {
-            valid_count: 0,
             sum,
-            mean: 0.0,
-            m2: 0.0,
-            nan_count: 0,
-            pos_inf: 0,
-            neg_inf: 0,
+            numeric: if dispersion {
+                crate::accumulate::NumericAccumulator::default()
+            } else {
+                crate::accumulate::NumericAccumulator::mean_only()
+            },
             expired_through: i128::MIN,
         }
     }
 
-    /// Adds one valid sample. Null and NaN values never reach this method.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the frozen mean/variance output type is Float64"
-    )]
+    /// Adds one valid sample. Null values never reach this method; the typed
+    /// sticky-AVG plan deliberately passes NaN through.
     fn add(&mut self, value: &ScalarValue, node_id: &str) -> Result<()> {
-        self.valid_count = self
-            .valid_count
-            .checked_add(1)
-            .ok_or_else(|| operator_error(node_id, "rolling valid sample count overflowed"))?;
-        if let Some(sum) = &mut self.sum {
-            match sum {
-                SumState::Signed(total) => {
-                    *total = total
-                        .checked_add(i128::from(signed_sample(value)))
-                        .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
-                }
-                SumState::Unsigned(total) => {
-                    *total = total
-                        .checked_add(u128::from(unsigned_sample(value)))
-                        .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
-                }
-                SumState::Float(total) => *total += float_sample(value),
+        match &mut self.sum {
+            Some(SumState::Signed(total)) => {
+                *total = total
+                    .checked_add(i128::from(signed_sample(value)))
+                    .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+                self.numeric.insert(float_sample(value))
             }
-            let sample = float_sample(value);
-            if sample.is_infinite() {
-                if sample > 0.0 {
-                    self.pos_inf = self.pos_inf.saturating_add(1);
-                } else {
-                    self.neg_inf = self.neg_inf.saturating_add(1);
-                }
+            Some(SumState::Unsigned(total)) => {
+                *total = total
+                    .checked_add(u128::from(unsigned_sample(value)))
+                    .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+                self.numeric.insert(float_sample(value))
             }
-            let count = self.valid_count as f64;
-            let delta = sample - self.mean;
-            self.mean += delta / count;
-            self.m2 += delta * (sample - self.mean);
+            Some(SumState::Float(total)) => {
+                if let Err(error) = self.numeric.insert(float_sample(value)) {
+                    return Err(kernel::float_arithmetic_error(error, node_id));
+                }
+                *total = self.numeric.sum();
+                Ok(())
+            }
+            None => self.numeric.insert_count_only(),
+        }
+        .map_err(|error| kernel::float_arithmetic_error(error, node_id))
+    }
+
+    /// Removes one previously added valid sample from its compensated families.
+    fn remove(&mut self, value: &ScalarValue) -> Result<()> {
+        let result = match &mut self.sum {
+            Some(SumState::Signed(total)) => {
+                *total = total
+                    .checked_sub(i128::from(signed_sample(value)))
+                    .ok_or_else(|| internal_error("rolling sum removal diverged from the adds"))?;
+                self.numeric.evict(float_sample(value))
+            }
+            Some(SumState::Unsigned(total)) => {
+                *total = total
+                    .checked_sub(u128::from(unsigned_sample(value)))
+                    .ok_or_else(|| internal_error("rolling sum removal diverged from the adds"))?;
+                self.numeric.evict(float_sample(value))
+            }
+            Some(SumState::Float(total)) => {
+                if let Err(error) = self.numeric.evict(float_sample(value)) {
+                    return Err(kernel::float_arithmetic_error(error, ""));
+                }
+                *total = self.numeric.sum();
+                Ok(())
+            }
+            None => self.numeric.evict_count_only(),
+        };
+        result.map_err(|error| kernel::float_arithmetic_error(error, ""))
+    }
+
+    fn rows(
+        &mut self,
+        leaving: Option<&ScalarValue>,
+        entering: Option<&ScalarValue>,
+        node_id: &str,
+    ) -> Result<()> {
+        if self.sum.is_none() {
+            if leaving.is_some() {
+                self.numeric.evict_count_only()
+            } else {
+                Ok(())
+            }
+            .map_err(|error| kernel::float_arithmetic_error(error, node_id))?;
+            if entering.is_some() {
+                self.numeric.insert_count_only()
+            } else {
+                Ok(())
+            }
+            .map_err(|error| kernel::float_arithmetic_error(error, node_id))?;
+            return Ok(());
+        }
+        if let Some(value) = leaving {
+            self.remove_exact_scalar(value)?;
+        }
+        if let Some(value) = entering {
+            self.add_exact_scalar(value, node_id)?;
+        }
+        self.numeric
+            .rows(leaving.map(float_sample), entering.map(float_sample))
+            .map_err(|error| kernel::float_arithmetic_error(error, node_id))?;
+        self.sync_float_sum();
+        Ok(())
+    }
+
+    fn add_exact_scalar(&mut self, value: &ScalarValue, node_id: &str) -> Result<()> {
+        match &mut self.sum {
+            Some(SumState::Signed(total)) => {
+                *total = total
+                    .checked_add(i128::from(signed_sample(value)))
+                    .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+            }
+            Some(SumState::Unsigned(total)) => {
+                *total = total
+                    .checked_add(u128::from(unsigned_sample(value)))
+                    .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
+            }
+            _ => {}
         }
         Ok(())
     }
 
-    /// Removes one previously added valid sample (West 1979 removal step).
+    fn remove_exact_scalar(&mut self, value: &ScalarValue) -> Result<()> {
+        match &mut self.sum {
+            Some(SumState::Signed(total)) => {
+                *total = total
+                    .checked_sub(i128::from(signed_sample(value)))
+                    .ok_or_else(|| internal_error("rolling sum removal diverged from the adds"))?;
+            }
+            Some(SumState::Unsigned(total)) => {
+                *total = total
+                    .checked_sub(u128::from(unsigned_sample(value)))
+                    .ok_or_else(|| internal_error("rolling sum removal diverged from the adds"))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn sync_float_sum(&mut self) {
+        if let Some(SumState::Float(total)) = &mut self.sum {
+            *total = self.numeric.sum();
+        }
+    }
+
     #[allow(
         clippy::cast_precision_loss,
-        reason = "the frozen mean/variance output type is Float64"
+        reason = "integer mean divides its exact numerator only at readout"
     )]
-    fn remove(&mut self, value: &ScalarValue) -> Result<()> {
-        self.valid_count = self
-            .valid_count
-            .checked_sub(1)
-            .ok_or_else(|| internal_error("rolling removal without a matching add"))?;
-        if let Some(sum) = &mut self.sum {
-            match sum {
-                SumState::Signed(total) => {
-                    *total = total
-                        .checked_sub(i128::from(signed_sample(value)))
-                        .ok_or_else(|| {
-                            internal_error("rolling sum removal diverged from the adds")
-                        })?;
-                }
-                SumState::Unsigned(total) => {
-                    *total = total
-                        .checked_sub(u128::from(unsigned_sample(value)))
-                        .ok_or_else(|| {
-                            internal_error("rolling sum removal diverged from the adds")
-                        })?;
-                }
-                SumState::Float(total) => *total -= float_sample(value),
-            }
-            let sample = float_sample(value);
-            if sample.is_infinite() {
-                if sample > 0.0 {
-                    self.pos_inf = self.pos_inf.saturating_sub(1);
-                } else {
-                    self.neg_inf = self.neg_inf.saturating_sub(1);
-                }
-            }
-            if self.valid_count == 0 {
-                self.mean = 0.0;
-                self.m2 = 0.0;
-            } else {
-                let count = self.valid_count as f64;
-                let delta = sample - self.mean;
-                self.mean -= delta / count;
-                self.m2 -= delta * (sample - self.mean);
-            }
+    fn mean_value(&self) -> f64 {
+        match self.sum {
+            Some(SumState::Signed(total)) => total as f64 / self.valid_count as f64,
+            Some(SumState::Unsigned(total)) => total as f64 / self.valid_count as f64,
+            Some(SumState::Float(_)) | None => self.numeric.mean(),
         }
-        Ok(())
     }
-
-    /// True when sliding arithmetic produced a non-finite component; the
-    /// caller then re-folds the current window so the live state always
-    /// matches the checkpoint rebuild for non-finite classifications.
-    #[inline]
-    fn is_non_finite(&self) -> bool {
-        let sum = match &self.sum {
-            Some(SumState::Float(total)) => Some(*total),
-            _ => None,
-        };
-        crate::array::rolling_mean_math::numerical_risk(sum, self.mean, self.m2)
-    }
-
-    const fn has_float_sum(&self) -> bool {
-        matches!(self.sum, Some(SumState::Float(_)))
-    }
-
-    fn reset(&mut self) {
-        *self = Self::new(match &self.sum {
-            Some(SumState::Signed(_)) => SumClass::Signed,
-            Some(SumState::Unsigned(_)) => SumClass::Unsigned,
-            Some(SumState::Float(_)) => SumClass::Float,
-            None => SumClass::CountOnly,
-        });
-    }
-}
-
-fn spec_uses_stable_v2(compiled: &CompiledRollingSpec) -> bool {
-    compiled.kernel_plan.numerical_profile_kind() == RollingNumericalProfile::StableV2Preview
 }
 
 /// Canonical expiry key of one queued extrema candidate: the entity-local
@@ -3204,21 +3451,15 @@ impl ExtremaAccumulator {
     }
 }
 
-/// Reversible pairwise co-moment accumulator (SCE-08, SCE-00 D5): a
-/// West-style joint add/remove maintains `mean_x`, `mean_y`, the co-moment
-/// `Σ(x - x̄)(y - ȳ)`, and the per-column second moments `M2_x`/`M2_y` over
-/// the pairwise-valid positions only. ±inf counts per column keep the
-/// classification a pure multiset function, mirroring the SCE-07 variance
-/// ruling: any infinity on either side makes covariance and correlation NaN
-/// (undefined ∞ − ∞ territory), never null.
+/// Pairwise-valid shifted compensated co-moments. Infinity counters remain
+/// outside the finite family and make every pair readout NaN.
 #[derive(Clone, Copy, Debug)]
 struct PairAccumulator {
     valid_count: u64,
-    mean_x: f64,
-    mean_y: f64,
-    co_moment: f64,
-    m2_x: f64,
-    m2_y: f64,
+    finite_count: u64,
+    family: crate::accumulate::PairFamily,
+    since_rebuild: u32,
+    n_prev: u64,
     pos_inf_x: u64,
     neg_inf_x: u64,
     pos_inf_y: u64,
@@ -3231,11 +3472,10 @@ impl Default for PairAccumulator {
     fn default() -> Self {
         Self {
             valid_count: 0,
-            mean_x: 0.0,
-            mean_y: 0.0,
-            co_moment: 0.0,
-            m2_x: 0.0,
-            m2_y: 0.0,
+            finite_count: 0,
+            family: crate::accumulate::PairFamily::default(),
+            since_rebuild: 0,
+            n_prev: 64,
             pos_inf_x: 0,
             neg_inf_x: 0,
             pos_inf_y: 0,
@@ -3246,107 +3486,144 @@ impl Default for PairAccumulator {
 }
 
 impl PairAccumulator {
-    /// Adds one pairwise-valid sample. Null/NaN operands never reach this
-    /// method.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the frozen covariance/correlation output type is Float64"
-    )]
+    /// Adds one pairwise-valid sample to the shifted compensated family.
     fn add(&mut self, x: &ScalarValue, y: &ScalarValue, node_id: &str) -> Result<()> {
+        self.add_values(float_sample(x), float_sample(y), node_id)
+    }
+
+    fn add_values(&mut self, sample_x: f64, sample_y: f64, node_id: &str) -> Result<()> {
         self.valid_count = self
             .valid_count
             .checked_add(1)
             .ok_or_else(|| operator_error(node_id, "rolling pair sample count overflowed"))?;
-        let sample_x = float_sample(x);
-        let sample_y = float_sample(y);
-        if sample_x.is_infinite() {
-            if sample_x > 0.0 {
-                self.pos_inf_x = self.pos_inf_x.saturating_add(1);
-            } else {
-                self.neg_inf_x = self.neg_inf_x.saturating_add(1);
-            }
+        self.update_infinities(sample_x, sample_y, true);
+        if sample_x.is_finite() && sample_y.is_finite() {
+            self.finite_count = self
+                .finite_count
+                .checked_add(1)
+                .ok_or_else(|| operator_error(node_id, "rolling finite pair count overflowed"))?;
+            self.family.add(sample_x, sample_y);
         }
-        if sample_y.is_infinite() {
-            if sample_y > 0.0 {
-                self.pos_inf_y = self.pos_inf_y.saturating_add(1);
-            } else {
-                self.neg_inf_y = self.neg_inf_y.saturating_add(1);
-            }
-        }
-        let count = self.valid_count as f64;
-        let delta_x = sample_x - self.mean_x;
-        self.mean_x += delta_x / count;
-        let delta_y = sample_y - self.mean_y;
-        self.mean_y += delta_y / count;
-        self.co_moment += delta_x * (sample_y - self.mean_y);
-        self.m2_x += delta_x * (sample_x - self.mean_x);
-        self.m2_y += delta_y * (sample_y - self.mean_y);
         Ok(())
     }
 
-    /// Removes one previously added pairwise-valid sample (reverse step).
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the frozen covariance/correlation output type is Float64"
-    )]
+    /// Removes one previously added pairwise-valid sample.
     fn remove(&mut self, x: &ScalarValue, y: &ScalarValue) -> Result<()> {
+        self.remove_values(float_sample(x), float_sample(y))
+    }
+
+    fn remove_values(&mut self, sample_x: f64, sample_y: f64) -> Result<()> {
         self.valid_count = self
             .valid_count
             .checked_sub(1)
             .ok_or_else(|| internal_error("rolling pair removal without a matching add"))?;
-        let sample_x = float_sample(x);
-        let sample_y = float_sample(y);
-        if sample_x.is_infinite() {
-            if sample_x > 0.0 {
-                self.pos_inf_x = self.pos_inf_x.saturating_sub(1);
-            } else {
-                self.neg_inf_x = self.neg_inf_x.saturating_sub(1);
-            }
-        }
-        if sample_y.is_infinite() {
-            if sample_y > 0.0 {
-                self.pos_inf_y = self.pos_inf_y.saturating_sub(1);
-            } else {
-                self.neg_inf_y = self.neg_inf_y.saturating_sub(1);
-            }
-        }
-        if self.valid_count == 0 {
-            self.mean_x = 0.0;
-            self.mean_y = 0.0;
-            self.co_moment = 0.0;
-            self.m2_x = 0.0;
-            self.m2_y = 0.0;
-        } else {
-            let count = self.valid_count as f64;
-            let delta_x = sample_x - self.mean_x;
-            self.mean_x -= delta_x / count;
-            let delta_y = sample_y - self.mean_y;
-            self.mean_y -= delta_y / count;
-            self.co_moment -= delta_x * (sample_y - self.mean_y);
-            self.m2_x -= delta_x * (sample_x - self.mean_x);
-            self.m2_y -= delta_y * (sample_y - self.mean_y);
+        self.update_infinities(sample_x, sample_y, false);
+        if sample_x.is_finite() && sample_y.is_finite() {
+            self.finite_count = self
+                .finite_count
+                .checked_sub(1)
+                .ok_or_else(|| internal_error("rolling finite pair removal without an add"))?;
+            self.family.remove(sample_x, sample_y);
         }
         Ok(())
     }
 
-    fn is_non_finite(&self) -> bool {
-        !self.mean_x.is_finite()
-            || !self.mean_y.is_finite()
-            || !self.co_moment.is_finite()
-            || !self.m2_x.is_finite()
-            || !self.m2_y.is_finite()
+    fn rows_values(
+        &mut self,
+        leaving: Option<(f64, f64)>,
+        entering: Option<(f64, f64)>,
+        node_id: &str,
+    ) -> Result<()> {
+        let paired = leaving.is_some_and(|(x, y)| x.is_finite() && y.is_finite())
+            && entering.is_some_and(|(x, y)| x.is_finite() && y.is_finite())
+            && self.finite_count > 1;
+        if paired {
+            self.family.pair(entering.unwrap(), leaving.unwrap());
+            return Ok(());
+        }
+        if let Some((x, y)) = leaving {
+            self.remove_values(x, y)?;
+        }
+        self.reset_if_empty();
+        if let Some((x, y)) = entering {
+            self.add_values(x, y, node_id)?;
+        }
+        Ok(())
+    }
+
+    fn finish_rows(
+        &mut self,
+        window: usize,
+        history: impl Iterator<Item = Option<(f64, f64)>> + Clone,
+    ) -> Result<()> {
+        let cadence = u64::try_from(window.max(64)).unwrap_or(u64::MAX);
+        self.finish(cadence, history)
+    }
+
+    fn finish_duration(
+        &mut self,
+        history: impl Iterator<Item = Option<(f64, f64)>> + Clone,
+    ) -> Result<()> {
+        let cadence = self.n_prev.max(64);
+        self.finish(cadence, history)
+    }
+
+    fn finish(
+        &mut self,
+        cadence: u64,
+        history: impl Iterator<Item = Option<(f64, f64)>> + Clone,
+    ) -> Result<()> {
+        self.since_rebuild = self
+            .since_rebuild
+            .checked_add(1)
+            .ok_or_else(|| internal_error("rolling pair rebuild counter overflowed"))?;
+        let retained = history.clone().count();
+        let finite = history.filter_map(|sample| {
+            sample.filter(|(left, right)| left.is_finite() && right.is_finite())
+        });
+        if u64::from(self.since_rebuild) >= cadence {
+            self.family.rebuild(finite.clone());
+            self.since_rebuild = 0;
+            self.n_prev = u64::try_from(retained).unwrap_or(u64::MAX);
+        } else if self.family.is_non_finite() {
+            self.family.rebuild(finite);
+        }
+        Ok(())
+    }
+
+    fn update_infinities(&mut self, left: f64, right: f64, add: bool) {
+        update_pair_infinity(self, left, true, add);
+        update_pair_infinity(self, right, false, add);
+    }
+
+    fn reset_if_empty(&mut self) {
+        if self.finite_count == 0 {
+            self.family = crate::accumulate::PairFamily::default();
+            self.since_rebuild = 0;
+            self.n_prev = 64;
+        }
     }
 
     fn holds_infinity(&self) -> bool {
         self.pos_inf_x > 0 || self.neg_inf_x > 0 || self.pos_inf_y > 0 || self.neg_inf_y > 0
     }
+}
 
-    fn reset(&mut self) {
-        *self = Self {
-            expired_through: self.expired_through,
-            ..Self::default()
-        };
+fn update_pair_infinity(accumulator: &mut PairAccumulator, value: f64, left: bool, add: bool) {
+    if !value.is_infinite() {
+        return;
     }
+    let positive = match (left, value > 0.0) {
+        (true, true) => &mut accumulator.pos_inf_x,
+        (true, false) => &mut accumulator.neg_inf_x,
+        (false, true) => &mut accumulator.pos_inf_y,
+        (false, false) => &mut accumulator.neg_inf_y,
+    };
+    *positive = if add {
+        positive.saturating_add(1)
+    } else {
+        positive.saturating_sub(1)
+    };
 }
 
 /// A rolling sample is valid when it is neither null nor NaN (SCE-00 D3,
@@ -3702,19 +3979,16 @@ impl EntityRowView<'_> {
 struct WindowSlideContext<'a> {
     view: &'a EntityRowView<'a>,
     row_index: usize,
-    transition_count: u64,
     compiled: &'a CompiledRollingSpec,
     node_id: &'a str,
     combined: usize,
 }
 
-/// Slides every shared window group to the current row. Add precedes removal
-/// so the frozen order matches the rebuild fold exactly.
+/// Slides every shared window group using the compensated per-row order.
 fn slide_windows(
     view: &EntityRowView<'_>,
     position: usize,
     row_index: usize,
-    transition_count: u64,
     compiled: &CompiledRollingSpec,
     windows: &mut [WindowState],
     node_id: &str,
@@ -3727,7 +4001,6 @@ fn slide_windows(
     let context = WindowSlideContext {
         view,
         row_index,
-        transition_count,
         compiled,
         node_id,
         combined: view.history.len() + position,
@@ -3775,44 +4048,67 @@ fn slide_numeric_window(
         return Err(internal_error("rolling numeric group has the wrong state"));
     };
     let current = &context.view.rows[context.row_index].values[input_index];
-    if is_valid_sample(current) {
-        accumulator.add(current, context.node_id)?;
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows).map_err(|_| {
+                operator_error(context.node_id, "rolling frame rows do not fit usize")
+            })?;
+            let leaving = (context.combined >= rows)
+                .then(|| context.view.value(context.combined - rows, input_index))
+                .filter(|value| is_valid_sample(value));
+            accumulator.rows(
+                leaving,
+                is_valid_sample(current).then_some(current),
+                context.node_id,
+            )?;
+        }
+        CompiledFrame::Duration(_) => {
+            expire_numeric(
+                accumulator,
+                context.view,
+                context.combined,
+                input_index,
+                frame,
+                context.node_id,
+            )?;
+            accumulator.numeric.reset_if_empty();
+            if is_valid_sample(current) {
+                accumulator.add(current, context.node_id)?;
+            }
+        }
     }
-    expire_numeric(
-        accumulator,
-        context.view,
-        context.combined,
-        input_index,
-        frame,
-        context.node_id,
-    )?;
-    let stable_v2_rebase = spec_uses_stable_v2(context.compiled)
-        && accumulator.has_float_sum()
-        && kernel::stable_v2_rebase_due(
-            context.transition_count,
-            window_positions(context.view, context.combined, frame, context.node_id)?.count(),
-            accumulator.is_non_finite(),
-        );
-    if stable_v2_rebase {
-        rebase_numeric_stable_v2(
-            accumulator,
-            context.view,
-            context.combined,
-            input_index,
-            frame,
-            context.node_id,
-        )
-    } else if accumulator.is_non_finite() {
-        refold_numeric(
-            accumulator,
-            context.view,
-            context.combined,
-            input_index,
-            frame,
-            context.node_id,
-        )
-    } else {
-        Ok(())
+    finish_numeric_window(accumulator, context, input_index, frame)?;
+    accumulator.sync_float_sum();
+    Ok(())
+}
+
+fn finish_numeric_window(
+    accumulator: &mut WindowAccumulator,
+    context: &WindowSlideContext<'_>,
+    input_index: usize,
+    frame: CompiledFrame,
+) -> Result<()> {
+    if accumulator.sum.is_none() {
+        return Ok(());
+    }
+    let history =
+        window_positions(context.view, context.combined, frame, context.node_id)?.map(|index| {
+            let value = context.view.value(index, input_index);
+            is_valid_sample(value).then(|| float_sample(value))
+        });
+    match frame {
+        CompiledFrame::Rows(rows) => usize::try_from(rows)
+            .map_err(|_| operator_error(context.node_id, "rolling frame rows do not fit usize"))
+            .and_then(|rows| {
+                accumulator
+                    .numeric
+                    .finish_rows(rows, history)
+                    .map_err(|error| kernel::float_arithmetic_error(error, context.node_id))
+            }),
+        CompiledFrame::Duration(_) => accumulator
+            .numeric
+            .finish_duration(history)
+            .map_err(|error| kernel::float_arithmetic_error(error, context.node_id)),
     }
 }
 
@@ -3855,46 +4151,64 @@ fn slide_pair_window(
     };
     let left = &context.view.rows[context.row_index].values[left_index];
     let right = &context.view.rows[context.row_index].values[right_index];
-    if is_valid_sample(left) && is_valid_sample(right) {
-        accumulator.add(left, right, context.node_id)?;
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows).map_err(|_| {
+                operator_error(context.node_id, "rolling frame rows do not fit usize")
+            })?;
+            let leaving = (context.combined >= rows)
+                .then(|| {
+                    let left = context.view.value(context.combined - rows, left_index);
+                    let right = context.view.value(context.combined - rows, right_index);
+                    (is_valid_sample(left) && is_valid_sample(right))
+                        .then(|| (float_sample(left), float_sample(right)))
+                })
+                .flatten();
+            let entering = (is_valid_sample(left) && is_valid_sample(right))
+                .then(|| (float_sample(left), float_sample(right)));
+            accumulator.rows_values(leaving, entering, context.node_id)?;
+        }
+        CompiledFrame::Duration(_) => {
+            expire_pair(
+                accumulator,
+                context.view,
+                context.combined,
+                left_index,
+                right_index,
+                frame,
+                context.node_id,
+            )?;
+            accumulator.reset_if_empty();
+            if is_valid_sample(left) && is_valid_sample(right) {
+                accumulator.add(left, right, context.node_id)?;
+            }
+        }
     }
-    expire_pair(
-        accumulator,
-        context.view,
-        context.combined,
-        left_index,
-        right_index,
-        frame,
-        context.node_id,
-    )?;
-    let stable_v2_rebase = spec_uses_stable_v2(context.compiled)
-        && kernel::stable_v2_rebase_due(
-            context.transition_count,
-            window_positions(context.view, context.combined, frame, context.node_id)?.count(),
-            accumulator.is_non_finite(),
-        );
-    if stable_v2_rebase {
-        rebase_pair_stable_v2(
-            accumulator,
-            context.view,
-            context.combined,
-            left_index,
-            right_index,
-            frame,
-            context.node_id,
-        )
-    } else if accumulator.is_non_finite() {
-        refold_pair(
-            accumulator,
-            context.view,
-            context.combined,
-            left_index,
-            right_index,
-            frame,
-            context.node_id,
-        )
-    } else {
-        Ok(())
+    finish_pair_window(accumulator, context, left_index, right_index, frame)
+}
+
+fn finish_pair_window(
+    accumulator: &mut PairAccumulator,
+    context: &WindowSlideContext<'_>,
+    left_index: usize,
+    right_index: usize,
+    frame: CompiledFrame,
+) -> Result<()> {
+    let history =
+        window_positions(context.view, context.combined, frame, context.node_id)?.map(|index| {
+            let left = context.view.value(index, left_index);
+            let right = context.view.value(index, right_index);
+            (is_valid_sample(left) && is_valid_sample(right))
+                .then(|| (float_sample(left), float_sample(right)))
+        });
+    match frame {
+        CompiledFrame::Rows(rows) => {
+            let rows = usize::try_from(rows).map_err(|_| {
+                operator_error(context.node_id, "rolling frame rows do not fit usize")
+            })?;
+            accumulator.finish_rows(rows, history)
+        }
+        CompiledFrame::Duration(_) => accumulator.finish_duration(history),
     }
 }
 
@@ -4037,98 +4351,6 @@ fn expire_pair(
             Ok(())
         }
     }
-}
-
-/// Rebuilds one numeric accumulator as the ordered fold over the current
-/// window; this is the same construction the checkpoint restore applies to
-/// retained history (SCE-00 D11/D13).
-fn refold_numeric(
-    accumulator: &mut WindowAccumulator,
-    view: &EntityRowView<'_>,
-    combined: usize,
-    input_index: usize,
-    frame: CompiledFrame,
-    node_id: &str,
-) -> Result<()> {
-    accumulator.reset();
-    for index in window_positions(view, combined, frame, node_id)? {
-        let value = view.value(index, input_index);
-        if is_valid_sample(value) {
-            accumulator.add(value, node_id)?;
-        }
-    }
-    if let CompiledFrame::Duration(micros) = frame {
-        accumulator.expired_through = duration_bound(view.event_time(combined), micros);
-    }
-    Ok(())
-}
-
-fn rebase_numeric_stable_v2(
-    accumulator: &mut WindowAccumulator,
-    view: &EntityRowView<'_>,
-    combined: usize,
-    input_index: usize,
-    frame: CompiledFrame,
-    node_id: &str,
-) -> Result<()> {
-    let expired_through = accumulator.expired_through;
-    *accumulator = kernel::stable_v2_float64_accumulator(
-        window_positions(view, combined, frame, node_id)?.filter_map(|index| {
-            let value = view.value(index, input_index);
-            is_valid_sample(value).then(|| float_sample(value))
-        }),
-        node_id,
-    )?;
-    accumulator.expired_through = expired_through;
-    Ok(())
-}
-
-/// Rebuilds one pair accumulator as the ordered fold over the current
-/// pairwise-valid window (SCE-00 D11/D13).
-fn refold_pair(
-    accumulator: &mut PairAccumulator,
-    view: &EntityRowView<'_>,
-    combined: usize,
-    left_index: usize,
-    right_index: usize,
-    frame: CompiledFrame,
-    node_id: &str,
-) -> Result<()> {
-    accumulator.reset();
-    for index in window_positions(view, combined, frame, node_id)? {
-        let x = view.value(index, left_index);
-        let y = view.value(index, right_index);
-        if is_valid_sample(x) && is_valid_sample(y) {
-            accumulator.add(x, y, node_id)?;
-        }
-    }
-    if let CompiledFrame::Duration(micros) = frame {
-        accumulator.expired_through = duration_bound(view.event_time(combined), micros);
-    }
-    Ok(())
-}
-
-fn rebase_pair_stable_v2(
-    accumulator: &mut PairAccumulator,
-    view: &EntityRowView<'_>,
-    combined: usize,
-    left_index: usize,
-    right_index: usize,
-    frame: CompiledFrame,
-    node_id: &str,
-) -> Result<()> {
-    let expired_through = accumulator.expired_through;
-    *accumulator = kernel::stable_v2_pair_accumulator(
-        window_positions(view, combined, frame, node_id)?.filter_map(|index| {
-            let left = view.value(index, left_index);
-            let right = view.value(index, right_index);
-            (is_valid_sample(left) && is_valid_sample(right))
-                .then(|| (float_sample(left), float_sample(right)))
-        }),
-        node_id,
-    )?;
-    accumulator.expired_through = expired_through;
-    Ok(())
 }
 
 /// Combined positions of the current row's window members in canonical
@@ -4289,14 +4511,7 @@ impl IncrementalScanState {
         ScalarValue::UInt64(self.advance_float(index, sample))
     }
 
-    fn valid_count(&self) -> usize {
-        match self {
-            Self::Extrema { valid_count, .. } | Self::UniqueFloat64 { valid_count, .. } => {
-                *valid_count
-            }
-        }
-    }
-
+    #[cfg(test)]
     fn estimated_bytes(&self) -> usize {
         match self {
             Self::Extrema {
@@ -4545,25 +4760,16 @@ fn evaluate_float_readout(
                 return Ok(None);
             }
             match readout.statistic {
-                Statistic::Mean => Ok(Some(match (state.pos_inf > 0, state.neg_inf > 0) {
-                    (true, true) => f64::NAN,
-                    (true, false) => f64::INFINITY,
-                    (false, true) => f64::NEG_INFINITY,
-                    (false, false) => state.mean,
-                })),
+                Statistic::Mean => Ok(Some(state.mean_value())),
                 Statistic::Variance | Statistic::Stddev => {
                     let divisor = state.valid_count - u64::from(readout.ddof);
                     if divisor == 0 {
                         return Ok(None);
                     }
-                    if state.pos_inf > 0 || state.neg_inf > 0 {
-                        return Ok(Some(f64::NAN));
-                    }
-                    let variance = state.m2.max(0.0) / divisor as f64;
                     Ok(Some(if readout.statistic == Statistic::Stddev {
-                        variance.sqrt()
+                        state.numeric.stddev(readout.ddof)
                     } else {
-                        variance
+                        state.numeric.variance(readout.ddof)
                     }))
                 }
                 _ => Err(internal_error(
@@ -4593,8 +4799,8 @@ fn evaluate_ewma(
 /// section 5.2), and the variance divisor is `valid_count - ddof` with a
 /// non-positive divisor producing null (SCE-00 D5). Windows holding ±inf
 /// samples classify from the reversible infinity counts — both signs is the
-/// undefined ∞ − ∞ (NaN), one sign is that infinity, and no infinity keeps
-/// the frozen finite-path West readout (SCE-07 defect 1 ruling);
+/// undefined ∞ − ∞ (NaN), one sign is that infinity, and no infinity reads
+/// the compensated finite families (SCE-07 defect 1 ruling);
 /// variance/stddev over a window with any infinity is NaN because every
 /// deviation involves ∞ − ∞.
 #[allow(
@@ -4648,30 +4854,13 @@ fn evaluate_aggregate(
                 "rolling sum requires a numeric window group",
             )),
         },
-        Statistic::Mean => Ok(ScalarValue::Float64(Some(
-            match (accumulator.pos_inf > 0, accumulator.neg_inf > 0) {
-                (true, true) => f64::NAN,
-                (true, false) => f64::INFINITY,
-                (false, true) => f64::NEG_INFINITY,
-                (false, false) => accumulator.mean,
-            },
-        ))),
+        Statistic::Mean => Ok(ScalarValue::Float64(Some(accumulator.mean_value()))),
         Statistic::Variance | Statistic::Stddev => {
             let divisor = accumulator.valid_count - u64::from(aggregate.ddof);
             if divisor == 0 {
                 return Ok(ScalarValue::Float64(None));
             }
-            if accumulator.pos_inf > 0 || accumulator.neg_inf > 0 {
-                return Ok(ScalarValue::Float64(Some(f64::NAN)));
-            }
-            // Negative M2 is floating-point removal drift, never a real
-            // negative variance; NaN propagates as the frozen undefined value.
-            let m2 = if accumulator.m2 < 0.0 {
-                0.0
-            } else {
-                accumulator.m2
-            };
-            let variance = m2 / divisor as f64;
+            let variance = accumulator.numeric.variance(aggregate.ddof);
             Ok(ScalarValue::Float64(Some(match aggregate.statistic {
                 Statistic::Variance => variance,
                 _ => variance.sqrt(),
@@ -4687,7 +4876,7 @@ fn evaluate_aggregate(
 /// accumulator (SCE-00 D3, contract section 5.2; D5): null below the
 /// pairwise minimum count or a non-positive divisor, null for correlation
 /// with zero variance on either side, NaN when the window holds any
-/// infinity, and the West-style co-moment readout otherwise. The ddof
+/// infinity, and the shifted compensated co-moment readout otherwise. The ddof
 /// divisor cancels in the correlation ratio; it only participates in the
 /// divisor gate.
 #[allow(
@@ -4713,26 +4902,18 @@ fn evaluate_pair_aggregate(
         return Ok(ScalarValue::Float64(Some(f64::NAN)));
     }
     if aggregate.correlation {
-        // Clamp negative drift to zero: a true zero-variance side yields the
-        // frozen null; tiny negative M2 is removal drift.
-        let m2_x = if accumulator.m2_x < 0.0 {
-            0.0
-        } else {
-            accumulator.m2_x
-        };
-        let m2_y = if accumulator.m2_y < 0.0 {
-            0.0
-        } else {
-            accumulator.m2_y
-        };
-        if m2_x == 0.0 || m2_y == 0.0 {
-            return Ok(typed_null(&output.output_type));
-        }
-        let scale = m2_x.sqrt() * m2_y.sqrt();
-        Ok(ScalarValue::Float64(Some(accumulator.co_moment / scale)))
+        Ok(accumulator
+            .family
+            .correlation(accumulator.valid_count)
+            .map_or_else(
+                || typed_null(&output.output_type),
+                |value| ScalarValue::Float64(Some(value)),
+            ))
     } else {
         Ok(ScalarValue::Float64(Some(
-            accumulator.co_moment / divisor as f64,
+            accumulator
+                .family
+                .covariance(accumulator.valid_count, aggregate.ddof),
         )))
     }
 }

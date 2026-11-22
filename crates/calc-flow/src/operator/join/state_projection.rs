@@ -123,17 +123,3 @@ fn project_schema(
             )
         })
 }
-
-impl StreamJoinOperator {
-    pub(super) fn retained_schema(&self, side: usize) -> &SchemaRef {
-        self.payload_projection
-            .as_ref()
-            .map_or_else(|| self.input_schema(side), |layout| &layout.schemas[side])
-    }
-
-    pub(super) fn retained_compiled(&self) -> &CompiledJoin {
-        self.payload_projection
-            .as_ref()
-            .map_or(&self.compiled, |layout| &layout.compiled)
-    }
-}

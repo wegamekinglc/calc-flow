@@ -1,18 +1,20 @@
-use std::{
-    marker::PhantomData,
-    sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
-    },
+#[cfg(test)]
+use std::marker::PhantomData;
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(test)]
 use datafusion::execution::memory_pool::MemoryReservation;
 use tokio::sync::Notify;
 
 use super::{
-    AdmissionResult, GatherHome, GatherScope, GatherStop, OwnedCpuWork, ParallelCpuWork,
-    RetirementGuard, Slot, WorkAdapter, WorkPackage, WorkTicket, cancelled,
+    AdmissionResult, GatherHome, GatherScope, GatherStop, RetirementGuard, Slot, WorkTicket,
 };
+#[cfg(test)]
+use super::{OwnedCpuWork, ParallelCpuWork, WorkAdapter, WorkPackage, cancelled};
+#[cfg(test)]
 use crate::{Result, StreamJobContext};
 
 pub(crate) struct AttemptCleanup {
@@ -26,12 +28,14 @@ struct ReleaseSignal {
     changed: Notify,
 }
 
+#[cfg(test)]
 struct CreditRelease {
     home: Weak<GatherHome>,
     released: Arc<ReleaseSignal>,
     _retirement: RetirementGuard,
 }
 
+#[cfg(test)]
 impl Drop for CreditRelease {
     fn drop(&mut self) {
         self.released.refunded.store(true, Ordering::Release);
@@ -42,16 +46,19 @@ impl Drop for CreditRelease {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct ObservedTicket<T: Send + 'static> {
     ticket: WorkTicket<T>,
     release: CreditRelease,
 }
 
+#[cfg(test)]
 struct TrackedCredit {
     _credit: MemoryReservation,
     _release: CreditRelease,
 }
 
+#[cfg(test)]
 struct ObservedSubmission<P> {
     work: Option<P>,
     credit: MemoryReservation,
@@ -59,17 +66,20 @@ struct ObservedSubmission<P> {
     retirement: RetirementGuard,
 }
 
+#[cfg(test)]
 pub(crate) struct ObservedOutput<T> {
     value: T,
     _credit: TrackedCredit,
 }
 
+#[cfg(test)]
 impl<T> ObservedOutput<T> {
     pub(crate) fn install(self, install: impl FnOnce(T) -> Result<()>) -> Result<()> {
         install(self.value)
     }
 }
 
+#[cfg(test)]
 pub(crate) const fn cleanup_control_bytes<T: Send + 'static>() -> usize {
     size_of::<AttemptCleanup>()
         + size_of::<ObservedTicket<T>>()
@@ -83,6 +93,7 @@ pub(crate) const fn cleanup_control_bytes<T: Send + 'static>() -> usize {
         + 64
 }
 
+#[cfg(test)]
 impl<T: Send + 'static> WorkTicket<T> {
     pub(crate) fn observe_cleanup(
         self,
@@ -112,6 +123,7 @@ impl<T: Send + 'static> WorkTicket<T> {
     }
 }
 
+#[cfg(test)]
 impl GatherScope {
     pub(crate) fn submit_observed_work<'a, W: OwnedCpuWork>(
         &'a self,
@@ -193,6 +205,7 @@ impl GatherScope {
     }
 }
 
+#[cfg(test)]
 impl<T: Send + 'static> ObservedTicket<T> {
     pub(crate) async fn finish(self) -> Result<ObservedOutput<T>> {
         let output = self.ticket.finish().await?;
@@ -206,6 +219,7 @@ impl<T: Send + 'static> ObservedTicket<T> {
     }
 }
 
+#[cfg(test)]
 impl AttemptCleanup {
     pub(crate) async fn wait(&self, stop: &GatherStop) -> Result<()> {
         self.wait_checked(stop, || stop.check()).await
