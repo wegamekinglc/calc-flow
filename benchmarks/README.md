@@ -207,8 +207,10 @@ measurement still follows the five-case and ten-minute limits in
 
 ## Open event-time stream latency
 
-Run the [Python diagnostic](open_stream_latency.py) against an installed
-release wheel from the checkout root. The build JSON uses the existing
+Run the [Python diagnostic](open_stream_latency.py) from the checkout root
+with Python 3.11 or newer, the installed release wheel and the benchmark
+dependencies (including NumPy, PyArrow and psutil). Wheel verification uses
+`hashlib.file_digest` from Python 3.11. The build JSON uses the existing
 [release identity](native_release_identity.py) fields `profile`,
 `tracked_source_clean`, `source_sha`, `native_sha256`, `wheel` and
 `wheel_sha256`. The collector verifies the loaded package against the wheel.
@@ -223,7 +225,8 @@ event-time mean. Three one-row Arrow batches for one entity have consecutive
 microsecond timestamps and prices 1, 2 and 3. Upon receiving the first result,
 the producer enqueues the third input immediately or after a seeded delay
 uniform over 1–100,000,000 ns. This makes the second input eligible for
-delivery. Both results are checked for exact schema, sequence and means
+delivery. Both results are checked for exact schema including field and
+schema metadata, sequence and means
 (1.0 and 1.5) while the source is open.
 
 The primary clock runs from third input enqueue until the second Arrow result

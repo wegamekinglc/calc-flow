@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import random
 from asyncio import sleep
 from pathlib import Path
 from time import perf_counter_ns
 
+import numpy as np
 import pyarrow as pa
 
 import calc_flow as cf
@@ -51,17 +51,20 @@ def workload() -> tuple[cf.TableExpr, tuple[pa.Table, ...]]:
 
 def check_output(result: pa.Table, sequence: int) -> None:
     expected = {"sequence": [sequence], "mean": [(1.0, 1.5)[sequence]]}
-    if result.schema != OUTPUT or result.to_pydict() != expected:
+    if not result.schema.equals(OUTPUT, check_metadata=True) or (
+        result.to_pydict() != expected
+    ):
         raise ValueError(f"expected {expected} with schema {OUTPUT}, got {result}")
 
 
 def arrival_schedule(samples: int, seed: int) -> list[tuple[str, int]]:
     if samples < 1:
         raise ValueError("samples per phase must be positive")
-    generator = random.Random(seed)
+    generator = np.random.default_rng(seed)
     plan = []
     for index in range(samples):
-        pair = [("immediate", 0), ("seeded", generator.randint(1, 100_000_000))]
+        offset = int(generator.integers(1, 100_000_001))
+        pair = [("immediate", 0), ("seeded", offset)]
         plan.extend(reversed(pair) if index % 2 else pair)
     return plan
 
@@ -128,6 +131,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20261123)
     args = parser.parse_args()
     identity = release_identity(args.build)
+    environment = worker_environment()
     report = asyncio.run(collect(args.samples, args.seed))
     write_json(
         args.output,
@@ -135,7 +139,7 @@ def main() -> None:
             "contract": "calc-flow.open-stream-latency.v1",
             "build": identity,
             "harness_sha256": file_hash(Path(__file__)),
-            "environment": worker_environment(),
+            "environment": environment,
             **report,
         },
         exclusive=True,

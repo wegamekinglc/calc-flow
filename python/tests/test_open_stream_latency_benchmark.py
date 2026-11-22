@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock
 
 import pyarrow as pa
@@ -25,7 +26,12 @@ def test_seeded_schedule_alternates_order_and_replays_offsets() -> None:
     ]
     assert all(delay == 0 for phase, delay in plan if phase == "immediate")
     jitter = [delay for phase, delay in plan if phase == "seeded"]
-    assert len(set(jitter)) == 4 and all(0 < delay <= 100_000_000 for delay in jitter)
+    assert json.loads(json.dumps(jitter)) == [
+        73_929_008,
+        85_857_836,
+        98_986_776,
+        72_506_624,
+    ]
     assert plan == latency.arrival_schedule(4, 217)
     assert plan != latency.arrival_schedule(4, 218)
 
@@ -68,3 +74,33 @@ def test_open_stream_reports_wait_and_delivery_separately(monkeypatch, offset) -
 def test_oracle_rejects_wrong_schema_or_rolling_value(malformed) -> None:
     with pytest.raises(ValueError, match="expected"):
         latency.check_output(malformed, 1)
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        latency.OUTPUT.with_metadata({b"origin": b"other"}),
+        latency.OUTPUT.set(
+            1, latency.OUTPUT.field("mean").with_metadata({b"unit": b"seconds"})
+        ),
+    ],
+)
+def test_oracle_rejects_unexpected_metadata(schema) -> None:
+    result = pa.table({"sequence": [1], "mean": [1.5]}, schema=schema)
+    with pytest.raises(ValueError, match="expected"):
+        latency.check_output(result, 1)
+
+
+def test_environment_failure_precedes_sampling(monkeypatch, tmp_path) -> None:
+    def unavailable():
+        raise OSError("worker environment unavailable")
+
+    monkeypatch.setattr("sys.argv", ["probe", "--build", "build", "--output", "result"])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(latency, "release_identity", lambda _: {})
+    monkeypatch.setattr(latency, "worker_environment", unavailable)
+    collect = AsyncMock(return_value={})
+    monkeypatch.setattr(latency, "collect", collect)
+    with pytest.raises(OSError, match="worker environment unavailable"):
+        latency.main()
+    collect.assert_not_awaited()
