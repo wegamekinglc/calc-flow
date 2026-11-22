@@ -99,7 +99,7 @@ async fn retained_bytes_for(payload_type: DataType, payload: ArrayRef) -> u64 {
 }
 
 fn base_charge(payload_cells: u64) -> u64 {
-    // Native run/bucket/expiration ownership plus the V1 logical row charge.
+    // This fixture's one-row native ownership plus the V1 logical row charge.
     345 + 64 + ENCODED_UTF8_KEY_LEN + 16 + payload_cells
 }
 
@@ -362,7 +362,7 @@ async fn checkpoints_capture_native_state_and_restore() {
 }
 
 #[tokio::test]
-async fn evicted_rows_leave_tombstones_that_survive_restore() {
+async fn evicted_rows_remain_absent_after_restore() {
     let (mut operator, job, mut collector) = state_operator(300);
     let context = StreamOperatorContext::new(&job, "match", None);
     operator
@@ -554,7 +554,7 @@ async fn watermark_equality_is_on_time_and_eviction_is_strict() {
     assert_eq!(operator.status().left.evicted_rows, 1);
 }
 
-fn assert_compacted_native_history(snapshot: &OperatorStateSnapshot) {
+fn assert_native_capture(snapshot: &OperatorStateSnapshot) {
     assert_native_history(snapshot, [5, 0]);
 }
 
@@ -587,23 +587,23 @@ async fn native_checkpoints_survive_restore_cycles() {
         )
         .await
         .unwrap();
-    let compacted = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
-    assert_compacted_native_history(&compacted);
+    let captured = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
+    assert_native_capture(&captured);
     assert_eq!(operator.status().left.retained_rows, 5);
 
     let (mut restored, _job_two, _) = state_operator(300);
-    restored.restore(&compacted).unwrap();
+    restored.restore(&captured).unwrap();
     assert_eq!(restored.status(), operator.status());
     let after_restore = restored.checkpoint(Epoch::new(6).unwrap()).unwrap();
-    assert_compacted_native_history(&after_restore);
-    assert_eq!(after_restore.segments, compacted.segments);
+    assert_native_capture(&after_restore);
+    assert_eq!(after_restore.segments, captured.segments);
 
     let (mut restored_again, _job_three, _) = state_operator(300);
     restored_again.restore(&after_restore).unwrap();
     let final_snapshot = restored_again.checkpoint(Epoch::new(7).unwrap()).unwrap();
-    assert_compacted_native_history(&final_snapshot);
+    assert_native_capture(&final_snapshot);
     assert_eq!(restored_again.status(), operator.status());
-    assert_eq!(final_snapshot.segments, compacted.segments);
+    assert_eq!(final_snapshot.segments, captured.segments);
 
     let (mut matcher, job_four, _) = state_operator(300);
     matcher.restore(&final_snapshot).unwrap();
@@ -692,7 +692,7 @@ async fn restore_checkpoint_cycles_reproduce_native_eviction_history() {
         .unwrap();
     let third = cycle_one.checkpoint(Epoch::new(3).unwrap()).unwrap();
 
-    // Cycle two: the folded state reproduces identically.
+    // Cycle two: the restored state reproduces identically.
     let (mut cycle_two, job_three, _) = state_operator(300);
     let _ = &job_three;
     cycle_two.restore(&third).unwrap();
