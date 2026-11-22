@@ -52,6 +52,17 @@ fn operator(dtype: DataType) -> RollingOperator {
     .unwrap();
     RollingOperator::new("features", schema(dtype), spec).unwrap()
 }
+fn legacy_operator(dtype: DataType) -> RollingOperator {
+    let mut spec = operator(dtype.clone()).spec().clone();
+    spec.outputs.push(
+        serde_json::from_value(json!({
+            "kind":"lag","primitive_version":1,"input":"price","output":"previous","periods":1
+        }))
+        .unwrap(),
+    );
+    RollingOperator::new("features", schema(dtype), spec).unwrap()
+}
+
 fn batch(times: Vec<i64>, entities: Vec<&str>, values: ArrayRef) -> Batch {
     let input_schema = schema(values.data_type().clone());
     let sequences = times
@@ -188,7 +199,7 @@ async fn test_table_macd_checkpoint_stores_one_complete_104_byte_group() -> Resu
     use datafusion::arrow::{array::BinaryArray, ipc::reader::FileReader};
     use std::io::Cursor;
 
-    let mut operator = operator(DataType::Int64);
+    let mut operator = legacy_operator(DataType::Int64);
     let job = StreamJobContext::new(
         1,
         "a".repeat(64),
@@ -248,7 +259,7 @@ async fn test_table_macd_checkpoint_stores_one_complete_104_byte_group() -> Resu
     for (chunk, expected) in payload[8..].chunks_exact(8).zip(expected) {
         assert_eq!(u64::from_le_bytes(chunk.try_into().unwrap()), expected);
     }
-    let mut restored = self::operator(DataType::Int64);
+    let mut restored = legacy_operator(DataType::Int64);
     restored.restore_async(&snapshot, &context).await?;
     Ok(())
 }
