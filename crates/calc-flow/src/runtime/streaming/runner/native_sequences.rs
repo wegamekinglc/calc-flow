@@ -48,6 +48,21 @@ pub(super) fn failure(
         NativeRecoveryError::Native(failure) => native_failure(launch_id, failure),
     }
 }
+pub(super) fn recovery_error(
+    checkpoint: &OpenedCheckpointRuntime,
+    node: &str,
+    error: crate::CalcFlowError,
+) -> NativeRecoveryError {
+    let record = checkpoint
+        .native_sequences
+        .as_ref()
+        .and_then(|inventory| inventory.record(node));
+    match record {
+        Some(record) => NativeRecoveryError::Native(record.failure(error)),
+        None => NativeRecoveryError::Legacy(error),
+    }
+}
+
 pub(super) fn native_failure(launch_id: LaunchId, failure: NativeSequenceFailure) -> DriverReport {
     let (node_id, error) = failure.into_parts();
     DriverReport {

@@ -107,7 +107,10 @@ use crate::{
     CalcFlowError, CancellationToken, CheckpointManifest, CheckpointManifestFields, Epoch,
     EventTime, OperatorManifestEntry, RecoveryStatus, SinkManifestEntry, SourceManifestEntry,
     StateBackend, StateLineageKey, StreamRuntimeConfig,
-    state::{ManifestPublication, ManifestTransaction, PreparedManifestIdentity, SelectedManifest},
+    state::{
+        ManifestPublication, ManifestTransaction, NativeRecoveryError, PreparedManifestIdentity,
+        SelectedManifest,
+    },
 };
 
 pub(crate) use super::failure::{
@@ -2213,9 +2216,14 @@ async fn run_job_driver(
     if let Some(checkpoint) = checkpoint.as_ref()
         && let Some(selected) = checkpoint.selected_v4.as_ref()
     {
-        if let Err(error) = checkpoint_v4_metadata::validate_capabilities(&selected.manifest, &plan)
+        if let Err(error) =
+            checkpoint_v4_metadata::validate_capabilities(checkpoint, &selected.manifest, &plan)
         {
-            return core.prepare_driver_report(checkpoint_start_failure(launch_id, error));
+            return core.prepare_driver_report(native_sequences::failure(
+                launch_id,
+                error,
+                checkpoint.managed,
+            ));
         }
         match checkpoint_v4_metadata::is_terminal(&selected.manifest, &plan) {
             Ok(true) => {
@@ -2279,9 +2287,10 @@ async fn run_job_driver(
                 {
                     Ok(nodes) => core.runtime_status.lock().nodes.extend(nodes),
                     Err(error) => {
-                        return core.prepare_driver_report(checkpoint_start_failure(
+                        return core.prepare_driver_report(native_sequences::failure(
                             launch_id,
-                            sanitize_managed_recovery_error(error, checkpoint.managed),
+                            error,
+                            checkpoint.managed,
                         ));
                     }
                 }
@@ -2414,9 +2423,10 @@ async fn run_job_driver(
             {
                 Ok(restored) => restored,
                 Err(error) => {
-                    return core.prepare_driver_report(checkpoint_start_failure(
+                    return core.prepare_driver_report(native_sequences::failure(
                         launch_id,
-                        sanitize_managed_recovery_error(error, checkpoint.managed),
+                        error,
+                        checkpoint.managed,
                     ));
                 }
             }
@@ -2779,7 +2789,7 @@ async fn restore_v4_terminal_operators(
     checkpoint: &OpenedCheckpointRuntime,
     context: &super::StreamJobContext,
     mut statuses: BTreeMap<String, OperatorProgress>,
-) -> crate::Result<BTreeMap<String, OperatorProgress>> {
+) -> Result<BTreeMap<String, OperatorProgress>, NativeRecoveryError> {
     let selected = checkpoint
         .selected_v4
         .as_ref()
@@ -2790,65 +2800,73 @@ async fn restore_v4_terminal_operators(
         if statuses.contains_key(&node.node_id) {
             continue;
         }
-        let id = node.operator_id.as_str();
-        let entry = &selected.manifest.operators[id];
-        let snapshot = snapshots
-            .remove(id)
-            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
-                message: format!("terminal v4 operator {id:?} has no snapshot"),
+        let id = node.operator_id.clone();
+        let entry = &selected.manifest.operators[id.as_str()];
+        let progress = async {
+            let snapshot =
+                snapshots
+                    .remove(id.as_str())
+                    .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+                        message: format!("terminal v4 operator {id:?} has no snapshot"),
+                    })?;
+            let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?.map(|snapshot| {
+                node.checkpoint_capability
+                    .decode_snapshot(id.as_str(), snapshot)
             })?;
-        let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?
-            .map(|snapshot| node.checkpoint_capability.decode_snapshot(id, snapshot))?;
-        let required = node.operator.requires_output_frontier_state();
-        let metadata_frontier = if required {
-            snapshot
-                .inline_metadata
-                .get(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
-                .cloned()
-        } else {
-            snapshot
-                .snapshot_mut()
-                .inline_metadata
-                .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
-        };
-        if required {
-            let expected = entry
-                .output_frontier()
-                .map_or(serde_json::Value::Null, |value| {
-                    serde_json::Value::from(value.as_micros())
-                });
-            if metadata_frontier != Some(expected) {
+            let required = node.operator.requires_output_frontier_state();
+            let metadata_frontier = if required {
+                snapshot
+                    .inline_metadata
+                    .get(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+                    .cloned()
+            } else {
+                snapshot
+                    .snapshot_mut()
+                    .inline_metadata
+                    .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1)
+            };
+            if required {
+                let expected = entry
+                    .output_frontier()
+                    .map_or(serde_json::Value::Null, |value| {
+                        serde_json::Value::from(value.as_micros())
+                    });
+                if metadata_frontier != Some(expected) {
+                    return Err(CalcFlowError::CheckpointMismatch {
+                        message: format!("terminal v4 operator {id:?} frontier metadata differs"),
+                    });
+                }
+            } else if metadata_frontier.is_some() || entry.output_frontier().is_some() {
                 return Err(CalcFlowError::CheckpointMismatch {
-                    message: format!("terminal v4 operator {id:?} frontier metadata differs"),
+                    message: format!("terminal v4 operator {id:?} unexpectedly has a frontier"),
                 });
             }
-        } else if metadata_frontier.is_some() || entry.output_frontier().is_some() {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!("terminal v4 operator {id:?} unexpectedly has a frontier"),
-            });
+            super::operator_task::validate_sql_restore_progress(
+                node.ingress_edges.keys(),
+                entry.progress(),
+            )?;
+            node.operator
+                .restore_async(
+                    &snapshot,
+                    &crate::StreamOperatorContext::new(context, id.as_str(), None),
+                )
+                .await?;
+            if let crate::pipeline::CompiledStreamOperator::StreamJoin(operator) = &node.operator {
+                operator.validate_terminal_recovery_state()?;
+            }
+            let progress = OperatorProgress::default();
+            if let Some(mut status) = node.operator.stream_asof_join_status() {
+                status.output_watermark_micros = entry.output_frontier();
+                progress.observe_stream_asof_join(status);
+            }
+            if let Some(status) = node.operator.stream_join_status() {
+                progress.observe_stream_join(status);
+            }
+            progress.mark_ended();
+            Ok(progress)
         }
-        super::operator_task::validate_sql_restore_progress(
-            node.ingress_edges.keys(),
-            entry.progress(),
-        )?;
-        node.operator
-            .restore_async(
-                &snapshot,
-                &crate::StreamOperatorContext::new(context, id, None),
-            )
-            .await?;
-        if let crate::pipeline::CompiledStreamOperator::StreamJoin(operator) = &node.operator {
-            operator.validate_terminal_recovery_state()?;
-        }
-        let progress = OperatorProgress::default();
-        if let Some(mut status) = node.operator.stream_asof_join_status() {
-            status.output_watermark_micros = entry.output_frontier();
-            progress.observe_stream_asof_join(status);
-        }
-        if let Some(status) = node.operator.stream_join_status() {
-            progress.observe_stream_join(status);
-        }
-        progress.mark_ended();
+        .await
+        .map_err(|error| native_sequences::recovery_error(checkpoint, id.as_str(), error))?;
         statuses.insert(node.node_id.clone(), progress);
     }
     Ok(statuses)
@@ -2950,10 +2968,13 @@ async fn prepare_checkpoint_recovery(
     loads: &asof::LoadOwner,
     cancellation: &CancellationToken,
     mut native_snapshots: BTreeMap<String, crate::state::PreloadedSnapshot>,
-) -> crate::Result<(
-    BTreeMap<String, OperatorRestoreState>,
-    Option<DurableProgressRestore>,
-)> {
+) -> Result<
+    (
+        BTreeMap<String, OperatorRestoreState>,
+        Option<DurableProgressRestore>,
+    ),
+    NativeRecoveryError,
+> {
     if checkpoint.selected_v4.is_some() {
         return prepare_v4_checkpoint_recovery(
             checkpoint,
@@ -3153,10 +3174,13 @@ async fn prepare_v4_checkpoint_recovery(
     prepared_progress: &super::progress::PreparedStreamJob,
     sources: &mut BTreeMap<String, SourceBinding>,
     cancellation: &CancellationToken,
-) -> crate::Result<(
-    BTreeMap<String, OperatorRestoreState>,
-    Option<DurableProgressRestore>,
-)> {
+) -> Result<
+    (
+        BTreeMap<String, OperatorRestoreState>,
+        Option<DurableProgressRestore>,
+    ),
+    NativeRecoveryError,
+> {
     let selected = checkpoint
         .selected_v4
         .as_ref()
@@ -3164,15 +3188,15 @@ async fn prepare_v4_checkpoint_recovery(
     checkpoint_v4_metadata::prepare_join_preloads(plan, &selected.manifest)?;
     let durable = restore_v4_sources(prepared_progress, &selected.manifest, sources)?;
     if cancellation.is_cancelled() {
-        return Err(CalcFlowError::Cancelled {
+        return Err(NativeRecoveryError::Legacy(CalcFlowError::Cancelled {
             run_id: "checkpoint-v4-restore".into(),
-        });
+        }));
     }
     let mut snapshots = checkpoint_v4::load_snapshots(checkpoint, &selected.manifest).await?;
     if cancellation.is_cancelled() {
-        return Err(CalcFlowError::Cancelled {
+        return Err(NativeRecoveryError::Legacy(CalcFlowError::Cancelled {
             run_id: "checkpoint-v4-restore".into(),
-        });
+        }));
     }
     let checkpoint_capabilities = plan
         .nodes
@@ -3190,37 +3214,46 @@ async fn prepare_v4_checkpoint_recovery(
             })?;
         let checkpoint_capability = node.checkpoint_capability;
         let requires_output_frontier = node.operator.requires_output_frontier_state();
-        let snapshot =
-            snapshots
-                .remove(operator_id)
-                .ok_or_else(|| CalcFlowError::CheckpointMismatch {
+        let (snapshot, output_frontier) = async {
+            let snapshot = snapshots.remove(operator_id).ok_or_else(|| {
+                CalcFlowError::CheckpointMismatch {
                     message: format!("checkpoint operator {operator_id:?} has no opaque snapshot"),
-                })?;
-        let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?
-            .map(|snapshot| checkpoint_capability.decode_snapshot(operator_id, snapshot))?;
-        let metadata_frontier = snapshot
-            .snapshot_mut()
-            .inline_metadata
-            .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
-        let output_frontier = entry.output_frontier();
-        let expected_metadata = output_frontier.map_or(serde_json::Value::Null, |frontier| {
-            serde_json::Value::from(frontier.as_micros())
-        });
-        if requires_output_frontier {
-            if metadata_frontier != Some(expected_metadata) {
+                }
+            })?;
+            let mut snapshot = admit_v4_snapshot(node, entry, snapshot)?
+                .map(|snapshot| checkpoint_capability.decode_snapshot(operator_id, snapshot))?;
+            let metadata_frontier = snapshot
+                .snapshot_mut()
+                .inline_metadata
+                .remove(crate::pipeline::OUTPUT_FRONTIER_METADATA_KEY_V1);
+            let output_frontier = entry.output_frontier();
+            let expected_metadata = output_frontier.map_or(serde_json::Value::Null, |frontier| {
+                serde_json::Value::from(frontier.as_micros())
+            });
+            if requires_output_frontier {
+                if metadata_frontier != Some(expected_metadata) {
+                    return Err(CalcFlowError::CheckpointMismatch {
+                        message: format!(
+                            "checkpoint operator {operator_id:?} output-frontier metadata differs from v4 state"
+                        ),
+                    });
+                }
+            } else if metadata_frontier.is_some() || output_frontier.is_some() {
                 return Err(CalcFlowError::CheckpointMismatch {
                     message: format!(
-                        "checkpoint operator {operator_id:?} output-frontier metadata differs from v4 state"
+                        "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
                     ),
                 });
             }
-        } else if metadata_frontier.is_some() || output_frontier.is_some() {
-            return Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "checkpoint operator {operator_id:?} unexpectedly contains an output frontier"
-                ),
-            });
+            Ok((
+                snapshot,
+                requires_output_frontier
+                    .then_some(output_frontier)
+                    .flatten(),
+            ))
         }
+        .await
+        .map_err(|error| native_sequences::recovery_error(checkpoint, operator_id, error))?;
         operators.insert(
             operator_id.clone(),
             OperatorRestoreState {
@@ -3363,23 +3396,17 @@ async fn select_checkpoint_state(
     manifest_root: &std::path::Path,
     managed: bool,
     retained_epochs: usize,
-) -> Result<SelectedCheckpointState, crate::state::NativeRecoveryError> {
+) -> Result<SelectedCheckpointState, NativeRecoveryError> {
     let selected_v4 = checkpoint_v4_selection::select_latest(manifest_root, identity)
         .await
         .map_err(|error| {
-            native_sequences::sanitize_preflight(
-                crate::state::NativeRecoveryError::Legacy(error),
-                managed,
-            )
+            native_sequences::sanitize_preflight(NativeRecoveryError::Legacy(error), managed)
         })?;
     let startup_orphans_removed =
         checkpoint_v4_retention::retain_root(manifest_root, retained_epochs)
             .await
             .map_err(|error| {
-                native_sequences::sanitize_preflight(
-                    crate::state::NativeRecoveryError::Legacy(error),
-                    managed,
-                )
+                native_sequences::sanitize_preflight(NativeRecoveryError::Legacy(error), managed)
             })?;
     Ok(SelectedCheckpointState {
         selected: None,
@@ -3399,7 +3426,7 @@ struct OpenedCheckpointStorage {
 async fn open_checkpoint_storage(
     storage: CheckpointRuntimeStorage,
     cancellation: &CancellationToken,
-) -> Result<OpenedCheckpointStorage, crate::state::NativeRecoveryError> {
+) -> Result<OpenedCheckpointStorage, NativeRecoveryError> {
     match storage {
         CheckpointRuntimeStorage::LegacyParts {
             state_backend,
@@ -3442,7 +3469,7 @@ async fn open_checkpoint_runtime(
     checkpoint: ValidatedCheckpointRuntime,
     cancellation: &CancellationToken,
     native_sequences: Option<Arc<crate::array::NativeSequenceInventory>>,
-) -> Result<OpenedCheckpointRuntime, crate::state::NativeRecoveryError> {
+) -> Result<OpenedCheckpointRuntime, NativeRecoveryError> {
     let ValidatedCheckpointRuntime { spec, identity } = checkpoint;
     let OpenedCheckpointStorage {
         state_backend,

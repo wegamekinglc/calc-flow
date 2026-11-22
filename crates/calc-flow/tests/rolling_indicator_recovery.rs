@@ -13,12 +13,11 @@ use std::{
 
 use async_trait::async_trait;
 use calc_flow::{
-    Batch, BatchMetadata, CancellationToken, CheckpointManifest, CheckpointManifestFields, Cursor,
-    EdgeCollector, Epoch, EventTime, JobState, JsonMap, ManagedCheckpointRuntime,
-    NativeWatermarkCapability, OperatorMetadata, PipelineBuilder, ReplayPositioning, Result,
-    RollingOperator, RollingSpec, SinkBinding, SourceBinding, SourceCapabilities,
-    SourceDeliveryCapability, SourceEvent, SourceSchema, StateBudget, StateHandle,
-    StreamExecutionPlan, StreamJobContext, StreamOperator, StreamOperatorContext,
+    Batch, BatchMetadata, CancellationToken, Cursor, EdgeCollector, Epoch, EventTime, JobState,
+    JsonMap, ManagedCheckpointRuntime, NativeWatermarkCapability, OperatorMetadata,
+    PipelineBuilder, ReplayPositioning, Result, RollingOperator, RollingSpec, SinkBinding,
+    SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
+    StateBudget, StreamExecutionPlan, StreamJobContext, StreamOperator, StreamOperatorContext,
     StreamRequirements, StreamSink, StreamSource, StreamingRunner, UdfRegistry,
 };
 use datafusion::arrow::{
@@ -355,7 +354,12 @@ async fn test_old_only_layout_five_terminal_keeps_encoded_storage_outside_retain
     let (runner, send, _received) = connect_plan(&root, &probe, old_only_plan());
     finish(runner, send, true).await;
     let (_, saved) = manifest(&root).await;
-    assert!(saved.operators()["features"].segments[0].byte_len() > 2048);
+    assert!(
+        saved["operators"]["features"]["blocks"][0]["byte_len"]
+            .as_u64()
+            .unwrap()
+            > 2048
+    );
     let (runner, send, _received) = connect_plan(&root, &probe, old_only_plan());
     finish(runner, send, false).await;
     assert_eq!(probe.sources.load(Ordering::SeqCst), 1);
@@ -369,17 +373,10 @@ async fn test_old_only_layout_five_terminal_validates_metadata_before_open() {
     let probe = Probe::default();
     let (runner, send, _received) = connect_plan(&root, &probe, old_only_plan());
     finish(runner, send, true).await;
-    let (path, original) = manifest(&root).await;
-    let mut operators = original.operators().clone();
-    operators
-        .get_mut("features")
-        .unwrap()
-        .inline_metadata
-        .insert("configuration_hash".into(), json!("0".repeat(64)));
-    let changed = changed_manifest(&original, operators);
-    tokio::fs::write(path, changed.canonical_bytes().unwrap())
-        .await
-        .unwrap();
+    let (path, mut original) = manifest(&root).await;
+    original["operators"]["features"]["inline_metadata"]["configuration_hash"] =
+        json!("0".repeat(64));
+    write_manifest(path, &original).await;
     let (runner, _send, _received) = connect_plan(&root, &probe, old_only_plan());
     assert_preopen_failure(runner.start().await, &probe, "configuration");
 }
@@ -458,9 +455,14 @@ async fn test_indicator_empty_global_terminal_preserves_no_segment_representatio
     let probe = Probe::default();
     complete(&root, &probe, false).await;
     let (_, manifest) = manifest(&root).await;
-    assert!(manifest.operators()["features"].segments.is_empty());
     assert!(
-        manifest.operators()["features"].inline_metadata["segment_inventory"]
+        manifest["operators"]["features"]["blocks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        manifest["operators"]["features"]["inline_metadata"]["segment_inventory"]
             .as_array()
             .unwrap()
             .is_empty()
@@ -471,29 +473,35 @@ async fn test_indicator_empty_global_terminal_preserves_no_segment_representatio
     assert_eq!(probe.writes.load(Ordering::SeqCst), 0);
 }
 
-async fn manifest(root: &Path) -> (PathBuf, CheckpointManifest) {
-    let path = root.join("manifests/manifest-00000000000000000001.json");
-    let manifest = CheckpointManifest::from_bytes(&tokio::fs::read(&path).await.unwrap()).unwrap();
+async fn manifest(root: &Path) -> (PathBuf, serde_json::Value) {
+    let path = root.join("manifests/lineage/manifests/epoch-1.json");
+    let manifest = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
     (path, manifest)
 }
 
-fn changed_manifest(
-    original: &CheckpointManifest,
-    operators: BTreeMap<String, calc_flow::OperatorManifestEntry>,
-) -> CheckpointManifest {
-    CheckpointManifest::new(CheckpointManifestFields {
-        pipeline_name: original.pipeline_name().into(),
-        pipeline_fingerprint: original.pipeline_fingerprint().into(),
-        runtime_config_hash: original.runtime_config_hash().into(),
-        epoch: original.epoch(),
-        created_at: original.created_at(),
-        recovery_status: original.recovery_status(),
-        sources: original.sources().clone(),
-        operators,
-        sinks: original.sinks().clone(),
-        static_inputs: original.static_inputs().clone(),
-    })
-    .unwrap()
+async fn write_manifest(path: PathBuf, manifest: &serde_json::Value) {
+    let mut changed = manifest.clone();
+    changed["operators"]["features"]["state_fingerprint"] = hex::encode(Sha256::digest(
+        calc_flow::canonical_json(&changed["operators"]["features"]["inline_metadata"])
+            .unwrap()
+            .as_bytes(),
+    ))
+    .into();
+    let mut unsigned = changed.clone();
+    unsigned
+        .as_object_mut()
+        .unwrap()
+        .remove("manifest_fingerprint");
+    changed["manifest_fingerprint"] = hex::encode(Sha256::digest(
+        calc_flow::canonical_json(&unsigned).unwrap().as_bytes(),
+    ))
+    .into();
+    tokio::fs::write(
+        path,
+        calc_flow::canonical_json(&changed).unwrap().into_bytes(),
+    )
+    .await
+    .unwrap();
 }
 
 fn corrupt_indicator(bytes: &[u8]) -> Vec<u8> {
@@ -542,33 +550,26 @@ async fn corrupt_saved_indicator(root: &Path) {
 }
 
 async fn corrupt_saved_segment(root: &Path, corrupt: fn(&[u8]) -> Vec<u8>) {
-    let (path, original) = manifest(root).await;
-    let entry = &original.operators()["features"];
-    assert_eq!(entry.segments.len(), 1);
-    let old = &entry.segments[0];
-    let segment_path = root.join("state").join(old.relative_path());
+    let (path, mut original) = manifest(root).await;
+    let blocks = original["operators"]["features"]["blocks"]
+        .as_array()
+        .unwrap();
+    assert_eq!(blocks.len(), 1);
+    let segment_path = root.join("manifests").join(
+        original["operators"]["features"]["blocks"][0]["relative_path"]
+            .as_str()
+            .unwrap(),
+    );
     let encoded = corrupt(&tokio::fs::read(&segment_path).await.unwrap());
     let checksum = hex::encode(Sha256::digest(&encoded));
-    let replacement = StateHandle::new(
-        old.operator_id(),
-        old.epoch(),
-        old.segment_id(),
-        old.relative_path(),
-        u64::try_from(encoded.len()).unwrap(),
-        &checksum,
-    )
-    .unwrap();
-    let mut operators = original.operators().clone();
-    let entry = operators.get_mut("features").unwrap();
-    entry.segments = vec![replacement];
-    let descriptor = &mut entry.inline_metadata.get_mut("segment_inventory").unwrap()[0]["handle"];
+    original["operators"]["features"]["blocks"][0]["byte_len"] = json!(encoded.len());
+    original["operators"]["features"]["blocks"][0]["sha256"] = json!(checksum);
+    let descriptor =
+        &mut original["operators"]["features"]["inline_metadata"]["segment_inventory"][0]["handle"];
     descriptor["byte_len"] = json!(encoded.len());
     descriptor["sha256"] = json!(checksum);
-    let changed = changed_manifest(&original, operators);
     tokio::fs::write(segment_path, encoded).await.unwrap();
-    tokio::fs::write(path, changed.canonical_bytes().unwrap())
-        .await
-        .unwrap();
+    write_manifest(path, &original).await;
 }
 
 fn assert_preopen_failure(result: Result<calc_flow::StreamingJob>, probe: &Probe, field: &str) {
@@ -623,23 +624,16 @@ async fn test_indicator_completed_output_cannot_masquerade_as_empty_global_state
     let root = directory.path().join("managed");
     let probe = Probe::default();
     complete(&root, &probe, true).await;
-    let (path, original) = manifest(&root).await;
-    let mut operators = original.operators().clone();
-    let entry = operators.get_mut("features").unwrap();
+    let (path, mut original) = manifest(&root).await;
     assert!(
-        entry.inline_metadata["next_output_sequence"]
+        original["operators"]["features"]["inline_metadata"]["next_output_sequence"]
             .as_u64()
             .unwrap()
             > 0
     );
-    entry.segments.clear();
-    entry
-        .inline_metadata
-        .insert("segment_inventory".into(), json!([]));
-    let changed = changed_manifest(&original, operators);
-    tokio::fs::write(path, changed.canonical_bytes().unwrap())
-        .await
-        .unwrap();
+    original["operators"]["features"]["blocks"] = json!([]);
+    original["operators"]["features"]["inline_metadata"]["segment_inventory"] = json!([]);
+    write_manifest(path, &original).await;
     let (runner, _send, _received) = connect(&root, &probe);
     assert_preopen_failure(runner.start().await, &probe, "state.segments");
 }
@@ -651,17 +645,9 @@ async fn assert_invalid_inline_metadata(field: &str, value: serde_json::Value) {
     let root = directory.path().join("managed");
     let probe = Probe::default();
     complete(&root, &probe, true).await;
-    let (path, original) = manifest(&root).await;
-    let mut operators = original.operators().clone();
-    operators
-        .get_mut("features")
-        .unwrap()
-        .inline_metadata
-        .insert(field.to_owned(), value);
-    let changed = changed_manifest(&original, operators);
-    tokio::fs::write(path, changed.canonical_bytes().unwrap())
-        .await
-        .unwrap();
+    let (path, mut original) = manifest(&root).await;
+    original["operators"]["features"]["inline_metadata"][field] = value;
+    write_manifest(path, &original).await;
     let (runner, _send, _received) = connect(&root, &probe);
     let result = runner.start().await;
     let Err(calc_flow::CalcFlowError::Streaming(error)) = result else {

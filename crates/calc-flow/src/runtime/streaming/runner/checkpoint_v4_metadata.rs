@@ -1,25 +1,33 @@
 use std::collections::BTreeSet;
 
 use crate::pipeline::StreamRuntimePlanParts;
-use crate::state::v4::V4Manifest;
-use crate::{CalcFlowError, ManifestIngressState, Result};
+use crate::state::{NativeRecoveryError, v4::V4Manifest};
+use crate::{CalcFlowError, ManifestIngressState, Result as CalcResult};
 
 pub(super) fn validate_capabilities(
+    checkpoint: &super::super::checkpoint_runtime::OpenedCheckpointRuntime,
     manifest: &V4Manifest,
     plan: &StreamRuntimePlanParts,
-) -> Result<()> {
+) -> Result<(), NativeRecoveryError> {
     for node in &plan.nodes {
         let operator_id = node.operator_id.as_str();
-        let entry = manifest.operators.get(operator_id).ok_or_else(|| {
-            CalcFlowError::CheckpointMismatch {
+        let entry = manifest
+            .operators
+            .get(operator_id)
+            .ok_or_else(|| CalcFlowError::CheckpointMismatch {
                 message: format!("checkpoint is missing operator {operator_id:?}"),
-            }
-        })?;
+            })
+            .map_err(|error| {
+                super::native_sequences::recovery_error(checkpoint, operator_id, error)
+            })?;
         let Some((metadata, no_blocks)) = entry.opaque_metadata() else {
             continue;
         };
         node.checkpoint_capability
-            .validate_snapshot_fields(operator_id, metadata, no_blocks)?;
+            .validate_snapshot_fields(operator_id, metadata, no_blocks)
+            .map_err(|error| {
+                super::native_sequences::recovery_error(checkpoint, operator_id, error)
+            })?;
     }
     Ok(())
 }
@@ -27,7 +35,7 @@ pub(super) fn validate_capabilities(
 pub(super) fn prepare_join_preloads(
     plan: &mut StreamRuntimePlanParts,
     manifest: &V4Manifest,
-) -> Result<()> {
+) -> CalcResult<()> {
     for node in &mut plan.nodes {
         let has_blocks = matches!(
             manifest.operators.get(node.operator_id.as_str()),
@@ -43,7 +51,10 @@ pub(super) fn prepare_join_preloads(
     Ok(())
 }
 
-pub(super) fn is_terminal(manifest: &V4Manifest, plan: &StreamRuntimePlanParts) -> Result<bool> {
+pub(super) fn is_terminal(
+    manifest: &V4Manifest,
+    plan: &StreamRuntimePlanParts,
+) -> CalcResult<bool> {
     let sources_terminal = manifest.sources.values().all(|source| source.ended);
     let mut operators_terminal = true;
     for node in &plan.nodes {
