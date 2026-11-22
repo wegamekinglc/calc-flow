@@ -1194,6 +1194,9 @@ fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
         let path = entry
             .map_err(|error| invalid(format!("checkpoint manifest entry: {error}")))?
             .path();
+        if path.extension() != Some(std::ffi::OsStr::new("json")) {
+            continue;
+        }
         let Some(manifest) = read_manifest_if_present(&path)? else {
             continue;
         };
@@ -1204,6 +1207,15 @@ fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
     epochs.sort_unstable();
     epochs.dedup();
     Ok(epochs)
+}
+
+#[test]
+fn nonterminal_scan_ignores_inflight_manifest_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("manifests/lineage/manifests");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("epoch-11.tmp"), b"not a manifest").unwrap();
+    assert!(nonterminal_epochs(root.path()).unwrap().is_empty());
 }
 
 #[test]
