@@ -271,7 +271,7 @@ impl InPlaceUpdate {
         direct_names: &[&str],
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<Option<(RollingKernelState, Self)>> {
+    ) -> Result<Option<(Self, super::EntityRows, Vec<usize>)>> {
         let EntityRouting {
             keys,
             rows,
@@ -318,10 +318,6 @@ impl InPlaceUpdate {
             new_keys.push((resident, key));
         }
         Ok(Some((
-            RollingKernelState {
-                kernel_fingerprint: Some(plan.fingerprint.clone()),
-                ..RollingKernelState::default()
-            },
             Self {
                 residents,
                 key_bytes,
@@ -330,6 +326,8 @@ impl InPlaceUpdate {
                 undo,
                 previous_charge,
             },
+            rows,
+            entity_ids,
         )))
     }
 
@@ -485,9 +483,7 @@ impl RollingKernelPlan {
         let started = Instant::now();
         let (routing, known_residents, direct_names) =
             self.route_in_place(state, input, node_id, observer)?;
-        let entity_rows = routing.rows.clone();
-        let entity_ids = routing.entity_ids.clone();
-        let Some((mut local, mut in_place)) = InPlaceUpdate::resolve(
+        let Some((mut in_place, entity_rows, entity_ids)) = InPlaceUpdate::resolve(
             self,
             state,
             routing,
@@ -499,18 +495,16 @@ impl RollingKernelPlan {
         else {
             return Ok(None);
         };
-        local.last_identity = last_identity;
         let entity_encode_ns = nanos(started.elapsed());
         let inputs = TypedRowInputs {
             columns: &columns,
             event_times: &event_times,
             entity_ids: &entity_ids,
         };
-        let typed_inputs = self.typed_inputs(input, node_id)?;
         let mut builders = self
             .outputs
             .iter()
-            .map(|output| DerivedBuilder::new_with_inputs(*output, input.num_rows(), &typed_inputs))
+            .map(|output| DerivedBuilder::new_with_inputs(*output, input.num_rows(), &columns))
             .collect::<Result<Vec<_>>>()?;
         let kernel_start = Instant::now();
         let numeric_result = {
@@ -555,7 +549,11 @@ impl RollingKernelPlan {
                     state_bytes,
                     ..RollingKernelMetrics::default()
                 },
-                state: local,
+                state: RollingKernelState {
+                    kernel_fingerprint: Some(self.fingerprint.clone()),
+                    last_identity,
+                    ..RollingKernelState::default()
+                },
             },
             in_place: Some(in_place),
             slab: None,
