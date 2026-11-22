@@ -1,0 +1,11 @@
+{
+  "revision": "a01349d1401620e21a4ca7f6ba7a0e80d57d2791",
+  "tree": "b9427ec7163598a3244885f9e2f2011644938256",
+  "source_status_at_build_and_measurement": "tracked source clean",
+  "build_elapsed_seconds": 606.512,
+  "command": "uv run maturin build --release --locked --manifest-path crates/calc-flow-python/Cargo.toml --out target/p5-utf8-charge-wheel-a01349d1",
+  "wheel": "target/p5-utf8-charge-wheel-a01349d1/calc_flow_python-2026.11.14-cp313-cp313-linux_x86_64.whl",
+  "wheel_sha256": "7cc208f7ebc5af4c2e565cf2ccb3bf676f80d25161734ee6143aa3b3544e3773",
+  "python": "3.13.9",
+  "measurement_environment": "target/p5-utf8-charge-venv-a01349d1 with PYTHONPATH set to the repository root for the maintained benchmark package"
+}
