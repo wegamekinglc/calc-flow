@@ -780,7 +780,12 @@ fixture has identical values within each key. The recovery check adds a
 distinct key, timestamp and amount on each side before capture, restores the
 snapshot and probes both keys from the opposite side. The right-input handler
 timers cover that input's `process_data` call. Preflight runs outside those
-timers and supports the current native join snapshot layout 12.
+timers and supports the current native join snapshot layout 12. On the
+original AC19 platform and workload, candidates must sustain the frozen
+throughput floors of 1.12M rows/s for no match, 491k for one-to-one, 75.0k
+for fanout10 and 135k for eviction. Each floor is 80% of the original lower
+95% bound. Report timings by platform and verify slopes and ratios across
+runs.
 
 The shared Criterion inventory contains the four handlers and
 `checkpoint/capture_dirty_20k`, which times the first capture of 20,000
