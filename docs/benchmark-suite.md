@@ -784,10 +784,12 @@ timers and supports the current native join snapshot layout 12.
 
 The shared Criterion inventory contains the four handlers and
 `checkpoint/capture_dirty_20k`, which times the first capture of 20,000
-dirty rows. The v2 base-plus-delta writer supplied two
+dirty rows. The legacy segmented writer (layouts 1 and 2) supplied two
 `capture_dirty_1250_base_*`, two `prepare_then_left_500_*` and two
 `restore/full_*` series. Their published samples keep their original definitions.
-The historical `CALC_FLOW_JOIN_PERF_FOCUSED` selector reports an error.
+The frozen AC19 restore ceilings on WSL2 i9-13900HX were 59.3 ms for
+20,000 rows and 175.5 ms for 60,000 rows under those fixtures. The
+historical `CALC_FLOW_JOIN_PERF_FOCUSED` selector reports an error.
 
 For the native writer, `--native-component join_capture_restore_1m`
 records preparation, capture and restore separately. `join_compaction_1m`

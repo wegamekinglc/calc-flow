@@ -4,30 +4,30 @@
     {
       "target": "stream_join_perf",
       "baseline_sha256": "2533de442d20cc252c0fbef406777d6d080ae901fb1a5e247078d807a771213b",
-      "candidate_sha256": "1a8378a6eac578bacc125d3e5148cc8e448a81e348b0b7397aad347b5251685d",
-      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six v2 base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
-      "reference": "2026-11-23 native Join handler preflight, published 61a81f20; retirement of v2 join workloads"
+      "candidate_sha256": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",
+      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six legacy base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
+      "reference": "2026-11-23 native Join handler preflight, published 61a81f20; retirement of segmented join workloads"
     },
     {
       "target": "stream_join_perf",
       "baseline_sha256": "0aa67fed5b67f03fb84fbf688749a2263edd253d160ab8d01d06bec332a5fb95",
-      "candidate_sha256": "1a8378a6eac578bacc125d3e5148cc8e448a81e348b0b7397aad347b5251685d",
-      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six v2 base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
-      "reference": "2026-11-23 native Join handler preflight, calc-flow-python-v2026.11.14; retirement of v2 join workloads"
+      "candidate_sha256": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",
+      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six legacy base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
+      "reference": "2026-11-23 native Join handler preflight, calc-flow-python-v2026.11.14; retirement of segmented join workloads"
     },
     {
       "target": "stream_join_perf",
       "baseline_sha256": "bacd89af25eba826a41de1046f53e9f00f78738b832aff005cd22d191e4ff7f6",
-      "candidate_sha256": "1a8378a6eac578bacc125d3e5148cc8e448a81e348b0b7397aad347b5251685d",
-      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six v2 base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
-      "reference": "2026-11-23 native Join handler preflight, main ec402c59; retirement of v2 join workloads"
+      "candidate_sha256": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",
+      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six legacy base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
+      "reference": "2026-11-23 native Join handler preflight, main ec402c59; retirement of segmented join workloads"
     },
     {
       "target": "stream_join_perf",
       "baseline_sha256": "6d8d90fbf5afbdd74e8fe7f1ea89b5fe8f403fbbcf2e8e426edbc6c0c6bea7da",
-      "candidate_sha256": "1a8378a6eac578bacc125d3e5148cc8e448a81e348b0b7397aad347b5251685d",
-      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six v2 base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
-      "reference": "Native join correctness preflight at dcb74d45; retirement of v2 join workloads"
+      "candidate_sha256": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",
+      "reason": "Use the same five-case harness on both exact products. Preserve the four handlers and initial dirty capture with their original timing boundaries. Retire the six legacy base/delta capture, compaction and restore IDs. Historical samples keep their original identity.",
+      "reference": "Native join correctness preflight at dcb74d45; retirement of segmented join workloads"
     },
     {
       "target": "stream_join_perf",

@@ -2,8 +2,8 @@
 //!
 //! The four 10k-row handlers and the first capture of 20k dirty rows retain
 //! the workload and timing boundaries introduced by DAL-130. The historical
-//! base-plus-delta capture, compaction and restore series ended with the v2
-//! writer. Native layout component measurements have their own workload IDs.
+//! base-plus-delta capture, compaction and restore series depended on the
+//! legacy segmented writer. Native layout component measurements have their own workload IDs.
 //!
 //! The original AC19 handler floors on WSL2 i9-13900HX at `main@f74f32a`
 //! (workload SHA-256 `555546a7…`) were 1.12M rows/s for no match, 491k for
@@ -241,7 +241,7 @@ impl ScenarioBatches {
 fn baseline(c: &mut Criterion) {
     assert!(
         std::env::var_os("CALC_FLOW_JOIN_PERF_FOCUSED").is_none(),
-        "the focused v2 checkpoint writer workloads have been retired"
+        "the focused base-plus-delta checkpoint workloads have been retired"
     );
     println!("JOIN_PERF_PROVENANCE {}", provenance());
     let runtime = tokio::runtime::Runtime::new().unwrap();
