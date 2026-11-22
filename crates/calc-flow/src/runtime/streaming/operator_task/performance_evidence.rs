@@ -1282,7 +1282,7 @@ async fn runner_arm(
     let (epochs, manifest_validation_seconds) = timed_nonterminal_epochs(root.path());
     assert!(
         epochs.len() >= minimum_epochs,
-        "checkpoint coverage: {epochs:?}"
+        "checkpoint coverage: {epochs:?}; status={status_at_cutoff}"
     );
     let freeze_to_ack_seconds = if checkpointing {
         let began = Instant::now();
@@ -1336,6 +1336,12 @@ async fn runner_checkpoint_arms_cover_epoch_and_off_cleanup() {
     let off = runner_arm(workload, false, 2, 10, 0).await;
     assert!(off["accepted_input_rows"].as_u64().unwrap() > 0);
     assert_eq!(off["checkpoint_objects"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runner_one_second_checkpoints_cover_five_second_arm() {
+    let on = runner_arm(dual(6_400, 64, false), true, 5, 1_000, 4).await;
+    assert!(on["completed_nonterminal_epochs"].as_u64().unwrap() >= 4);
 }
 
 async fn runner_round(
