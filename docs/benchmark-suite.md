@@ -780,20 +780,28 @@ fixture has identical values within each key. The recovery check adds a
 distinct key, timestamp and amount on each side before capture, restores the
 snapshot and probes both keys from the opposite side. The right-input handler
 timers cover that input's `process_data` call. Preflight runs outside those
-timers and supports the current native join snapshot layout 12.
+timers and supports the current native join snapshot layout 12. On the
+original AC19 platform and workload, candidates must sustain the frozen
+throughput floors of 1.12M rows/s for no match, 491k for one-to-one, 75.0k
+for fanout10 and 135k for eviction. Each floor is 80% of the original lower
+95% bound. Report timings by platform and verify slopes and ratios across
+runs.
 
-The historical `checkpoint/prepare_then_left_500_{compact,steady}_60k`,
-`checkpoint/capture_dirty_1250_base_*` and `restore/full_*` cases require
-the former base-plus-delta writer. Their preflight checks for the legacy
-segment layout when a case is executed. Discovery can list these cases on a
-native build, but selecting one fails the legacy fixture check; a full sweep
-on such a build includes unsupported cases. The prepare cases time asynchronous
-checkpoint preparation followed by the 500-row handler, with fixture
-construction, capture and restore outside timing. The adapter compiles the
-same declared lifecycle harness against both exact product revisions in owned
-build clones, leaving the supplied checkouts unchanged. Provenance retains the original bench
-digest, the effective measured harness digest, both product and harness revisions,
-and compiled dependencies. The former pure-handler case IDs are retired.
+The shared Criterion inventory contains the four handlers and
+`checkpoint/capture_dirty_20k`, which times the first capture of 20,000
+dirty rows. The legacy segmented writer (layouts 1 and 2) supplied two
+`capture_dirty_1250_base_*`, two `prepare_then_left_500_*` and two
+`restore/full_*` series. Their published samples keep their original definitions.
+The frozen AC19 restore ceilings on WSL2 i9-13900HX were 59.3 ms for
+20,000 rows and 175.5 ms for 60,000 rows under those fixtures. The
+historical `CALC_FLOW_JOIN_PERF_FOCUSED` selector reports an error.
+
+For the native writer, `--native-component join_capture_restore_1m`
+records preparation, capture and restore separately. `join_compaction_1m`
+checks stable pages and continued results after recovery. Both require
+`benchmark-internals` and have independent workload identities. Release
+comparisons compile the same shared Criterion inventory against each product
+revision and retain both original harness digests.
 
 ### Join/ASOF acceptance measurement controls (#428)
 
@@ -887,10 +895,10 @@ A declaration also retires cases its candidate source removed: when the
 candidate measured that target, a case only the baseline blocks still report
 is dropped instead of failing as a missing block. Without a declaration, a
 removed case still fails.
-The common Join harness above also requires an exact migration declaration
-when replacing an older source. Its revised timing boundary uses new case IDs
-and is compiled on both products, so historical pure-handler timings are never
-compared against checkpoint-preparation timings.
+The common join harness requires an exact migration declaration for each
+supported older source. Both products run the same five-case inventory.
+The six retired segmented-writer measurements retain their historical IDs
+and samples.
 
 ### Current-milestone Join/ASOF acquisition (#443)
 

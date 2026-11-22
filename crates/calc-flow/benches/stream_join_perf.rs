@@ -1,31 +1,24 @@
 //! Resident controlled baseline for the bounded event-time stream join.
 //!
-//! Adopted from the frozen DAL-130 AC19 evidence harness (first baseline:
-//! `main@f74f32a`, WSL2 i9-13900HX, workload SHA-256 `555546a7…`). The frozen
-//! acceptance gates for future candidates are throughput floors at 0.80 × the
-//! frozen 95% lower bound (`no_match` ≥ 1.12M rows/s, `one_to_one` ≥ 491k,
-//! `fanout10` ≥ 75.0k, `evict` ≥ 135k) and recovery ceilings at 1.20 × the frozen
-//! 95% upper bound (20k restore ≤ 59.3 ms, 60k restore ≤ 175.5 ms). Absolute
-//! values are platform-keyed; slope and ratio conclusions must hold across
-//! runs. The zero-match honey-key workaround from the scratch harness is gone:
-//! the zero-row equality probe is well-defined since PR #189, so the no-match
-//! scenario probes with truly disjoint keys.
+//! The four 10k-row handlers and the first capture of 20k dirty rows retain
+//! the workload and timing boundaries introduced by DAL-130. The historical
+//! base-plus-delta capture, compaction and restore series depended on the
+//! legacy segmented writer. Native layout component measurements have their own workload IDs.
 //!
-//! The two `checkpoint/capture_dirty_1250_base_*` scenarios are the capture
-//! independence canary (DAL-160): equal dirty cardinality at two retained
-//! state scales. Their costs must track the dirty set, not the retained
-//! payload — before the FR47 fix they grew linearly with total state
-//! (8.8 ms @17.5k → 67.4 ms @62.5k rows).
+//! The original AC19 handler floors on WSL2 i9-13900HX at `main@f74f32a`
+//! (workload SHA-256 `555546a7…`) were 1.12M rows/s for no match, 491k for
+//! one-to-one, 75.0k for fanout10 and 135k for eviction. Each floor was
+//! 80% of the platform-specific frozen 95% lower bound.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use calc_flow::{
     Batch, BatchMetadata, CancellationToken, EdgeCollector, Epoch, EventTime, IngressProgress,
     IngressProgressSnapshot, IngressState, JoinStateLimits, JoinTimeBounds, JsonMap,
-    OperatorMetadata, OperatorStateSnapshot, StreamJobContext, StreamJoinOperator, StreamJoinSpec,
-    StreamOperator, StreamOperatorContext,
+    OperatorMetadata, StreamJobContext, StreamJoinOperator, StreamJoinSpec, StreamOperator,
+    StreamOperatorContext,
 };
 use criterion::{Criterion, criterion_group};
 use datafusion::arrow::array::{Int64Array, StringArray, TimestampMicrosecondArray, UInt32Array};
@@ -47,8 +40,6 @@ const BYTE_LIMIT: u64 = 4 * 1_024 * 1_024 * 1_024;
 const MATCH_LIMIT: u64 = 100_000_000;
 const BEFORE: Duration = Duration::from_secs(300);
 const AFTER: Duration = Duration::from_secs(60);
-/// Segment count that arms compaction on the next checkpoint preparation.
-const COMPACTION_THRESHOLD: u64 = 4;
 
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -173,100 +164,6 @@ fn read_rss() -> (u64, u64) {
     (rss, hwm)
 }
 
-/// Operator with `total_rows` of retained state across both sides and exactly
-/// `COMPACTION_THRESHOLD` carried delta segments: the next checkpoint
-/// preparation compacts them. Returns the operator and the next unused epoch.
-async fn armed_operator(total_rows: usize) -> (StreamJoinOperator, u64) {
-    let mut operator = new_operator();
-    let job = job();
-    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-    let bulk = unique_keys("B", total_rows);
-    let (left_bulk, right_bulk) = bulk.split_at(bulk.len() / 2);
-    feed(
-        &mut operator,
-        &job,
-        &mut collector,
-        "left",
-        &make_batch(left_bulk, BASE_TS),
-    )
-    .await;
-    feed(
-        &mut operator,
-        &job,
-        &mut collector,
-        "right",
-        &make_batch(right_bulk, BASE_TS),
-    )
-    .await;
-    let mut epoch = 1_u64;
-    operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
-    // Three more tiny epochs arm the compaction threshold (4 segments).
-    for index in 0..COMPACTION_THRESHOLD - 1 {
-        let stamp = BASE_TS + SECOND * i64::try_from(index + 1).unwrap();
-        feed(
-            &mut operator,
-            &job,
-            &mut collector,
-            "left",
-            &make_batch(&["ZLhot0000".into()], stamp),
-        )
-        .await;
-        feed(
-            &mut operator,
-            &job,
-            &mut collector,
-            "right",
-            &make_batch(&["ZRhot0000".into()], stamp),
-        )
-        .await;
-        epoch += 1;
-        operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
-    }
-    (operator, epoch + 1)
-}
-
-/// Compacted operator carrying `total_rows - dirty_rows` of base state plus
-/// `dirty_rows` of fresh dirty ops above it: one call away from a
-/// base-plus-delta checkpoint. The compaction itself already ran (untimed).
-async fn dirty_operator(total_rows: usize, dirty_rows: usize) -> (StreamJoinOperator, u64) {
-    assert!(total_rows > dirty_rows + 8);
-    let (mut operator, next_epoch) = armed_operator(total_rows - dirty_rows).await;
-    let job = job();
-    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-    operator
-        .prepare_checkpoint_async(&plain_ctx(&job))
-        .await
-        .unwrap();
-    let dirty = unique_keys("D", dirty_rows);
-    let (left_dirty, right_dirty) = dirty.split_at(dirty.len() / 2);
-    let stamp = BASE_TS + 2 * SECOND;
-    feed(
-        &mut operator,
-        &job,
-        &mut collector,
-        "left",
-        &make_batch(left_dirty, stamp),
-    )
-    .await;
-    feed(
-        &mut operator,
-        &job,
-        &mut collector,
-        "right",
-        &make_batch(right_dirty, stamp),
-    )
-    .await;
-    (operator, next_epoch)
-}
-
-/// Snapshot with a compacted base of ~`total_rows` plus a small delta.
-async fn full_snapshot(total_rows: usize) -> OperatorStateSnapshot {
-    let (mut operator, next_epoch) = dirty_operator(total_rows, 1_000).await;
-    operator
-        .checkpoint(Epoch::new(next_epoch).unwrap())
-        .unwrap()
-}
-
 fn provenance() -> serde_json::Value {
     let tree = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -341,235 +238,13 @@ impl ScenarioBatches {
     }
 }
 
-const FOCUSED_CHECKPOINT_ENV: &str = "CALC_FLOW_JOIN_PERF_FOCUSED";
-const FOCUSED_CAPTURE: &str = "join/checkpoint/capture_dirty_1250_base_17500";
-const FOCUSED_PREPARE: &str = "join/checkpoint/prepare_then_left_500_compact_60k";
-
-#[derive(Clone, Copy)]
-enum FocusedCheckpoint {
-    Capture,
-    Prepare,
-}
-
-#[derive(Clone, Copy)]
-enum FocusedSelection {
-    Disabled,
-    List,
-    Probe(FocusedCheckpoint),
-}
-
-fn focused_checkpoint_mode() -> bool {
-    match std::env::var(FOCUSED_CHECKPOINT_ENV) {
-        Err(std::env::VarError::NotPresent) => return false,
-        Ok(mode) => assert_eq!(mode, "checkpoint-writer-v1", "invalid focused mode"),
-        Err(error) => panic!("invalid focused mode: {error}"),
-    }
-    true
-}
-
-fn focused_checkpoint_case(name: &str) -> FocusedCheckpoint {
-    match name {
-        FOCUSED_CAPTURE => FocusedCheckpoint::Capture,
-        FOCUSED_PREPARE => FocusedCheckpoint::Prepare,
-        _ => panic!("focused mode requires one exact approved case"),
-    }
-}
-
-fn focused_checkpoint_selection() -> FocusedSelection {
-    if !focused_checkpoint_mode() {
-        return FocusedSelection::Disabled;
-    }
-    // Only closed benchmark selectors use these arguments; argv[0] is not an identity.
-    // Validate every argument before skipping argv[0], matching env::args on invalid UTF-8.
-    let args = std::env::args_os() // nosemgrep: args-os
-        .map(|argument| {
-            argument
-                .into_string()
-                .expect("benchmark arguments must be UTF-8")
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .skip(1)
-        .collect::<Vec<_>>();
-    match args.as_slice() {
-        [flag] if flag == "--list" => FocusedSelection::List,
-        [name, exact, bench] if exact == "--exact" && bench == "--bench" => {
-            FocusedSelection::Probe(focused_checkpoint_case(name))
-        }
-        _ => panic!("focused mode accepts --list or <approved-case> --exact --bench"),
-    }
-}
-
-fn focused_checkpoint(
-    c: &mut Criterion,
-    runtime: &tokio::runtime::Runtime,
-    selected: FocusedSelection,
-) {
-    if let FocusedSelection::Probe(selected) = selected {
-        runtime.block_on(focused_checkpoint_probe(selected));
-    }
-    let mut group = c.benchmark_group("join");
-    group.sample_size(30);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(2));
-    capture_dirty_scenario(&mut group, runtime, 17_500);
-    prepare_compact_scenario(&mut group, runtime);
-    let (rss, hwm) = read_rss();
-    println!("JOIN_PERF_RSS rss_kib={rss} hwm_kib={hwm}");
-    group.finish();
-}
-
-async fn focused_checkpoint_probe(selected: FocusedCheckpoint) {
-    match selected {
-        FocusedCheckpoint::Capture => {
-            let (mut operator, next_epoch) = dirty_operator(17_500, 1_250).await;
-            let status = operator.status();
-            assert_eq!(status.left.retained_rows, 8_753);
-            assert_eq!(status.right.retained_rows, 8_753);
-            assert_eq!(status.emitted_match_rows, 0);
-            let snapshot = operator
-                .checkpoint(Epoch::new(next_epoch).unwrap())
-                .unwrap();
-            verify_checkpoint_probe(
-                FOCUSED_CAPTURE,
-                &snapshot,
-                [8_128, 8_128],
-                [8_753, 8_753],
-                &["left", "right"],
-            );
-        }
-        FocusedCheckpoint::Prepare => focused_prepare_probe().await,
-    }
-}
-
-async fn focused_prepare_probe() {
-    let (mut operator, next_epoch) = armed_operator(60_000).await;
-    let job = job();
-    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-    let batch = make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND);
-    operator
-        .prepare_checkpoint_async(&plain_ctx(&job))
-        .await
-        .unwrap();
-    feed(&mut operator, &job, &mut collector, "left", &batch).await;
-    let status = operator.status();
-    assert_eq!(status.left.retained_rows, 30_503);
-    assert_eq!(status.right.retained_rows, 30_003);
-    assert_eq!(status.emitted_match_rows, 0);
-    let snapshot = operator
-        .checkpoint(Epoch::new(next_epoch).unwrap())
-        .unwrap();
-    verify_checkpoint_probe(
-        FOCUSED_PREPARE,
-        &snapshot,
-        [30_003, 30_003],
-        [30_503, 30_003],
-        &["left"],
-    );
-}
-
-fn verify_checkpoint_probe(
-    case: &str,
-    snapshot: &OperatorStateSnapshot,
-    base_rows: [u64; 2],
-    retained_rows: [u64; 2],
-    delta_sides: &[&str],
-) {
-    let metadata = &snapshot.inline_metadata;
-    let layout = metadata["layout_version"].as_u64().expect("integer layout");
-    assert_eq!(metadata["epoch"].as_u64(), Some(5));
-    assert_eq!(metadata["ended"].as_bool(), Some(false));
-    assert_eq!(metadata["metrics"]["emitted_match_rows"].as_u64(), Some(0));
-    for (side, name) in ["left", "right"].into_iter().enumerate() {
-        assert_eq!(
-            metadata["metrics"][name]["retained_rows"].as_u64(),
-            Some(retained_rows[side]),
-        );
-        let bytes = snapshot.segments[&format!("{name}-base")].bytes();
-        verify_populated_base(bytes, layout, u8::try_from(side).unwrap(), base_rows[side]);
-    }
-    if layout == 2 {
-        let inventory = &metadata["v2_inventory"];
-        assert_eq!(inventory["codec_version"].as_u64(), Some(2));
-        assert_eq!(inventory["base_epoch"].as_u64(), Some(4));
-        assert_eq!(
-            inventory["deltas"],
-            serde_json::json!([{"epoch": 5, "sides": delta_sides}]),
-        );
-    }
-    verify_delta_names(snapshot, delta_sides);
-    let base_epoch = metadata
-        .get("v2_inventory")
-        .map(|inventory| &inventory["base_epoch"]);
-    println!(
-        "JOIN_PERF_FOCUSED_PROBE {}",
-        serde_json::json!({
-            "case": case,
-            "layout_version": layout,
-            "capture_epoch": 5,
-            "base_epoch": base_epoch,
-            "base_rows": base_rows,
-            "retained_rows": retained_rows,
-            "delta_sides": delta_sides,
-            "emitted_match_rows": 0,
-            "populated_base_verified": true,
-        }),
-    );
-}
-
-fn verify_populated_base(bytes: &[u8], layout: u64, side: u8, expected_rows: u64) {
-    assert!(
-        expected_rows > 0,
-        "focused workload must have populated bases"
-    );
-    match layout {
-        1 => {
-            assert_eq!(bytes.get(..8), Some(&b"CFJOIN1\0"[..]));
-            assert_eq!(frame_u64(bytes, 8), expected_rows);
-        }
-        2 => {
-            assert_eq!(bytes.get(..8), Some(&b"CFJIDX2\0"[..]));
-            assert_eq!(bytes.get(8..12), Some(&2_u32.to_le_bytes()[..]));
-            assert_eq!(bytes.get(12..16), Some(&[side, 0, 0, 0][..]));
-            assert_eq!(frame_u64(bytes, 16), expected_rows);
-            assert_eq!(frame_u64(bytes, 24), 0);
-        }
-        _ => panic!("unsupported focused checkpoint layout {layout}"),
-    }
-}
-
-fn frame_u64(bytes: &[u8], offset: usize) -> u64 {
-    let encoded = bytes
-        .get(offset..offset + 8)
-        .expect("truncated base header");
-    u64::from_le_bytes(encoded.try_into().expect("eight-byte integer"))
-}
-
-fn verify_delta_names(snapshot: &OperatorStateSnapshot, sides: &[&str]) {
-    let actual = snapshot
-        .segments
-        .keys()
-        .filter(|name| name.contains("-delta-"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let expected = sides
-        .iter()
-        .map(|side| format!("{side}-delta-5"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        actual, expected,
-        "prepared cut must carry only the new dirty epoch"
-    );
-}
-
 fn baseline(c: &mut Criterion) {
-    let focused = focused_checkpoint_selection();
+    assert!(
+        std::env::var_os("CALC_FLOW_JOIN_PERF_FOCUSED").is_none(),
+        "the focused base-plus-delta checkpoint workloads have been retired"
+    );
     println!("JOIN_PERF_PROVENANCE {}", provenance());
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    if !matches!(focused, FocusedSelection::Disabled) {
-        focused_checkpoint(c, &runtime, focused);
-        return;
-    }
     let batches = ScenarioBatches::new();
     run_probe(&runtime, &batches);
 
@@ -579,8 +254,6 @@ fn baseline(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(2));
     handler_scenarios(&mut group, &runtime, &batches);
     checkpoint_scenarios(&mut group, &runtime, &batches);
-    compaction_scenarios(&mut group, &runtime);
-    restore_scenarios(&mut group, &runtime);
     let (rss, hwm) = read_rss();
     println!("JOIN_PERF_RSS rss_kib={rss} hwm_kib={hwm}");
     group.finish();
@@ -668,64 +341,6 @@ fn run_probe(runtime: &tokio::runtime::Runtime, batches: &ScenarioBatches) {
         );
 
         check_pairs(&mut collector, &batches.left_fan, &batches.right_fan, ROWS / FAN_KEYS);
-    });
-}
-
-// These historical workloads specifically require a compacted base and delta segments.
-fn check_legacy_compaction(runtime: &tokio::runtime::Runtime) {
-    static VERIFIED: Once = Once::new();
-    if focused_checkpoint_mode() {
-        return; // The focused selector already verified its own exact workload.
-    }
-    VERIFIED.call_once(|| {
-        runtime.block_on(async {
-            let job = job();
-            // Fail-closed self-checks require checkpoint preparation to compact
-            // the armed operator; dirty_operator must already carry that base.
-            let (mut armed, next_epoch) = armed_operator(20_000).await;
-            armed
-                .prepare_checkpoint_async(&plain_ctx(&job))
-                .await
-                .unwrap();
-            let mut collector = EdgeCollector::new(armed.output_ports().to_vec());
-            feed(
-                &mut armed,
-                &job,
-                &mut collector,
-                "left",
-                &make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND),
-            )
-            .await;
-            let snapshot = armed.checkpoint(Epoch::new(next_epoch).unwrap()).unwrap();
-            assert!(
-                snapshot.segments.contains_key("left-base"),
-                "harness self-check failed: checkpoint preparation did not compact; segments: {:?}",
-                snapshot.segments.keys().collect::<Vec<_>>()
-            );
-            let (mut compacted, next_epoch) = dirty_operator(20_000, 1_250).await;
-            let snapshot = compacted
-                .checkpoint(Epoch::new(next_epoch).unwrap())
-                .unwrap();
-            assert!(
-                snapshot.segments.contains_key("left-base"),
-                "harness self-check failed: setup compaction missing; segments: {:?}",
-                snapshot.segments.keys().collect::<Vec<_>>()
-            );
-            let bytes: u64 = snapshot
-                .segments
-                .values()
-                .map(|segment| segment.bytes().len() as u64)
-                .sum();
-            println!(
-                "JOIN_PERF_PROBE snapshot_20k segments={} encoded_bytes={bytes}",
-                snapshot
-                    .segments
-                    .keys()
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(",")
-            );
-        })
     });
 }
 
@@ -858,130 +473,6 @@ fn checkpoint_scenarios(
             }
         });
     });
-
-    // Capture independence canary (DAL-160): equal dirty cardinality (1,250
-    // rows) at two retained state scales. The capture cost must track the
-    // dirty set — before the FR47 fix it grew linearly with total state.
-    for total_rows in [17_500_usize, 62_500] {
-        capture_dirty_scenario(group, runtime, total_rows);
-    }
-}
-
-fn capture_dirty_scenario(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &tokio::runtime::Runtime,
-    total_rows: usize,
-) {
-    let name = format!("checkpoint/capture_dirty_1250_base_{total_rows}");
-    group.bench_function(name, |b| {
-        check_legacy_compaction(runtime);
-        b.to_async(runtime).iter_custom(|iters| {
-            Box::pin(async move {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let (mut operator, next_epoch) = dirty_operator(total_rows, 1_250).await;
-                    let start = Instant::now();
-                    operator
-                        .checkpoint(Epoch::new(next_epoch).unwrap())
-                        .unwrap();
-                    total += start.elapsed();
-                }
-                total
-            })
-        });
-    });
-}
-
-fn prepare_compact_scenario(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &tokio::runtime::Runtime,
-) {
-    group.bench_function("checkpoint/prepare_then_left_500_compact_60k", |b| {
-        check_legacy_compaction(runtime);
-        b.to_async(runtime).iter_custom(|iters| {
-            Box::pin(async move {
-                let job = job();
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let (mut operator, _) = armed_operator(60_000).await;
-                    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-                    let batch = Arc::new(make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND));
-                    let start = Instant::now();
-                    operator
-                        .prepare_checkpoint_async(&plain_ctx(&job))
-                        .await
-                        .unwrap();
-                    operator
-                        .process_data("left", (*batch).clone(), &plain_ctx(&job), &mut collector)
-                        .await
-                        .unwrap();
-                    total += start.elapsed();
-                }
-                total
-            })
-        });
-    });
-}
-
-/// Checkpoint preparation plus a 500-row handler, with an armed 60k-row
-/// compaction or an already-compacted control. Both time the same lifecycle.
-fn compaction_scenarios(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &tokio::runtime::Runtime,
-) {
-    prepare_compact_scenario(group, runtime);
-
-    group.bench_function("checkpoint/prepare_then_left_500_steady_60k", |b| {
-        check_legacy_compaction(runtime);
-        b.to_async(runtime).iter_custom(|iters| {
-            Box::pin(async move {
-                let job = job();
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let (mut operator, _) = dirty_operator(60_000, 1_250).await;
-                    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
-                    let batch = Arc::new(make_batch(&unique_keys("X", 500), BASE_TS + 3 * SECOND));
-                    let start = Instant::now();
-                    operator
-                        .prepare_checkpoint_async(&plain_ctx(&job))
-                        .await
-                        .unwrap();
-                    operator
-                        .process_data("left", (*batch).clone(), &plain_ctx(&job), &mut collector)
-                        .await
-                        .unwrap();
-                    total += start.elapsed();
-                }
-                total
-            })
-        });
-    });
-}
-
-/// Scenario: full restore — base-plus-delta snapshot at scale.
-fn restore_scenarios(
-    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
-    runtime: &tokio::runtime::Runtime,
-) {
-    for total_rows in [20_000_usize, 60_000] {
-        let name = format!("restore/full_{total_rows}");
-        group.bench_function(name, |b| {
-            check_legacy_compaction(runtime);
-            b.to_async(runtime).iter_custom(|iters| {
-                Box::pin(async move {
-                    let snapshot = full_snapshot(total_rows).await;
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        let mut operator = new_operator();
-                        let start = Instant::now();
-                        operator.restore(&snapshot).unwrap();
-                        total += start.elapsed();
-                    }
-                    total
-                })
-            });
-        });
-    }
 }
 
 criterion_group!(benches, baseline);
