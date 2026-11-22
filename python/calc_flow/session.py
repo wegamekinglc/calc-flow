@@ -175,6 +175,14 @@ class StreamSession(Generic[T]):
         return _datetime_micros(watermark)
 
     def _result(self, emitted: Mapping[str, list[pa.RecordBatch]]) -> T:
+        if len(self._outputs) == 1 and (
+            not self._table_output or self._outputs[0][0] == "result"
+        ):
+            name, physical = self._outputs[0]
+            batches = emitted.get(physical)
+            table = pa.Table.from_batches(batches) if batches else self._empty[name]
+            return cast(T, table if self._table_output else {name: table})
+
         tables: dict[str, pa.Table] = {}
         by_physical: dict[str, pa.Table] = {}
         for name, physical in self._outputs:
