@@ -782,18 +782,19 @@ snapshot and probes both keys from the opposite side. The right-input handler
 timers cover that input's `process_data` call. Preflight runs outside those
 timers and supports the current native join snapshot layout 12.
 
-The historical `checkpoint/prepare_then_left_500_{compact,steady}_60k`,
-`checkpoint/capture_dirty_1250_base_*` and `restore/full_*` cases require
-the former base-plus-delta writer. Their preflight checks for the legacy
-segment layout when a case is executed. Discovery can list these cases on a
-native build, but selecting one fails the legacy fixture check; a full sweep
-on such a build includes unsupported cases. The prepare cases time asynchronous
-checkpoint preparation followed by the 500-row handler, with fixture
-construction, capture and restore outside timing. The adapter compiles the
-same declared lifecycle harness against both exact product revisions in owned
-build clones, leaving the supplied checkouts unchanged. Provenance retains the original bench
-digest, the effective measured harness digest, both product and harness revisions,
-and compiled dependencies. The former pure-handler case IDs are retired.
+The shared Criterion inventory contains the four handlers and
+`checkpoint/capture_dirty_20k`, which times the first capture of 20,000
+dirty rows. The v2 base-plus-delta writer supplied two
+`capture_dirty_1250_base_*`, two `prepare_then_left_500_*` and two
+`restore/full_*` series. Their published samples keep their original definitions.
+The historical `CALC_FLOW_JOIN_PERF_FOCUSED` selector reports an error.
+
+For the native writer, `--native-component join_capture_restore_1m`
+records preparation, capture and restore separately. `join_compaction_1m`
+checks stable pages and continued results after recovery. Both require
+`benchmark-internals` and have independent workload identities. Release
+comparisons compile the same shared Criterion inventory against each product
+revision and retain both original harness digests.
 
 ### Join/ASOF acceptance measurement controls (#428)
 
