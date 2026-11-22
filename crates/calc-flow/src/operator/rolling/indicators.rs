@@ -36,8 +36,16 @@ pub(super) use storage::StateOwner;
 pub(super) fn initial_state(
     compiled: &super::CompiledRollingSpec,
     node: &str,
+    input_schema: &Schema,
 ) -> Result<(StateOwner, Option<Resources>)> {
-    if compiled.indicator_groups.is_empty() || compiled.kernel_plan.supports_slab() {
+    let flat_input = input_schema.fields().iter().all(|field| {
+        field.data_type().primitive_width().is_some()
+            || matches!(
+                field.data_type(),
+                DataType::Utf8 | DataType::Binary | DataType::LargeUtf8 | DataType::LargeBinary
+            )
+    });
+    if compiled.indicator_groups.is_empty() || compiled.kernel_plan.supports_slab() && flat_input {
         return Ok((
             StateOwner::new(super::RollingStreamState::default(), false),
             None,

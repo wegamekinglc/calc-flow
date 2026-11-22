@@ -1381,7 +1381,8 @@ impl RollingOperator {
         let output_schema = Arc::new(output_schema(&input_schema, &compiled.outputs));
         let output_ports =
             super::late_output::output_ports(spec.late_policy, &input_schema, output_schema)?;
-        let (state, indicator_resources) = indicators::initial_state(&compiled, name)?;
+        let (state, indicator_resources) =
+            indicators::initial_state(&compiled, name, &input_schema)?;
         Ok(Self {
             name: name.into(),
             spec,
@@ -1397,7 +1398,9 @@ impl RollingOperator {
                 indicator_resources.as_ref(),
             ),
             checkpoint_pending: indicators::pending_for_layout(compiled.state_layout_version, name),
-            state_layout_version: if compiled.kernel_plan.supports_slab() {
+            state_layout_version: if indicator_resources.is_none()
+                && compiled.kernel_plan.supports_slab()
+            {
                 ROLLING_STATE_TABLE_LAYOUT_VERSION
             } else {
                 compiled.state_layout_version
@@ -1775,9 +1778,7 @@ impl StreamOperator for RollingOperator {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if self.indicator_resources.is_some() {
-            context.check_cancelled()?;
-        }
+        context.check_cancelled()?;
         let checkpoint_guard = self.try_native_checkpoint_guard(context.operator_id())?;
         let observer = context.rolling_metrics();
         let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
