@@ -641,14 +641,19 @@ impl RunCore {
             &compiled.right_key_indices
         };
         #[cfg(feature = "benchmark-internals")]
-        let route_span =
+        let mut route_span =
             context
                 .job()
                 .join_cpu_trace()
                 .stage(&operator.name, "run_route", admitted.len());
-        let incoming = route(admitted, key_indices, &mut self.keys, &mut || {
-            context.check_cancelled()
-        })?;
+        let incoming = route(
+            admitted,
+            key_indices,
+            &mut self.keys,
+            &mut || context.check_cancelled(),
+            #[cfg(feature = "benchmark-internals")]
+            route_span.units(),
+        )?;
         #[cfg(feature = "benchmark-internals")]
         drop(route_span);
         let output = RunOutputContext::new(
@@ -853,16 +858,16 @@ fn route(
     key_indices: &[usize],
     keys: &mut KeyStore,
     check: &mut dyn FnMut() -> Result<()>,
+    #[cfg(feature = "benchmark-internals")] mut visits: Option<&mut usize>,
 ) -> Result<Vec<Incoming>> {
     (0..admitted.len())
         .step_by(MORSEL_ROWS)
         .map(|start| {
             let end = (start + MORSEL_ROWS).min(admitted.len());
-            let rows = admitted
-                .iter()
-                .skip(start)
-                .take(end - start)
-                .collect::<Vec<_>>();
+            let iter = admitted.iter();
+            #[cfg(feature = "benchmark-internals")]
+            let iter = iter.count_visits(visits.as_deref_mut());
+            let rows = iter.skip(start).take(end - start).collect::<Vec<_>>();
             let payload = morsel(&rows)?;
             let times = rows.iter().map(|row| row.event_time).collect();
             let row_ids = rows.iter().map(|row| row.row_id).collect::<Vec<_>>();
@@ -957,6 +962,92 @@ mod tests {
     use super::*;
     use crate::operator::join::PayloadRef;
     use datafusion::arrow::array::{Array, ArrayRef, Int64Array};
+
+    #[cfg(feature = "benchmark-internals")]
+    #[tokio::test]
+    async fn run_route_trace_counts_admitted_row_visits_across_morsels() {
+        use crate::{
+            CancellationToken, EdgeCollector, JoinStateLimits, JoinTimeBounds, OperatorMetadata,
+            StreamJobContext, StreamJoinSpec, StreamOperator,
+        };
+        use std::time::Duration;
+
+        let rows = 2 * MORSEL_ROWS + 1;
+        let record = |ordinals: Vec<i64>| {
+            let len = ordinals.len();
+            RecordBatch::try_from_iter([
+                ("key", Arc::new(Int64Array::from(vec![1; len])) as ArrayRef),
+                (
+                    "ts",
+                    Arc::new(TimestampMicrosecondArray::from(vec![0; len])) as ArrayRef,
+                ),
+                ("ordinal", Arc::new(Int64Array::from(ordinals)) as ArrayRef),
+            ])
+            .unwrap()
+        };
+        let ordinals = (0..i64::try_from(rows).unwrap()).rev().collect::<Vec<_>>();
+        let left = record(ordinals.clone());
+        let right = record(vec![42]);
+        let spec = StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "ts",
+            "ts",
+            JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
+            JoinStateLimits::new(20_000, 64 << 20, 20_000).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("probe", left.schema(), right.schema(), spec).unwrap();
+        operator.set_output_projection(vec![2, 5]).unwrap();
+        operator.enable_run_core();
+        let job =
+            StreamJobContext::new(1, "trace", BTreeMap::new(), None, CancellationToken::new())
+                .with_checkpointing(false);
+        let trace = job.join_cpu_trace();
+        trace.start(1, "trace").unwrap();
+        trace.mark("ready_timer_start").unwrap();
+        let context = StreamOperatorContext::new(&job, "probe", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, input) in [("right", right), ("left", left)] {
+            let batch = Batch::table(vec![input], BatchMetadata::default()).unwrap();
+            operator
+                .process_data(side, batch, &context, &mut output)
+                .await
+                .unwrap();
+        }
+        trace.mark("ready_timer_end").unwrap();
+
+        let messages = output.drain("output");
+        let records = messages.iter().flat_map(|message| {
+            message
+                .as_data()
+                .unwrap()
+                .table_payload()
+                .unwrap()
+                .batches()
+        });
+        let schema = operator.output_ports()[0].schema().unwrap();
+        let result = datafusion::arrow::compute::concat_batches(schema, records).unwrap();
+        assert_eq!(result.num_columns(), 2);
+        assert_eq!(result.column(0).as_ref(), &Int64Array::from(ordinals));
+        assert_eq!(result.column(1).as_ref(), &Int64Array::from(vec![42; rows]));
+
+        let capture = trace.take().unwrap();
+        let visits = capture["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["stage"] == "run_route")
+            .map(|event| {
+                (
+                    event["rows"].as_u64().unwrap(),
+                    event["units"].as_u64().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(visits, [(1, 1), (8193, 20481)]);
+    }
 
     #[test]
     fn morsel_shares_dense_source_buffers() {

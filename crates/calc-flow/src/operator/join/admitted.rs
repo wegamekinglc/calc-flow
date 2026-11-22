@@ -884,6 +884,8 @@ impl<'a> AdmittedCursor<'a> {
 
 pub(super) struct RowIter<'a> {
     rows: &'a dyn AdmittedRows,
+    #[cfg(feature = "benchmark-internals")]
+    visits: Option<&'a mut usize>,
     range: Range<usize>,
     #[cfg(test)]
     view: Option<GroupView<'a>>,
@@ -892,12 +894,24 @@ impl<'a> RowIter<'a> {
     fn new(rows: &'a dyn AdmittedRows, range: Range<usize>) -> Self {
         Self {
             rows,
+            #[cfg(feature = "benchmark-internals")]
+            visits: None,
             range,
             #[cfg(test)]
             view: None,
         }
     }
+    #[cfg(feature = "benchmark-internals")]
+    pub(super) fn count_visits(mut self, visits: Option<&'a mut usize>) -> Self {
+        self.visits = visits;
+        self
+    }
+
     fn row(&mut self, position: usize) -> AdmittedRef<'a> {
+        #[cfg(feature = "benchmark-internals")]
+        if let Some(visits) = self.visits.as_deref_mut() {
+            *visits = visits.saturating_add(1);
+        }
         #[cfg(test)]
         if !self.view.is_some_and(|view| view.contains(position)) {
             self.view = self.rows.group_view(position);
@@ -981,9 +995,8 @@ impl<'a> AdmittedGroup<'a> {
     }
     pub(super) fn iter(&self) -> RowIter<'a> {
         RowIter {
-            rows: self.rows,
-            range: self.start..self.end,
             view: self.view,
+            ..RowIter::new(self.rows, self.start..self.end)
         }
     }
     pub(super) fn key_offsets(&self) -> Box<dyn Iterator<Item = (usize, bool)> + Send + '_> {
