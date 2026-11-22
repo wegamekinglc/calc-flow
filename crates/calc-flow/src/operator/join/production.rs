@@ -494,12 +494,20 @@ impl RunCore {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        if self
+        let requires_generic = self
             .hot
             .as_ref()
-            .is_some_and(|hot| hot.needs_migration(ingress))
+            .is_some_and(|hot| hot.requires_generic(ingress));
+        if requires_generic
+            || self
+                .hot
+                .as_ref()
+                .is_some_and(|hot| hot.needs_migration(ingress))
         {
             self.migrate_hot(operator)?;
+            if requires_generic {
+                self.hot = None;
+            }
         }
         #[cfg(feature = "benchmark-internals")]
         let admit_span =

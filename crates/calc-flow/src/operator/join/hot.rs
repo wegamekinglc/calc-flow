@@ -105,6 +105,10 @@ impl HotJoinCore {
         self.left.is_some() || self.right.is_some()
     }
 
+    pub(super) fn requires_generic(&self, ingress: &str) -> bool {
+        matches!(self.kind, HotKind::Band) || ingress == "right"
+    }
+
     pub(super) fn needs_migration(&self, ingress: &str) -> bool {
         self.completed
             || ingress == "left" && self.left.is_some()
@@ -1331,10 +1335,53 @@ mod tests {
             }
             assert_eq!(operator.state.metrics.emitted_match_rows, 1);
             let core = operator.run_core.as_ref().unwrap();
-            assert!(core.hot_enabled());
-            assert_eq!(core.rows(JoinSide::Left), 0);
-            assert_eq!(core.rows(JoinSide::Right), 0);
+            assert!(!core.hot_enabled());
+            assert_eq!(core.rows(JoinSide::Left), 2);
+            assert_eq!(core.rows(JoinSide::Right), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn hot_static_right_input_uses_ingress_order() {
+        let mut operator = static_operator(false);
+        let (left, _) = static_inputs();
+        let left = RecordBatch::try_new(
+            left.schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![1_000_000; 2]).with_timezone("UTC")),
+                left.column(1).clone(),
+                left.column(2).clone(),
+                left.column(3).clone(),
+            ],
+        )
+        .unwrap();
+        let right = static_right_history();
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let context = hot_context(&job);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for (side, record) in [("left", left), ("right", right)] {
+            operator
+                .process_data(
+                    side,
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            static_pairs(&collector.drain("output"), false),
+            [(0, 4.0), (1, 6.0), (0, 4.0), (1, 6.0)]
+        );
+        assert!(!operator.run_core.as_ref().unwrap().hot_enabled());
     }
 
     fn band_spec() -> StreamJoinSpec {
@@ -1517,13 +1564,13 @@ mod tests {
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .unwrap();
-                assert_eq!(left.values(), &[2.0, 2.0, 3.0, 3.0]);
+                assert_eq!(left.values(), &[2.0, 3.0, 2.0, 3.0]);
                 let right = record
                     .column(record.schema().index_of("right__price").unwrap())
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .unwrap();
-                assert_eq!(right.values(), &[2.0, 3.0, 2.0, 3.0]);
+                assert_eq!(right.values(), &[2.0, 2.0, 3.0, 3.0]);
             }
             let right_sequence_name = if fused {
                 "right_sequence"
@@ -1535,9 +1582,9 @@ mod tests {
                 .as_any()
                 .downcast_ref::<UInt64Array>()
                 .unwrap();
-            assert_eq!(right_sequence.values(), &[0, 1, 0, 1]);
+            assert_eq!(right_sequence.values(), &[0, 0, 1, 1]);
             assert_eq!(operator.state.metrics.emitted_match_rows, 4);
-            assert!(operator.run_core.as_ref().unwrap().hot_enabled());
+            assert!(!operator.run_core.as_ref().unwrap().hot_enabled());
         }
     }
 
@@ -1606,7 +1653,7 @@ mod tests {
         }
         let messages = collector.drain("output");
         assert_eq!(messages.len(), 3);
-        assert_eq!(messages[0].as_data().unwrap().num_rows(), 65_536);
+        assert_eq!(messages[0].as_data().unwrap().num_rows(), 64_000);
         assert_eq!(
             messages
                 .iter()

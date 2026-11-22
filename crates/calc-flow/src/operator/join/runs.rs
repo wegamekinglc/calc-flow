@@ -1161,24 +1161,22 @@ impl RunState {
         let mut prepared = Vec::<Prepared>::new();
         let mut runs = Vec::new();
         for incoming in incoming {
-            let next = self.prepare(incoming_side, incoming, RunId(next_run), &output, check)?;
+            let next = self.prepare(
+                incoming_side,
+                incoming,
+                RunId(next_run),
+                &output,
+                check,
+                &mut matches,
+            )?;
             if let Some(run) = &next.run {
                 next_run = next_run
                     .checked_add(1)
                     .ok_or_else(|| run_error("run-ID frontier overflowed"))?;
                 runs.push(Arc::clone(run));
             }
-            matches = matches
-                .checked_add(next.probe.len())
-                .ok_or_else(|| run_error("input batch match count overflowed"))?;
             prepared.push(next);
         }
-        super::enforce_match_limit(
-            matches,
-            &mut self.match_limit_failures,
-            self.limits.max_matches_per_input_batch(),
-            &self.name,
-        )?;
         #[cfg(feature = "benchmark-internals")]
         let merge_span = output.trace.map(|trace| {
             trace.stage(
@@ -1236,6 +1234,7 @@ impl RunState {
         id: RunId,
         output: &RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
+        matches: &mut usize,
     ) -> Result<Prepared> {
         check()?;
         #[cfg(not(feature = "benchmark-internals"))]
@@ -1247,7 +1246,7 @@ impl RunState {
         let probe_span = output
             .trace
             .map(|trace| trace.stage(&self.name, "run_probe", incoming.len()));
-        let probe = self.probe(incoming_side, &incoming, check)?;
+        let probe = self.probe(incoming_side, &incoming, check, matches)?;
         #[cfg(feature = "benchmark-internals")]
         drop(probe_span);
         #[cfg(feature = "benchmark-internals")]
@@ -1272,9 +1271,11 @@ impl RunState {
         incoming_side: JoinSide,
         incoming: &Incoming,
         check: &mut dyn FnMut() -> Result<()>,
+        matches: &mut usize,
     ) -> Result<Probe> {
         check()?;
-        let opposite = &self.sides[opposite(incoming_side).index()];
+        let opposite_index = opposite(incoming_side).index();
+        let opposite = &self.sides[opposite_index];
         let mut cursors = Vec::<Option<WindowCursor>>::new();
         let mut bounds = Vec::with_capacity(incoming.len());
         let mut count = 0usize;
@@ -1302,6 +1303,17 @@ impl RunState {
                 .ok_or_else(|| run_error("match count overflowed"))?;
             bounds.push(found);
         }
+        let _ = opposite;
+        *matches = matches
+            .checked_add(count)
+            .ok_or_else(|| run_error("input batch match count overflowed"))?;
+        super::enforce_match_limit(
+            *matches,
+            &mut self.match_limit_failures,
+            self.limits.max_matches_per_input_batch(),
+            &self.name,
+        )?;
+        let opposite = &self.sides[opposite_index];
         let mut selection = Selection::with_capacity(count, incoming.len());
         let mut selected = Vec::with_capacity(count);
         let mut runs = Vec::<Option<Arc<Run>>>::new();
