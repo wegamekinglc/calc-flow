@@ -222,3 +222,28 @@ async fn test_indicator_side_output_preparation_error_neither_emits_nor_poisons(
     assert_eq!(main.len(), 1);
     assert_eq!(values(main[0].as_data().unwrap(), "rsi"), [None]);
 }
+
+#[tokio::test]
+async fn test_indicator_side_output_ordered_input_rejects_non_finite_price() {
+    let mut operator = operator();
+    let job = StreamJobContext::new(
+        24,
+        "a".repeat(64),
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "features", Some(EventTime::from_micros(11)));
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    let error = operator
+        .process_data(
+            "input",
+            input(&[(12, f64::INFINITY)]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("finite non-missing"), "{error}");
+    assert!(output.drain("late").is_empty());
+}

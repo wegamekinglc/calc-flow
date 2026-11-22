@@ -215,10 +215,11 @@ impl RollingOperator {
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         let validation = observer.map(|recorder| recorder.stage(RollingStage::InputValidation));
         let on_time = self.wholly_on_time(record, watermark)?;
-        drop(validation);
         if !on_time {
             return Ok(None);
         }
+        self.validate_indicator_record(record)?;
+        drop(validation);
         self.compiled
             .kernel_plan
             .ordered_stream_bounds(record, &self.name, observer)
