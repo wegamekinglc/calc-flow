@@ -1443,7 +1443,7 @@ fn temporary_artifact_oracle_covers_state_manifest_and_both_sinks() {
     std::fs::write(state_staging.join("segment.tmp"), b"temporary state").unwrap();
     std::fs::write(state_committed.join("segment.segment"), b"durable state").unwrap();
     std::fs::write(
-        manifest_root.join("manifest-00000000000000000001.json"),
+        manifest_root.join("epoch-00000000000000000001.json"),
         b"durable manifest",
     )
     .unwrap();
