@@ -29,6 +29,14 @@ fn declarations() -> Value {
     ])
 }
 
+fn legacy_declarations() -> Value {
+    let mut outputs = declarations();
+    outputs.as_array_mut().unwrap().push(json!({
+        "kind":"lag","primitive_version":1,"input":"price","output":"previous","periods":1
+    }));
+    outputs
+}
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new(
@@ -63,7 +71,7 @@ fn input() -> Batch {
 }
 
 #[test]
-fn test_indicator_declarations_roundtrip_and_require_layout_five() {
+fn test_indicator_declarations_roundtrip_and_typed_writer_layout() {
     let value = document(&declarations());
     let spec: RollingSpec = serde_json::from_value(value.clone()).unwrap();
     assert_eq!(serde_json::to_value(&spec).unwrap(), value);
@@ -71,7 +79,7 @@ fn test_indicator_declarations_roundtrip_and_require_layout_five() {
         RollingOperator::new("features", schema(), spec)
             .unwrap()
             .state_layout_version(),
-        5
+        7
     );
     let mut old = value;
     old["state_layout_version"] = json!(4);
@@ -223,9 +231,9 @@ async fn test_numerical_failure_preserves_pending_rows_for_whole_finalization_ca
 }
 
 #[tokio::test]
-async fn test_finite_indicator_peak_budget_covers_candidate_and_output() {
+async fn test_finite_legacy_indicator_peak_budget_covers_candidate_and_output() {
     use calc_flow::StateBudget;
-    let spec = serde_json::from_value(document(&declarations())).unwrap();
+    let spec = serde_json::from_value(document(&legacy_declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     operator
         .set_state_budget(StateBudget::new(128, 512).unwrap())
@@ -253,7 +261,7 @@ fn slice_input(offset: usize, length: usize) -> Batch {
 }
 
 #[tokio::test]
-async fn test_layout_five_restores_full_indicator_prefix_in_new_operator() {
+async fn test_indicator_snapshot_restores_full_prefix_in_new_operator() {
     use calc_flow::{
         CancellationToken, EdgeCollector, Epoch, EventTime, JsonMap, OperatorMetadata,
         StreamJobContext, StreamOperator, StreamOperatorContext,
@@ -280,6 +288,7 @@ async fn test_layout_five_restores_full_indicator_prefix_in_new_operator() {
     output.drain("output");
     first.prepare_checkpoint_async(&context).await.unwrap();
     let snapshot = first.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    assert_eq!(snapshot.inline_metadata["state_layout_version"], json!(7));
     assert_eq!(
         snapshot.segments.len(),
         1,
@@ -316,12 +325,12 @@ async fn test_layout_five_restores_full_indicator_prefix_in_new_operator() {
 }
 
 #[tokio::test]
-async fn test_finalization_peak_rejection_preserves_pending_rows_for_retry() {
+async fn test_legacy_finalization_peak_rejection_preserves_pending_rows_for_retry() {
     use calc_flow::{
         CancellationToken, EdgeCollector, JsonMap, OperatorMetadata, StateBudget, StreamJobContext,
         StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(&declarations())).unwrap();
+    let spec = serde_json::from_value(document(&legacy_declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     operator
         .set_state_budget(StateBudget::new(128, 4096).unwrap())
@@ -357,12 +366,12 @@ async fn test_finalization_peak_rejection_preserves_pending_rows_for_retry() {
 }
 
 #[tokio::test]
-async fn test_indicator_capture_credit_survives_reset_until_last_snapshot_owner_drops() {
+async fn test_legacy_indicator_capture_credit_survives_reset_until_last_snapshot_owner_drops() {
     use calc_flow::{
         CancellationToken, EdgeCollector, Epoch, JsonMap, OperatorMetadata, StateBudget,
         StreamJobContext, StreamOperator, StreamOperatorContext,
     };
-    let spec: RollingSpec = serde_json::from_value(document(&declarations())).unwrap();
+    let spec: RollingSpec = serde_json::from_value(document(&legacy_declarations())).unwrap();
     let budget = {
         let mut empty = RollingOperator::new("features", schema(), spec.clone()).unwrap();
         let (mut rejected, mut accepted) = (0, StateBudget::default().max_bytes());
@@ -414,12 +423,12 @@ async fn test_indicator_capture_credit_survives_reset_until_last_snapshot_owner_
 }
 
 #[tokio::test]
-async fn test_indicator_capture_requires_preparation_of_current_revision() {
+async fn test_legacy_indicator_capture_requires_preparation_of_current_revision() {
     use calc_flow::{
         CancellationToken, EdgeCollector, Epoch, JsonMap, OperatorMetadata, StreamJobContext,
         StreamOperator, StreamOperatorContext,
     };
-    let spec = serde_json::from_value(document(&declarations())).unwrap();
+    let spec = serde_json::from_value(document(&legacy_declarations())).unwrap();
     let mut operator = RollingOperator::new("features", schema(), spec).unwrap();
     let job = StreamJobContext::new(
         1,
