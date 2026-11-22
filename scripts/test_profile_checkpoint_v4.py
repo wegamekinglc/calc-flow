@@ -129,6 +129,12 @@ class CheckpointV4DirectTests(unittest.TestCase):
         )
         self.assertEqual(result["verdict"], "inconclusive")
 
+    def test_runner_statistics_prioritizes_gate_crossing_over_failure(self):
+        result = paired_runner_statistics(
+            [runner_evidence([0.75] * 10), runner_evidence([0.5] * 10)], 0.75
+        )
+        self.assertEqual(result["verdict"], "inconclusive")
+
     def test_runner_validation_requires_epoch_coverage(self):
         value = runner_evidence([1.0] * 10)
         value["rounds"][0]["pairs"][0]["on"]["completed_nonterminal_epochs"] = 0

@@ -129,15 +129,9 @@ def paired_runner_statistics(
     pooled = paired_summary(all_on, all_off, rows=len(all_on))
     pooled_median = pooled["paired_speedup_median"]
     intervals = [item["on_off_ci95"] for item in per_round]
-    if (
-        any(upper < gate for _, upper in intervals)
-        or pooled_median < gate
-        and all(upper < gate for _, upper in intervals)
-    ):
-        verdict = "failed"
-    elif any(lower <= gate <= upper for lower, upper in intervals):
+    if any(lower <= gate <= upper for lower, upper in intervals):
         verdict = "inconclusive"
-    elif pooled_median < gate:
+    elif any(upper < gate for _, upper in intervals) or pooled_median < gate:
         verdict = "failed"
     else:
         verdict = "passed"
