@@ -13,8 +13,8 @@ use super::{
     ROLLING_INDICATOR_STATE_LAYOUT_VERSION, ROLLING_MACD_STATE_LAYOUT_VERSION, RecordBatch, Result,
     RollingHistories, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
     RollingSnapshotMetadata, RollingStage, RollingWork, RollingWorkBatch, RowIdentity, ScalarValue,
-    Schema, SchemaRef, SegmentDescriptor, Sha256, StateInventory, StateRowOrderKey, TableBatch,
-    UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
+    Schema, SchemaRef, SegmentDescriptor, Sha256, StateBudget, StateInventory, StateRowOrderKey,
+    TableBatch, UInt8Array, UInt64Array, Value, WindowState, checkpoint_mismatch, concat_batches,
     ewma_entity_values, format_error, fresh_windows, history_event_time, internal_error,
     is_valid_sample, kernel, new_null_array, operator_error, state_format, state_v3,
 };
@@ -1068,6 +1068,7 @@ pub(super) fn build_typed_batch_output(
     compiled: &CompiledRollingSpec,
     output_schema: &SchemaRef,
     node_id: &str,
+    budget: StateBudget,
 ) -> Result<Option<RecordBatch>> {
     let input = if let [record] = table.batches() {
         record.clone()
@@ -1091,6 +1092,18 @@ pub(super) fn build_typed_batch_output(
     else {
         return Ok(None);
     };
+    let charge = RollingKernelPlan::execution_charge(&execution.state, node_id)?;
+    if !budget.allows(charge.rows, charge.bytes) {
+        let field = if charge.rows > budget.max_rows() {
+            "max_rows"
+        } else {
+            "max_bytes"
+        };
+        return Err(operator_error(
+            node_id,
+            &format!("rolling.state_budget.{field} exceeded at a retained row prefix"),
+        ));
+    }
     debug_assert_eq!(execution.metrics.input_rows, input.num_rows());
     debug_assert_eq!(execution.metrics.output_rows, input.num_rows());
     let mut columns = input.columns().to_vec();

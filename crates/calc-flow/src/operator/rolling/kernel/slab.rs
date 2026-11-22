@@ -436,6 +436,33 @@ impl RollingKernelPlan {
             .transpose()
     }
 
+    pub(in crate::operator::rolling) fn execution_charge(
+        state: &RollingKernelState,
+        node_id: &str,
+    ) -> Result<StateCharge> {
+        let mut total = if let Some(charge) = Self::slab_charge(state, node_id)? {
+            charge
+        } else {
+            let mut total = StateCharge::default();
+            for (key, &index) in &state.entities {
+                total =
+                    total.checked_add(state.states[index].charge(key.len(), node_id)?, node_id)?;
+            }
+            total
+        };
+        let entities = state
+            .slab
+            .as_ref()
+            .map_or(state.states.len(), StateTable::entity_count);
+        total.rows =
+            total
+                .rows
+                .max(u64::try_from(entities).map_err(|_| {
+                    operator_error(node_id, "rolling entity row charge overflowed")
+                })?);
+        Ok(total)
+    }
+
     pub(in crate::operator::rolling) fn slab_last_identity(
         state: &RollingKernelState,
     ) -> Option<Vec<u8>> {

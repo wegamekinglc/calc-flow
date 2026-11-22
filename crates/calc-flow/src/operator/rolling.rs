@@ -1567,9 +1567,13 @@ impl BatchOperator for RollingOperator {
         let output_schema = self.output_ports[0]
             .schema()
             .expect("rolling output always has an exact schema");
-        let record = if let Some(record) =
-            build_typed_batch_output(table, &self.compiled, output_schema, &self.name)?
-        {
+        let record = if let Some(record) = build_typed_batch_output(
+            table,
+            &self.compiled,
+            output_schema,
+            &self.name,
+            self.state_budget,
+        )? {
             record
         } else {
             let rows = read_buffered_rows(table, &self.compiled, &self.name)?;
