@@ -132,7 +132,10 @@ impl StreamAsofJoinOperator {
     }
 
     fn check_rebuilt_replay(&self, control: &Control) -> Result<()> {
-        if self.status != control.status
+        let mut rebuilt = self.status.clone();
+        rebuilt.state_bytes = control.status.state_bytes;
+        if rebuilt != control.status
+            || self.status.state_bytes > control.status.state_bytes
             || self.terminal != control.terminal
             || self.next_output_sequence != control.next_output_sequence
         {
@@ -338,12 +341,11 @@ fn anchor_metrics(anchor: &Anchor) -> Result<crate::StreamAsofJoinStatus> {
 
 fn valid_replay_metadata(snapshot: &OperatorStateSnapshot) -> bool {
     let metadata = &snapshot.inline_metadata;
-    metadata.len() == 3
+    let state_version = metadata.get("state_version");
+    let expected_fields = if state_version.is_some() { 3 } else { 2 };
+    metadata.len() == expected_fields
+        && state_version.is_none_or(|value| value.as_u64() == Some(3))
         && metadata.get("kind").and_then(serde_json::Value::as_str) == Some("stream_asof_join")
-        && metadata
-            .get("state_version")
-            .and_then(serde_json::Value::as_u64)
-            == Some(3)
         && metadata
             .get("source_replay")
             .and_then(serde_json::Value::as_u64)

@@ -818,7 +818,7 @@ fn assert_replay_cut_segments(cut: usize, segments: &[serde_json::Value]) {
             handle["object_id"]
                 .as_str()
                 .unwrap()
-                .starts_with("asof-log-")
+                .starts_with("asof-columnar-v1-")
         }));
         assert!(!segments.iter().any(|handle| {
             handle["object_id"]
