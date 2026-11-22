@@ -858,16 +858,16 @@ fn route(
     key_indices: &[usize],
     keys: &mut KeyStore,
     check: &mut dyn FnMut() -> Result<()>,
-    #[cfg(feature = "benchmark-internals")] mut visits: Option<&mut usize>,
+    #[cfg(feature = "benchmark-internals")] visits: Option<&mut usize>,
 ) -> Result<Vec<Incoming>> {
-    (0..admitted.len())
-        .step_by(MORSEL_ROWS)
-        .map(|start| {
-            let end = (start + MORSEL_ROWS).min(admitted.len());
-            let iter = admitted.iter();
-            #[cfg(feature = "benchmark-internals")]
-            let iter = iter.count_visits(visits.as_deref_mut());
-            let rows = iter.skip(start).take(end - start).collect::<Vec<_>>();
+    let mut remaining = admitted.iter();
+    #[cfg(feature = "benchmark-internals")]
+    {
+        remaining = remaining.count_visits(visits);
+    }
+    (0..admitted.len().div_ceil(MORSEL_ROWS))
+        .map(|_| {
+            let rows = remaining.by_ref().take(MORSEL_ROWS).collect::<Vec<_>>();
             let payload = morsel(&rows)?;
             let times = rows.iter().map(|row| row.event_time).collect();
             let row_ids = rows.iter().map(|row| row.row_id).collect::<Vec<_>>();
@@ -1009,8 +1009,16 @@ mod tests {
         trace.mark("ready_timer_start").unwrap();
         let context = StreamOperatorContext::new(&job, "probe", None);
         let mut output = EdgeCollector::new(operator.output_ports().to_vec());
-        for (side, input) in [("right", right), ("left", left)] {
-            let batch = Batch::table(vec![input], BatchMetadata::default()).unwrap();
+        let split = MORSEL_ROWS - 1;
+        for (side, records) in [
+            ("right", vec![right]),
+            ("left", vec![left.slice(0, 0)]),
+            (
+                "left",
+                vec![left.slice(0, split), left.slice(split, rows - split)],
+            ),
+        ] {
+            let batch = Batch::table(records, BatchMetadata::default()).unwrap();
             operator
                 .process_data(side, batch, &context, &mut output)
                 .await
@@ -1046,7 +1054,8 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(visits, [(1, 1), (8193, 20481)]);
+        let routed = u64::try_from(rows).unwrap();
+        assert_eq!(visits, [(1, 1), (0, 0), (routed, routed)]);
     }
 
     #[test]
