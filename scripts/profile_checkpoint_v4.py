@@ -112,8 +112,9 @@ def paired_runner_statistics(
     all_on = []
     all_off = []
     for index, evidence in enumerate(rounds, 1):
-        on = [pair["on"]["rows_per_second"] for pair in evidence["pairs"]]
-        off = [pair["off"]["rows_per_second"] for pair in evidence["pairs"]]
+        pairs = evidence["rounds"][0]["pairs"]
+        on = [pair["on"]["rows_per_second"] for pair in pairs]
+        off = [pair["off"]["rows_per_second"] for pair in pairs]
         all_on.extend(on)
         all_off.extend(off)
         summary = paired_summary(on, off, rows=len(on))
@@ -182,7 +183,10 @@ def validate_runner_evidence(
         raise ValueError("runner checkpoint interval differs from its request")
     if evidence.get("seconds") != args.seconds:
         raise ValueError("runner measurement duration differs from its request")
-    pairs = evidence.get("pairs", [])
+    native_rounds = evidence.get("rounds", [])
+    if len(native_rounds) != 1:
+        raise ValueError("runner evidence must contain exactly one native round")
+    pairs = native_rounds[0].get("pairs", [])
     if len(pairs) != args.pairs:
         raise ValueError("runner pair count differs from its request")
     for pair in pairs:
@@ -269,6 +273,7 @@ async def run_runner_round(args: argparse.Namespace, output: Path) -> dict[str, 
         CALC_FLOW_CHECKPOINT_V4_RUNNER_ENTITIES=str(args.entities),
         CALC_FLOW_CHECKPOINT_V4_RUNNER_BATCH_ROWS=str(args.batch_rows),
         CALC_FLOW_CHECKPOINT_V4_RUNNER_CHECKPOINT_MS=str(args.checkpoint_ms),
+        CALC_FLOW_CHECKPOINT_V4_RUNNER_ROUNDS="1",
         CALC_FLOW_CHECKPOINT_V4_RUNNER_PAIRS=str(args.pairs),
         CALC_FLOW_CHECKPOINT_V4_RUNNER_SECONDS=str(args.seconds),
         CALC_FLOW_CHECKPOINT_V4_RUNNER_WARMUPS=str(args.warmups_per_arm_round),

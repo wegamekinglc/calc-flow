@@ -1441,7 +1441,7 @@ fn checkpoint_runner_evidence() {
         .parse::<u64>()
         .unwrap();
     let rounds = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_ROUNDS")
-        .map_or(2, |value| value.parse::<usize>().unwrap());
+        .map_or(1, |value| value.parse::<usize>().unwrap());
     let pairs = std::env::var("CALC_FLOW_CHECKPOINT_V4_RUNNER_PAIRS")
         .expect("set runner pairs")
         .parse::<usize>()
@@ -1462,7 +1462,7 @@ fn checkpoint_runner_evidence() {
     assert_eq!(batch_rows, 6_400);
     assert_eq!(seconds, 5);
     assert_eq!(pairs, 10);
-    assert_eq!(rounds, 2);
+    assert_eq!(rounds, 1);
     assert_eq!(warmups, 1);
     let workload = dual(batch_rows, entities, false);
     let runtime = tokio::runtime::Builder::new_multi_thread()

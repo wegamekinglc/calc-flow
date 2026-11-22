@@ -1,7 +1,7 @@
 {
   "schema": "calc-flow.checkpoint-v4-runner-plan.v1",
   "protocol": "benchmarks/checkpoint-v4/protocol.md M4",
-  "candidate_revision": "1e1a8891",
+  "candidate_revision": "8c76de43",
   "baseline": "checkpoint-off arm inside the same sealed evidence binary",
   "case": "6400x64-dual",
   "connection": "Measure sustained replayable-source Rolling and mean5-mean projection with 100-millisecond periodic checkpoints versus checkpoint-off.",
