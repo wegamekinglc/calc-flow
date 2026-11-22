@@ -47,31 +47,26 @@ def runner_evidence(ratios: list[float]) -> dict:
         "contract": "calc-flow.checkpoint-v4-runner/1",
         "checkpoint_interval_ms": 100,
         "seconds": 5,
-        "rounds": [
+        "pairs": [
             {
-                "round": 1,
-                "pairs": [
-                    {
-                        "on": {
-                            "checkpointing": True,
-                            "accepted_input_rows": 100,
-                            "rows_per_second": ratio,
-                            "completed_nonterminal_epochs": 40,
-                            "checkpoint_objects": 40,
-                            "cleanup_completed": True,
-                        },
-                        "off": {
-                            "checkpointing": False,
-                            "accepted_input_rows": 100,
-                            "rows_per_second": 1.0,
-                            "completed_nonterminal_epochs": 0,
-                            "checkpoint_objects": 0,
-                            "cleanup_completed": True,
-                        },
-                    }
-                    for ratio in ratios
-                ],
+                "on": {
+                    "checkpointing": True,
+                    "accepted_input_rows": 100,
+                    "rows_per_second": ratio,
+                    "completed_nonterminal_epochs": 40,
+                    "checkpoint_objects": 40,
+                    "cleanup_completed": True,
+                },
+                "off": {
+                    "checkpointing": False,
+                    "accepted_input_rows": 100,
+                    "rows_per_second": 1.0,
+                    "completed_nonterminal_epochs": 0,
+                    "checkpoint_objects": 0,
+                    "cleanup_completed": True,
+                },
             }
+            for ratio in ratios
         ],
     }
 
@@ -129,28 +124,16 @@ class CheckpointV4DirectTests(unittest.TestCase):
         )
         self.assertEqual(result["verdict"], "inconclusive")
 
-    def test_runner_statistics_prioritizes_gate_crossing_over_failure(self):
-        result = paired_runner_statistics(
-            [runner_evidence([0.75] * 10), runner_evidence([0.5] * 10)], 0.75
-        )
-        self.assertEqual(result["verdict"], "inconclusive")
-
     def test_runner_validation_requires_epoch_coverage(self):
         value = runner_evidence([1.0] * 10)
-        value["rounds"][0]["pairs"][0]["on"]["completed_nonterminal_epochs"] = 0
+        value["pairs"][0]["on"]["completed_nonterminal_epochs"] = 0
         with self.assertRaisesRegex(ValueError, "coverage"):
             validate_runner_evidence(value, runner_arguments())
 
     def test_runner_validation_rejects_off_checkpoint_objects(self):
         value = runner_evidence([1.0] * 10)
-        value["rounds"][0]["pairs"][0]["off"]["checkpoint_objects"] = 1
+        value["pairs"][0]["off"]["checkpoint_objects"] = 1
         with self.assertRaisesRegex(ValueError, "objects"):
-            validate_runner_evidence(value, runner_arguments())
-
-    def test_runner_validation_rejects_duplicate_native_rounds(self):
-        value = runner_evidence([1.0] * 10)
-        value["rounds"].append(value["rounds"][0])
-        with self.assertRaisesRegex(ValueError, "one native round"):
             validate_runner_evidence(value, runner_arguments())
 
     def test_positive_int_rejects_zero(self):
