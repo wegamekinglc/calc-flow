@@ -205,6 +205,35 @@ Use the normal scheduled collector for complete measurements. A local feature
 measurement still follows the five-case and ten-minute limits in
 [the suite protocol](../docs/benchmark-suite.md#feature-measurement-scope).
 
+## Open event-time stream latency
+
+Run the [Python diagnostic](open_stream_latency.py) against an installed
+release wheel from the checkout root. The build JSON uses the existing
+[release identity](native_release_identity.py) fields `profile`,
+`tracked_source_clean`, `source_sha`, `native_sha256`, `wheel` and
+`wheel_sha256`. The collector verifies the loaded package against the wheel.
+
+```bash
+python -m benchmarks.open_stream_latency --build release.json \
+  --output target/open-stream-latency.json --samples 20 --seed 20261123
+```
+
+Each observation opens a fresh default `TableExpr.stream` running a 60 µs
+event-time mean. Three one-row Arrow batches for one entity have consecutive
+microsecond timestamps and prices 1, 2 and 3. Upon receiving the first result,
+the producer enqueues the third input immediately or after a seeded delay
+uniform over 1–100,000,000 ns. This makes the second input eligible for
+delivery. Both results are checked for exact schema, sequence and means
+(1.0 and 1.5) while the source is open.
+
+The primary clock runs from third input enqueue until the second Arrow result
+returns. The report also records the time from second input enqueue to
+delivery, and the requested and actual offsets after receiving the first
+result. One warmup per phase uses delays of 0 and 50 ms. The formal samples
+alternate phase order between pairs. Each phase reports raw observations,
+median and linearly interpolated P95. Timeouts or incorrect results fail
+the run. Use a new output path for each build.
+
 ## ASOF settlement benchmark
 
 The independent `stream_asof_perf` target covers eight pending/retained,
