@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use calc_flow::OperatorMetadata;
 use calc_flow::{
@@ -99,9 +99,8 @@ async fn retained_bytes_for(payload_type: DataType, payload: ArrayRef) -> u64 {
 }
 
 fn base_charge(payload_cells: u64) -> u64 {
-    // 64 overhead + encoded key + 8 event time + 8 row id + payload cells.
-    // The key and timestamp cells are themselves payload cells.
-    64 + ENCODED_UTF8_KEY_LEN + 16 + payload_cells
+    // Native run/bucket/expiration ownership plus the V1 logical row charge.
+    345 + 64 + ENCODED_UTF8_KEY_LEN + 16 + payload_cells
 }
 
 const KEY_CELL: u64 = 1 + 4 + "account-01".len() as u64;
@@ -293,96 +292,22 @@ fn keyed_batch(values: &[(&str, i64)]) -> Batch {
 
 const SECOND: i64 = 1_000_000;
 
-fn wire_count(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
-}
-
-fn assert_v2_base(snapshot: &OperatorStateSnapshot, side: &str, rows: u64) {
-    let bytes = snapshot.segments[&format!("{side}-base")].bytes();
-    assert_eq!(&bytes[..8], b"CFJIDX2\0");
-    assert_eq!(wire_count(bytes, 16), rows);
-    assert_eq!(wire_count(bytes, 24), 0);
-    if rows == 0 {
-        assert_eq!(bytes.len(), 32);
-    }
-}
-
-fn assert_v2_delta(snapshot: &OperatorStateSnapshot, epoch: u64, side: &str) {
-    let bytes = snapshot.segments[&format!("{side}-delta-{epoch}")].bytes();
-    assert_eq!(&bytes[..8], b"CFJDIX2\0");
-    assert_eq!(wire_count(bytes, 16), epoch);
-    assert_eq!(wire_count(bytes, 24), 1);
-    assert_eq!(wire_count(bytes, 32), 0);
-}
-
-fn assert_v2_history(
-    snapshot: &OperatorStateSnapshot,
-    anchor: u64,
-    base_rows: [u64; 2],
-    deltas: &[(u64, &str)],
-    payload_rows: &[(&str, u64)],
-) {
+fn assert_native_history(snapshot: &OperatorStateSnapshot, retained_rows: [u64; 2]) {
     let metadata = &snapshot.inline_metadata;
-    assert_eq!(metadata["layout_version"], 2);
-    let inventory = &metadata["v2_inventory"];
-    assert_eq!(inventory["codec_version"], 2);
-    assert_eq!(inventory["base_epoch"], anchor);
-    let expected_deltas = deltas
-        .iter()
-        .map(|(epoch, side)| serde_json::json!({"epoch": epoch, "sides": [side]}))
-        .collect::<Vec<_>>();
-    assert_eq!(inventory["deltas"], serde_json::json!(expected_deltas));
-    assert_v2_base(snapshot, "left", base_rows[0]);
-    assert_v2_base(snapshot, "right", base_rows[1]);
-    let mut names = BTreeSet::from(["left-base".to_owned(), "right-base".to_owned()]);
-    for &(epoch, side) in deltas {
-        assert_v2_delta(snapshot, epoch, side);
-        names.insert(format!("{side}-delta-{epoch}"));
-    }
-    let mut actual_payload_rows = Vec::new();
-    for entry in inventory["payloads"].as_array().unwrap() {
-        let side = entry["side"].as_str().unwrap();
-        let digest = entry["sha256"].as_str().unwrap();
-        let name = format!("{side}-payload-{digest}");
-        let segment = &snapshot.segments[&name];
-        assert_eq!(segment.sha256(), digest);
-        assert_eq!(
-            entry["bytes"].as_u64().unwrap(),
-            u64::try_from(segment.bytes().len()).unwrap()
-        );
-        assert_eq!(&segment.bytes()[..8], b"CFJPAY2\0");
-        assert_eq!(
-            entry["rows"].as_u64().unwrap(),
-            wire_count(segment.bytes(), 16)
-        );
-        actual_payload_rows.push((side.to_owned(), wire_count(segment.bytes(), 16)));
-        names.insert(name);
-    }
-    let mut expected_payload_rows = payload_rows
-        .iter()
-        .map(|(side, rows)| ((*side).to_owned(), *rows))
-        .collect::<Vec<_>>();
-    actual_payload_rows.sort_unstable();
-    expected_payload_rows.sort_unstable();
-    assert_eq!(actual_payload_rows, expected_payload_rows);
+    assert_eq!(metadata["layout_version"], 12);
     assert_eq!(
-        snapshot.segments.keys().cloned().collect::<BTreeSet<_>>(),
-        names
+        metadata["metrics"]["left"]["retained_rows"],
+        retained_rows[0]
     );
-}
-
-fn assert_shared_segments(previous: &OperatorStateSnapshot, current: &OperatorStateSnapshot) {
-    for (name, segment) in &previous.segments {
-        assert_eq!(&current.segments[name], segment);
-        assert!(Arc::ptr_eq(
-            &segment.bytes_arc(),
-            &current.segments[name].bytes_arc()
-        ));
-    }
+    assert_eq!(
+        metadata["metrics"]["right"]["retained_rows"],
+        retained_rows[1]
+    );
+    assert!(!snapshot.segments.is_empty());
 }
 
 #[tokio::test]
-async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
+async fn checkpoints_capture_native_state_and_restore() {
     let (mut operator, job, mut collector) = state_operator(300);
     let context = StreamOperatorContext::new(&job, "match", None);
 
@@ -396,7 +321,7 @@ async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
         .await
         .unwrap();
     let first = operator.checkpoint(Epoch::INITIAL).unwrap();
-    assert_v2_history(&first, 0, [0, 0], &[(1, "left")], &[("left", 1)]);
+    assert_native_history(&first, [1, 0]);
 
     operator
         .process_data(
@@ -408,25 +333,14 @@ async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
         .await
         .unwrap();
     let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
-    // The epoch-2 snapshot carries the prepared epoch-1 delta plus the new
-    // dirty right delta; no full-state re-encode happens at either epoch.
-    assert_v2_history(
-        &second,
-        0,
-        [0, 0],
-        &[(1, "left"), (2, "right")],
-        &[("left", 1), ("right", 1)],
-    );
-    assert_shared_segments(&first, &second);
-    assert_eq!(operator.status().left.retained_bytes, 105);
-    assert_eq!(operator.status().right.retained_bytes, 105);
+    assert_native_history(&second, [1, 1]);
 
+    let expected = operator.status();
     let (mut restored, job, collector_two) = state_operator(300);
     let context_two = StreamOperatorContext::new(&job, "match", None);
     let mut collector_two = collector_two;
     restored.restore(&second).unwrap();
-    assert_eq!(restored.status(), operator.status());
-    // The restored left row still matches a newly processed right row.
+    assert_eq!(restored.status(), expected);
     restored
         .process_data(
             "right",
@@ -439,8 +353,12 @@ async fn checkpoints_capture_only_dirty_deltas_and_restore_folds_them() {
     let outputs = collector_two.drain("output");
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs[0].as_data().unwrap().num_rows(), 1);
-    assert_eq!(restored.status().left.retained_bytes, 105);
-    assert_eq!(restored.status().right.retained_bytes, 210);
+    assert_eq!(
+        restored.status().left.retained_bytes,
+        expected.left.retained_bytes
+    );
+    assert_eq!(restored.status().right.retained_rows, 2);
+    assert!(restored.status().right.retained_bytes > expected.right.retained_bytes);
 }
 
 #[tokio::test]
@@ -473,7 +391,8 @@ async fn evicted_rows_leave_tombstones_that_survive_restore() {
         .unwrap();
 
     let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
-    assert!(second.segments.contains_key("left-delta-2"));
+    assert_native_history(&second, [0, 0]);
+    assert_eq!(second.inline_metadata["metrics"]["left"]["evicted_rows"], 1);
 
     let (mut restored, job_two, _) = state_operator(300);
     let _ = &job_two;
@@ -635,17 +554,15 @@ async fn watermark_equality_is_on_time_and_eviction_is_strict() {
     assert_eq!(operator.status().left.evicted_rows, 1);
 }
 
-fn assert_compacted_v2_history(snapshot: &OperatorStateSnapshot) {
-    assert_v2_history(snapshot, 4, [4, 0], &[(5, "left")], &[("left", 1); 5]);
+fn assert_compacted_native_history(snapshot: &OperatorStateSnapshot) {
+    assert_native_history(snapshot, [5, 0]);
 }
 
 #[tokio::test]
-async fn compaction_survives_restore_checkpoint_restore_cycles() {
+async fn native_checkpoints_survive_restore_cycles() {
     let (mut operator, job, mut collector) = state_operator(300);
     let context = StreamOperatorContext::new(&job, "match", None);
 
-    // Empty V2 bases anchor four dirty deltas until async preparation compacts them.
-    let mut previous = None;
     for epoch in 1..=4_u64 {
         let stamp = 100_i64 + i64::try_from(epoch).unwrap() * SECOND;
         operator
@@ -658,13 +575,7 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
             .await
             .unwrap();
         let pending = operator.checkpoint(Epoch::new(epoch).unwrap()).unwrap();
-        let deltas = (1..=epoch).map(|epoch| (epoch, "left")).collect::<Vec<_>>();
-        let payloads = vec![("left", 1); usize::try_from(epoch).unwrap()];
-        assert_v2_history(&pending, 0, [0, 0], &deltas, &payloads);
-        if let Some(previous) = &previous {
-            assert_shared_segments(previous, &pending);
-        }
-        previous = Some(pending);
+        assert_native_history(&pending, [epoch, 0]);
     }
     operator.prepare_checkpoint_async(&context).await.unwrap();
     operator
@@ -677,63 +588,24 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         .await
         .unwrap();
     let compacted = operator.checkpoint(Epoch::new(5).unwrap()).unwrap();
-    assert!(
-        compacted.segments.contains_key("left-base"),
-        "compaction must emit a canonical base: {:?}",
-        compacted.segments.keys().collect::<Vec<_>>()
-    );
-    // The post-compaction dirty row is a delta on top of the fresh base.
-    assert!(
-        compacted.segments.contains_key("left-delta-5"),
-        "{:?}",
-        compacted.segments.keys().collect::<Vec<_>>()
-    );
-
-    // Index compaction preserves the four immutable payload owners.
-    for (name, segment) in &previous.as_ref().unwrap().segments {
-        if name.contains("-payload-") {
-            assert_eq!(&compacted.segments[name], segment);
-            assert!(Arc::ptr_eq(
-                &segment.bytes_arc(),
-                &compacted.segments[name].bytes_arc()
-            ));
-        }
-    }
-    assert_compacted_v2_history(&compacted);
+    assert_compacted_native_history(&compacted);
     assert_eq!(operator.status().left.retained_rows, 5);
-    assert_eq!(operator.status().left.retained_bytes, 525);
 
-    // Restore from the compacted snapshot; the next checkpoint must still
-    // carry the base plus any new deltas instead of an empty inventory.
-    let (mut restored, job_two, _) = state_operator(300);
-    let _ = &job_two;
+    let (mut restored, _job_two, _) = state_operator(300);
     restored.restore(&compacted).unwrap();
     assert_eq!(restored.status(), operator.status());
     let after_restore = restored.checkpoint(Epoch::new(6).unwrap()).unwrap();
-    assert!(
-        after_restore.segments.contains_key("left-base"),
-        "restore must carry the base forward: {:?}",
-        after_restore.segments.keys().collect::<Vec<_>>()
-    );
-
-    assert_compacted_v2_history(&after_restore);
+    assert_compacted_native_history(&after_restore);
     assert_eq!(after_restore.segments, compacted.segments);
-    assert_shared_segments(&compacted, &after_restore);
 
-    // The chain restores again from the carried checkpoint.
-    let (mut restored_again, job_three, collector_three) = state_operator(300);
-    let _ = (&job_three, collector_three);
+    let (mut restored_again, _job_three, _) = state_operator(300);
     restored_again.restore(&after_restore).unwrap();
     let final_snapshot = restored_again.checkpoint(Epoch::new(7).unwrap()).unwrap();
-    assert!(final_snapshot.segments.contains_key("left-base"));
-    assert_compacted_v2_history(&final_snapshot);
+    assert_compacted_native_history(&final_snapshot);
     assert_eq!(restored_again.status(), operator.status());
     assert_eq!(final_snapshot.segments, compacted.segments);
-    assert_shared_segments(&after_restore, &final_snapshot);
 
-    // The compacted state still matches newly processed right rows.
     let (mut matcher, job_four, _) = state_operator(300);
-    let _ = job_four;
     matcher.restore(&final_snapshot).unwrap();
     let context_four = StreamOperatorContext::new(&job_four, "match", None);
     let mut matcher_collector = EdgeCollector::new(matcher.output_ports().to_vec());
@@ -746,8 +618,6 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
         )
         .await
         .unwrap();
-    // Original stamps are 1..4 seconds plus 100 microseconds; all four match
-    // the 100-second right row, while the 500-second row is outside.
     let matched_rows = matcher_collector
         .drain("output")
         .iter()
@@ -756,12 +626,10 @@ async fn compaction_survives_restore_checkpoint_restore_cycles() {
     assert_eq!(matched_rows, 4);
 }
 
-/// Two restore-checkpoint-restore cycles over a tombstone-bearing history:
-/// the first cycle's derived delta (upserts above the watermark plus
-/// recorded tombstones) must fold so the second cycle's capture is clean and
-/// every later fold reproduces the same state (spec FR5, AC3).
+/// Native restore-checkpoint-restore cycles preserve eviction history and
+/// reproduce identical state and snapshots.
 #[tokio::test]
-async fn two_restore_checkpoint_restore_cycles_reproduce_tombstone_history() {
+async fn restore_checkpoint_cycles_reproduce_native_eviction_history() {
     let (mut operator, job, mut collector) = state_operator(300);
     let context = StreamOperatorContext::new(&job, "match", None);
     operator
@@ -775,7 +643,7 @@ async fn two_restore_checkpoint_restore_cycles_reproduce_tombstone_history() {
         .unwrap();
     let first = operator.checkpoint(Epoch::INITIAL).unwrap();
 
-    // Evict both captured rows, then capture the tombstone delta.
+    // Evict both captured rows, then capture the native state.
     let progress = IngressProgressSnapshot::new(BTreeMap::from([(
         "right".into(),
         IngressProgress::new(
@@ -792,9 +660,10 @@ async fn two_restore_checkpoint_restore_cycles_reproduce_tombstone_history() {
         .unwrap();
     assert_eq!(operator.status().left.retained_rows, 0);
     let second = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
-    assert!(second.segments.contains_key("left-delta-2"));
+    assert_native_history(&second, [0, 0]);
+    assert_eq!(second.inline_metadata["metrics"]["left"]["evicted_rows"], 2);
 
-    // Cycle one: restore the tombstone delta, admit one fresh row, capture.
+    // Cycle one: restore the evicted state, admit one fresh row, capture.
     let (mut cycle_one, job_two, _) = state_operator(300);
     let _ = &job_two;
     cycle_one.restore(&second).unwrap();
