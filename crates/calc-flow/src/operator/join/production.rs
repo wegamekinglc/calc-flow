@@ -520,33 +520,20 @@ impl RunCore {
             .await?;
         #[cfg(feature = "benchmark-internals")]
         drop(admit_span);
-        #[cfg(feature = "benchmark-internals")]
-        let charge_span =
-            context
-                .job()
-                .join_cpu_trace()
-                .stage(&operator.name, "hot_charge", batch.num_rows());
         if let Some(input) = prepare_hot_input(
             operator,
             &plan,
             batch,
             &bundle,
             self.hot.is_some(),
-            self.hot
-                .as_ref()
-                .is_some_and(super::hot::HotJoinCore::has_history),
             &mut self.keys,
         )? {
-            #[cfg(feature = "benchmark-internals")]
-            drop(charge_span);
             let hot = self
                 .hot
                 .as_mut()
                 .expect("hot admission requires a hot core");
             return hot.process(operator, input, context, output).await;
         }
-        #[cfg(feature = "benchmark-internals")]
-        drop(charge_span);
         if self.hot.is_some() {
             self.migrate_hot(operator)?;
             self.hot = None;
@@ -750,12 +737,12 @@ fn prepare_hot_input<'a>(
     batch: &'a Batch,
     bundle: &'a super::AdmissionBundle,
     enabled: bool,
-    has_history: bool,
     key_store: &mut KeyStore,
 ) -> Result<Option<super::hot::HotInput<'a>>> {
-    let fully_retained = bundle.admitted.iter().all(|row| row.retain);
-    let transient = !fully_retained && has_history && bundle.admitted.iter().all(|row| !row.retain);
-    if !enabled || bundle.admitted.len() != batch.num_rows() || !(fully_retained || transient) {
+    if !enabled
+        || bundle.admitted.len() != batch.num_rows()
+        || !bundle.admitted.iter().all(|row| row.retain)
+    {
         return Ok(None);
     }
     let compiled = operator.retained_compiled();
@@ -783,7 +770,6 @@ fn prepare_hot_input<'a>(
         next_row_id: bundle.next_row_id,
         metrics: bundle.metrics.clone(),
         charge,
-        transient,
     }))
 }
 
