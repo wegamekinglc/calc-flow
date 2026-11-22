@@ -277,6 +277,60 @@ def test_program_session_returns_every_declared_output() -> None:
     assert second["large"].schema.equals(schemas["large"])
 
 
+def test_table_output_session_requires_a_result_binding() -> None:
+    program = Program("named", mode="stream", outputs={"signals": _signals()})
+    with program.session(config=CONFIG) as named:
+        table_session = cf.StreamSession(
+            named._native, named._input, named._outputs, named._empty, table_output=True
+        )
+        with pytest.raises(KeyError) as error:
+            table_session.finish()
+        assert error.value.args == ("result",)
+
+
+def test_single_program_output_uses_one_physical_name_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    quotes = _quotes()
+    program = Program("named", mode="stream", outputs={"signals": _signals(quotes)})
+    hashes = 0
+
+    class CountedName(str):
+        def __hash__(self) -> int:
+            nonlocal hashes
+            hashes += 1
+            return super().__hash__()
+
+    with program.session(config=CONFIG) as session:
+        ((logical, physical),) = session._outputs
+        monkeypatch.setattr(session, "_outputs", ((logical, CountedName(physical)),))
+        result = session.push({"quotes": _rows((0, "a", 0, 1.0))}, watermark=_at(0))
+        assert list(result) == ["signals"]
+        assert result["signals"].column("avg").to_pylist() == [1.0]
+        assert hashes <= 1
+        assert session.finish() is not result
+
+
+@pytest.mark.parametrize("named", [False, True])
+def test_single_session_output_keeps_emitted_empty_batch(named: bool) -> None:
+    quotes = _quotes()
+    expr = quotes.filter(quotes["x"] > 100.0)
+    owner = (
+        Program("empty", mode="stream", outputs={"filtered": expr}) if named else expr
+    )
+    data = _rows((0, "a", 0, 1.0))
+    with owner.session(config=CONFIG) as session:
+        waiting = session.advance(_at(-1))
+        output = session.push({"quotes": data} if named else data)
+        finished = session.finish()
+    emitted = output["filtered"] if named else output
+    absent = finished["filtered"] if named else finished
+    assert emitted.num_rows == absent.num_rows == 0
+    assert emitted.schema.equals(absent.schema, check_metadata=True)
+    assert absent is (waiting["filtered"] if named else waiting)
+    assert emitted is not absent
+
+
 def test_default_ordered_watermark_keeps_latest_timestamp_open() -> None:
     with _signals().session(config=CONFIG) as session:
         assert session.push(_rows((0, "a", 0, 1.0))).num_rows == 0
