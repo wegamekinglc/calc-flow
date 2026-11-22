@@ -4,6 +4,27 @@
     {
       "target": "stream_join_perf",
       "baseline_sha256": "2533de442d20cc252c0fbef406777d6d080ae901fb1a5e247078d807a771213b",
+      "candidate_sha256": "6d8d90fbf5afbdd74e8fe7f1ea89b5fe8f403fbbcf2e8e426edbc6c0c6bea7da",
+      "reason": "Run the same handler fixtures, clocks and complete output checks on published 61a81f20 and the candidate. Check recovery by continuation on the product's own snapshot format. The base/delta workload guard rejects unsupported layouts.",
+      "reference": "2026-11-23 native Join handler preflight, published 61a81f20"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline_sha256": "0aa67fed5b67f03fb84fbf688749a2263edd253d160ab8d01d06bec332a5fb95",
+      "candidate_sha256": "6d8d90fbf5afbdd74e8fe7f1ea89b5fe8f403fbbcf2e8e426edbc6c0c6bea7da",
+      "reason": "Use the same handler preflight on the 2026.11.14 release and the candidate. Handler inputs, timings and submitted pairs are unchanged. Legacy checkpoint cases must pass their original layout checks before measurement.",
+      "reference": "2026-11-23 native Join handler preflight, calc-flow-python-v2026.11.14"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline_sha256": "bacd89af25eba826a41de1046f53e9f00f78738b832aff005cd22d191e4ff7f6",
+      "candidate_sha256": "6d8d90fbf5afbdd74e8fe7f1ea89b5fe8f403fbbcf2e8e426edbc6c0c6bea7da",
+      "reason": "Common preflight on both exact products: check complete handler outputs and restore continuity. Fixture values, Criterion IDs and timed boundaries stay fixed. Legacy base/delta scenarios retain their layout checks and cannot produce comparable timings on a native-only writer.",
+      "reference": "2026-11-23 native Join handler preflight, main ec402c59"
+    },
+    {
+      "target": "stream_join_perf",
+      "baseline_sha256": "2533de442d20cc252c0fbef406777d6d080ae901fb1a5e247078d807a771213b",
       "candidate_sha256": "0aa67fed5b67f03fb84fbf688749a2263edd253d160ab8d01d06bec332a5fb95",
       "reason": "Common harness on both exact products: extend the benchmark-internals CLI with check-only dictionary refusal/retention and Join/ASOF layout controls since release 61a81f20. Default Criterion cases, fixtures, timing boundaries and samples are unchanged; the overlay rebuilds the same entry point and support against both product revisions.",
       "reference": "DAL-384 / Rust job 117719606184; ca3de78c and PR #446"

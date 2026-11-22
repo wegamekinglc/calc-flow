@@ -774,12 +774,24 @@ review and merge, the complete rerun must explicitly retain
 `baseline_sha=61a81f203f68c2cd20be603851c4b41fa3672b40`; this input also sets
 the Rust baseline to that release rather than the default first parent.
 
-The `stream_join_perf` compaction and control cases are
-`checkpoint/prepare_then_left_500_{compact,steady}_60k`. Both time asynchronous
-checkpoint preparation followed by the 500-row handler; fixture construction,
-capture and restore stay outside timing. The adapter compiles the same declared
-lifecycle harness against both exact product revisions in owned build clones,
-leaving the supplied checkouts unchanged. Provenance retains the original bench
+The `stream_join_perf` handler preflight checks every column of the 10,000
+one-to-one pairs and 100,000 fan-out pairs in ingress order. The fan-out
+fixture has identical values within each key. The recovery check adds a
+distinct key, timestamp and amount on each side before capture, restores the
+snapshot and probes both keys from the opposite side. The right-input handler
+timers cover that input's `process_data` call. Preflight runs outside those
+timers and supports the current native join snapshot layout 12.
+
+The historical `checkpoint/prepare_then_left_500_{compact,steady}_60k`,
+`checkpoint/capture_dirty_1250_base_*` and `restore/full_*` cases require
+the former base-plus-delta writer. Their preflight checks for the legacy
+segment layout when a case is executed. Discovery can list these cases on a
+native build, but selecting one fails the legacy fixture check; a full sweep
+on such a build includes unsupported cases. The prepare cases time asynchronous
+checkpoint preparation followed by the 500-row handler, with fixture
+construction, capture and restore outside timing. The adapter compiles the
+same declared lifecycle harness against both exact product revisions in owned
+build clones, leaving the supplied checkouts unchanged. Provenance retains the original bench
 digest, the effective measured harness digest, both product and harness revisions,
 and compiled dependencies. The former pure-handler case IDs are retired.
 

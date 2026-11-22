@@ -1,5 +1,5 @@
 use super::*;
-use calc_flow::{SourceHistoryContext, SourceHistoryReplayFactory};
+use calc_flow::{SourceHistoryContext, SourceHistoryReplayFactory, StreamRuntimeConfig};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountedFactory {
@@ -113,6 +113,13 @@ async fn recovery_case(rows: u64, cuts: u64, idle_right: bool, projection: Proje
             projection,
         },
     )
+    .with_runtime_config(StreamRuntimeConfig {
+        // The fixture drives each cut and must work with only the latest manifest.
+        checkpoint_interval: Duration::from_secs(3_600),
+        retained_epochs: 1,
+        ..StreamRuntimeConfig::default()
+    })
+    .unwrap()
     .start()
     .await
     .unwrap();
@@ -126,18 +133,17 @@ async fn recovery_case(rows: u64, cuts: u64, idle_right: bool, projection: Proje
             }
         }
     }
-    let unchanged = first.trigger_checkpoint().await.unwrap();
-    let unchanged_manifest = find_manifest(
-        &root.path().join("checkpoints"),
-        &format!("epoch-{}.json", unchanged.as_u64()),
-    )
-    .unwrap();
-    assert_eq!(first.cancel().await.state, JobState::Cancelled);
+    let checkpoints = root.path().join("checkpoints");
     let manifest = find_manifest(
-        &root.path().join("checkpoints"),
+        &checkpoints,
         &format!("epoch-{}.json", last.unwrap().as_u64()),
     )
-    .unwrap();
+    .expect("final data checkpoint must be readable at its cut");
+    let unchanged = first.trigger_checkpoint().await.unwrap();
+    let unchanged_manifest =
+        find_manifest(&checkpoints, &format!("epoch-{}.json", unchanged.as_u64()))
+            .expect("unchanged checkpoint must be readable at its cut");
+    assert_eq!(first.cancel().await.state, JobState::Cancelled);
     let replay = !matches!(
         projection,
         ProjectionMode::Computed | ProjectionMode::Filtered
