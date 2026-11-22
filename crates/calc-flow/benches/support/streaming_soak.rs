@@ -53,8 +53,8 @@ use super::{
         CheckpointStartedTestGate, ContinuousJobState, ContinuousRunner, TerminalCause,
     },
     source_task::{
-        AcceptedSequenceRecorder, Cursor, SourceBinding, SourceCapabilities, SourceEvent,
-        StreamSource,
+        AcceptedSequenceRecorder, Cursor, DurableCursorAcknowledger, SourceBinding,
+        SourceCapabilities, SourceEvent, StreamSource,
     },
 };
 use crate::{
@@ -767,10 +767,40 @@ struct CheckpointMatrixSource {
     next_sequence: u64,
     pending_watermark: bool,
     ended: bool,
-    pause_before_eof: bool,
+    eof: CheckpointMatrixEof,
     poll_delay: Duration,
     opened_with: SourceOpenHistory,
     closed: Arc<AtomicUsize>,
+}
+
+enum CheckpointMatrixEof {
+    Ready,
+    Paused,
+    AfterDurableCursor(Arc<CheckpointMatrixCursorAck>),
+}
+
+impl CheckpointMatrixEof {
+    async fn wait(&self) {
+        match self {
+            Self::Ready => {}
+            Self::Paused => std::future::pending().await,
+            Self::AfterDurableCursor(ack) => ack.received.notified().await,
+        }
+    }
+}
+
+struct CheckpointMatrixCursorAck {
+    order: Vec<u8>,
+    received: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl DurableCursorAcknowledger for CheckpointMatrixCursorAck {
+    async fn acknowledge(&self, cursor: &Cursor) -> Result<()> {
+        assert_eq!(cursor.order(), self.order);
+        self.received.notify_one();
+        Ok(())
+    }
 }
 
 fn checkpoint_matrix_batch(source_id: &str) -> Result<Batch> {
@@ -807,6 +837,13 @@ fn checkpoint_matrix_cursor_order(source_id: &str) -> Vec<u8> {
 
 #[async_trait]
 impl StreamSource for CheckpointMatrixSource {
+    fn durable_cursor_acknowledger(&self) -> Option<Arc<dyn DurableCursorAcknowledger>> {
+        match &self.eof {
+            CheckpointMatrixEof::AfterDurableCursor(ack) => Some(ack.clone()),
+            _ => None,
+        }
+    }
+
     async fn open(&mut self, cursor: Option<Cursor>) -> Result<()> {
         self.opened_with.lock().push((
             self.source_id.into(),
@@ -837,9 +874,6 @@ impl StreamSource for CheckpointMatrixSource {
             self.pending_watermark = false;
             return Ok(Some(SourceEvent::Watermark(EventTime::from_micros(1))));
         }
-        if self.next_sequence != 0 && self.pause_before_eof {
-            return std::future::pending().await;
-        }
         if self.next_sequence == 0 {
             self.next_sequence = 1;
             self.pending_watermark = true;
@@ -852,6 +886,7 @@ impl StreamSource for CheckpointMatrixSource {
                 )?,
             }));
         }
+        self.eof.wait().await;
         self.ended = true;
         Ok(None)
     }
@@ -915,9 +950,6 @@ impl PublicStreamSource for CheckpointMatrixSource {
                 1,
             ))));
         }
-        if self.next_sequence != 0 && self.pause_before_eof {
-            return std::future::pending().await;
-        }
         if self.next_sequence == 0 {
             self.next_sequence = 1;
             self.pending_watermark = true;
@@ -930,6 +962,7 @@ impl PublicStreamSource for CheckpointMatrixSource {
                 )?,
             }));
         }
+        self.eof.wait().await;
         self.ended = true;
         Ok(None)
     }
@@ -1653,7 +1686,11 @@ fn checkpoint_matrix_public_runner(
                     next_sequence: 0,
                     pending_watermark: false,
                     ended: false,
-                    pause_before_eof,
+                    eof: if pause_before_eof {
+                        CheckpointMatrixEof::Paused
+                    } else {
+                        CheckpointMatrixEof::Ready
+                    },
                     poll_delay: source_poll_delay,
                     opened_with: Arc::clone(source_opened_with),
                     closed: Arc::clone(source_closed),
@@ -1722,7 +1759,7 @@ fn checkpoint_matrix_spec(
     sink_closed: &Arc<AtomicUsize>,
     sink_writes: &Arc<AtomicUsize>,
     source_poll_delay: Duration,
-    pause_before_eof: bool,
+    wait_for_durable_cursor: bool,
     cancellation: CancellationToken,
     exactly_once: bool,
 ) -> ContinuousJobSpec {
@@ -1792,7 +1829,16 @@ fn checkpoint_matrix_spec(
                     next_sequence: 0,
                     pending_watermark: false,
                     ended: false,
-                    pause_before_eof,
+                    eof: if wait_for_durable_cursor {
+                        CheckpointMatrixEof::AfterDurableCursor(Arc::new(
+                            CheckpointMatrixCursorAck {
+                                order: checkpoint_matrix_cursor_order(source_id),
+                                received: tokio::sync::Notify::new(),
+                            },
+                        ))
+                    } else {
+                        CheckpointMatrixEof::Ready
+                    },
                     poll_delay: source_poll_delay,
                     opened_with: Arc::clone(source_opened_with),
                     closed: Arc::clone(source_closed),
@@ -2939,7 +2985,7 @@ async fn prepare_private_full_runner_benchmark(
         &sink_closed,
         &sink_writes,
         private_full_runner_sink_delay(mode),
-        false,
+        matches!(mode, PrivateFullRunnerMode::CheckpointEnabled),
         CancellationToken::new(),
         checkpointed,
     );
@@ -3026,7 +3072,7 @@ impl PrivateFullRunnerFixture {
         assert_eq!(self.source_closed.load(Ordering::SeqCst), 2);
         assert_eq!(self.sink_closed.load(Ordering::SeqCst), 2);
         let manifests = self.directory.path().join("manifests");
-        let mut manifest_count = checkpoint_manifest_count(&manifests);
+        let manifest_count = checkpoint_manifest_count(&manifests);
         let visible_records = if matches!(self.mode, PrivateFullRunnerMode::NoCheckpoint) {
             self.sink_writes.load(Ordering::SeqCst)
         } else {
@@ -3041,16 +3087,6 @@ impl PrivateFullRunnerFixture {
             PrivateFullRunnerMode::NoCheckpoint => assert_eq!(manifest_count, 0),
             PrivateFullRunnerMode::CheckpointDisabled => assert_eq!(manifest_count, 1),
             PrivateFullRunnerMode::CheckpointEnabled => {
-                // The auto-checkpoint interval is one millisecond, but on a
-                // loaded runner the manifest publication can lag shutdown.
-                // Wait briefly for the directory to catch up before failing;
-                // a count that never arrives means checkpoints genuinely did
-                // not happen, which stays a real failure.
-                let deadline = std::time::Instant::now() + Duration::from_secs(30);
-                while manifest_count < 2 && std::time::Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    manifest_count = checkpoint_manifest_count(&manifests);
-                }
                 assert!(
                     manifest_count >= 2,
                     "checkpoint-enabled case produced {manifest_count} manifests \
@@ -5311,10 +5347,13 @@ async fn private_benchmark_smoke_runs_twelve_honest_cases() {
         (PrivateFullRunnerMode::CheckpointDisabled, 1),
         (PrivateFullRunnerMode::CheckpointEnabled, 2),
     ] {
-        let report = prepare_private_full_runner_benchmark(mode)
-            .await
-            .measure()
-            .await;
+        let mut fixture = prepare_private_full_runner_benchmark(mode).await;
+        if matches!(mode, PrivateFullRunnerMode::CheckpointEnabled) {
+            // Exercise a periodic tick later than the source's normal EOF.
+            let checkpoint = fixture.checkpoint.as_mut().unwrap();
+            checkpoint.config.checkpoint_interval = Duration::from_millis(100);
+        }
+        let report = fixture.measure().await;
         assert_eq!(report.completed_jobs, 1);
         assert_eq!(report.failed_jobs, 0);
         assert_eq!(report.visible_records, 8);

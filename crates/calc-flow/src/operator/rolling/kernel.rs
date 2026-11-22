@@ -5983,6 +5983,92 @@ mod tests {
     }
 
     #[test]
+    fn test_duration_sum_prepares_the_widened_input_once() {
+        const ROWS: u32 = 4_096;
+        let kernel = plan(
+            vec![TypedGroupPlan::Numeric {
+                input_index: 3,
+                frame: TypedFrame::Duration(5),
+                dispersion: false,
+            }],
+            vec![TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Statistic(Statistic::Sum),
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            }],
+        );
+        let prices = (0..ROWS)
+            .map(|i| (i % 4 != 0).then(|| f64::from(i)))
+            .collect::<Vec<_>>();
+        let wide = batch(
+            (0..ROWS).map(|i| Some(i64::from(i))).collect(),
+            (0..ROWS).map(|i| Some(u64::from(i))).collect(),
+            (0..ROWS)
+                .map(|i| if i % 2 == 0 { "A" } else { "B" })
+                .collect(),
+            prices.clone(),
+        );
+        let mut columns = wide.columns().to_vec();
+        columns[3] = cast(&columns[3], &DataType::Float32).unwrap();
+        let narrow = RecordBatch::try_from_iter(
+            wide.schema()
+                .fields()
+                .iter()
+                .map(|field| field.name())
+                .zip(columns),
+        )
+        .unwrap();
+        let expected = (0..prices.len())
+            .map(|i| {
+                let mut terms = (i.saturating_sub(4)..=i)
+                    .filter(|&j| j % 2 == i % 2)
+                    .filter_map(|j| prices[j]);
+                terms.next().map(|first| first + terms.sum::<f64>())
+            })
+            .collect::<Vec<_>>();
+        let prepared_bytes = |input: &RecordBatch| {
+            let mut state = RollingKernelState::default();
+            let mut update = None;
+            let work = allocation_counter::measure(|| {
+                update = kernel
+                    .prepare_ordered_stream_in_place(&mut state, input, "r", None)
+                    .unwrap();
+            });
+            let mut update = update.unwrap();
+            assert_eq!(update.entity_rows().counts, [2_048, 2_048]);
+            assert_eq!(update.entity_rows().first_rows, [0, 1]);
+            let columns = update.take_columns();
+            assert_eq!(
+                columns[0]
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap()
+                    .iter()
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            update.rollback(&mut state);
+            assert!(state.states.is_empty());
+            work.bytes_total
+        };
+        let one_cast = allocation_counter::measure(|| {
+            std::hint::black_box(cast_float64(narrow.column(3), "r").unwrap());
+        })
+        .bytes_total;
+        let native_bytes = prepared_bytes(&wide);
+        let widened_bytes = prepared_bytes(&narrow);
+        println!(
+            "duration SUM prepare allocated {native_bytes} bytes for Float64, {widened_bytes} for Float32"
+        );
+        assert!(
+            widened_bytes <= native_bytes + one_cast,
+            "native={native_bytes}, widened={widened_bytes}, one cast={one_cast}"
+        );
+    }
+
+    #[test]
     fn ordered_stream_key_allocations_depend_on_entities_instead_of_rows() {
         fn allocations(row_count: usize, warm: bool) -> u64 {
             let kernel = numeric_plan();
