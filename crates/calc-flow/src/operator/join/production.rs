@@ -520,6 +520,12 @@ impl RunCore {
             .await?;
         #[cfg(feature = "benchmark-internals")]
         drop(admit_span);
+        #[cfg(feature = "benchmark-internals")]
+        let charge_span =
+            context
+                .job()
+                .join_cpu_trace()
+                .stage(&operator.name, "hot_charge", batch.num_rows());
         if let Some(input) = prepare_hot_input(
             operator,
             &plan,
@@ -531,12 +537,16 @@ impl RunCore {
                 .is_some_and(super::hot::HotJoinCore::has_history),
             &mut self.keys,
         )? {
+            #[cfg(feature = "benchmark-internals")]
+            drop(charge_span);
             let hot = self
                 .hot
                 .as_mut()
                 .expect("hot admission requires a hot core");
             return hot.process(operator, input, context, output).await;
         }
+        #[cfg(feature = "benchmark-internals")]
+        drop(charge_span);
         if self.hot.is_some() {
             self.migrate_hot(operator)?;
             self.hot = None;
