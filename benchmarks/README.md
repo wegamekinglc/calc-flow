@@ -205,6 +205,41 @@ Use the normal scheduled collector for complete measurements. A local feature
 measurement still follows the five-case and ten-minute limits in
 [the suite protocol](../docs/benchmark-suite.md#feature-measurement-scope).
 
+## Open event-time stream latency
+
+Run the [Python diagnostic](open_stream_latency.py) from the checkout root
+with Python 3.11 or newer, the installed release wheel and the benchmark
+dependencies (including NumPy, PyArrow and psutil). Wheel verification uses
+`hashlib.file_digest` from Python 3.11. The build JSON uses the existing
+[release identity](native_release_identity.py) fields `profile`,
+`tracked_source_clean`, `source_sha`, `native_sha256`, `wheel` and
+`wheel_sha256`. The collector verifies the loaded package against the wheel.
+
+```bash
+python -m benchmarks.open_stream_latency --build release.json \
+  --output target/open-stream-latency.json --samples 20 --seed 20261123
+```
+
+Each observation opens a fresh default `TableExpr.stream` running a 60 µs
+event-time mean. Three one-row Arrow batches for one entity have consecutive
+microsecond timestamps and prices 1, 2 and 3. Upon receiving the first result,
+the producer enqueues the third input immediately or after a seeded delay
+uniform over 1–100,000,000 ns. This makes the second input eligible for
+delivery. Both results are checked for exact schema including field and
+schema metadata, sequence and means
+(1.0 and 1.5) while the source is open.
+
+The primary clock runs from third input enqueue until the second Arrow result
+returns. The report also records the time from second input enqueue to
+delivery, and the requested and actual offsets after receiving the first
+result. The warmups use delays of 0 and 50 ms. In the 50 ms warmup a reader
+requests the second result before the third row is sent. It must stay pending
+for the full delay and deliver the expected result when the third row arrives.
+The formal samples alternate phase order between pairs. Each phase reports
+raw observations, median and linearly interpolated P95 for both clocks.
+Timeouts or incorrect results fail
+the run. Use a new output path for each build.
+
 ## ASOF settlement benchmark
 
 The independent `stream_asof_perf` target covers eight pending/retained,
