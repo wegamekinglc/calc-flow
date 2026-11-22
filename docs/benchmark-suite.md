@@ -890,10 +890,10 @@ A declaration also retires cases its candidate source removed: when the
 candidate measured that target, a case only the baseline blocks still report
 is dropped instead of failing as a missing block. Without a declaration, a
 removed case still fails.
-The common Join harness above also requires an exact migration declaration
-when replacing an older source. Its revised timing boundary uses new case IDs
-and is compiled on both products, so historical pure-handler timings are never
-compared against checkpoint-preparation timings.
+The common join harness requires an exact migration declaration for each
+supported older source. Both products run the same five-case inventory.
+The six retired segmented-writer measurements retain their historical IDs
+and samples.
 
 ### Current-milestone Join/ASOF acquisition (#443)
 
