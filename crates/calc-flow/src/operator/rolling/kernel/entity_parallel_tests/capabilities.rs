@@ -169,7 +169,15 @@ fn test_equal_batch_counts_include_each_logical_duration_in_lane_work() {
     let prepared = plan
         .prepare_ordered_stream_inputs(&state, &batch, "r", None)
         .unwrap();
-    assert_eq!(prepared.fill.stream.entity_rows.counts, [1, 1]);
+    assert!(
+        prepared
+            .fill
+            .stream
+            .entity_rows
+            .iter()
+            .map(|row| row.count)
+            .eq([1, 1])
+    );
     assert_eq!(
         entity_work_weights(&prepared.fill, 2),
         Some((vec![4 + 10 + 120, 4], 138))
@@ -259,9 +267,9 @@ fn test_capability_parallel_rejects_incomplete_row_coverage_before_moving_state(
             .prepare_ordered_stream_inputs(&state, &batch, "r", None)
             .unwrap();
         if missing_entity {
-            prepared.fill.stream.entity_rows.counts.pop();
+            prepared.fill.stream.entity_rows.pop();
         } else {
-            prepared.fill.stream.entity_rows.counts[0] -= 1;
+            prepared.fill.stream.entity_rows[0].count -= 1;
         }
         let pointer = prepared.fill.stream.state.states.as_ptr();
         let rejected = prepared

@@ -557,8 +557,8 @@ impl RollingKernelPlan {
             .map(|&local| resolved[local])
             .collect::<Vec<_>>();
         let mut positions = Vec::with_capacity(if track_positions { resolved.len() } else { 0 });
-        for (&entity, &rows) in resolved.iter().zip(&routing.rows.counts) {
-            let rows = u64::try_from(rows)
+        for (&entity, row) in resolved.iter().zip(&routing.rows) {
+            let rows = u64::try_from(row.count)
                 .map_err(|_| operator_error(node_id, "rolling entity row count overflowed"))?;
             let previous = table.u64(0, entity)?;
             if track_positions {
@@ -668,7 +668,7 @@ impl RollingKernelPlan {
                     table,
                     indicator::EntityRow {
                         entity,
-                        first: routing.rows.first_rows[local] == row,
+                        first: routing.rows[local].first == row,
                         ordered_position,
                         node_id,
                     },
@@ -728,8 +728,7 @@ impl RollingKernelPlan {
         let columns = Self::finish_slab_columns(state, created, result)?;
         // Routing reserves for resident entities; delivery only retains the touched subset.
         let mut entity_rows = routing.rows;
-        entity_rows.counts.shrink_to_fit();
-        entity_rows.first_rows.shrink_to_fit();
+        entity_rows.shrink_to_fit();
         let local = RollingKernelState {
             kernel_fingerprint: Some(self.fingerprint.clone()),
             last_identity: batch.last_identity,
@@ -906,9 +905,9 @@ mod tests {
             .prepare_slab_ordered_stream(&mut state, &sparse, "r", None)
             .unwrap();
         let rows = update.entity_rows();
-        assert_eq!(rows.counts, [RESIDENTS]);
-        assert_eq!(rows.first_rows, [0]);
-        let capacities = [rows.counts.capacity(), rows.first_rows.capacity()];
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].count, rows[0].first), (RESIDENTS, 0));
+        let capacity = rows.capacity();
         assert_eq!(update.entity_ids(), [0; RESIDENTS]);
         let output = update.take_columns();
         let sums = output[1].as_any().downcast_ref::<Float64Array>().unwrap();
@@ -921,8 +920,7 @@ mod tests {
         update.rollback(&mut state);
         assert_eq!(state.canonical_state_for_test(), before);
         assert_eq!(
-            capacities,
-            [1, 1],
+            capacity, 1,
             "prepared capacities after touching one resident"
         );
     }

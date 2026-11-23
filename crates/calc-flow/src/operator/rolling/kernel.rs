@@ -566,12 +566,15 @@ pub(super) struct RollingKernelExecution {
     pub state: RollingKernelState,
 }
 
-/// Row count and first row of each dense entity in one stream batch.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct EntityRows {
-    pub(super) counts: Vec<usize>,
-    pub(super) first_rows: Vec<usize>,
+/// Row count and first input offset for one batch-local dense entity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct EntityRow {
+    pub(super) count: usize,
+    pub(super) first: usize,
 }
+
+/// A one-entity batch keeps its routing facts inline.
+pub(super) type EntityRows = smallvec::SmallVec<[EntityRow; 1]>;
 
 /// A transactional update of only the entities touched by a stream batch.
 pub(crate) struct StreamKernelUpdate {
@@ -1997,13 +2000,13 @@ impl RollingKernelState {
         let mut copied = 0;
         let states = keys
             .iter()
-            .zip(&rows.counts)
-            .map(|(key, &count)| {
+            .zip(&rows)
+            .map(|(key, row)| {
                 self.entities.get(key.as_slice()).map_or_else(
                     || {
                         Arc::new(TypedEntityState::with_duration_storage(
                             groups,
-                            count,
+                            row.count,
                             self.share_durations,
                         ))
                     },
@@ -3023,10 +3026,7 @@ fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
     if keys.len() == 1 {
         return (
             keys.collect(),
-            EntityRows {
-                counts: vec![1],
-                first_rows: vec![0],
-            },
+            smallvec::smallvec![EntityRow { count: 1, first: 0 }],
             vec![0],
         );
     }
@@ -3058,10 +3058,7 @@ impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
             distinct: Vec::with_capacity(entities),
             successors: Vec::with_capacity(entities),
             previous: None,
-            rows: EntityRows {
-                counts: Vec::with_capacity(entities),
-                first_rows: Vec::with_capacity(entities),
-            },
+            rows: EntityRows::with_capacity(entities),
         }
     }
 
@@ -3075,7 +3072,7 @@ impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
             self.successors[previous] = id;
         }
         self.previous = Some(id);
-        self.rows.counts[id] += 1;
+        self.rows[id].count += 1;
         id
     }
 
@@ -3083,8 +3080,10 @@ impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
         *self.ids.entry(key).or_insert_with(|| {
             self.distinct.push(key);
             self.successors.push(usize::MAX);
-            self.rows.counts.push(0);
-            self.rows.first_rows.push(row);
+            self.rows.push(EntityRow {
+                count: 0,
+                first: row,
+            });
             self.distinct.len() - 1
         })
     }
@@ -6088,9 +6087,10 @@ mod tests {
             )
             .unwrap();
         assert!(update.in_place.is_none() && update.slab.is_none());
-        assert_eq!(update.entity_rows().counts, [1; 64]);
+        assert_eq!(update.entity_rows().len(), 64);
+        assert!(update.entity_rows().iter().all(|row| row.count == 1));
         let measured = allocation_counter::measure(|| {
-            for entity in 0..update.entity_rows().counts.len() {
+            for entity in 0..update.entity_rows().len() {
                 assert!(update.recurrence_seeds(entity).next().is_none());
             }
         });
@@ -6183,8 +6183,19 @@ mod tests {
                     .unwrap();
             });
             let mut update = update.unwrap();
-            assert_eq!(update.entity_rows().counts, [2_048, 2_048]);
-            assert_eq!(update.entity_rows().first_rows, [0, 1]);
+            assert_eq!(
+                update.entity_rows().as_slice(),
+                &[
+                    EntityRow {
+                        count: 2_048,
+                        first: 0
+                    },
+                    EntityRow {
+                        count: 2_048,
+                        first: 1
+                    }
+                ]
+            );
             let columns = update.take_columns();
             assert_eq!(
                 columns[0]
@@ -6691,13 +6702,14 @@ mod tests {
             let expected = if input.num_rows() == 0 {
                 EntityRows::default()
             } else {
-                EntityRows {
-                    counts: vec![3, 1, 1],
-                    first_rows: vec![0, 1, 3],
-                }
+                smallvec::smallvec![
+                    EntityRow { count: 3, first: 0 },
+                    EntityRow { count: 1, first: 1 },
+                    EntityRow { count: 1, first: 3 }
+                ]
             };
             assert_eq!(update.entity_rows(), &expected);
-            assert_eq!(update.execution.state.states.len(), expected.counts.len());
+            assert_eq!(update.execution.state.states.len(), expected.len());
         }
     }
 
@@ -6727,11 +6739,10 @@ mod tests {
                 .map(|(row, key)| {
                     let id = distinct.iter().position(|seen| seen == key).unwrap_or_else(|| {
                         distinct.push(*key);
-                        expected.counts.push(0);
-                        expected.first_rows.push(row);
+                        expected.push(EntityRow { count: 0, first: row });
                         distinct.len() - 1
                     });
-                    expected.counts[id] += 1;
+                    expected[id].count += 1;
                     id
                 })
                 .collect::<Vec<_>>();
@@ -6743,18 +6754,22 @@ mod tests {
     }
 
     #[test]
-    fn single_row_routing_allocates_only_the_four_returned_buffers() {
+    fn single_row_routing_allocates_only_keys_and_ids() {
         // Prime the process-local hash builder just as earlier batches do.
         std::hint::black_box(dense_entity_ids(["a", "b"].into_iter(), 2));
         let expected = ["desk"];
         let measured = allocation_counter::measure(|| {
             let (keys, rows, ids) = dense_entity_ids(expected.iter().copied(), 4096);
             assert_eq!(keys, expected);
-            assert_eq!(rows.counts, [1]);
-            assert_eq!(rows.first_rows, [0]);
+            assert_eq!(rows.as_slice(), &[EntityRow { count: 1, first: 0 }]);
             assert_eq!(ids, [0]);
         });
-        assert!(measured.count_total <= 4, "{measured:?}");
+        println!("single row routing {measured:?}");
+        assert!(measured.count_total <= 2, "{measured:?}");
+        assert!(
+            measured.bytes_total <= 3 * u64::from(usize::BITS / 8),
+            "{measured:?}"
+        );
     }
 
     #[test]

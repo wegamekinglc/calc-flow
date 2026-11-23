@@ -1516,19 +1516,17 @@ fn entity_tails(
     times: &[i64],
     node_id: &str,
 ) -> Result<std::vec::IntoIter<EntityTail>> {
-    if rows.counts.iter().sum::<usize>() != entity_ids.len() {
+    if rows.iter().map(|row| row.count).sum::<usize>() != entity_ids.len() {
         return Err(inconsistent_entity_rows());
     }
     if retention.duration.is_some() && times.len() != entity_ids.len() {
         return Err(inconsistent_entity_rows());
     }
     let mut tails = rows
-        .counts
         .iter()
-        .zip(&rows.first_rows)
         .enumerate()
-        .map(|(entity_id, (&count, &first))| {
-            EntityTail::new(entity_id, first, count, retention, node_id)
+        .map(|(entity_id, row)| {
+            EntityTail::new(entity_id, row.first, row.count, retention, node_id)
         })
         .collect::<Result<Vec<_>>>()?;
     collect_tail_rows(&mut tails, entity_ids, times, retention)?;
@@ -1731,6 +1729,7 @@ fn retained_histories(
 mod tests {
     use std::collections::VecDeque;
 
+    use super::super::kernel::EntityRow;
     use super::{EntityRows, RetentionPolicy, entity_tails};
 
     /// Entity ID, first row, transitions, and retained rows of one tail.
@@ -1768,11 +1767,13 @@ mod tests {
                     .position(|seen| seen == key)
                     .unwrap_or_else(|| {
                         distinct.push(*key);
-                        rows.counts.push(0);
-                        rows.first_rows.push(row);
+                        rows.push(EntityRow {
+                            count: 0,
+                            first: row,
+                        });
                         distinct.len() - 1
                     });
-                rows.counts[id] += 1;
+                rows[id].count += 1;
                 id
             })
             .collect();
@@ -1803,10 +1804,10 @@ mod tests {
     #[test]
     fn test_duration_tail_counts_every_transition_before_the_retained_suffix() {
         let times = (1..=136).collect::<Vec<i64>>();
-        let routing = EntityRows {
-            counts: vec![136],
-            first_rows: vec![0],
-        };
+        let routing = smallvec::smallvec![EntityRow {
+            count: 136,
+            first: 0
+        }];
         let policy = RetentionPolicy {
             rows: 2,
             duration: Some(100),
@@ -1825,10 +1826,7 @@ mod tests {
 
     #[test]
     fn routed_entity_tails_reject_inconsistent_routing() {
-        let rows = EntityRows {
-            counts: vec![1],
-            first_rows: vec![0],
-        };
+        let rows = smallvec::smallvec![EntityRow { count: 1, first: 0 }];
         assert!(
             entity_tails(
                 &[0, 1],
@@ -1855,10 +1853,10 @@ mod tests {
             )
             .is_err()
         );
-        let split = EntityRows {
-            counts: vec![1, 1],
-            first_rows: vec![0, 1],
-        };
+        let split = smallvec::smallvec![
+            EntityRow { count: 1, first: 0 },
+            EntityRow { count: 1, first: 1 }
+        ];
         assert!(
             entity_tails(
                 &[0, 0],
