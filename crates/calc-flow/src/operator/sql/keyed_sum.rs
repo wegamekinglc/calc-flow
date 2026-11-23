@@ -589,11 +589,17 @@ impl Transaction {
     pub(super) fn visit_changes(
         &mut self,
         schema: &SchemaRef,
-        check: impl FnMut() -> Result<()>,
-        reserve: impl FnMut(usize, usize) -> Result<()>,
+        mut check: impl FnMut() -> Result<()>,
+        mut reserve: impl FnMut(usize, usize) -> Result<()>,
         mut visit: impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
     ) -> Result<()> {
-        self.changed_groups(check, reserve, |state, group, previous, current| {
+        check()?;
+        self.undo.sort_unstable_by_key(|(group, _)| *group);
+        self.changed_groups(check, |state, group, previous, current| {
+            reserve(
+                state.keys.output_charge(&[group])?,
+                1 + usize::from(previous.is_some()),
+            )?;
             let keys = state.keys.columns(&[group])?;
             let before = previous
                 .map(|value| value.record(&keys, schema))
@@ -606,12 +612,33 @@ impl Transaction {
         &mut self,
         schema: &SchemaRef,
         mut check: impl FnMut() -> Result<()>,
-        reserve: impl FnMut(usize, usize) -> Result<()>,
+        charge: impl Fn(usize, usize, usize) -> Result<usize>,
+        reserve: impl FnOnce(usize) -> Result<()>,
     ) -> Result<(RecordBatch, ArrayRef)> {
+        check()?;
+        self.undo.sort_unstable_by_key(|(group, _)| *group);
+        let mut bytes = 0;
+        self.changed_groups(&mut check, |state, group, previous, _| {
+            bytes = charge(
+                bytes,
+                state.keys.output_charge(&[group])?,
+                1 + usize::from(previous.is_some()),
+            )?;
+            Ok(())
+        })?;
+        check()?;
+        if bytes == 0 {
+            return Ok((
+                RecordBatch::new_empty(schema.clone()),
+                datafusion::arrow::array::new_empty_array(&DataType::Utf8),
+            ));
+        }
+        // This transaction owns all writes until commit or rollback; both passes see the same versions.
+        reserve(bytes)?;
         let mut versions = Vec::new();
         let mut records = Vec::new();
         let mut operations = super::StringBuilder::with_capacity(0, 0);
-        self.changed_groups(&mut check, reserve, |state, group, previous, current| {
+        self.changed_groups(&mut check, |state, group, previous, current| {
             if versions.len() + 1 + usize::from(previous.is_some()) > MORSEL_ROWS {
                 state.flush_versions(schema, &mut versions, &mut records)?;
             }
@@ -633,13 +660,10 @@ impl Transaction {
     }
 
     fn changed_groups(
-        &mut self,
+        &self,
         mut check: impl FnMut() -> Result<()>,
-        mut reserve: impl FnMut(usize, usize) -> Result<()>,
         mut visit: impl FnMut(&KeyedSumState, GroupId, Option<SumValue>, SumValue) -> Result<()>,
     ) -> Result<()> {
-        check()?;
-        self.undo.sort_unstable_by_key(|(group, _)| *group);
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let existing = self
             .undo
@@ -652,7 +676,10 @@ impl Transaction {
                 check()?;
             }
             let (group, previous) = item?;
-            state.visit_change(group, previous, &mut reserve, &mut visit)?;
+            let current = state.sums.value(group);
+            if previous != Some(current) {
+                visit(&state, group, previous, current)?;
+            }
         }
         Ok(())
     }
@@ -984,24 +1011,6 @@ impl KeyedSumState {
             RecordBatch::try_new(schema.clone(), columns)
                 .map_err(|error| super::df_error("keyed SUM", error))?,
         );
-        Ok(())
-    }
-
-    fn visit_change(
-        &self,
-        group: GroupId,
-        previous: Option<SumValue>,
-        reserve: &mut impl FnMut(usize, usize) -> Result<()>,
-        visit: &mut impl FnMut(&KeyedSumState, GroupId, Option<SumValue>, SumValue) -> Result<()>,
-    ) -> Result<()> {
-        let current = self.sums.value(group);
-        if previous != Some(current) {
-            reserve(
-                self.keys.output_charge(&[group])?,
-                1 + usize::from(previous.is_some()),
-            )?;
-            visit(self, group, previous, current)?;
-        }
         Ok(())
     }
 

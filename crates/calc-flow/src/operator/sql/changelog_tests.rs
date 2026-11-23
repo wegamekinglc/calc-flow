@@ -260,6 +260,69 @@ async fn test_sparse_keyed_sum_projects_only_affected_group_versions() {
 }
 
 #[tokio::test]
+async fn test_direct_sum_reserves_exact_output_once_before_export() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "changes", None);
+    let mut operator = changelog(GROUPED);
+    let mut keys = (0..257).map(|id| format!("key-{id}")).collect::<Vec<_>>();
+    keys[256] = "long-key".repeat(2_048);
+    let borrowed = keys
+        .iter()
+        .map(|key| Some(key.as_str()))
+        .collect::<Vec<_>>();
+    let calls = |operator: &SqlOperator| {
+        operator
+            .incremental
+            .as_ref()
+            .unwrap()
+            .changelog_output_reservations
+            .swap(0, std::sync::atomic::Ordering::Relaxed)
+    };
+    let first = process(
+        &mut operator,
+        input(&borrowed, &vec![Some(1); keys.len()]),
+        &context,
+    )
+    .await;
+    assert_eq!(first.len(), keys.len());
+    assert_eq!(first[256], [text(&keys[256]), int(1), text("upsert")]);
+    let seed = calls(&operator);
+    let unchanged = process(
+        &mut operator,
+        input(&borrowed, &vec![Some(0); keys.len()]),
+        &context,
+    )
+    .await;
+    assert!(unchanged.is_empty());
+    let noop = calls(&operator);
+    let changed = process(
+        &mut operator,
+        input(
+            &[Some(&keys[256]), Some("new"), Some(&keys[0])],
+            &[Some(5), Some(9), Some(7)],
+        ),
+        &context,
+    )
+    .await;
+    assert_eq!(
+        changed,
+        [
+            vec![text(&keys[0]), int(1), text("retract")],
+            vec![text(&keys[0]), int(8), text("upsert")],
+            vec![text(&keys[256]), int(1), text("retract")],
+            vec![text(&keys[256]), int(6), text("upsert")],
+            vec![text("new"), int(9), text("upsert")],
+        ]
+    );
+    let update = calls(&operator);
+    assert_eq!(
+        [seed, noop, update],
+        [1, 0, 1],
+        "output reservation increments"
+    );
+}
+
+#[tokio::test]
 async fn test_small_changelog_operation_column_keeps_only_small_buffers() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "changes", None);

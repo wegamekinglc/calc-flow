@@ -174,6 +174,8 @@ pub(super) struct IncrementalSql {
     #[cfg(test)]
     pub(super) keyed_output_batches: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
+    pub(super) changelog_output_reservations: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     pub(super) keyed_output_rows: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(super) finalized_groups: Arc<std::sync::atomic::AtomicUsize>,
@@ -1058,6 +1060,8 @@ impl IncrementalSql {
             #[cfg(test)]
             keyed_output_batches: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
+            changelog_output_reservations: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             keyed_output_rows: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             finalized_groups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1907,17 +1911,25 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<PreparedKeyedRecords> {
         let width = self.keyed_output_charge(0, 1, name)?;
-        let reserve = |key_bytes, versions| {
-            // Reserve key buffers, projected columns and any final concatenation before export.
+        let charge = |total, key_bytes, versions| {
+            // Include key buffers, projected columns and any final concatenation.
             let row_bytes = checked_bytes(width, [(key_bytes, 3)], name)?;
+            checked_bytes(total, [(row_bytes, versions)], name)
+        };
+        let reserve = |bytes| {
+            let total = checked_bytes(reservation.size(), [(1, bytes)], name)?;
+            #[cfg(test)]
+            self.changelog_output_reservations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             reservation
-                .try_grow(checked_bytes(0, [(row_bytes, versions)], name)?)
+                .try_resize(total)
                 .map_err(|error| df_error(name, error))
         };
         if self.projects_sum_columns() {
             let (aggregate, operations) = transaction.change_record(
                 &self.aggregate_schema,
                 || context.check_cancelled(),
+                charge,
                 reserve,
             )?;
             context.check_cancelled()?;
@@ -1937,7 +1949,7 @@ impl IncrementalSql {
         transaction.visit_changes(
             &self.aggregate_schema,
             || context.check_cancelled(),
-            reserve,
+            |key_bytes, versions| reserve(charge(0, key_bytes, versions)?),
             |previous, current| {
                 let old = previous.as_ref().map(visible).transpose()?.flatten();
                 push_visible_changes(&mut changes, old, visible(&current)?);
