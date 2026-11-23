@@ -1,0 +1,209 @@
+{
+  "case": "python/public-sparse-changelog/fresh-stream",
+  "fixture": {
+    "sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
+    "input_rows": 12000,
+    "input_batch_rows": [
+      10000,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100,
+      100
+    ],
+    "retained_groups": 10000,
+    "batch_count": 21
+  },
+  "clock": "Immediately before declaration of the public TableExpr through EOF, retaining every public Arrow table until async context cleanup. Per-batch verification runs after the timer.",
+  "oracle": "For each prefix, independently filter raw trades and sum signed quantities in first-seen group order, verify exact Arrow schema and ordered old retract/new upsert values, replay all returned changes and compare full reconstructed numeric positions.",
+  "single_build_reference": {
+    "permanent_source": "../public-sparse-changelog-20261123/baseline.json",
+    "pr": 632,
+    "source_sha": "fced5062c1a6f05b6302674e8eda926182bb558a",
+    "measured_harness_sha256": "17314a398192db7d5171a968c84b681fa1a8a692f132d0a2a8876eab07601ac1",
+    "observed_rows_per_batch": [
+      10000,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160,
+      160
+    ],
+    "total_output_rows_per_sample": 13200,
+    "warmups_and_samples_verified": 22,
+    "rounds": [
+      {
+        "round": 1,
+        "warmup_ns": 417074332,
+        "observations_ns": [
+          398395471,
+          416568419,
+          390292275,
+          402695506,
+          394217038,
+          425346542,
+          399600768,
+          408628621,
+          392118051,
+          393490554
+        ],
+        "median_ns": 398998119.5
+      },
+      {
+        "round": 2,
+        "warmup_ns": 422013392,
+        "observations_ns": [
+          389441664,
+          419253815,
+          423654370,
+          413238998,
+          450396804,
+          446822873,
+          439431431,
+          432188780,
+          433045566,
+          427086736
+        ],
+        "median_ns": 429637758.0
+      }
+    ],
+    "collection_wall_seconds": 17.019125069025904
+  },
+  "paired_attempt": {
+    "outcome": "Stopped during initial baseline worker startup at the preregistered host major-fault limit. Neither wheel completed a warmup or a formal observation in this attempt.",
+    "source_tree_candidate": "c310acd5c312ad408ac33c4fd2155dba2c7320ad",
+    "harness_sha256": "93c7f29a3637d55cba2e88a935095f73f924943f3be7f7369fad389cad18bba9",
+    "protocol_sha256": "cf47f38c89a9285d5c3c2bdf72c1555879ef10d05ffd8bf80d7f9460396a45b1",
+    "actual_round_pairs": [
+      0,
+      0
+    ],
+    "completed_samples": {
+      "baseline": 0,
+      "candidate": 0
+    },
+    "completed_warmups": {
+      "baseline": 0,
+      "candidate": 0
+    },
+    "round_medians_ms": null,
+    "paired_median_intervals": null,
+    "wall_seconds": 4.011979463975877,
+    "registered_max_seconds": 180,
+    "protocol": "Two rounds of 10 adjacent AB/BA pairs; one warmup per arm per round; exact median change intervals using maintained benchmark_suite.report.comparison. A fresh isolated worker per arm/round, CPU 8, one Tokio and one Rayon worker. Every sample reconstructs every prefix.",
+    "resource_rule": "Three seconds of at least 80% idle on CPUs 8 and 9 before launch. Require 10 GiB available RAM, mean host CPU below 50%, fewer than 256 major faults and fewer than 1024 swapped pages per interval. Check each second after launch with CPU 9 below 50%. Stop and settle workers if exceeded.",
+    "resource_intervals": [
+      {
+        "stage": "preflight",
+        "seconds": 3.000744613003917,
+        "available_gib_start": 28.963424682617188,
+        "available_gib_end": 28.95681381225586,
+        "cpu8_busy_pct": 0.3,
+        "sibling9_busy_pct": 0.7,
+        "host_mean_busy_pct": 3.615625,
+        "major_faults": 15,
+        "swap_in_pages": 26,
+        "swap_out_pages": 0
+      },
+      {
+        "stage": "baseline worker startup",
+        "seconds": 1.000638913945295,
+        "available_gib_start": 28.95681381225586,
+        "available_gib_end": 28.898094177246094,
+        "cpu8_busy_pct": 52.6,
+        "sibling9_busy_pct": 0.0,
+        "host_mean_busy_pct": 5.1375,
+        "major_faults": 339,
+        "swap_in_pages": 1,
+        "swap_out_pages": 0
+      }
+    ],
+    "startup_state": "Only baseline hello request started; no functional sample was dispatched. No residual worker processes remained after termination.",
+    "conclusion": "No public Python implementation speedup or regression can be inferred from this comparison. The earlier single-build timings and the Rust measurements have separate scopes."
+  },
+  "release_wheels": {
+    "baseline": {
+      "source_sha": "fced5062c1a6f05b6302674e8eda926182bb558a",
+      "profile": "release",
+      "tracked_source_clean": true,
+      "native_sha256": "1bb87c8482913352419cb2c7cb57dea49e0063bda002aec9c88bddc440439425",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "dd8cc3a3274414eb8d60b258279d3aeb30b7d5a909313ed5cde820b5c6fc89f9",
+      "github_run": 45069870259,
+      "github_artifact": 14773009244,
+      "artifact_sha256": "28d836524655c4267e30affcecf59a79497426a2864c9750706bfe6e1f47c2da"
+    },
+    "candidate": {
+      "source_sha": "ccef6edc981e04d2999482b09bd8d02c6dd8f5c4",
+      "expected_branch_sha": "7e8f6658d7893840ccf2cf8ea30bc03a336560cb",
+      "test_merge_differences": [],
+      "profile": "release",
+      "tracked_source_clean": true,
+      "native_sha256": "4bd3e9d8d299553cbb0ef06c3c321f7463c191039d62bf2cdc9cd24ad15c817b",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "c6752ae3df7228cf58fe80d64367301ccf09a5f36bceaf224b060f0e7333c822",
+      "github_run": 45096060316,
+      "github_job": 137436274161,
+      "github_artifact": 14784320573,
+      "artifact_sha256": "d0f664c879b3959fc21915e6fc38196f8f9d3ee555d68b1e577d3cd15ab262be",
+      "runner_image": "ubuntu-26.04",
+      "runner_image_version": "20261116.202.1"
+    }
+  },
+  "build_environment": {
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "profile": "optimized release",
+    "features": "pyo3/abi3-py313",
+    "windows_of_measurement": "Both optimized wheels came from Linux CI. The public measurements used the local same-host environment recorded with the single-build reference."
+  },
+  "alternative_evidence": {
+    "scheduled_reports": [
+      {
+        "run": 45075275418,
+        "commit": "fced5062c1a6f05b6302674e8eda926182bb558a",
+        "run_conclusion": "failure",
+        "artifact": 14775081515,
+        "artifact_sha256": "1e9b8dc725254bf553e8f75b61bc6c05a8c9c6b587378c7cebffd6c53824d9a8"
+      },
+      {
+        "run": 45010853292,
+        "commit": "39cab2fb0bc44c871734ac1f2321396aa25e5161",
+        "run_conclusion": "success",
+        "artifact": 14760091481,
+        "artifact_sha256": "9d9e7b583579611c7a1a42c2482eed46d7ba65ca1e420b77184f0e846b67f44c"
+      }
+    ],
+    "inspection": "The archived JSON and Markdown reports do not contain the public sparse changelog case. The scheduled engine catalog lacks it. Standard CI checks functional fixtures and builds wheels; neither release job measures this 21-batch public lifecycle. The existing sparse-stream-1cpu Rust report uses native entry points."
+  }
+}
