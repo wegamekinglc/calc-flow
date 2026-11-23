@@ -53,24 +53,22 @@ class SparseChangelogCiTests(unittest.TestCase):
     def test_pressure_guard_checks_startup_paging_and_smt(self):
         counters = {"pgmajfault": 10, "pswpin": 1, "pswpout": 2}
         row = ci.interval(
-            counters,
-            {**counters, "pgmajfault": 349},
+            (counters, {**counters, "pgmajfault": 349}),
             [1.0, 0.0],
             29 * 1024**3,
-            0,
-            (1,),
+            (0, 1),
             preflight=False,
         )
         self.assertFalse(row["suitable"])
         self.assertEqual(row["major_faults"], 339)
         self.assertTrue(
             ci.interval(
-                counters, counters, [99, 0], 12 * 1024**3, 0, (1,), preflight=False
+                (counters, counters), [99, 0], 12 * 1024**3, (0, 1), preflight=False
             )["suitable"]
         )
         self.assertFalse(
             ci.interval(
-                counters, counters, [90, 70], 12 * 1024**3, 0, (1,), preflight=False
+                (counters, counters), [90, 70], 12 * 1024**3, (0, 1), preflight=False
             )["suitable"]
         )
 

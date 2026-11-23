@@ -29,15 +29,15 @@ SIDES = ("baseline", "candidate")
 
 
 def interval(
-    before: dict,
-    after: dict,
+    paging: tuple[dict, dict],
     busy: list[float],
     available: int,
-    cpu: int,
-    siblings: tuple[int, ...],
+    cores: tuple[int, ...],
     *,
     preflight: bool,
 ) -> dict:
+    before, after = paging
+    cpu, *siblings = cores
     major = after["pgmajfault"] - before["pgmajfault"]
     swapped = sum(after[k] - before[k] for k in ("pswpin", "pswpout"))
     host = sum(busy) / len(busy)
@@ -98,12 +98,10 @@ async def _resource(path: Path, cpu: int | None) -> int:
             key=lambda i: max(busy[j] for j in (i, *_siblings(i))),
         )
     row = interval(
-        before,
-        _paging(),
+        (before, _paging()),
         busy,
         psutil.virtual_memory().available,
-        cpu,
-        _siblings(cpu),
+        (cpu, *_siblings(cpu)),
         preflight=preflight,
     )
     with path.open("a", encoding="utf-8") as log:
