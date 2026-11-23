@@ -26,6 +26,7 @@ CASE = {
 }
 FIXTURE = ROOT / "benchmarks/sum-state/public-sparse-changelog-20261123/sparse.arrow.gz"
 SIDES = ("baseline", "candidate")
+GROUP_HASH_JOB_SECONDS = 480
 
 
 def interval(
@@ -204,7 +205,8 @@ def main():
             "warmups_per_side_per_round": 1,
             "cleanup_reserve_seconds": 45,
             "acquisition_seconds": 180,
-            "job_seconds": 600,
+            "job_seconds": GROUP_HASH_JOB_SECONDS,
+            "total_including_external_provenance_seconds": 600,
             "harness_sha256": sha256_file(ROOT / "benchmarks/sparse_changelog.py"),
             "fixture_gzip_sha256": sha256_file(FIXTURE),
             "workflow_sha": os.environ["GITHUB_SHA"],

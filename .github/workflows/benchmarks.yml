@@ -381,7 +381,7 @@ jobs:
     name: Public sparse changelog paired release wheels
     if: inputs.mode == 'sparse-changelog'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     env:
       RAYON_NUM_THREADS: "1"
     steps:

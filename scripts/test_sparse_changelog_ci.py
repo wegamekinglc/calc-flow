@@ -87,7 +87,7 @@ class SparseChangelogCiTests(unittest.TestCase):
         for expected in [
             "inputs.mode == 'sparse-changelog'",
             "runs-on: ubuntu-latest",
-            "timeout-minutes: 10",
+            "timeout-minutes: 8",
             "persist-credentials: false",
             "inputs.baseline_wheel_artifact",
             "inputs.candidate_wheel_artifact",

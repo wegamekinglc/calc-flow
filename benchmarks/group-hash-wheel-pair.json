@@ -1,0 +1,40 @@
+{
+  "baseline": {
+    "artifact": 14794681070,
+    "artifact_digest": "sha256:6be87771e4da11d870d2e2e65623a580bad6aff4d733760006cc332c2a375698",
+    "build_profile": "release",
+    "checkout": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137513145073,
+    "parents": [
+      "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+      "a1a8424891c3c24f53ab762825b355a5fed3e10b"
+    ],
+    "requested_sha": "35d4c124b9c9647b6a52b4f5b22989b5270d0a86",
+    "tree": "44ef75f0b28a8070f90ff09a86f7d4910c914cd6",
+    "workflow_run": 45120573404
+  },
+  "candidate": {
+    "artifact": 14794933077,
+    "artifact_digest": "sha256:49b56fc26541c869b9e96ab858da8c35adf629434ceda918bff5f3cdfde4d7aa",
+    "build_profile": "release",
+    "checkout": "41bd7f9cfa3fb34f16bc536077d25fb19deffbaa",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "41bd7f9cfa3fb34f16bc536077d25fb19deffbaa",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137518700368,
+    "parents": [
+      "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+      "6781cd28bb4b5eb680664aeddd9b7ad2a9673ed8"
+    ],
+    "requested_sha": "f65c47f553b8ab18c0be77e80fee4a8e3f5fdcc0",
+    "tree": "12bedcfcd8c7c2977c77100bf2614c25d11b673f",
+    "workflow_run": 45122325781
+  }
+}

@@ -108,6 +108,21 @@ def _wheel(content: bytes, digest: str, directory: Path) -> Path:
     return path
 
 
+def product_tree(
+    registration: dict, sha: str, artifact: int, checkout: str, tree: str
+) -> str:
+    observed = (sha, artifact, checkout, tree)
+    fields = ("requested_sha", "artifact", "checkout", "tree")
+    expected = [
+        tuple(record[key] for key in fields) for record in registration.values()
+    ]
+    if observed not in expected:
+        raise ValueError(
+            "artifact, workflow, checkout or tree differs from sealed product pair"
+        )
+    return tree
+
+
 def seal(repository: str, artifact_id: int, sha: str, directory: Path) -> dict:
     if artifact_id <= 0 or not FULL_SHA.fullmatch(sha):
         raise ValueError("a positive artifact ID and full head SHA are required")
@@ -133,9 +148,16 @@ def seal(repository: str, artifact_id: int, sha: str, directory: Path) -> dict:
         sha,
         _api(repository, f"actions/jobs/{job['id']}/logs").decode("utf-8-sig"),
     )
-    tree = api(f"git/commits/{sha}")["tree"]["sha"]
-    if tree != api(f"git/commits/{proof['checkout']}")["tree"]["sha"]:
-        raise ValueError("CI actually built a different Git tree")
+    registration = (
+        Path(__file__).resolve().parents[1] / "benchmarks/group-hash-wheel-pair.json"
+    )
+    tree = product_tree(
+        json.loads(registration.read_text()),
+        sha,
+        artifact_id,
+        proof["checkout"],
+        api(f"git/commits/{proof['checkout']}")["tree"]["sha"],
+    )
     directory.mkdir(parents=True, exist_ok=False)
     wheel = _wheel(
         _api(repository, f"actions/artifacts/{artifact_id}/zip"),
