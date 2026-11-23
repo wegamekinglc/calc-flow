@@ -63,6 +63,10 @@ def validate_sample(sample: dict) -> float:
 def validate_stream_sample(case: dict, sample: dict) -> None:
     """Require original adapter evidence for every replay-backed dimension."""
 
+    from scripts.hosted_static_product_state import CASE_ID, validate_static_sample
+
+    if case["id"] == CASE_ID:
+        validate_static_sample(sample)
     if (
         not case.get("backend", "").startswith("calc-flow-stream")
         or "batch_rows" not in case

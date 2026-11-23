@@ -698,7 +698,7 @@ async def run_stream(
     expected_rows: int,
     *,
     static_join: bool = False,
-) -> tuple[pa.Table, float]:
+) -> tuple:
     timed = _validated_timed_streams(plan, streams)
     sources = {name: _ReadySource() for name in streams}
     sink = _CollectSink(expected_rows)
@@ -720,19 +720,36 @@ async def run_stream(
         result = await _measure_ready(
             sources, sink, timed, job, static_join=static_join
         )
+        if static_join:
+            delta = streams["right"][-1].at - BASE
+            sealed = int(BASE_MICROS + delta // timedelta(microseconds=1))
+            ((join_id, status),) = job.status()["stream_joins"].items()
+            _require_static_left_counters(status)
+            result = (
+                *result,
+                {
+                    "lookup_join": status,
+                    "join_id": join_id,
+                    "sealed_dimension_watermark_micros": sealed,
+                },
+            )
         for source in sources.values():
             await source.push(None)
         return result
 
     try:
-        table, seconds = await run_with_completion(
+        result = await run_with_completion(
             measure_and_end(),
             job.wait_async(),
             on_failure=lambda error: stream_failure(root, job, sources, sink, error),
         )
         if sink.rows != expected_rows:
             raise RuntimeError("stream output row count changed after the timed result")
-        return table, seconds
+        if static_join:
+            table, seconds, evidence = result
+            operator = job.status()["operators"][evidence["join_id"]]
+            return table, seconds, {**evidence, "join_operator": operator}
+        return result
     finally:
         await job.cancel_async()
 
