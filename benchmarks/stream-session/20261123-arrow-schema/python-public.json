@@ -1,0 +1,641 @@
+{
+  "case_ids": [
+    "component",
+    "public"
+  ],
+  "builds": {
+    "baseline": {
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "native": "4bd3e9d8d299553cbb0ef06c3c321f7463c191039d62bf2cdc9cd24ad15c817b"
+    },
+    "candidate": {
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "native": "4bd3e9d8d299553cbb0ef06c3c321f7463c191039d62bf2cdc9cd24ad15c817b"
+    }
+  },
+  "worker": "e7b3fac89dbeda9780e767bce51a1f6f0cd75fedaa7ecdbb4f79da48add047e7",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "observations": [
+    {
+      "round": 0,
+      "index": -1,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9413.265625,
+        "public": 37220.203125
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": -1,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 381.6796875,
+        "public": 27939.171875
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 0,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 475.0,
+        "public": 27833.4765625
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 0,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9527.359375,
+        "public": 50245.328125
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 1,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 11854.3125,
+        "public": 39145.109375
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 1,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 446.6015625,
+        "public": 41957.703125
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 2,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 396.734375,
+        "public": 29028.2734375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 2,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9808.984375,
+        "public": 39185.203125
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 3,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9731.890625,
+        "public": 38176.1484375
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 3,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 426.4296875,
+        "public": 30016.359375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 4,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 385.328125,
+        "public": 27971.9609375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 4,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9451.1953125,
+        "public": 36960.375
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 5,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9675.5546875,
+        "public": 37963.40625
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 5,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 383.953125,
+        "public": 38993.34375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 6,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 432.9375,
+        "public": 30283.5859375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 6,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 12486.1171875,
+        "public": 44078.65625
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 7,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 10810.5703125,
+        "public": 37381.90625
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 7,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 380.9765625,
+        "public": 27803.0234375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 8,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 400.0546875,
+        "public": 28945.8671875
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 8,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9701.984375,
+        "public": 38196.1796875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 9,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 10065.953125,
+        "public": 40734.921875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 0,
+      "index": 9,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 405.3125,
+        "public": 31004.3984375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": -1,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 468.3984375,
+        "public": 31121.1484375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": -1,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9395.4921875,
+        "public": 40560.421875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 0,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9488.2578125,
+        "public": 37065.8125
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 0,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 424.3359375,
+        "public": 30141.7734375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 1,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 392.703125,
+        "public": 28255.125
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 1,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 10048.0078125,
+        "public": 37591.8125
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 2,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9435.0,
+        "public": 38031.8046875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 2,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 400.5390625,
+        "public": 28034.921875
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 3,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 395.2890625,
+        "public": 29378.2109375
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 3,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9573.4453125,
+        "public": 37984.1796875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 4,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9389.578125,
+        "public": 37487.59375
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 4,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 409.6796875,
+        "public": 27822.65625
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 5,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 393.8671875,
+        "public": 27908.8046875
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 5,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9585.625,
+        "public": 37050.5703125
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 6,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9490.015625,
+        "public": 37675.875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 6,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 435.2265625,
+        "public": 28941.3671875
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 7,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 401.578125,
+        "public": 28265.28125
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 7,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9592.953125,
+        "public": 40090.59375
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 8,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 10032.4296875,
+        "public": 38649.6875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 8,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 403.171875,
+        "public": 29543.3515625
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 9,
+      "side": "candidate",
+      "per_call_ns": {
+        "component": 398.5859375,
+        "public": 30249.6640625
+      },
+      "verified_calls": 256,
+      "module": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163",
+      "arrow": "24.0.0"
+    },
+    {
+      "round": 1,
+      "index": 9,
+      "side": "baseline",
+      "per_call_ns": {
+        "component": 9838.125,
+        "public": 38533.421875
+      },
+      "verified_calls": 256,
+      "module": "dbbc3dcbf4dfef3897e007a75f77f0da4d92bf484bb3cd982d3cc77c7b390a45",
+      "arrow": "24.0.0"
+    }
+  ],
+  "budget": 120,
+  "cpu": 8,
+  "summary": {
+    "component": {
+      "head_p50": 4.0105859375000003e-07,
+      "head_p95": 4.48021484375e-07,
+      "head_min": 3.809765625e-07,
+      "head_max": 4.75e-07,
+      "rows_per_second": 2493401.2525445353,
+      "samples": 20,
+      "base_p50": 9.688769531250001e-06,
+      "change_percent": -95.86058278652999,
+      "round_changes": [
+        -95.96441475522093,
+        -95.84240297147299
+      ],
+      "round_min_changes": [
+        -95.96901185613923,
+        -95.81767018952196
+      ],
+      "round_intervals": [
+        {
+          "median": -95.96441475522093,
+          "low": -96.47588839915794,
+          "high": -95.61822359157473,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -95.84240297147299,
+          "low": -95.98131372400908,
+          "high": -95.527778166599,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "improved"
+    },
+    "public": {
+      "head_p50": 2.89870703125e-05,
+      "head_p95": 3.914156171875e-05,
+      "head_min": 2.78030234375e-05,
+      "head_max": 4.1957703125e-05,
+      "rows_per_second": 34498.13966086712,
+      "samples": 20,
+      "base_p50": 3.81039765625e-05,
+      "change_percent": -23.92639055675988,
+      "round_changes": [
+        -24.26847755513681,
+        -24.11748317827218
+      ],
+      "round_min_changes": [
+        -24.776132716456477,
+        -24.906267257610104
+      ],
+      "round_intervals": [
+        {
+          "median": -24.26847755513681,
+          "low": -31.296485614849022,
+          "high": 2.712974418621883,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -24.11748317827218,
+          "low": -26.285586220907632,
+          "high": -21.497591984880003,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "no-confirmed-regression"
+    }
+  },
+  "status": "completed",
+  "seconds": 9.507375231012702,
+  "sealed_release": {
+    "source_sha": "ccef6edc981e04d2999482b09bd8d02c6dd8f5c4",
+    "expected_branch_sha": "7e8f6658d7893840ccf2cf8ea30bc03a336560cb",
+    "test_merge_differences": [],
+    "profile": "release",
+    "tracked_source_clean": true,
+    "native_sha256": "4bd3e9d8d299553cbb0ef06c3c321f7463c191039d62bf2cdc9cd24ad15c817b",
+    "wheel_sha256": "c6752ae3df7228cf58fe80d64367301ccf09a5f36bceaf224b060f0e7333c822",
+    "github_run": 45096060316,
+    "github_job": 137436274161,
+    "github_artifact": 14784320573,
+    "artifact_sha256": "d0f664c879b3959fc21915e6fc38196f8f9d3ee555d68b1e577d3cd15ab262be",
+    "runner_image": "ubuntu-26.04",
+    "runner_image_version": "20261116.202.1"
+  },
+  "modules": {
+    "baseline": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
+    "candidate": "bf4d7919a37c6fc0cc4f9659b3a373abc1e9dacb"
+  },
+  "protocol": "One Python public StreamSession.push workload and one input-validation component control, each looking at a 32-column Arrow RecordBatch and exact symbolic schema. The public expression selects one Int64 column, with disabled watermarks. Compare the same sealed Linux CI wheel native module using baseline main 3a63b112 and a Python-only schema check. Reuse the same symbolic and native sources on both arms. For the public clock warm a session and push a prebuilt one-row record, verify the returned Arrow values and field. For the control call the actual _session_batch and verify object identity. Two rounds, ten AB/BA pairs per round and case, one excluded warmup per arm/round. Use 128 calls per observation for timer resolution, normalize by invocations. Run with one CPU, one worker and same ordinary GC settings. Neither clock forces GC; measure this specific Arrow path separately from the established forced-GC native Batch session target. Fixed inclusive budget 120s for fixture, warmup, validation, statistics, startup and cleanup. Build identical native module once from existing sealed release; no compilation. No timing of metadata normalization fallback in this comparison. Stop on unavailable matching identity, competing workloads or budget expiration.",
+  "interpreter": "CPython 3.13.9"
+}

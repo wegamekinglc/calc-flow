@@ -83,6 +83,60 @@ fn rollback_invalidates_repeated_key_run() {
 }
 
 #[test]
+fn test_cancelled_key_encoding_allocates_only_the_first_page() {
+    use datafusion::arrow::array::LargeStringArray;
+
+    let value = "x".repeat(2 << 20);
+    let narrow: ArrayRef = Arc::new(StringArray::from(vec![value.as_str()]));
+    let wide: ArrayRef = Arc::new(LargeStringArray::from(vec![value.as_str()]));
+    for array in [narrow, wide] {
+        let mut stop = || {
+            Err(crate::CalcFlowError::Cancelled {
+                run_id: "keys".into(),
+            })
+        };
+        let mut work = super::VariableWork::new(&mut stop);
+        let allocated = allocation_counter::measure(|| {
+            let result = super::canonical_row(std::slice::from_ref(&array), 0, &mut work);
+            assert!(matches!(
+                result,
+                Err(crate::CalcFlowError::Cancelled { .. })
+            ));
+        });
+        eprintln!(
+            "cancelled {:?} canonical key: {allocated:?}",
+            array.data_type()
+        );
+        assert!(allocated.bytes_total < 2 * 65_536);
+    }
+}
+
+#[test]
+fn test_sliced_string_keys_keep_their_canonical_encoding() {
+    use datafusion::arrow::array::{Int16Array, LargeStringArray};
+    let values = vec![Some("unused"), None, Some(""), Some("猫\0")];
+    let narrow: ArrayRef = Arc::new(StringArray::from(values.clone()));
+    let wide: ArrayRef = Arc::new(LargeStringArray::from(values));
+    let other: ArrayRef = Arc::new(Int16Array::from(vec![-2; 3]));
+    let arrays = [narrow.slice(1, 3), wide.slice(1, 3), other];
+    for (row, string) in [None, Some(""), Some("猫\0")].into_iter().enumerate() {
+        let mut expected = Vec::new();
+        for tag in [10, 11] {
+            expected.extend_from_slice(&[tag, u8::from(string.is_none())]);
+            if let Some(string) = string {
+                expected.extend_from_slice(&(string.len() as u64).to_le_bytes());
+                expected.extend_from_slice(string.as_bytes());
+            }
+        }
+        expected.extend_from_slice(&[3, 0, 0xfe, 0xff]);
+        let actual =
+            super::canonical_row(&arrays, row, &mut super::VariableWork::new(&mut || Ok(())))
+                .unwrap();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn test_routing_distinct_fixed_keys_avoids_per_hash_allocations() {
     use datafusion::arrow::array::UInt32Array;
 
