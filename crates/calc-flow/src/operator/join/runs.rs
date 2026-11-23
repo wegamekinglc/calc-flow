@@ -704,9 +704,6 @@ struct Prepared {
     incoming_is_left: bool,
     incoming: Incoming,
     probe: Probe,
-    run: Option<Arc<Run>>,
-    next_row_id: u64,
-    output_base: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -755,7 +752,9 @@ pub(super) struct RunOutput {
 
 pub(super) struct PreparedRuns {
     incoming_side: JoinSide,
-    prepared: Vec<Prepared>,
+    matched_rows: usize,
+    row_ids: std::ops::Range<u64>,
+    output_sequences: std::ops::Range<u64>,
     outputs: Vec<RunOutput>,
     update: Option<SideUpdate>,
     next_run: u64,
@@ -767,45 +766,29 @@ impl PreparedRuns {
     }
 
     pub(super) fn matched_rows(&self) -> usize {
-        self.prepared
-            .iter()
-            .map(|prepared| prepared.probe.len())
-            .sum()
+        self.matched_rows
     }
 
     pub(super) fn commit(self, state: &mut RunState) -> Result<Vec<RunOutput>> {
         let Self {
             incoming_side,
-            prepared,
             outputs,
+            row_ids,
+            output_sequences,
             update,
             next_run,
+            ..
         } = self;
-        if prepared
-            .first()
-            .is_some_and(|prepared| prepared.output_base != state.next_output)
-        {
+        if outputs.is_empty() {
+            return Ok(outputs);
+        }
+        if state.next_output != output_sequences.start {
             return Err(run_error("prepared batch output sequence is stale"));
         }
-        let mut next_output = state.next_output;
-        for (prepared, output) in prepared.iter().zip(&outputs) {
-            if prepared.incoming_is_left != (incoming_side == JoinSide::Left) {
-                return Err(run_error("prepared batch changed its input side"));
-            }
-            if prepared.output_base != next_output {
-                return Err(run_error("prepared output sequence is stale"));
-            }
-            let count = u64::try_from(output.records.len())
-                .map_err(|_| run_error("output count overflowed"))?;
-            next_output = next_output
-                .checked_add(count)
-                .ok_or_else(|| run_error("output sequence overflowed"))?;
-        }
-        let next_row_id = prepared.last().map_or_else(
-            || state.next_row_id(incoming_side),
-            |prepared| prepared.next_row_id,
-        );
         let side = incoming_side.index();
+        if state.sides[side].next_row_id != row_ids.start {
+            return Err(run_error("prepared batch row-ID frontier is stale"));
+        }
         if let Some(update) = update {
             let expected = u64::try_from(update.runs.len())
                 .ok()
@@ -825,10 +808,10 @@ impl PreparedRuns {
             state.dirty.runs[side].extend(ids);
             state.dirty.groups[side].extend(groups);
             state.dirty.expiration[side] = true;
+            state.next_run = next_run;
         }
-        state.sides[side].next_row_id = next_row_id;
-        state.next_run = next_run;
-        state.next_output = next_output;
+        state.sides[side].next_row_id = row_ids.end;
+        state.next_output = output_sequences.end;
         Ok(outputs)
     }
 }
@@ -1158,10 +1141,12 @@ impl RunState {
         check()?;
         let mut matches = 0usize;
         let mut next_run = self.next_run;
+        let mut next_row_id = self.next_row_id(incoming_side);
         let mut prepared = Vec::<Prepared>::new();
         let mut runs = Vec::new();
         for incoming in incoming {
-            let next = self.prepare(
+            next_row_id = incoming.next_row_id;
+            let (next, run) = self.prepare(
                 incoming_side,
                 incoming,
                 RunId(next_run),
@@ -1169,11 +1154,11 @@ impl RunState {
                 check,
                 &mut matches,
             )?;
-            if let Some(run) = &next.run {
+            if let Some(run) = run {
                 next_run = next_run
                     .checked_add(1)
                     .ok_or_else(|| run_error("run-ID frontier overflowed"))?;
-                runs.push(Arc::clone(run));
+                runs.push(run);
             }
             prepared.push(next);
         }
@@ -1198,29 +1183,25 @@ impl RunState {
         drop(merge_span);
         let mut next_output = self.next_output;
         let mut outputs = Vec::with_capacity(prepared.len());
-        for prepared in &mut prepared {
-            prepared.output_base = next_output;
+        for prepared in prepared {
             #[cfg(feature = "benchmark-internals")]
             let materialize_span = output
                 .trace
                 .map(|trace| trace.stage(&self.name, "run_materialize", prepared.probe.len()));
-            let records = prepared.materialize(self, &output, check)?;
+            let records = prepared.materialize(self, &output, next_output, check)?;
             #[cfg(feature = "benchmark-internals")]
             drop(materialize_span);
-            let count = u64::try_from(records.len())
-                .map_err(|_| run_error("output sequence overflowed"))?;
-            next_output = next_output
-                .checked_add(count)
-                .ok_or_else(|| run_error("output sequence overflowed"))?;
-            let sequences = (0..count)
-                .map(|offset| prepared.output_base + offset)
-                .collect();
+            let sequences = output_sequence_range(next_output, records.len())?;
+            next_output = sequences.end;
+            let sequences = sequences.collect();
             outputs.push(RunOutput { records, sequences });
         }
         check()?;
         Ok(PreparedRuns {
             incoming_side,
-            prepared,
+            matched_rows: matches,
+            row_ids: self.next_row_id(incoming_side)..next_row_id,
+            output_sequences: self.next_output..next_output,
             outputs,
             update,
             next_run,
@@ -1235,7 +1216,7 @@ impl RunState {
         output: &RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
         matches: &mut usize,
-    ) -> Result<Prepared> {
+    ) -> Result<(Prepared, Option<Arc<Run>>)> {
         check()?;
         #[cfg(not(feature = "benchmark-internals"))]
         let _ = output;
@@ -1256,14 +1237,14 @@ impl RunState {
         let run = Run::new(id, &incoming)?;
         #[cfg(feature = "benchmark-internals")]
         drop(build_span);
-        Ok(Prepared {
-            incoming_is_left: incoming_side == JoinSide::Left,
-            next_row_id: incoming.next_row_id,
-            incoming,
-            probe,
+        Ok((
+            Prepared {
+                incoming_is_left: incoming_side == JoinSide::Left,
+                incoming,
+                probe,
+            },
             run,
-            output_base: self.next_output,
-        })
+        ))
     }
 
     fn probe(
@@ -1353,14 +1334,14 @@ impl RunState {
             runs,
         })
     }
+}
 
-    fn output_sequences(&self, count: usize) -> Result<Vec<u64>> {
-        let count = u64::try_from(count).map_err(|_| run_error("output sequence overflowed"))?;
-        self.next_output
-            .checked_add(count)
-            .ok_or_else(|| run_error("output sequence overflowed"))?;
-        Ok((0..count).map(|offset| self.next_output + offset).collect())
-    }
+fn output_sequence_range(start: u64, count: usize) -> Result<std::ops::Range<u64>> {
+    let count = u64::try_from(count).map_err(|_| run_error("output sequence overflowed"))?;
+    let end = start
+        .checked_add(count)
+        .ok_or_else(|| run_error("output sequence overflowed"))?;
+    Ok(start..end)
 }
 
 impl Prepared {
@@ -1368,6 +1349,7 @@ impl Prepared {
         &self,
         state: &RunState,
         output: &RunOutputContext<'_>,
+        first_sequence: u64,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<RecordBatch>> {
         check()?;
@@ -1381,18 +1363,12 @@ impl Prepared {
             output.budget,
             check,
         )?;
-        // Validate the complete sequence range before gathering any output.
-        drop(state.output_sequences(ranges.len())?);
+        // Check planned ranges here; byte-budget splits are counted after materialization.
+        let sequences = output_sequence_range(first_sequence, ranges.len())?;
         let mut records = Vec::with_capacity(ranges.len());
-        for (ordinal, range) in ranges.into_iter().enumerate() {
+        for (sequence, range) in sequences.zip(ranges) {
             check()?;
-            self.materialize_range(
-                state,
-                output,
-                range,
-                self.output_base + ordinal as u64,
-                &mut records,
-            )?;
+            self.materialize_range(state, output, range, sequence, &mut records)?;
         }
         Ok(records)
     }
