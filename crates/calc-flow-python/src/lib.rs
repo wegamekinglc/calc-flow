@@ -40,6 +40,7 @@ fn register_types(module: &Bound<'_, PyModule>) -> PyResult<()> {
     array_indicators::register(module)?;
     batch::register(module)?;
     module.add_class::<arrow_source::PyArrowSource>()?;
+    module.add_function(wrap_pyfunction!(arrow_source::_ordered_event_time, module)?)?;
     execution_options::register(module)?;
     config::register(module)?;
     connector::register(module)
