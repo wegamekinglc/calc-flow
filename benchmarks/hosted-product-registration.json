@@ -1,9 +1,9 @@
 {
   "candidate_pr": 668,
   "case": "one 60-second grouped rolling Float64 SUM through public TableExpr.stream",
-  "baseline_expected_checkout": "131aa898d1b7910c84248405399eefec4b8db776",
-  "candidate_expected_checkout": "9d08158a61198e45c82d2e6d41fda48d7c5be532",
-  "candidate_reviewed_head": "049ea181447305cef8b969fa3c110064fb6134d4",
+  "baseline_expected_checkout": "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
+  "candidate_expected_checkout": "52babf51dd6674ad102cfabbc9857a83a1e2b53d",
+  "candidate_reviewed_head": "453ed531756c18fc8c499f1eac268bd068cbe9b0",
   "job_seconds": 105,
   "external_provenance_seconds": 75,
   "reserved_cleanup_seconds": 45,
@@ -13,7 +13,7 @@
   "pairs_per_round": 10,
   "warmups_per_arm_per_round": 1,
   "sources_sha256": {
-    "benchmarks/hosted-product-protocol.md": "b8199972055f84b1264611183dda922f2b7146b6347ee331ccedc9e11fe0082b",
+    "benchmarks/hosted-product-protocol.md": "b74a05b31bfa70f2f2d21efdb0173a89a6263560507f06689b61afd674f08bce",
     "benchmarks/public_duration_sum.py": "f17d62312ab7b2936651a0aa16659006e4705267900a40968d5bbe35c7a2c730",
     "scripts/hosted_duration_sum.py": "bed1c65bbe4129ba7135c69900a1d7fd344e8e8d43f7cbd18a1d5b3974652333",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
@@ -25,17 +25,18 @@
     "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd"
   },
   "baseline": {
-    "workflow_run": 45135841399,
-    "job": 137561789888,
-    "requested_sha": "8bd678c98a981d7c399cb09aa21d17e0ebebb8bb",
-    "checkout": "131aa898d1b7910c84248405399eefec4b8db776",
-    "tree": "55563f02211a3d79be106aed09f41b58fd1ac4f5"
+    "workflow_run": 45138047364,
+    "job": 137568951270,
+    "requested_sha": "29c86d93445d3bb8db5061a867841be9401fa645",
+    "checkout": "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
+    "tree": "9cf8ba8aff3c06139518617e340b2755b80b9227"
   },
   "candidate": {
-    "workflow_run": 45135454729,
-    "job": 137561115917,
-    "requested_sha": "049ea181447305cef8b969fa3c110064fb6134d4",
-    "checkout": "9d08158a61198e45c82d2e6d41fda48d7c5be532",
-    "tree": "514858645e5aa581297564dd28787a226a5fa977"
-  }
+    "workflow_run": 45136760816,
+    "job": 137565761579,
+    "requested_sha": "453ed531756c18fc8c499f1eac268bd068cbe9b0",
+    "checkout": "52babf51dd6674ad102cfabbc9857a83a1e2b53d",
+    "tree": "ff8378203388448ddfe58dc7b451939dcedeb80e"
+  },
+  "prior_external_reservation_seconds": 75
 }

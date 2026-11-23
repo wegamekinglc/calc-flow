@@ -35,3 +35,12 @@ previous complete job took 43 seconds. Preserve the maintained three-second
 preflight, every one-second pressure sample and the final interval. Stop on
 any correctness, resource, setup or time-budget failure and preserve partial
 results. There is one formal collection on a new VM.
+
+The independent review replaced an iterator-wide comparison with a check of
+the previous-to-first boundary followed by Rust's contiguous slice sort test.
+The earlier candidate and its parent had no hosted samples or warmups. Charge
+its full external preparation reservation of 75 seconds and cancel its obsolete
+parent build. The final official wheel is built at synthetic merge 52babf51,
+whose first parent is 86781a39. Only the five reviewed product/test files differ.
+The phase reservation of 120 seconds, previous external reservation of 75 seconds
+and final collection's 180 seconds total 375 of the 600-second stage allowance.
