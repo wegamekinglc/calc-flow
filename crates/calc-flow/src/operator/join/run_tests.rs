@@ -364,7 +364,7 @@ fn fanout_input(rows: usize, first_value: i64, retain: bool) -> Incoming {
     )
 }
 
-fn fanout_state(left_rows: usize, right_rows: usize) -> (RunState, Incoming) {
+fn fanout_state_with_rows(left_rows: usize, right_rows: usize) -> (RunState, Incoming) {
     let mut state = state(100);
     state
         .apply(
@@ -379,9 +379,13 @@ fn fanout_state(left_rows: usize, right_rows: usize) -> (RunState, Incoming) {
     (state, fanout_input(right_rows, 100, false))
 }
 
+fn fanout_state(rows: usize) -> (RunState, Incoming) {
+    fanout_state_with_rows(rows, 1)
+}
+
 #[test]
 fn test_chunked_run_gather_visits_only_its_matched_pairs() {
-    let (mut state, right) = fanout_state(8, 11);
+    let (mut state, right) = fanout_state_with_rows(8, 11);
     super::matches::CURSOR_VISITS.set(0);
     let output = state
         .apply(
@@ -421,7 +425,7 @@ fn estimated(record: &RecordBatch, sequence: u64) -> usize {
 
 #[test]
 fn test_selection_materialization_preflights_row_and_byte_chunks() {
-    let (mut state, right) = fanout_state(3, 1);
+    let (mut state, right) = fanout_state(3);
     let output = state
         .apply(
             JoinSide::Right,
@@ -450,7 +454,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
         [0, 1, 2]
     );
 
-    let (mut state, right) = fanout_state(3, 1);
+    let (mut state, right) = fanout_state(3);
     let whole = state
         .apply(
             JoinSide::Right,
@@ -462,7 +466,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
         )
         .unwrap();
     let whole_bytes = estimated(&whole.records[0], 0);
-    let (mut state, right) = fanout_state(3, 1);
+    let (mut state, right) = fanout_state(3);
     let split = state
         .apply(
             JoinSide::Right,
@@ -483,7 +487,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
 
 #[test]
 fn test_one_byte_short_output_row_does_not_commit_input() {
-    let (mut measured, right) = fanout_state(1, 1);
+    let (mut measured, right) = fanout_state(1);
     let output = measured
         .apply(
             JoinSide::Right,
@@ -496,7 +500,7 @@ fn test_one_byte_short_output_row_does_not_commit_input() {
         .unwrap();
     let row_bytes = estimated(&output.records[0], 0);
 
-    let (mut state, right) = fanout_state(1, 1);
+    let (mut state, right) = fanout_state(1);
     let before = state.snapshot();
     let error = state
         .apply(
