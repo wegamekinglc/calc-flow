@@ -685,8 +685,8 @@ pub(super) fn record_work(
     observer: Option<&RollingMetricsRecorder>,
 ) {
     let mut work = DecayWork::default();
-    for &first in &rows.first_rows {
-        let entity = Arc::get_mut(&mut states[entity_ids[first]])
+    for row in rows {
+        let entity = Arc::get_mut(&mut states[entity_ids[row.first]])
             .expect("prepared decay entity is privately owned");
         for group in &mut entity.groups {
             if let TypedWindowState::Decay(Some(cache)) = group {

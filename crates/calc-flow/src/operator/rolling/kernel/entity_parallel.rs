@@ -731,10 +731,10 @@ struct LaneRoutes {
 
 fn lane_routes(fill: &PreparedTypedFill, outputs: usize, lanes: usize) -> Option<LaneRoutes> {
     let mut assignments = vec![EntityAssignment::default(); fill.stream.state.states.len()];
-    for (assignment, &count) in assignments.iter_mut().zip(&fill.stream.entity_rows.counts) {
+    for (assignment, row) in assignments.iter_mut().zip(&fill.stream.entity_rows) {
         #[cfg(test)]
         ENTITY_COUNT_VISITS.set(ENTITY_COUNT_VISITS.get() + 1);
-        assignment.rows = count;
+        assignment.rows = row.count;
     }
     let (weights, total_work) = entity_work_weights(fill, outputs)?;
     let mut work_loads = vec![0_usize; lanes];
@@ -838,15 +838,15 @@ pub(super) fn entity_work_weights(
     fill: &PreparedTypedFill,
     outputs: usize,
 ) -> Option<(Vec<usize>, usize)> {
-    if fill.stream.state.states.len() != fill.stream.entity_rows.counts.len() {
+    if fill.stream.state.states.len() != fill.stream.entity_rows.len() {
         return None;
     }
     fill.stream
         .state
         .states
         .iter()
-        .zip(&fill.stream.entity_rows.counts)
-        .map(|(entity, &rows)| {
+        .zip(&fill.stream.entity_rows)
+        .map(|(entity, row)| {
             let steps = entity.groups.len().checked_add(outputs)?;
             let duration_work = entity
                 .shared_duration
@@ -862,7 +862,8 @@ pub(super) fn entity_work_weights(
                 .shared_rows
                 .as_ref()
                 .map_or(0, |tape| tape.bytes().div_ceil(size_of::<Option<f64>>()));
-            rows.checked_mul(steps)?
+            row.count
+                .checked_mul(steps)?
                 .checked_add(retained)?
                 .checked_add(shared)
         })

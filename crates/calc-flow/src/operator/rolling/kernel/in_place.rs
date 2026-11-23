@@ -313,7 +313,7 @@ impl InPlaceUpdate {
                 .states
                 .push(Arc::new(TypedEntityState::with_duration_storage(
                     &plan.groups,
-                    rows.counts[local],
+                    rows[local].count,
                     state.share_durations,
                 )));
             update.residents[local] = resident;
