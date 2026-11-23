@@ -155,9 +155,7 @@ fn finish(
     accumulator
         .numeric
         .finish_duration(history)
-        .map_err(|error| float_arithmetic_error(error, node))?;
-    accumulator.sync_float_sum();
-    Ok(())
+        .map_err(|error| float_arithmetic_error(error, node))
 }
 
 pub(super) struct DurationUndo {

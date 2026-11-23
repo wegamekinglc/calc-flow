@@ -4462,7 +4462,6 @@ impl Float64NumericState {
                     .map_err(|error| float_arithmetic_error(error, node_id))?;
             }
         }
-        self.accumulator.sync_float_sum();
         Ok(())
     }
 
@@ -4975,7 +4974,7 @@ pub(super) fn float_arithmetic_error(
 
 #[inline]
 fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) -> Result<()> {
-    if !matches!(accumulator.sum, Some(SumState::Float(_))) {
+    if !matches!(accumulator.sum, Some(SumState::Float)) {
         return Err(float_arithmetic_error(
             ArithmeticError::NonFloatingSum,
             node_id,
@@ -4984,22 +4983,18 @@ fn add_float64(accumulator: &mut WindowAccumulator, sample: f64, node_id: &str) 
     accumulator
         .numeric
         .insert(sample)
-        .map_err(|error| float_arithmetic_error(error, node_id))?;
-    accumulator.sync_float_sum();
-    Ok(())
+        .map_err(|error| float_arithmetic_error(error, node_id))
 }
 
 #[inline]
 fn remove_float64(accumulator: &mut WindowAccumulator, sample: f64) -> Result<()> {
-    if !matches!(accumulator.sum, Some(SumState::Float(_))) {
+    if !matches!(accumulator.sum, Some(SumState::Float)) {
         return Err(float_arithmetic_error(ArithmeticError::NonFloatingSum, ""));
     }
     accumulator
         .numeric
         .evict(sample)
-        .map_err(|error| float_arithmetic_error(error, ""))?;
-    accumulator.sync_float_sum();
-    Ok(())
+        .map_err(|error| float_arithmetic_error(error, ""))
 }
 
 fn add_exact_sum(
@@ -5802,7 +5797,7 @@ fn append_float(
 }
 
 fn append_sum(builder: &mut Float64Builder, accumulator: &WindowAccumulator) -> Result<()> {
-    let Some(SumState::Float(_)) = accumulator.sum else {
+    let Some(SumState::Float) = accumulator.sum else {
         return Err(internal_error(
             "typed Float64 sum has a non-floating accumulator",
         ));
@@ -6049,6 +6044,32 @@ mod tests {
                 ddof: 0,
             }],
         )
+    }
+
+    #[test]
+    fn test_duration_sum_materializes_the_total_only_when_read() {
+        let mut state = Float64NumericState::new(TypedFrame::Duration(2), 5);
+        let mut output = Float64Builder::new();
+        crate::accumulate::SUM_READS.set(0);
+        for (time, value) in [(0, 1.0), (0, 2.0), (2, 4.0), (3, f64::NAN), (5, 8.0)] {
+            state.update(time, Some(value), "r").unwrap();
+            append_sum(&mut output, &state.accumulator).unwrap();
+        }
+        let reads = crate::accumulate::SUM_READS.get();
+        let output = output.finish();
+        // Admitted NaN-as-value is sticky partition state, including after its row expires.
+        for (index, expected) in [1.0_f64, 3.0, 4.0, f64::NAN, f64::NAN]
+            .into_iter()
+            .enumerate()
+        {
+            if expected.is_nan() {
+                assert!(output.value(index).is_nan());
+            } else {
+                assert_eq!(output.value(index).to_bits(), expected.to_bits());
+            }
+        }
+        eprintln!("five timestamp SUM output rows materialized {reads} totals");
+        assert_eq!(reads, 5);
     }
 
     #[test]

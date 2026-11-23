@@ -526,6 +526,8 @@ impl NumericAccumulator {
     }
 
     pub(crate) fn sum(&self) -> f64 {
+        #[cfg(test)]
+        SUM_READS.set(SUM_READS.get() + 1);
         if self.nan_count > 0 {
             return f64::NAN;
         }
@@ -694,6 +696,11 @@ fn update_infinity(positive: &mut u64, negative: &mut u64, sample: f64, add: boo
     } else {
         count.saturating_sub(1)
     };
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SUM_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
