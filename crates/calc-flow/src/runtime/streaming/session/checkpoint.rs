@@ -219,17 +219,19 @@ impl StreamSession {
                 "checkpoint recovery fingerprint differs from the plan",
             ));
         }
-        let input_id = session.input.binding_id.clone();
-        let source = manifest.sources.get(&input_id).ok_or_else(|| {
-            session_error("checkpoint manifest does not contain the session input")
-        })?;
+        let source = manifest
+            .sources
+            .get(session.input.binding_id.as_ref())
+            .ok_or_else(|| {
+                session_error("checkpoint manifest does not contain the session input")
+            })?;
         session.restore_input(source)?;
         for node in &mut session.nodes {
             let mut store = V4Store::new(opened.manifest_root().join("lineage"));
             let snapshot = V4OpaqueAdapter::restore(&mut store, &manifest, node.node_id())?;
             node.restore(&snapshot)?;
         }
-        session.lifecycle = if manifest.sources[&input_id].ended {
+        session.lifecycle = if source.ended {
             Lifecycle::Finished
         } else {
             Lifecycle::Open
@@ -275,7 +277,7 @@ impl StreamSession {
             recovery_status: "final".into(),
             job_kind: JobKind::Session,
             recovery_fingerprint: self.job.fingerprint().to_owned(),
-            sources: BTreeMap::from([(self.input.binding_id.clone(), source)]),
+            sources: BTreeMap::from([(self.input.binding_id.to_string(), source)]),
             operators: BTreeMap::new(),
             sinks: BTreeMap::new(),
             static_inputs: BTreeMap::new(),

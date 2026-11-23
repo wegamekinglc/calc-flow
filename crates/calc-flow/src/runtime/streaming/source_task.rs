@@ -22,7 +22,7 @@ use super::{
     },
     supervisor::{TaskFailureSignal, TaskId, TaskSupervisor},
 };
-use crate::{Batch, BatchMetadata, CalcFlowError, Epoch, EventTime, JsonMap, Result};
+use crate::{Batch, CalcFlowError, Epoch, EventTime, JsonMap, Result};
 
 const MAX_CURSOR_ORDER_BYTES: usize = 16 * 1024;
 
@@ -1078,7 +1078,7 @@ enum PumpSlotCommit {
 }
 
 struct SourceTaskInputs {
-    binding_id: String,
+    binding_id: Arc<str>,
     keep_source_cursor: bool,
     first_sequence: u64,
     resume_cursor: Option<Cursor>,
@@ -1471,7 +1471,7 @@ fn spawn_validated_source_tasks(
         move |failure_signal| async move {
             run_source_task(
                 SourceTaskInputs {
-                    binding_id,
+                    binding_id: binding_id.into(),
                     keep_source_cursor,
                     first_sequence: next_sequence,
                     resume_cursor,
@@ -1939,7 +1939,7 @@ async fn process_source_data(
 }
 
 pub(super) fn sequenced_source_message(
-    binding_id: &str,
+    binding_id: &Arc<str>,
     next_sequence: Option<u64>,
     batch: &Batch,
     cursor: Option<&Cursor>,
@@ -1947,7 +1947,9 @@ pub(super) fn sequenced_source_message(
     let sequence = next_sequence.ok_or_else(|| CalcFlowError::Internal {
         message: format!("source binding {binding_id:?} sequence is exhausted"),
     })?;
-    let metadata = BatchMetadata::new(binding_id, sequence, batch.metadata().attributes().clone())?;
+    let metadata = batch
+        .metadata()
+        .with_source_sequence(binding_id, sequence)?;
     let batch = batch.with_metadata(metadata).with_source_cursor(
         cursor.map(|cursor| Arc::new(crate::Cursor::from_internal(cursor.clone()))),
     );
@@ -2792,8 +2794,9 @@ mod tests {
     fn sequenced_history_batch_carries_shared_exact_source_cursor() {
         let input = batch(99);
         let cursor = cursor_for("orders", 7);
+        let binding_id: Arc<str> = "orders".into();
         let (sequence, message, cost) =
-            sequenced_source_message("orders", Some(5), &input, Some(&cursor)).unwrap();
+            sequenced_source_message(&binding_id, Some(5), &input, Some(&cursor)).unwrap();
         let data = message.as_data().unwrap();
         let expected = crate::Cursor::from_internal(cursor);
         assert_eq!(sequence, 5);
@@ -2808,21 +2811,38 @@ mod tests {
             &cloned.source_cursor().unwrap()
         ));
         assert!(input.source_cursor().is_none());
-        let (_, ordinary, _) = sequenced_source_message("orders", Some(6), &input, None).unwrap();
+        let (_, ordinary, _) =
+            sequenced_source_message(&binding_id, Some(6), &input, None).unwrap();
         assert!(ordinary.as_data().unwrap().source_cursor().is_none());
+    }
+
+    #[test]
+    fn sequenced_source_message_checks_sequence_exhaustion_before_source_nul() {
+        let input = batch(2);
+        let binding: Arc<str> = "invalid\0source".into();
+        assert!(matches!(
+            sequenced_source_message(&binding, None, &input, None),
+            Err(CalcFlowError::Internal { .. })
+        ));
+        assert!(matches!(
+            sequenced_source_message(&binding, Some(0), &input, None),
+            Err(CalcFlowError::InvalidArgument { field, .. }) if field == "metadata.source"
+        ));
     }
 
     #[tokio::test]
     async fn data_metadata_cursor_fanout_and_end_are_ordered() {
         let cancellation = CancellationToken::new();
         let mut supervisor = TaskSupervisor::new(cancellation.clone());
+        let first_input = batch(10);
+        let second_input = batch(20);
         let source = StepSource::new([
             Ok(Some(SourceEvent::Data {
-                batch: batch(10),
+                batch: first_input.clone(),
                 cursor: cursor_for("orders", 1),
             })),
             Ok(Some(SourceEvent::Data {
-                batch: batch(20),
+                batch: second_input.clone(),
                 cursor: cursor_for("orders", 2),
             })),
             Ok(None),
@@ -2849,12 +2869,16 @@ mod tests {
         assert_eq!(*opened_at.lock(), OpenObservation::Opened(Some(resume)));
         assert!(closed.load(Ordering::SeqCst));
         for receiver in [&mut left_rx, &mut right_rx] {
-            for (sequence, attribute) in [(5, 10), (6, 20)] {
+            for (sequence, attribute, input) in [(5, 10, &first_input), (6, 20, &second_input)] {
                 let message = receiver.recv().await.unwrap().unwrap();
                 let data = message.as_data().unwrap();
                 assert_eq!(data.metadata().source(), "orders");
                 assert_eq!(data.metadata().sequence(), sequence);
                 assert_eq!(data.metadata().attributes()["attribute"], json!(attribute));
+                assert!(std::ptr::eq(
+                    data.metadata().attributes(),
+                    input.metadata().attributes()
+                ));
             }
             assert_eq!(
                 receiver.recv().await.unwrap().unwrap().kind(),

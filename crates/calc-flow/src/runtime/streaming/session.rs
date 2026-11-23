@@ -238,7 +238,7 @@ enum Lifecycle {
 }
 
 struct SessionInput {
-    binding_id: String,
+    binding_id: Arc<str>,
     /// The route's expected kind and exact schema.
     port: Port,
     sender: SessionEdgeSender,
@@ -331,7 +331,7 @@ impl StreamSession {
 
     /// The session's source binding IDs in plan order.
     pub fn input_ids(&self) -> Vec<&str> {
-        vec![self.input.binding_id.as_str()]
+        vec![self.input.binding_id.as_ref()]
     }
 
     /// The graph output IDs in plan order.
@@ -703,7 +703,7 @@ impl SessionInput {
     }
 
     fn check_input(&self, input: &str) -> Result<()> {
-        if input == self.binding_id {
+        if input == self.binding_id.as_ref() {
             return Ok(());
         }
         Err(CalcFlowError::InvalidArgument {
@@ -1127,7 +1127,7 @@ fn session_input(
     )?;
     let sender = take_edge(senders, &route.edge_id)?.into_session()?;
     Ok(SessionInput {
-        binding_id,
+        binding_id: binding_id.into(),
         port,
         sender,
         mode,
