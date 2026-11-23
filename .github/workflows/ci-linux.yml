@@ -384,6 +384,7 @@ jobs:
             scripts.test_rust_toolchain_diagnostics \
             scripts.test_toolkit \
             scripts.test_verify_complexity_gates \
+            scripts.test_inspect_v3_wheel \
             scripts.test_verify_python_release \
             scripts.test_verify_security_gates
           uv build --sdist

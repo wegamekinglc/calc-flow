@@ -92,6 +92,10 @@ def prepare_case(case: dict, root: Path):
             factory = WarmCase
         case "engines":
             factory = EngineCase
+        case "sparse-changelog":
+            from benchmarks.sparse_changelog import SparseChangelogCase
+
+            factory = SparseChangelogCase
         case "join-asof-acceptance":
             from benchmarks.join_asof_acceptance import AcceptanceEngineCase
 

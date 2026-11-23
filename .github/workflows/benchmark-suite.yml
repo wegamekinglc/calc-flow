@@ -60,6 +60,7 @@ jobs:
         run: >-
           python -m unittest scripts.test_benchmark_suite
           scripts.test_benchmark_workflow scripts.test_benchmark_normalize
+          scripts.test_sparse_changelog_ci
           scripts.test_benchmark_aggregate scripts.test_benchmark_process
           scripts.test_benchmark_diagnostics
           scripts.test_benchmark_refs
@@ -89,6 +90,8 @@ jobs:
           scripts.test_groupby_diagnostic_imports
           scripts.test_groupby_diagnostic_rustc
           scripts.test_checkpoint_benchmark
+          scripts.test_profile_checkpoint_v4
+          scripts.test_join_p5_measurement scripts.test_join_stage_profile
           scripts.test_checkpoint_cycles
           scripts.test_issue406_acceptance
           scripts.test_issue406_build_identity
