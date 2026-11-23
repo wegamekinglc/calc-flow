@@ -388,13 +388,13 @@ impl RollingOperator {
         Ok((batches, next_sequence))
     }
 
-    fn can_defer_ordered_history(&self, context: &StreamOperatorContext<'_>) -> bool {
+    fn can_defer_ordered_history(&self, checkpointing: bool) -> bool {
         if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
             return true;
         }
         self.state.committed_kernel().is_none()
             && self.state.histories.by_entity.is_empty()
-            && !context.job().checkpointing()
+            && !checkpointing
             && self.compiled.kernel_plan.supports_deferred_history()
     }
 
@@ -404,7 +404,7 @@ impl RollingOperator {
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedOrderedOutput<'a>> {
         let observer = context.rolling_metrics();
-        let can_defer = self.can_defer_ordered_history(context);
+        let can_defer = self.can_defer_ordered_history(context.job().checkpointing());
         self.ensure_ordered_kernel_state(input, context.operator_id(), observer, can_defer)?;
         let defer_history = self.state.deferred_history || can_defer;
         let update = self
@@ -412,7 +412,7 @@ impl RollingOperator {
             .await?;
         let mut prepared =
             PreparedOrderedOutput::new(update, self.state.owned_mut()?, defer_history);
-        prepared.prepare_history(input, &self.compiled, context)?;
+        prepared.prepare_history(input, &self.compiled, context.operator_id(), observer)?;
         let sequence = prepared.state.next_output_sequence;
         let (batches, next_sequence) = Self::ordered_output_chunks(
             input,
@@ -429,15 +429,12 @@ impl RollingOperator {
     fn prepare_ordered_update_in_place(
         &mut self,
         input: &RecordBatch,
-        context: &StreamOperatorContext<'_>,
-        defer_history: bool,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
+        allow_in_place: bool,
     ) -> Option<Result<StreamKernelUpdate>> {
-        let observer = context.rolling_metrics();
         let plan = &self.compiled.kernel_plan;
-        if !defer_history
-            || context.job().checkpointing()
-            || !plan.supports_inplace_ordered_stream(input)
-        {
+        if !allow_in_place || !plan.supports_inplace_ordered_stream(input) {
             return None;
         }
         let state = match self.state.owned_mut() {
@@ -450,7 +447,7 @@ impl RollingOperator {
                 .as_deref_mut()
                 .expect("state initialized above"),
             input,
-            context.operator_id(),
+            node_id,
             observer,
         );
         if matches!(&update, Ok(None)) {
@@ -466,7 +463,8 @@ impl RollingOperator {
     fn prepare_slab_update(
         &mut self,
         input: &RecordBatch,
-        context: &StreamOperatorContext<'_>,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Option<Result<StreamKernelUpdate>> {
         let plan = &self.compiled.kernel_plan;
         let prior = self
@@ -488,8 +486,8 @@ impl RollingOperator {
                     .as_deref_mut()
                     .expect("state initialized above"),
                 input,
-                context.operator_id(),
-                context.rolling_metrics(),
+                node_id,
+                observer,
             ),
         )
     }
@@ -501,10 +499,16 @@ impl RollingOperator {
         defer_history: bool,
     ) -> Result<StreamKernelUpdate> {
         let observer = context.rolling_metrics();
-        if let Some(update) = self.prepare_slab_update(input, context) {
+        let node_id = context.operator_id();
+        if let Some(update) = self.prepare_slab_update(input, node_id, observer) {
             return update;
         }
-        if let Some(update) = self.prepare_ordered_update_in_place(input, context, defer_history) {
+        if let Some(update) = self.prepare_ordered_update_in_place(
+            input,
+            node_id,
+            observer,
+            defer_history && !context.job().checkpointing(),
+        ) {
             return update;
         }
         let plan = &self.compiled.kernel_plan;
@@ -516,23 +520,24 @@ impl RollingOperator {
         let Some(owner) = context.job().morsel_owner() else {
             return self.serial_ordered_update(
                 input,
-                context,
+                node_id,
+                observer,
                 RollingWork::ParallelFallbackNoWorkClient,
             );
         };
         if let Some(reason) = plan.entity_parallel_fallback(input) {
-            return self.serial_ordered_update(input, context, reason);
+            return self.serial_ordered_update(input, node_id, observer, reason);
         }
         let cpus = owner.parallelism(context.job().morsel_worker_count());
         if cpus < 2 {
             return self.serial_ordered_update(
                 input,
-                context,
+                node_id,
+                observer,
                 RollingWork::ParallelFallbackCpuLimit,
             );
         }
-        let prepared =
-            plan.prepare_ordered_stream_inputs(prior, input, context.operator_id(), observer)?;
+        let prepared = plan.prepare_ordered_stream_inputs(prior, input, node_id, observer)?;
         let prepared = match prepared.qualify_parallel(cpus) {
             Ok(prepared) => prepared,
             Err((prepared, reason)) => {
@@ -584,10 +589,10 @@ impl RollingOperator {
     fn serial_ordered_update(
         &self,
         input: &RecordBatch,
-        context: &StreamOperatorContext<'_>,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
         reason: RollingWork,
     ) -> Result<StreamKernelUpdate> {
-        let observer = context.rolling_metrics();
         let mut work = RollingWorkBatch::new(observer);
         work.add(reason, 1);
         work.add(RollingWork::NumericSerialCalls, 1);
@@ -600,97 +605,7 @@ impl RollingOperator {
                     .expect("state initialized above"),
                 input,
                 Some(&self.state.histories),
-                context.operator_id(),
-                observer,
-            )
-    }
-
-    fn prepare_slab_update_sync(
-        &mut self,
-        input: &RecordBatch,
-        context: &SyncContext<'_>,
-    ) -> Option<Result<StreamKernelUpdate>> {
-        let plan = &self.compiled.kernel_plan;
-        let prior = self
-            .state
-            .typed_kernel_state
-            .as_deref()
-            .expect("state initialized above");
-        if !plan.can_use_slab(prior) {
-            return None;
-        }
-        let state = match self.state.owned_mut() {
-            Ok(state) => state,
-            Err(error) => return Some(Err(error)),
-        };
-        Some(
-            plan.prepare_slab_ordered_stream(
-                state
-                    .typed_kernel_state
-                    .as_deref_mut()
-                    .expect("state initialized above"),
-                input,
-                context.operator_id(),
-                context.rolling_metrics(),
-            ),
-        )
-    }
-
-    fn prepare_ordered_update_in_place_sync(
-        &mut self,
-        input: &RecordBatch,
-        context: &SyncContext<'_>,
-        defer_history: bool,
-    ) -> Option<Result<StreamKernelUpdate>> {
-        let observer = context.rolling_metrics();
-        let plan = &self.compiled.kernel_plan;
-        if !defer_history || context.checkpointing() || !plan.supports_inplace_ordered_stream(input)
-        {
-            return None;
-        }
-        let state = match self.state.owned_mut() {
-            Ok(state) => state,
-            Err(error) => return Some(Err(error)),
-        };
-        let update = plan.prepare_ordered_stream_in_place(
-            state
-                .typed_kernel_state
-                .as_deref_mut()
-                .expect("state initialized above"),
-            input,
-            context.operator_id(),
-            observer,
-        );
-        if matches!(&update, Ok(None)) {
-            return None;
-        }
-        let mut work = RollingWorkBatch::new(observer);
-        work.add(RollingWork::ParallelFallbackSmallBatch, 1);
-        work.add(RollingWork::NumericSerialCalls, 1);
-        drop(work);
-        Some(update.map(|update| update.expect("in-place update was checked above")))
-    }
-
-    fn serial_ordered_update_sync(
-        &self,
-        input: &RecordBatch,
-        context: &SyncContext<'_>,
-        reason: RollingWork,
-    ) -> Result<StreamKernelUpdate> {
-        let observer = context.rolling_metrics();
-        let mut work = RollingWorkBatch::new(observer);
-        work.add(reason, 1);
-        work.add(RollingWork::NumericSerialCalls, 1);
-        self.compiled
-            .kernel_plan
-            .prepare_ordered_stream_with_history(
-                self.state
-                    .typed_kernel_state
-                    .as_deref()
-                    .expect("state initialized above"),
-                input,
-                Some(&self.state.histories),
-                context.operator_id(),
+                node_id,
                 observer,
             )
     }
@@ -701,25 +616,25 @@ impl RollingOperator {
         context: &SyncContext<'_>,
         defer_history: bool,
     ) -> Result<StreamKernelUpdate> {
-        if let Some(update) = self.prepare_slab_update_sync(input, context) {
+        let node_id = context.operator_id();
+        let observer = context.rolling_metrics();
+        if let Some(update) = self.prepare_slab_update(input, node_id, observer) {
             return update;
         }
-        if let Some(update) =
-            self.prepare_ordered_update_in_place_sync(input, context, defer_history)
-        {
+        if let Some(update) = self.prepare_ordered_update_in_place(
+            input,
+            node_id,
+            observer,
+            defer_history && !context.checkpointing(),
+        ) {
             return update;
         }
-        self.serial_ordered_update_sync(input, context, RollingWork::ParallelFallbackNoWorkClient)
-    }
-
-    fn can_defer_ordered_history_sync(&self, context: &SyncContext<'_>) -> bool {
-        if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
-            return true;
-        }
-        self.state.committed_kernel().is_none()
-            && self.state.histories.by_entity.is_empty()
-            && !context.checkpointing()
-            && self.compiled.kernel_plan.supports_deferred_history()
+        self.serial_ordered_update(
+            input,
+            node_id,
+            observer,
+            RollingWork::ParallelFallbackNoWorkClient,
+        )
     }
 
     fn prepare_ordered_output_sync<'a>(
@@ -728,13 +643,13 @@ impl RollingOperator {
         context: &SyncContext<'_>,
     ) -> Result<PreparedOrderedOutput<'a>> {
         let observer = context.rolling_metrics();
-        let can_defer = self.can_defer_ordered_history_sync(context);
+        let can_defer = self.can_defer_ordered_history(context.checkpointing());
         self.ensure_ordered_kernel_state(input, context.operator_id(), observer, can_defer)?;
         let defer_history = self.state.deferred_history || can_defer;
         let update = self.prepare_ordered_update_sync(input, context, defer_history)?;
         let mut prepared =
             PreparedOrderedOutput::new(update, self.state.owned_mut()?, defer_history);
-        prepared.prepare_history_sync(input, &self.compiled, context)?;
+        prepared.prepare_history(input, &self.compiled, context.operator_id(), observer)?;
         let sequence = prepared.state.next_output_sequence;
         let (batches, next_sequence) = Self::ordered_output_chunks_sync(
             input,
@@ -1431,16 +1346,16 @@ impl<'a> PreparedOrderedOutput<'a> {
         &mut self,
         input: &RecordBatch,
         compiled: &CompiledRollingSpec,
-        context: &StreamOperatorContext<'_>,
+        node_id: &str,
+        observer: Option<&RollingMetricsRecorder>,
     ) -> Result<()> {
-        let observer = context.rolling_metrics();
         if self.defer_history {
             let charge = self.update().charge_change(
                 self.state
                     .typed_kernel_state
                     .as_deref()
                     .expect("state initialized above"),
-                context.operator_id(),
+                node_id,
             )?;
             self.deferred_charge = Some(charge);
             return Ok(());
@@ -1451,37 +1366,7 @@ impl<'a> PreparedOrderedOutput<'a> {
             self.update(),
             &self.state.histories,
             compiled,
-            context.operator_id(),
-            observer,
-        )?;
-        Ok(())
-    }
-
-    fn prepare_history_sync(
-        &mut self,
-        input: &RecordBatch,
-        compiled: &CompiledRollingSpec,
-        context: &SyncContext<'_>,
-    ) -> Result<()> {
-        let observer = context.rolling_metrics();
-        if self.defer_history {
-            let charge = self.update().charge_change(
-                self.state
-                    .typed_kernel_state
-                    .as_deref()
-                    .expect("state initialized above"),
-                context.operator_id(),
-            )?;
-            self.deferred_charge = Some(charge);
-            return Ok(());
-        }
-        let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
-        self.touched = retained_histories(
-            input,
-            self.update(),
-            &self.state.histories,
-            compiled,
-            context.operator_id(),
+            node_id,
             observer,
         )?;
         Ok(())
