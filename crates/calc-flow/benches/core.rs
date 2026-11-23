@@ -1270,15 +1270,27 @@ mod rolling_history {
             );
             if observation.started == 0 {
                 assert_eq!(observation.parallel_rows, 0);
-                assert!(
-                    !matches!(case, Case::WarmRowsMean),
-                    "warm Rows control must use real lanes"
-                );
+                if matches!(case, Case::WarmRowsMean) {
+                    verify_warm_rows_serial(rolling);
+                }
             } else {
                 assert!(observation.started >= 2);
                 assert!(observation.parallel_rows >= 64_000);
             }
             Some((observation, metrics))
+        }
+    }
+
+    fn verify_warm_rows_serial(metrics: &serde_json::Value) {
+        assert!(total(counts(metrics, "numeric_serial_calls")) > 0);
+        assert_eq!(total(counts(metrics, "numeric_general_calls")), 0);
+        assert_eq!(total(counts(metrics, "numeric_parallel_calls")), 0);
+        for callback in ["data", "watermark", "end"] {
+            for (name, count) in metrics[callback].as_object().unwrap() {
+                if name.starts_with("parallel_fallback_") {
+                    assert_eq!(count.as_u64(), Some(0), "{callback}.{name}");
+                }
+            }
         }
     }
 
