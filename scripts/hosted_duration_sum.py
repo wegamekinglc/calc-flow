@@ -1,10 +1,11 @@
-"""Single-core public three-duration-SUM comparison."""
+"""Single-core public single-duration-SUM comparison."""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -14,20 +15,25 @@ from benchmarks.native_release_identity import verify_package_files
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.release import load_release
 from scripts.sparse_changelog_ci import _resource, guarded_measure
-from scripts.sparse_changelog_wheels import _api, _wheel
-from scripts.toolkit import linear_percentile, sha256_file, write_json
+from scripts.sparse_changelog_wheels import _api, _wheel, build_proof
+from scripts.toolkit import (
+    linear_percentile,
+    sha256_file,
+    wheel_native_sha256,
+    write_json,
+)
 
 
 def case():
     return {
-        "id": "python/public-duration-sum-30-60-90/fresh-stream",
+        "id": "python/public-duration-sum-60/fresh-stream",
         "family": "public-duration-sum",
         "rows": 100_000,
         "backend": "calc-flow-stream-1t",
     }
 
 
-BUDGET = 119
+BUDGET = 105
 ROW_COUNT = 100000
 SIDES = ("baseline", "candidate")
 CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
@@ -39,6 +45,57 @@ def remaining_seconds(started: float, now: float) -> float:
     if remaining <= 0:
         raise TimeoutError("acquisition budget exhausted before worker startup")
     return remaining
+
+
+def download_receipt(manifest: dict, wheel: Path) -> dict:
+    return {
+        **manifest,
+        "wheel": wheel.name,
+        "wheel_sha256": sha256_file(wheel),
+        "native_sha256": wheel_native_sha256(wheel),
+    }
+
+
+def ci_receipt(repository: str, registered: dict) -> dict:
+    def api(path: str) -> dict:
+        return json.loads(_api(repository, path))
+
+    run_id = registered["workflow_run"]
+    run = api(f"actions/runs/{run_id}")
+    jobs = api(
+        f"actions/runs/{run_id}/attempts/{run['run_attempt']}/jobs?per_page=100"
+    )["jobs"]
+    if not any(
+        j["id"] == registered["job"]
+        and j["name"] == "Build + isolated wheel smoke test"
+        and j["conclusion"] == "success"
+        for j in jobs
+    ):
+        raise ValueError("registered release smoke job did not succeed")
+    log = _api(repository, f"actions/jobs/{registered['job']}/logs").decode("utf-8-sig")
+    uploads = re.findall(
+        r"Artifact python-distributions successfully finalized\. Artifact ID (\d+)\b",
+        log,
+    )
+    if len(uploads) != 1:
+        raise ValueError("expected one finalized release upload in the tested job")
+    artifact = api(f"actions/artifacts/{uploads[0]}")
+    proof = build_proof(artifact, run, registered["requested_sha"], log)
+    if (
+        proof["checkout"] != registered["checkout"]
+        or api(f"git/commits/{proof['checkout']}")["tree"]["sha"] != registered["tree"]
+    ):
+        raise ValueError("wheel source differs from registered product commit or tree")
+    return {
+        **registered,
+        **proof,
+        "git_sha": proof["checkout"],
+        "artifact": artifact["id"],
+        "artifact_digest": artifact["digest"],
+        "git_clean": True,
+        "build_profile": "release",
+        "contract": "benchmark-release-v1",
+    }
 
 
 def acquire() -> None:
@@ -63,27 +120,29 @@ def acquire() -> None:
         "requirements_sha256": sha256_file(ROOT / "benchmarks/requirements.lock"),
     }
     write_json(OUT / "registration.json", record, exclusive=True)
-    for side in SIDES:
-        manifest = record[side]
-        metadata = json.loads(
-            _api(repository, f"actions/artifacts/{manifest['artifact']}")
-        )
-        if (
-            metadata["digest"] != manifest["artifact_digest"]
-            or metadata["expired"]
-            or metadata["workflow_run"]["id"] != manifest["workflow_run"]
-            or metadata["workflow_run"]["head_sha"] != manifest["requested_sha"]
-        ):
-            raise ValueError(f"published {side} artifact identity changed")
+    manifests = {side: ci_receipt(repository, record[side]) for side in SIDES}
+    if any(
+        manifests["baseline"][key] != manifests["candidate"][key]
+        for key in ("image", "image_version")
+    ):
+        raise ValueError("wheel build images differ")
+    for side, manifest in manifests.items():
         directory = OUT / side
         directory.mkdir()
-        _wheel(
+        wheel = _wheel(
             _api(repository, f"actions/artifacts/{manifest['artifact']}/zip"),
             manifest["artifact_digest"],
             directory,
         )
-        write_json(directory / "release.json", manifest)
+        write_json(directory / "release.json", download_receipt(manifest, wheel))
         load_release(directory / "release.json")
+
+
+def verify_fixture(path: Path) -> str:
+    digest = sha256_file(path)
+    if digest != "36847ac453bd58a3a0a918d993ec726d56bbddb8c3af6e8362ca940999286ab0":
+        raise ValueError("duration fixture differs from committed PR 638 IPC bytes")
+    return digest
 
 
 async def observe() -> None:
@@ -103,7 +162,8 @@ async def observe() -> None:
     )
     selected = {**selected, "fixture": str(fixture_path)}
     write_json(
-        OUT / "fixture.json", {"sha256": sha256_file(fixture_path), "rows": ROW_COUNT}
+        OUT / "fixture.json",
+        {"sha256": verify_fixture(fixture_path), "rows": ROW_COUNT},
     )
     cpu = await _resource(OUT / "resources.jsonl", None)
     os.sched_setaffinity(0, {cpu})

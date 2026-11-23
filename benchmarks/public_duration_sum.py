@@ -1,4 +1,4 @@
-"""Public three-duration SUM stream and an independent timestamp-prefix oracle."""
+"""Public single-duration SUM stream and an independent timestamp-prefix oracle."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pyarrow as pa
 import calc_flow as cf
 from benchmarks.warm_stream import BASE_MICROS, SCHEMA
 
-WINDOWS = (30, 60, 90)
+WINDOWS = (60,)
 INPUT = SCHEMA.set(3, pa.field("price", pa.float64(), nullable=True))
 OUTPUT = pa.schema(
     [

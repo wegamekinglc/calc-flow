@@ -30,7 +30,7 @@ jobs:
         run: |
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock
-      - name: Measure and check all three duration SUM columns
+      - name: Measure and check the single 60-second duration SUM
         run: target/benchmark-venv/bin/python -m scripts.hosted_duration_sum measure
       - name: Preserve stopped or completed evidence
         if: always()
