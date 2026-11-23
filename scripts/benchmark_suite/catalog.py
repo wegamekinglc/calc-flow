@@ -193,7 +193,7 @@ def polars_thread_count(case: dict) -> int:
 def worker_thread_count(case: dict) -> int:
     """Return the Tokio worker count for one engine-matrix case."""
 
-    if case.get("family") == "sparse-changelog":
+    if case.get("family") in ("sparse-changelog", "public-rolling-count"):
         return 1
     if case.get("family") != "engines":
         return THREADS

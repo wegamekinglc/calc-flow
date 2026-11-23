@@ -1,0 +1,164 @@
+"""Single-core public eager rolling mean on a prepared native array."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+from benchmarks.native_release_identity import verify_package_files
+from scripts.benchmark_suite.process import ROOT, install
+from scripts.benchmark_suite.release import load_release
+from scripts.sparse_changelog_ci import _resource, guarded_measure
+from scripts.sparse_changelog_wheels import _api, _wheel
+from scripts.toolkit import (
+    linear_percentile,
+    sha256_file,
+    wheel_native_sha256,
+    write_json,
+)
+
+
+def case():
+    return {
+        "id": "python/public-array-rolling-mean/1024-window20-ones",
+        "family": "public-rolling-count",
+        "rows": 1024,
+        "backend": "calc-flow-eager-array-1t",
+    }
+
+
+BUDGET = 250
+ROW_COUNT = 1024
+SIDES = ("baseline", "candidate")
+CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
+OUT = ROOT / "target/hosted-evidence"
+
+
+def remaining_seconds(started: float, now: float) -> float:
+    remaining = BUDGET - (now - started) - 45
+    if remaining <= 0:
+        raise TimeoutError("acquisition budget exhausted before worker startup")
+    return remaining
+
+
+def acquire() -> None:
+    registration = json.loads(CONFIG.read_text())
+    repository = os.environ["GITHUB_REPOSITORY"]
+    run = int(os.environ["GITHUB_RUN_ID"])
+    attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+    jobs = json.loads(
+        _api(repository, f"actions/runs/{run}/attempts/{attempt}/jobs?per_page=100")
+    )
+    (job,) = (job for job in jobs["jobs"] if job["name"] == "Public stream evidence")
+    started = datetime.fromisoformat(job["started_at"]).timestamp()
+    record = {
+        **registration,
+        "workflow_sha": os.environ["GITHUB_SHA"],
+        "job": job["id"],
+        "workflow_run": run,
+        "start_epoch": started,
+        "job_budget_seconds": BUDGET,
+        "reserved_cleanup_seconds": 45,
+        "registration_sha256": sha256_file(CONFIG),
+        "requirements_sha256": sha256_file(ROOT / "benchmarks/requirements.lock"),
+    }
+    write_json(OUT / "registration.json", record, exclusive=True)
+    for side in SIDES:
+        manifest = record[side]
+        metadata = json.loads(
+            _api(repository, f"actions/artifacts/{manifest['artifact']}")
+        )
+        if (
+            metadata["digest"] != manifest["artifact_digest"]
+            or metadata["expired"]
+            or metadata["workflow_run"]["id"] != manifest["workflow_run"]
+            or metadata["workflow_run"]["head_sha"] != manifest["requested_sha"]
+        ):
+            raise ValueError(f"published {side} artifact identity changed")
+        directory = OUT / side
+        directory.mkdir()
+        wheel = _wheel(
+            _api(repository, f"actions/artifacts/{manifest['artifact']}/zip"),
+            manifest["artifact_digest"],
+            directory,
+        )
+        write_json(
+            directory / "release.json",
+            {
+                **manifest,
+                "wheel": wheel.name,
+                "wheel_sha256": sha256_file(wheel),
+                "native_sha256": wheel_native_sha256(wheel),
+            },
+        )
+
+        load_release(directory / "release.json")
+
+
+async def observe() -> None:
+    releases = {side: load_release(OUT / side / "release.json") for side in SIDES}
+    sites = {}
+    for side, release in releases.items():
+        site = await install(release, OUT / side)
+        verify_package_files(Path(release["wheel_path"]), site)
+        sites[side] = (site, ROOT)
+    selected = case()
+    if releases["baseline"]["native_sha256"] == releases["candidate"]["native_sha256"]:
+        raise ValueError("wheel comparison requires distinct native modules")
+    if any(
+        releases["baseline"][key] != releases["candidate"][key]
+        for key in ("image", "image_version")
+    ):
+        raise ValueError("wheel origins must use identical release images")
+    cpu = await _resource(OUT / "resources.jsonl", None)
+    os.sched_setaffinity(0, {cpu})
+    row = await guarded_measure(OUT, cpu, selected, sites, releases)
+    write_json(OUT / "samples.json", row)
+    if row["status"] != "ok":
+        raise ValueError(f"paired measurement failed: {row.get('error')}")
+    samples = [s for r in row["evidence"] for arm in SIDES for s in r["samples"][arm]]
+    if len(samples) != 40 or any(
+        s["correctness"]
+        != {"passed": True, "rows": ROW_COUNT, "calls": 10, "null_count": 0}
+        for s in samples
+    ):
+        raise ValueError("complete output proof missing from measured pairs")
+    base = [s for r in row["baseline"] for s in r]
+    write_json(
+        OUT / "result.json",
+        {**row["result"], "base_p95": linear_percentile(base, 0.95)},
+    )
+
+
+def main():
+    if sys.argv[1] == "acquire":
+        acquire()
+        return
+    if sys.argv[1] != "measure":
+        raise ValueError("expected acquire or measure")
+    registered = json.loads((OUT / "registration.json").read_text())
+    started = registered["start_epoch"]
+    outcome = {"state": "interrupted"}
+    try:
+        asyncio.run(
+            asyncio.wait_for(observe(), remaining_seconds(started, time.time()))
+        )
+    except Exception as exc:
+        outcome = {"state": "stopped", "error": repr(exc)}
+        raise
+    else:
+        outcome = {"state": "completed"}
+    finally:
+        write_json(
+            OUT / "outcome.json",
+            {**outcome, "elapsed_since_job_start_seconds": time.time() - started},
+        )
+
+
+if __name__ == "__main__":
+    main()

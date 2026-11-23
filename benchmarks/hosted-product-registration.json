@@ -1,0 +1,74 @@
+{
+  "catalog_case": "python/public-array-rolling-mean/1024-window20-ones",
+  "fixture": {
+    "dtype": "float64",
+    "shape": [
+      1024
+    ],
+    "value": 1.0,
+    "window": 20,
+    "min_periods": 1,
+    "construction": "public calc_flow.array.from_numpy in worker prepare"
+  },
+  "timing": "Median of ten separate synchronous public calc_flow.array.rolling_mean calls on one prepared immutable input. Each call ends before exact full-output validation and release. Each process runs warmup before measurement.",
+  "comparison": "Two independent worker pairs, one excluded warmup per arm per round, ten adjacent AB/BA pairs per round; exact paired median intervals and 5 percent rule.",
+  "resources": "One logical CPU and one Tokio/Rayon/BLAS thread. A 3 s preflight requires target CPU and all SMT siblings <=20% busy. In every interval require host average <50%, >=10 GiB available, <256 major faults and <1024 total swap pages. Steady-state check every second includes final interval; sibling <50%. Stop on failed oracle, resource gate or deadline. No retries.",
+  "budget": "250 seconds from hosted job start, including dependency installation, warmups, all measured and cleanup, 45s reserved for cleanup. Total independent Python phase ceiling 300s. No retry after resource/clock gates.",
+  "oracle_scope": "Each of every 10 calls requires native Float64 shape (1024,), all 1024 present, every bit equal to 1.0; retain per-call ns and per-sample oracle results.",
+  "source_hashes": {
+    ".github/workflows/benchmarks.yml": "7e3a4286c1801ec7491b3253cc94da8265c15c2b83735e4837de8d1b9fdaf2f6",
+    "scripts/hosted_rolling_count.py": "408f65ba8e9fa5c07a70ee083e30b9c6265d59e402935fdbf64bbf4b4208e32f",
+    "benchmarks/public_rolling_count.py": "afb3ea4d58011a725c33624a5056bcf7427ee3ed7888c14c970a402361a4ddee",
+    "scripts/benchmark_suite/catalog.py": "b4079800acd2aa31c8bcaba6efe8670b61f3d0c97cb33f338ff1b86feefa9318",
+    "scripts/benchmark_suite/worker.py": "10e8f3ed0bdf76060c5ce81494240f3b52607778e76a4c7e68981359a36bf8e1",
+    "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/sparse_changelog_wheels.py": "b3e1d08297c250b7ba358465cf3643e4d0ac86768659aefd63f0a92b130af9ba",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3"
+  },
+  "baseline": {
+    "artifact": 14792112661,
+    "artifact_digest": "sha256:223dc4d2d3107a9efff521e7e90cc0f108441b59b537bc33191fcdb44430cc41",
+    "build_profile": "release",
+    "checkout": "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137496379361,
+    "parents": [
+      "267564a5c019f6ef484aac1bbdb84ef00b22a95d",
+      "a1263ddd5e963ab3a49e8bcfc14ecbde3156a166"
+    ],
+    "requested_sha": "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+    "tree": "10d1990a63dd096f950983f7d812602790250d00",
+    "workflow_run": 45115166537
+  },
+  "candidate": {
+    "artifact": 14793248562,
+    "artifact_digest": "sha256:e818eac60fe95afdd1b92b5625f4cbb5042949404038fb4ffdfd7961c3d425ba",
+    "build_profile": "release",
+    "checkout": "c875eae8770c8fa8e2e3e4e3133abaf6b5aa7d87",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "c875eae8770c8fa8e2e3e4e3133abaf6b5aa7d87",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137505931330,
+    "parents": [
+      "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+      "c29247701a52ab393f83d9509e280a430c92fe26"
+    ],
+    "requested_sha": "c29247701a52ab393f83d9509e280a430c92fe26",
+    "tree": "22f1294f544ae282b4e2993db9186afa552310b9",
+    "workflow_run": 45118230478
+  },
+  "candidate_pr": 654,
+  "actual_common_parent": "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+  "candidate_files": [
+    "crates/calc-flow/src/accumulate/mod.rs",
+    "crates/calc-flow/src/array/rolling_mean.rs"
+  ]
+}

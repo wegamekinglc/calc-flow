@@ -92,6 +92,10 @@ def prepare_case(case: dict, root: Path):
             factory = WarmCase
         case "engines":
             factory = EngineCase
+        case "public-rolling-count":
+            from benchmarks.public_rolling_count import RollingCountCase
+
+            factory = RollingCountCase
         case "sparse-changelog":
             from benchmarks.sparse_changelog import SparseChangelogCase
 
