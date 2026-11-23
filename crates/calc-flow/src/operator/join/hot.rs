@@ -1,8 +1,8 @@
-use super::{HotProjection, StreamJoinOperator, operator_error};
+use super::{HotProjection, JoinTimeBounds, StreamJoinOperator, operator_error};
 use crate::Result;
 use datafusion::arrow::{
     array::Float64Array,
-    datatypes::{DataType, SchemaRef, TimeUnit},
+    datatypes::{DataType, Schema, SchemaRef, TimeUnit},
     record_batch::RecordBatch,
 };
 use std::sync::Arc;
@@ -14,24 +14,9 @@ pub(super) enum HotKind {
 }
 
 pub(super) fn projection_kind(operator: &StreamJoinOperator) -> Option<HotKind> {
-    if output_schema(operator).fields().is_empty() {
+    let kind = HotKind::from_bounds(operator.spec.bounds)?;
+    if output_schema(operator).fields().is_empty() || !kind.accepts(operator.hot_projection) {
         return None;
-    }
-    let kind = if operator.spec.bounds.after_micros == 0 {
-        HotKind::Equi
-    } else if operator.spec.bounds.before_micros == operator.spec.bounds.after_micros
-        && operator.spec.bounds.before_micros.is_multiple_of(1_000_000)
-        && operator.spec.bounds.before_micros <= 60_000_000
-    {
-        HotKind::Band
-    } else {
-        return None;
-    };
-    match (kind, operator.hot_projection) {
-        (_, None)
-        | (HotKind::Equi, Some(HotProjection::Equi { .. }))
-        | (HotKind::Band, Some(HotProjection::Band)) => {}
-        _ => return None,
     }
     if operator.spec.left_keys() != ["symbol"]
         || operator.spec.right_keys() != ["symbol"]
@@ -40,33 +25,58 @@ pub(super) fn projection_kind(operator: &StreamJoinOperator) -> Option<HotKind> 
     {
         return None;
     }
-    for side in [0, 1] {
-        let schema = operator.input_schema(side);
-        for (name, data_type) in [("symbol", DataType::Utf8), ("sequence", DataType::UInt64)] {
-            let (_, field) = schema.column_with_name(name)?;
-            if field.data_type() != &data_type {
-                return None;
-            }
-        }
-        let (_, time) = schema.column_with_name("event_time")?;
-        if !matches!(
-            time.data_type(),
-            DataType::Timestamp(TimeUnit::Microsecond, _)
-        ) {
-            return None;
-        }
-        let price = schema.column_with_name("price");
-        let factor = schema.column_with_name("factor");
-        if price.is_none() && (kind == HotKind::Band || factor.is_none()) {
-            return None;
-        }
-        for (_, field) in [price, factor].into_iter().flatten() {
-            if field.data_type() != &DataType::Float64 {
-                return None;
-            }
+    [0, 1]
+        .into_iter()
+        .all(|side| kind.accepts_schema(operator.input_schema(side)))
+        .then_some(kind)
+}
+
+impl HotKind {
+    fn from_bounds(bounds: JoinTimeBounds) -> Option<Self> {
+        if bounds.after_micros == 0 {
+            Some(Self::Equi)
+        } else if bounds.before_micros == bounds.after_micros
+            && bounds.before_micros.is_multiple_of(1_000_000)
+            && bounds.before_micros <= 60_000_000
+        {
+            Some(Self::Band)
+        } else {
+            None
         }
     }
-    Some(kind)
+
+    fn accepts(self, projection: Option<HotProjection>) -> bool {
+        matches!(
+            (self, projection),
+            (_, None)
+                | (Self::Equi, Some(HotProjection::Equi { .. }))
+                | (Self::Band, Some(HotProjection::Band))
+        )
+    }
+
+    fn accepts_schema(self, schema: &Schema) -> bool {
+        let field = |name| {
+            schema
+                .column_with_name(name)
+                .map(|(_, field)| field.data_type())
+        };
+        field("symbol") == Some(&DataType::Utf8)
+            && field("sequence") == Some(&DataType::UInt64)
+            && matches!(
+                field("event_time"),
+                Some(DataType::Timestamp(TimeUnit::Microsecond, _))
+            )
+            && self.accepts_prices(field("price"), field("factor"))
+    }
+
+    fn accepts_prices(self, price: Option<&DataType>, factor: Option<&DataType>) -> bool {
+        let has_operand = price.is_some() || (self == Self::Equi && factor.is_some());
+        has_operand
+            && [price, factor]
+                .into_iter()
+                .flatten()
+                .all(|ty| ty == &DataType::Float64)
+    }
 }
 
 pub(super) fn project_run_record(

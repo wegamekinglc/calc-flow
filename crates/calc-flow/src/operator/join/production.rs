@@ -107,65 +107,16 @@ impl RunCore {
     }
 
     fn seed_left(&mut self, operator: &StreamJoinOperator, batch: &Batch) -> Result<()> {
-        let compiled = operator.retained_compiled();
         let mut next_row_id = self.state.next_row_id(JoinSide::Left);
         let mut incoming = Vec::new();
         for record in batch.table_payload()?.batches() {
             let record = retained_left_record(operator, record)?;
-            let times = record
-                .column(compiled.left_event_time_index)
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .expect("hot Join time is microseconds");
             for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
                 let rows = (record.num_rows() - start).min(MORSEL_ROWS);
-                let row_ids = (0..rows)
-                    .map(|row| {
-                        let row = u64::try_from(row)
-                            .map_err(|_| counter_overflow(&operator.name, "hot row_id"))?;
-                        next_row_id
-                            .checked_add(row)
-                            .ok_or_else(|| counter_overflow(&operator.name, "hot row_id"))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let following_row_id = next_row_id
-                    .checked_add(
-                        u64::try_from(rows)
-                            .map_err(|_| counter_overflow(&operator.name, "hot row_id"))?,
-                    )
-                    .ok_or_else(|| counter_overflow(&operator.name, "hot row_id"))?;
-                let times = times
-                    .iter()
-                    .skip(start)
-                    .take(rows)
-                    .map(|time| {
-                        time.map(EventTime::from_micros).ok_or_else(|| {
-                            operator_error(&operator.name, "hot history has null event time")
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let cut = self.keys.cut();
-                let chunk = Incoming::route(
-                    RouteInput::new(
-                        &record.slice(start, rows),
-                        &compiled.left_key_indices,
-                        (0..rows).collect(),
-                        times,
-                        row_ids,
-                        BooleanArray::from(vec![true; rows]),
-                        following_row_id,
-                    ),
-                    &mut self.keys,
-                    &mut || Ok(()),
-                );
-                match chunk {
-                    Ok(chunk) => incoming.push(chunk),
-                    Err(error) => {
-                        self.keys.rollback(cut);
-                        return Err(error);
-                    }
-                }
-                next_row_id = following_row_id;
+                let (chunk, next) =
+                    self.seed_morsel(operator, &record.slice(start, rows), next_row_id)?;
+                incoming.push(chunk);
+                next_row_id = next;
             }
         }
         if incoming.is_empty() {
@@ -182,6 +133,45 @@ impl RunCore {
                 .prepare_batch(JoinSide::Left, incoming, output, &mut || Ok(()))?;
         drop(prepared.commit(&mut self.state)?);
         Ok(())
+    }
+
+    fn seed_morsel(
+        &mut self,
+        operator: &StreamJoinOperator,
+        record: &RecordBatch,
+        first: u64,
+    ) -> Result<(Incoming, u64)> {
+        let compiled = operator.retained_compiled();
+        let rows = record.num_rows();
+        let overflow = || counter_overflow(&operator.name, "hot row_id");
+        let next = first
+            .checked_add(u64::try_from(rows).map_err(|_| overflow())?)
+            .ok_or_else(overflow)?;
+        let times = record
+            .column(compiled.left_event_time_index)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("deferred Join time is microseconds")
+            .iter()
+            .map(|time| {
+                time.map(EventTime::from_micros).ok_or_else(|| {
+                    operator_error(&operator.name, "hot history has null event time")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let cut = self.keys.cut();
+        let input = RouteInput::new(
+            record,
+            &compiled.left_key_indices,
+            (0..rows).collect(),
+            times,
+            (first..next).collect(),
+            BooleanArray::from(vec![true; rows]),
+            next,
+        );
+        let incoming = Incoming::route(input, &mut self.keys, &mut || Ok(()))
+            .inspect_err(|_| self.keys.rollback(cut))?;
+        Ok((incoming, next))
     }
 
     pub(super) fn native_capture(
