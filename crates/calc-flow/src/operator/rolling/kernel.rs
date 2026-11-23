@@ -3020,6 +3020,16 @@ fn dense_entity_ids<K: Copy + Eq + std::hash::Hash>(
     keys: impl ExactSizeIterator<Item = K>,
     expected_entities: usize,
 ) -> (Vec<K>, EntityRows, Vec<usize>) {
+    if keys.len() == 1 {
+        return (
+            keys.collect(),
+            EntityRows {
+                counts: vec![1],
+                first_rows: vec![0],
+            },
+            vec![0],
+        );
+    }
     let mut router = DenseRouter::with_capacity(expected_entities.min(keys.len()));
     let entity_ids = keys
         .enumerate()
@@ -6730,6 +6740,21 @@ mod tests {
             proptest::prop_assert_eq!(actual_rows, expected);
             proptest::prop_assert_eq!(actual_ids, ids);
         }
+    }
+
+    #[test]
+    fn single_row_routing_allocates_only_the_four_returned_buffers() {
+        // Prime the process-local hash builder just as earlier batches do.
+        std::hint::black_box(dense_entity_ids(["a", "b"].into_iter(), 2));
+        let expected = ["desk"];
+        let measured = allocation_counter::measure(|| {
+            let (keys, rows, ids) = dense_entity_ids(expected.iter().copied(), 4096);
+            assert_eq!(keys, expected);
+            assert_eq!(rows.counts, [1]);
+            assert_eq!(rows.first_rows, [0]);
+            assert_eq!(ids, [0]);
+        });
+        assert!(measured.count_total <= 4, "{measured:?}");
     }
 
     #[test]
