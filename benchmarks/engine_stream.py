@@ -721,7 +721,7 @@ async def run_stream(
             sources, sink, timed, job, static_join=static_join
         )
         if static_join:
-            delta = streams["right"][-1].at - BASE
+            delta = timed["right"][-1].at - BASE
             sealed = int(BASE_MICROS + delta // timedelta(microseconds=1))
             ((join_id, status),) = job.status()["stream_joins"].items()
             _require_static_left_counters(status)
