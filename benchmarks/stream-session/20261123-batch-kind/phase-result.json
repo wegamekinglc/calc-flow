@@ -1,0 +1,100 @@
+{
+  "all_resource_intervals_admitted": true,
+  "artifact": 14823273081,
+  "artifact_sha256": "ab2f70c27c79a6dfe7d0933a1ed7e6eefd7f0a51622ed248e8d4e0c708af455e",
+  "cpu_model": "AMD EPYC 7763 64-Core Processor",
+  "fixture_sha256": {
+    "expected.arrow": "c86c9e5c2141776e9881d7467da417f7fe4f19ebdd594df2e5339172cb2fe738",
+    "inputs.arrow": "90da6c27244354bacbc53983ca2d1f71be2654ee3b7943779843648197ebe253",
+    "project.json": "57e36971d02b987132f4b6ab8f8fae4c9aa0f74de2c53660b2f3ead67eb6a5b6"
+  },
+  "job": 137735305230,
+  "job_elapsed_seconds": 63,
+  "local_qualification_allowance_seconds": 30,
+  "observations": {
+    "calibration_median_ns": 435.53324999999995,
+    "paired_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 5.143046842414378,
+        "low": 3.615379498436777,
+        "median": 4.319926743779989
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 6.017766497461929,
+        "low": 2.954033646840637,
+        "median": 4.6998119542482675
+      }
+    ],
+    "pooled": {
+      "plain": {
+        "p50_us": 59.621,
+        "p95_us": 80.66145
+      },
+      "probed": {
+        "p50_us": 62.325500000000005,
+        "p95_us": 81.9916
+      }
+    },
+    "pooled_phase_us": {
+      "argument_handling": {
+        "p50": 8.646,
+        "p95": 10.08805
+      },
+      "native_call": {
+        "p50": 48.23,
+        "p95": 66.32905
+      },
+      "result_assembly": {
+        "p50": 5.45,
+        "p95": 6.132449999999999
+      }
+    },
+    "verdict": "inconclusive"
+  },
+  "observer_commit": "0da2427bc49f1041b18f0232bb9bfa10baaefbab",
+  "outcome": {
+    "elapsed_since_job_start_seconds": 60.387272119522095,
+    "state": "completed"
+  },
+  "release": {
+    "artifact": 14822848922,
+    "artifact_digest": "sha256:dad62e3c28ace0dab4742d078f157dca905b67bf26e9edf4defebbbddb179a05",
+    "build_profile": "release",
+    "checkout": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137719754356,
+    "native_sha256": "d7a1bb4dae897378ed410e1362565450f4372bf6b2ffdbc9211bd0fb7186ff11",
+    "requested_sha": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+    "tree": "d22e0c7693ad29181778653dff63d34a0ed86dac",
+    "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+    "wheel_sha256": "7f4b12183edf3abd2cae3066e159c4c3290ffa7761bdad2fecbd543921555366",
+    "workflow_run": 45182357543
+  },
+  "resource_intervals": 42,
+  "resource_log_sha256": "d9e9d011ff4b7dcf9f88b6261d766843571f8a39d21846e5efd23ec576e3c69d",
+  "run": "45187056499",
+  "runner_image": [
+    "ubuntu26",
+    "20261116.202.1"
+  ],
+  "total_budget_seconds": 180,
+  "worker_environment": {
+    "cpu_affinity": [
+      0
+    ],
+    "logical_cpus": 4,
+    "native_sha256": "d7a1bb4dae897378ed410e1362565450f4372bf6b2ffdbc9211bd0fb7186ff11",
+    "numpy": "2.5.2",
+    "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+    "pyarrow": "24.0.0",
+    "python": "3.13.18",
+    "tokio_worker_threads": "1"
+  },
+  "workers_sha256": "f353794c68242407dc3c1cc9abaf64bc1b52f055801b1b253def2c2fa50a6867"
+}
