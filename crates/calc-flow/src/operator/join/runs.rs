@@ -2,7 +2,7 @@
 
 use super::{
     HotProjection, JoinSide, JoinStateLimits, JoinTimeBounds, PayloadRef, StreamJoinType,
-    native_dictionary::{TimedEntry, WindowCursor, ordered_window_bounds},
+    native_dictionary::{TimedEntry, WindowBounds, WindowCursor, ordered_window_bounds},
     operator_error, output_gather,
 };
 use crate::operator::keyed::{GroupId, KeyStore, MORSEL_ROWS};
@@ -725,6 +725,37 @@ struct ProbeSpan {
 }
 
 #[derive(Default)]
+struct ProbeCursors {
+    dense: Vec<Option<WindowCursor>>,
+    sparse: Option<hashbrown::HashMap<GroupId, Option<WindowCursor>, ahash::RandomState>>,
+}
+
+impl ProbeCursors {
+    fn window(
+        &mut self,
+        group: GroupId,
+        dense_limit: usize,
+        bucket: &Bucket,
+        range: (EventTime, EventTime),
+    ) -> WindowBounds {
+        let cursor = if group.index() < dense_limit {
+            if group.index() >= self.dense.len() {
+                self.dense.resize(group.index() + 1, None);
+            }
+            &mut self.dense[group.index()]
+        } else {
+            self.sparse
+                .get_or_insert_with(hashbrown::HashMap::default)
+                .entry(group)
+                .or_default()
+        };
+        let found = ordered_window_bounds(bucket.active(), range, *cursor);
+        *cursor = Some(WindowCursor::new(range, found));
+        found
+    }
+}
+
+#[derive(Default)]
 struct Probe {
     spans: Vec<ProbeSpan>,
     count: usize,
@@ -1376,8 +1407,7 @@ impl RunState {
         check()?;
         let opposite_index = opposite(incoming_side).index();
         let opposite = &self.sides[opposite_index];
-        let mut cursors = Vec::<Option<WindowCursor>>::new();
-        let mut sparse_cursors = None;
+        let mut cursors = ProbeCursors::default();
         let mut probe = Probe::default();
         let room = usize::try_from(self.limits.max_matches_per_input_batch())
             .unwrap_or(usize::MAX)
@@ -1392,41 +1422,16 @@ impl RunState {
             let Some(bucket) = opposite.buckets.get(&group) else {
                 continue;
             };
-            let found = {
-                let cursor = if group.index() < incoming.len() {
-                    if group.index() >= cursors.len() {
-                        cursors.resize(group.index() + 1, None);
-                    }
-                    &mut cursors[group.index()]
-                } else {
-                    sparse_cursors
-                        .get_or_insert_with(hashbrown::HashMap::<_, _, ahash::RandomState>::default)
-                        .entry(group)
-                        .or_default()
-                };
-                let found = ordered_window_bounds(bucket.active(), range, *cursor);
-                *cursor = Some(WindowCursor::new(range, found));
-                found
-            };
-            if found.matches() != 0 {
-                if !EXISTENCE {
-                    probe.push(row, found.range())?;
-                } else if incoming_side == JoinSide::Left {
-                    let first = found.range().start;
-                    probe.push(row, first..first + 1)?;
-                } else {
-                    matches.witnesses.select(
-                        &mut probe,
-                        row,
-                        (group, bucket),
-                        found.range(),
-                        room,
-                        check,
-                    )?;
-                }
-                if EXISTENCE && probe.count > room {
-                    break;
-                }
+            let found = cursors.window(group, incoming.len(), bucket, range);
+            if matches.record_window::<EXISTENCE>(
+                &mut probe,
+                (incoming_side, row),
+                (group, bucket),
+                found,
+                room,
+                check,
+            )? {
+                break;
             }
         }
         matches.count = matches

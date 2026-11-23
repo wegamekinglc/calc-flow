@@ -33,7 +33,15 @@ fn data(times: Vec<Option<i64>>) -> Batch {
     .unwrap()
 }
 fn plan(limits: JoinStateLimits) -> Result<calc_flow::BatchExecutionPlan> {
-    let spec = StreamJoinSpec::inner(
+    join_plan(calc_flow::StreamJoinType::Inner, limits)
+}
+
+fn join_plan(
+    kind: calc_flow::StreamJoinType,
+    limits: JoinStateLimits,
+) -> Result<calc_flow::BatchExecutionPlan> {
+    let spec = StreamJoinSpec::new(
+        kind,
         ["k"],
         ["k"],
         "ts",
@@ -51,21 +59,10 @@ fn plan(limits: JoinStateLimits) -> Result<calc_flow::BatchExecutionPlan> {
 
 #[tokio::test]
 async fn test_left_semi_finite_counts_witnessed_left_rows_once() -> Result<()> {
-    let spec = StreamJoinSpec::new(
+    let plan = join_plan(
         calc_flow::StreamJoinType::LeftSemi,
-        ["k"],
-        ["k"],
-        "ts",
-        "ts",
-        JoinTimeBounds::new(Duration::from_micros(2), Duration::from_micros(3))?,
         JoinStateLimits::new(100, 1_000_000, 2)?,
     )?;
-    let plan = PipelineBuilder::new("existence")?
-        .add_node(
-            "semi",
-            StreamJoinOperator::new("semi", schema(), schema(), spec)?,
-        )?
-        .compile_batch(&UdfRegistry::new().snapshot())?;
     let output = plan
         .execute(
             BTreeMap::from([

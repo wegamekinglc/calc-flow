@@ -21,8 +21,7 @@ async fn typed_and_sql_inner_join_export_and_compile_both_modes() -> Result<()> 
     stream::verify(stream_plan(&p).await?, inputs).await
 }
 
-#[tokio::test]
-async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()> {
+fn left_semi_program(entity: &str) -> Result<Program> {
     let left = table_input("a", schema(), options())?;
     let right = table_input("b", schema(), options())?;
     let spec = StreamJoinSpec::new(
@@ -36,22 +35,22 @@ async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()>
     )?;
     assert!(left.inner_join(&right, spec.clone(), None).is_err());
     let ordering = calc_flow::JoinOutputOrdering {
-        entity_by: vec!["k".into()],
+        entity_by: vec![entity.into()],
         event_time: "ts".into(),
         sequence_by: vec!["seq".into()],
     };
-    let wrong = calc_flow::JoinOutputOrdering {
-        entity_by: vec!["left__k".into()],
-        ..ordering.clone()
-    };
-    let invalid = left.interval_join(&right, spec.clone(), Some(wrong))?;
-    let registry = calc_flow::UdfRegistry::new().snapshot();
-    let invalid = Program::new(
-        "invalid",
+    let joined = left.interval_join(&right, spec, Some(ordering))?;
+    Program::new(
+        "semi",
         CompileMode::Batch,
-        BTreeMap::from([("exists".into(), invalid)]),
-    )?;
-    let error = invalid
+        BTreeMap::from([("exists".into(), joined)]),
+    )
+}
+
+#[tokio::test]
+async fn test_typed_left_semi_rejects_prefixed_identity() -> Result<()> {
+    let registry = calc_flow::UdfRegistry::new().snapshot();
+    let error = left_semi_program("left__k")?
         .collect_schema(&registry)
         .await
         .unwrap_err()
@@ -60,12 +59,13 @@ async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()>
         error.contains("interval_join.output_ordering.entity_by"),
         "{error}"
     );
-    let joined = left.interval_join(&right, spec, Some(ordering))?;
-    let program = Program::new(
-        "semi",
-        CompileMode::Batch,
-        BTreeMap::from([("exists".into(), joined)]),
-    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()> {
+    let registry = calc_flow::UdfRegistry::new().snapshot();
+    let program = left_semi_program("k")?;
     let plan = program
         .compile_batch(&registry, &calc_flow::CompileOptions::default())
         .await?;
