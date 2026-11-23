@@ -1,111 +1,72 @@
 {
-  "candidate_pr": 639,
+  "workload": "One warmed public Program.session.push, native Batch and explicit Watermark at history row 4096, independent process, forced GC and exact dual SMA probe.",
+  "rounds": 2,
+  "pairs_per_round": 10,
+  "warmups_per_side_per_round": 1,
+  "job_seconds": 480,
+  "reserved_external_provenance_seconds": 120,
+  "source_hashes": {
+    "benchmarks/warm_stream.py": "56532fef6313ef8697dcdd8d30f09cf4de5c9ad1c9a646925063204373999b59",
+    "scripts/hosted_session_record.py": "2df19dae56ff08af56f4935ed47a3ac6bf0d7968a4608a807ef8e43bc09716af",
+    "scripts/hosted_session_record_worker.py": "3f3f33224a2041832e43a1e45847425755236f758ee2f2f5a7ec3ca57cd81dd9",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/release_pairs.py": "13393d24d5b98a8065f9c21d851454386bb4ba9f6cf14b2b88fcaeb5efbc102a",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+    "benchmarks/hosted-product-protocol.md": "c8f993be57d3839477065be33394b0dbc215c7726653bddf0d54c05bc265909f"
+  },
+  "candidate_pr": 656,
+  "compiled_parent": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+  "reviewed_product_sha": "83618b1f2450570173fc227afda62045e123c73c",
+  "expected_candidate_checkout": {
+    "parents": [
+      "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+      "83618b1f2450570173fc227afda62045e123c73c"
+    ],
+    "sha": "bc5b2374968c9f066bbf28bdae07e41633578b36",
+    "tree": "8f1ad549d08a989ccb6a1eab33beaf22f1cbc51b"
+  },
+  "changed_files": {
+    "crates/calc-flow-python/src/session.rs": "01483f293793b37dc3f2660a77e66f9be997c123",
+    "python/tests/test_stream_session.py": "72621f23137457c066a852173bf56b03b7acbc2a"
+  },
   "baseline": {
-    "artifact": 14786819620,
-    "artifact_digest": "sha256:32cf6d8afa2d342c7284625c76caaf73f972d636cae4baae17a7e0aaa6ddae02",
+    "artifact": 14794681070,
+    "artifact_digest": "sha256:6be87771e4da11d870d2e2e65623a580bad6aff4d733760006cc332c2a375698",
     "build_profile": "release",
-    "checkout": "e7db38a848d3efc0e36fd641e05066be429956cf",
+    "checkout": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
     "contract": "benchmark-release-v1",
     "git_clean": true,
-    "git_sha": "e7db38a848d3efc0e36fd641e05066be429956cf",
+    "git_sha": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
     "image": "ubuntu-26.04",
     "image_version": "20261116.202.1",
-    "job": 137461256130,
+    "job": 137513145073,
     "parents": [
-      "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-      "3c364d7d0c25072102b55cb6040a76afba6d50a9"
+      "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
+      "a1a8424891c3c24f53ab762825b355a5fed3e10b"
     ],
-    "requested_sha": "3c364d7d0c25072102b55cb6040a76afba6d50a9",
-    "tree": "81676c984010ed3ab39dd0033ebdbfaecbcbf88f",
-    "workflow_run": 45103223384
+    "requested_sha": "35d4c124b9c9647b6a52b4f5b22989b5270d0a86",
+    "tree": "44ef75f0b28a8070f90ff09a86f7d4910c914cd6",
+    "workflow_run": 45120573404
   },
   "candidate": {
-    "artifact": 14787860773,
-    "artifact_digest": "sha256:4c1510d66649e3172dd14d62f0c5e5a69e3b9c84e9db6af46e128d2d800dc644",
+    "artifact": 14794248127,
+    "artifact_digest": "sha256:87a5ca7d818ea95675c980f942881779adf22e78dfe9165f64ee5a5b8a521ff6",
     "build_profile": "release",
-    "checkout": "7f997b25aa110f1f7acc61e248ad889844498100",
+    "checkout": "bc5b2374968c9f066bbf28bdae07e41633578b36",
     "contract": "benchmark-release-v1",
     "git_clean": true,
-    "git_sha": "7f997b25aa110f1f7acc61e248ad889844498100",
+    "git_sha": "bc5b2374968c9f066bbf28bdae07e41633578b36",
     "image": "ubuntu-26.04",
     "image_version": "20261116.202.1",
-    "job": 137460424772,
+    "job": 137512856144,
     "parents": [
-      "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-      "dd252fdebcaeff068b87be9072527d1d8781962f"
+      "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+      "83618b1f2450570173fc227afda62045e123c73c"
     ],
-    "requested_sha": "dd252fdebcaeff068b87be9072527d1d8781962f",
-    "tree": "f05add4a3babc17d50203e778d6de3d7fcb7b3da",
-    "workflow_run": 45103382462
-  },
-  "catalog_case": {
-    "id": "engines/1000000/calc-flow-stream-1t/interval_join",
-    "family": "engines",
-    "backend": "calc-flow-stream-1t",
-    "scenario": "interval_join",
-    "rows": 1000000,
-    "scope": "ready-enqueue-to-arrow/retained-interval-v2",
-    "reference_algorithm": "native-interval-v1",
-    "batch_rows": 1000000,
-    "checkpoint_interval_millis": null,
-    "replay_mode": "exact-cursor",
-    "workload": "throughput",
-    "source_mode": "immutable-event-log-v1",
-    "source_bindings": [
-      "left",
-      "right"
-    ]
-  },
-  "fixture": "One 1,000,000-row batch per side; 64 symbols; \u00b15s; 10,998,080 ordered interval pairs. Fixed public EngineCase.",
-  "timing": "ready enqueue through expected Arrow output and final table concatenate; check all source-sequence pairs and values against the independent oracle; validate EOF and replay outside clock",
-  "comparison": "Two independent worker pairs, one excluded warmup per arm per round, ten adjacent AB/BA pairs per round; exact paired median intervals and 5 percent rule.",
-  "resources": "One logical CPU and one Tokio/Rayon/BLAS thread. A 3 s preflight requires target CPU and all SMT siblings <=20% busy. In every interval require host average <50%, >=10 GiB available, <256 major faults and <1024 total swap pages. Steady-state check every second includes final interval; sibling <50%. Stop on failed oracle, resource gate or deadline. No retries.",
-  "budget": "300s Python total; metadata, source comparison and setup checks reserve 50s; hosted job capped at 250s including download, fixtures, startup, oracle, cleanup and upload. 45s reserved for settling workers and releasing evidence.",
-  "excluded_image_mismatch": {
-    "baseline_artifact": 14787565886,
-    "image_version": "20261116.88.1",
-    "sampled": false
-  },
-  "actual_common_parent": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-  "baseline_nonproduct_files": {
-    "base": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-    "files": [
-      ".github/workflows/benchmark-suite.yml",
-      ".github/workflows/benchmarks.yml",
-      ".github/workflows/ci-linux.yml",
-      "benchmarks/README.md",
-      "benchmarks/native_release_identity.py",
-      "benchmarks/sparse_changelog.py",
-      "benchmarks/sum-state/public-sparse-changelog-20261123/sparse.arrow.gz",
-      "python/tests/test_sparse_changelog_benchmark.py",
-      "scripts/benchmark_suite/catalog.py",
-      "scripts/benchmark_suite/worker.py",
-      "scripts/sparse_changelog_ci.py",
-      "scripts/sparse_changelog_wheels.py",
-      "scripts/test_benchmark_workflow.py",
-      "scripts/test_sparse_changelog_ci.py"
-    ]
-  },
-  "candidate_files": {
-    "base": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-    "files": [
-      "benchmarks/join-asof/p5-bucket-ranges-20261123/README.md",
-      "benchmarks/join-asof/p5-bucket-ranges-20261123/range-sample.patch",
-      "benchmarks/join-asof/p5-bucket-ranges-20261123/result.json",
-      "crates/calc-flow/src/operator/join.rs",
-      "crates/calc-flow/src/operator/join/matches.rs",
-      "crates/calc-flow/src/operator/join/output_gather.rs",
-      "crates/calc-flow/src/operator/join/run_tests.rs",
-      "crates/calc-flow/src/operator/join/runs.rs"
-    ]
-  },
-  "source_hashes": {
-    "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
-    "benchmarks/engine_stream.py": "1f37cfa730c111793ca0ce698e5722074592ac1e3a5b97206bd9e71fd84ee70f",
-    "scripts/hosted_interval_join.py": "eafa8f35efbd3488b2fdb33650a1b182b8e0f60cca2d8eee42042800d6f808a2",
-    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
-    "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
-    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
-    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3"
+    "requested_sha": "83618b1f2450570173fc227afda62045e123c73c",
+    "tree": "8f1ad549d08a989ccb6a1eab33beaf22f1cbc51b",
+    "workflow_run": 45120320420
   }
 }
