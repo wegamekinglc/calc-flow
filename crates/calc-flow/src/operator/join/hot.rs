@@ -1437,6 +1437,64 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn watermark_checkpoint_restores_compacted_locator_pages() {
+            let mut original = operator();
+            let job = job();
+            let context = hot_context(&job);
+            let mut collector = EdgeCollector::new(original.output_ports().to_vec());
+            let record = RecordBatch::try_new(
+                quote_schema(),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from_iter_values(0..96).with_timezone("UTC"),
+                    ),
+                    Arc::new(UInt64Array::from_iter_values(0..96)),
+                    Arc::new(StringArray::from(vec!["S000"; 96])),
+                    Arc::new(Float64Array::from(vec![1.0; 96])),
+                ],
+            )
+            .unwrap();
+            original
+                .process_data(
+                    "left",
+                    Batch::table(vec![record], BatchMetadata::default()).unwrap(),
+                    &context,
+                    &mut collector,
+                )
+                .await
+                .unwrap();
+            let progress = hot_progress_context(&job, 94, crate::EdgeBudget::default());
+            original
+                .on_ingress_progress("right", &progress)
+                .await
+                .unwrap();
+            assert_eq!(original.status().left.retained_rows, 2);
+
+            let snapshot = native_snapshot(&mut original).await;
+            let mut restored = operator();
+            restored.restore_native(&snapshot).unwrap();
+            assert_eq!(
+                restored.status().left.retained_bytes,
+                original.status().left.retained_bytes
+            );
+            for name in ["left/group-0", "left/expiration"] {
+                let segment = &snapshot.segments[name];
+                let reader = datafusion::arrow::ipc::reader::FileReader::try_new(
+                    std::io::Cursor::new(segment.bytes()),
+                    None,
+                )
+                .unwrap();
+                assert_eq!(
+                    reader
+                        .map(|record| record.unwrap().num_rows())
+                        .sum::<usize>(),
+                    2,
+                    "{name}"
+                );
+            }
+        }
+
+        #[tokio::test]
         async fn hot_watermark_migration_evicts_expired_history() {
             let mut operator = operator();
             let (left, right) = static_inputs();

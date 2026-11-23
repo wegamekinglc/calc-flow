@@ -10,7 +10,7 @@ use datafusion::arrow::{
 };
 use datafusion::common::ScalarValue;
 use datafusion::execution::memory_pool::MemoryReservation;
-use hashbrown::HashMap;
+use hashbrown::HashTable;
 use sha2::{Digest, Sha256};
 use std::{mem::size_of, sync::Arc};
 
@@ -66,7 +66,7 @@ impl KeySchema {
 pub(crate) struct KeyStore {
     schema: KeySchema,
     columns: Vec<KeyColumn>,
-    buckets: HashMap<u64, Vec<GroupId>>,
+    index: HashTable<GroupId>,
     hashes: Vec<u64>,
     canonical: Vec<Arc<[u8]>>,
     leases: Vec<u64>,
@@ -116,7 +116,7 @@ impl KeyStore {
         Self {
             schema,
             columns,
-            buckets: HashMap::new(),
+            index: HashTable::new(),
             hashes: Vec::new(),
             canonical: Vec::new(),
             leases: Vec::new(),
@@ -246,16 +246,7 @@ impl KeyStore {
             if row % MORSEL_ROWS == 0 {
                 variable.chunk(0)?;
             }
-            let mut found = None;
-            if let Some(bucket) = self.buckets.get(&hash) {
-                for &group in bucket {
-                    if self.equals(group, arrays, row, &mut variable)? {
-                        found = Some(group);
-                        break;
-                    }
-                }
-            }
-            groups.push(found);
+            groups.push(self.lookup(arrays, row, hash, &mut variable)?);
         }
         Ok(groups)
     }
@@ -393,14 +384,26 @@ impl KeyStore {
         limit: usize,
         variable: &mut VariableWork<'_>,
     ) -> Result<GroupId> {
-        if let Some(bucket) = self.buckets.get(&hash) {
-            for &group in bucket {
-                if self.equals(group, arrays, row, variable)? {
-                    return Ok(group);
-                }
+        match self.lookup(arrays, row, hash, variable)? {
+            Some(group) => Ok(group),
+            None => self.birth(arrays, row, hash, limit, variable),
+        }
+    }
+
+    fn lookup(
+        &self,
+        arrays: &[ArrayRef],
+        row: usize,
+        hash: u64,
+        variable: &mut VariableWork<'_>,
+    ) -> Result<Option<GroupId>> {
+        // iter_hash can return other full hashes with the same table fingerprint.
+        for &group in self.index.iter_hash(hash) {
+            if self.hashes[group.index()] == hash && self.equals(group, arrays, row, variable)? {
+                return Ok(Some(group));
             }
         }
-        self.birth(arrays, row, hash, limit, variable)
+        Ok(None)
     }
 
     fn lookup_colliding(
@@ -473,8 +476,9 @@ impl KeyStore {
         for (column, array) in self.columns.iter_mut().zip(arrays) {
             column.push(array, row)?;
         }
-        self.buckets.entry(hash).or_default().push(group);
         self.hashes.push(hash);
+        self.index
+            .insert_unique(hash, group, |id| self.hashes[id.index()]);
         self.canonical.push(Arc::from(canonical));
         self.leases.push(1);
         self.next = self
@@ -495,19 +499,31 @@ impl KeyStore {
         }
     }
 
+    fn remove_index_suffix(&mut self, retained: usize) {
+        if retained == 0 {
+            self.index.clear();
+            return;
+        }
+        // Usually only a few IDs are removed. Bound repeated cluster searches on collisions.
+        let mut probes_left = self.index.len();
+        for index in (retained..self.hashes.len()).rev() {
+            if probes_left == 0 {
+                self.index.retain(|id| id.index() < retained);
+                break;
+            }
+            self.index
+                .find_entry(self.hashes[index], |id| {
+                    probes_left = probes_left.saturating_sub(1);
+                    id.index() == index
+                })
+                .expect("each installed group is indexed until rollback")
+                .remove();
+        }
+    }
+
     pub(crate) fn rollback(&mut self, cut: KeyCut) {
         self.route_cache = None;
-        for &hash in self.hashes[cut.groups..].iter().rev() {
-            let remove = if let Some(bucket) = self.buckets.get_mut(&hash) {
-                bucket.pop();
-                bucket.is_empty()
-            } else {
-                false
-            };
-            if remove {
-                self.buckets.remove(&hash);
-            }
-        }
+        self.remove_index_suffix(cut.groups);
         for column in &mut self.columns {
             column.truncate(cut.groups);
         }
@@ -1015,9 +1031,18 @@ fn canonical_row(
     let mut canonical = Vec::new();
     for array in arrays {
         canonical.push(canonical_tag(array.data_type())?);
-        let value = ScalarValue::try_from_array(array, row)
-            .map_err(|error| keyed_error(error.to_string()))?;
-        canonical_value(&value, &mut canonical, variable)?;
+        let is_null = array.is_null(row);
+        canonical.push(u8::from(is_null));
+        if is_null {
+            continue;
+        }
+        if matches!(array.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+            canonical_string(string_value(array, row)?, &mut canonical, variable)?;
+        } else {
+            let value = ScalarValue::try_from_array(array, row)
+                .map_err(|error| keyed_error(error.to_string()))?;
+            canonical_scalar(&value, &mut canonical)?;
+        }
     }
     Ok(canonical)
 }
@@ -1072,21 +1097,13 @@ fn canonical_temporal_tag(data_type: &DataType) -> Result<u8> {
     }
 }
 
-fn canonical_value(
-    value: &ScalarValue,
-    output: &mut Vec<u8>,
-    variable: &mut VariableWork<'_>,
-) -> Result<()> {
-    output.push(u8::from(value.is_null()));
+fn canonical_scalar(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
     match value {
         ScalarValue::Boolean(value) => {
             if let Some(value) = value {
                 output.push(u8::from(*value));
             }
             Ok(())
-        }
-        ScalarValue::Utf8(value) | ScalarValue::LargeUtf8(value) => {
-            canonical_string(value.as_deref(), output, variable)
         }
         ScalarValue::TimestampSecond(..)
         | ScalarValue::TimestampMillisecond(..)
@@ -1097,19 +1114,17 @@ fn canonical_value(
 }
 
 fn canonical_string(
-    value: Option<&str>,
+    value: &str,
     output: &mut Vec<u8>,
     variable: &mut VariableWork<'_>,
 ) -> Result<()> {
-    if let Some(value) = value {
-        output.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        let bytes = value.as_bytes();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let count = variable.chunk(bytes.len() - offset)?;
-            output.extend_from_slice(&bytes[offset..offset + count]);
-            offset += count;
-        }
+    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let count = variable.chunk(bytes.len() - offset)?;
+        output.extend_from_slice(&bytes[offset..offset + count]);
+        offset += count;
     }
     Ok(())
 }

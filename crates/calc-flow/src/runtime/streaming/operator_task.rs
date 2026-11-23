@@ -1329,13 +1329,7 @@ async fn finish_sync_operator(
     let rolling = callback
         .as_ref()
         .map(|callback| callback.recorder().clone());
-    let result = sync_adapter::end(
-        inputs,
-        input_progress.input_watermark(),
-        input_progress.snapshot(),
-        rolling,
-    )
-    .await;
+    let result = sync_adapter::end(inputs, input_progress.input_watermark(), rolling).await;
     if let Some(callback) = callback {
         callback.complete(&result);
     }
@@ -1625,13 +1619,13 @@ async fn dispatch_message_inner(
     }
     match message.kind() {
         StreamMessageKind::Data => {
-            let transition = control::evaluate_data(input_progress, ingress_name)?;
+            let watermark = control::evaluate_data(input_progress, ingress_name)?;
             dispatch_data(
                 inputs,
                 ingress_name,
                 message,
-                transition.input_watermark,
-                transition.ingress_progress,
+                watermark,
+                &input_progress.cached_snapshot,
             )
             .await
         }
@@ -2139,7 +2133,7 @@ async fn dispatch_data(
     ingress_name: &str,
     message: StreamMessage,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
+    ingress_progress: &IngressProgressSnapshot,
 ) -> Result<()> {
     let preparation = inputs
         .ingresses
@@ -2166,7 +2160,7 @@ async fn dispatch_data(
         let rolling = callback
             .as_ref()
             .map(|callback| callback.recorder().clone());
-        sync_adapter::data(inputs, batch, input_watermark, ingress_progress, rolling).await
+        sync_adapter::data(inputs, batch, input_watermark, rolling).await
     } else {
         let output_budget = inputs.progress.output_budget(&inputs.outputs);
         let late_metrics: Arc<dyn LateMetricSink> = Arc::new(inputs.progress.clone());
@@ -2174,7 +2168,7 @@ async fn dispatch_data(
             inputs.context.job(),
             &inputs.node_id,
             input_watermark,
-            ingress_progress,
+            ingress_progress.clone(),
             output_budget,
             late_metrics,
         )
@@ -3639,12 +3633,13 @@ pub(super) mod tests {
             checkpoint: None,
             restore: None,
         };
+        let snapshot = IngressProgressSnapshot::default();
         let mut dispatch = Box::pin(super::dispatch_data(
             &mut inputs,
             "input",
             StreamMessage::data(batch("S", 1)),
             None,
-            IngressProgressSnapshot::default(),
+            &snapshot,
         ));
         assert!(futures::poll!(dispatch.as_mut()).is_pending());
         cancellation.cancel();

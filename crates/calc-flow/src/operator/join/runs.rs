@@ -32,6 +32,7 @@ const ROW_COLUMN_BYTES: usize =
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static IDENTITY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MERGE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -86,6 +87,8 @@ impl TimedEntry for LocatorEntry {
 
 impl LocatorEntry {
     fn identity(self) -> (EventTime, u64) {
+        #[cfg(test)]
+        IDENTITY_READS.set(IDENTITY_READS.get() + 1);
         (self.time, self.row_id)
     }
 }
@@ -506,6 +509,20 @@ pub(super) fn hot_batch_charge(
         .and_then(|bytes| bytes.checked_add(run_bytes))
         .ok_or_else(|| run_error("hot state owner charge overflowed"))?;
     Ok((batch.num_rows(), bytes))
+}
+
+/// Reclaim a mostly expired locator array while keeping small watermark advances cheap.
+fn compact_locator_prefix(entries: &mut Vec<LocatorEntry>, head: &mut usize) -> usize {
+    let active = entries.len() - *head;
+    if *head < 64 || active > *head / 3 {
+        return 0;
+    }
+    let old_capacity = entries.capacity();
+    entries.copy_within(*head.., 0);
+    entries.truncate(active);
+    entries.shrink_to_fit();
+    *head = 0;
+    (old_capacity - entries.capacity()) * size_of::<LocatorEntry>()
 }
 
 #[derive(Clone)]
@@ -1123,6 +1140,8 @@ impl RunState {
             bucket.head += cut;
             if bucket.head == bucket.entries.len() {
                 side.buckets.remove(&group);
+            } else {
+                side.bytes -= compact_locator_prefix(&mut bucket.entries, &mut bucket.head);
             }
         }
         side.expiration_head += plan.cut;
@@ -1134,6 +1153,8 @@ impl RunState {
             side.expiration = Vec::new();
             side.expiration_head = 0;
             side.bytes = 0;
+        } else if cut > 0 {
+            side.bytes -= compact_locator_prefix(&mut side.expiration, &mut side.expiration_head);
         }
         if cut > 0 {
             self.dirty.runs[index].extend(affected);
@@ -1802,29 +1823,33 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
 fn merge(left: &[LocatorEntry], right: &[LocatorEntry]) -> Vec<LocatorEntry> {
     #[cfg(test)]
     MERGE_VISITS.with(|count| count.set(count.get() + left.len() + right.len()));
+    let Some((first, mut newer)) = right.split_first() else {
+        return left.to_vec();
+    };
+    let first_key = first.identity();
+    let split = if left.last().is_some_and(|last| last.identity() <= first_key) {
+        left.len()
+    } else {
+        left.partition_point(|old| old.identity() <= first_key)
+    };
+    let (prefix, mut older) = left.split_at(split);
     let mut merged = Vec::with_capacity(left.len() + right.len());
-    let (mut left, mut right) = (left.iter().peekable(), right.iter().peekable());
-    loop {
-        match (left.peek(), right.peek()) {
-            (Some(a), Some(b)) if a.identity() <= b.identity() => {
-                merged.push(**a);
-                left.next();
-            }
-            (Some(_), Some(_)) => {
-                merged.push(**right.peek().expect("right entry"));
-                right.next();
-            }
-            (Some(_), None) => {
-                merged.extend(left.copied());
-                break;
-            }
-            (None, Some(_)) => {
-                merged.extend(right.copied());
-                break;
-            }
-            (None, None) => break,
+    merged.extend_from_slice(prefix);
+    merged.push(*first);
+
+    while let (Some((old, old_tail)), Some((new, new_tail))) =
+        (older.split_first(), newer.split_first())
+    {
+        if old.identity() <= new.identity() {
+            merged.push(*old);
+            older = old_tail;
+        } else {
+            merged.push(*new);
+            newer = new_tail;
         }
     }
+    merged.extend_from_slice(older);
+    merged.extend_from_slice(newer);
     merged
 }
 

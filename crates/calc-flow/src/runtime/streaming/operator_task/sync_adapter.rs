@@ -95,16 +95,9 @@ pub(super) async fn data(
     inputs: &mut OperatorTaskInputs,
     batch: crate::Batch,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
     rolling: Option<RollingMetricsRecorder>,
 ) -> Result<()> {
-    data_callback(
-        inputs,
-        batch,
-        input_watermark,
-        ingress_progress,
-        rolling.clone(),
-    )?;
+    data_callback(inputs, batch, input_watermark, rolling.clone())?;
     flush(inputs, rolling.as_ref()).await
 }
 
@@ -112,12 +105,11 @@ fn data_callback(
     inputs: &mut OperatorTaskInputs,
     batch: crate::Batch,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
     rolling: Option<RollingMetricsRecorder>,
 ) -> Result<()> {
     let result = {
         let mut node = node_mut(&mut inputs.operator);
-        node.context_mut().update(input_watermark, ingress_progress);
+        node.context_mut().set_input_watermark(input_watermark);
         node.context_mut().set_rolling_metrics(rolling);
         node.on_data(0, batch)
     };
@@ -140,8 +132,7 @@ pub(super) async fn progress(
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
     let mut emit_idle = false;
     for emission in emissions {
-        emit_idle |=
-            runner_emission(inputs, emission, &mut previous_watermark, &ingress_progress).await?;
+        emit_idle |= runner_emission(inputs, emission, &mut previous_watermark).await?;
     }
     forward_runner_progress(
         inputs,
@@ -183,17 +174,10 @@ async fn runner_emission(
     inputs: &mut OperatorTaskInputs,
     emission: ProgressEmissionKind,
     previous_watermark: &mut Option<EventTime>,
-    ingress_progress: &IngressProgressSnapshot,
 ) -> Result<bool> {
     match emission {
         ProgressEmissionKind::Watermark(watermark) => {
-            watermark_callback(
-                inputs,
-                watermark,
-                *previous_watermark,
-                ingress_progress.clone(),
-            )
-            .await?;
+            watermark_callback(inputs, watermark, *previous_watermark).await?;
             *previous_watermark = Some(watermark);
             Ok(false)
         }
@@ -206,7 +190,6 @@ async fn watermark_callback(
     inputs: &mut OperatorTaskInputs,
     watermark: EventTime,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
     let processing_timer = inputs.metrics.timer();
     let callback = inputs.progress.begin_rolling(
@@ -218,7 +201,7 @@ async fn watermark_callback(
         .map(|callback| callback.recorder().clone());
     let result = {
         let mut node = node_mut(&mut inputs.operator);
-        node.context_mut().update(input_watermark, ingress_progress);
+        node.context_mut().set_input_watermark(input_watermark);
         node.context_mut().set_rolling_metrics(rolling.clone());
         node.on_watermark(watermark)
     };
@@ -239,12 +222,11 @@ async fn watermark_callback(
 pub(super) async fn end(
     inputs: &mut OperatorTaskInputs,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
     rolling: Option<RollingMetricsRecorder>,
 ) -> Result<()> {
     let result = {
         let mut node = node_mut(&mut inputs.operator);
-        node.context_mut().update(input_watermark, ingress_progress);
+        node.context_mut().set_input_watermark(input_watermark);
         node.context_mut().set_rolling_metrics(rolling.clone());
         node.on_end()
     };
@@ -321,7 +303,6 @@ pub(super) fn data_session(
     inputs: &mut OperatorTaskInputs,
     message: &StreamMessage,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
     let batch = message
         .as_data()
@@ -344,8 +325,8 @@ pub(super) fn data_session(
     let rolling = callback
         .as_ref()
         .map(|callback| callback.recorder().clone());
-    let result = data_callback(inputs, batch, input_watermark, ingress_progress, rolling)
-        .and_then(|()| flush_session(inputs));
+    let result =
+        data_callback(inputs, batch, input_watermark, rolling).and_then(|()| flush_session(inputs));
     if let Some(callback) = callback {
         callback.complete(&result);
     }
@@ -371,7 +352,7 @@ pub(super) fn progress_session(
         .observe_datafusion_runtime(inputs.operator.datafusion_runtime_initialized());
     let mut emit_idle = false;
     for emission in emissions {
-        emit_idle |= session_emission(inputs, emission, &mut previous_watermark, ingress_progress)?;
+        emit_idle |= session_emission(inputs, emission, &mut previous_watermark)?;
     }
     forward_session_progress(
         inputs,
@@ -412,16 +393,10 @@ fn session_emission(
     inputs: &mut OperatorTaskInputs,
     emission: ProgressEmissionKind,
     previous_watermark: &mut Option<EventTime>,
-    ingress_progress: &IngressProgressSnapshot,
 ) -> Result<bool> {
     match emission {
         ProgressEmissionKind::Watermark(watermark) => {
-            watermark_session(
-                inputs,
-                watermark,
-                *previous_watermark,
-                ingress_progress.clone(),
-            )?;
+            watermark_session(inputs, watermark, *previous_watermark)?;
             *previous_watermark = Some(watermark);
             Ok(false)
         }
@@ -434,7 +409,6 @@ fn watermark_session(
     inputs: &mut OperatorTaskInputs,
     watermark: EventTime,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
     let timer = inputs.metrics.timer();
     let callback = inputs.progress.begin_rolling(
@@ -446,7 +420,7 @@ fn watermark_session(
         .map(|callback| callback.recorder().clone());
     let result = {
         let mut node = node_mut(&mut inputs.operator);
-        node.context_mut().update(input_watermark, ingress_progress);
+        node.context_mut().set_input_watermark(input_watermark);
         node.context_mut().set_rolling_metrics(rolling);
         node.on_watermark(watermark)
     }
@@ -461,7 +435,6 @@ fn watermark_session(
 pub(super) fn end_session(
     inputs: &mut OperatorTaskInputs,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
 ) -> Result<()> {
     inputs.progress.record_on_end()?;
     let callback = inputs.progress.begin_rolling(
@@ -473,7 +446,7 @@ pub(super) fn end_session(
         .map(|callback| callback.recorder().clone());
     let result = {
         let mut node = node_mut(&mut inputs.operator);
-        node.context_mut().update(input_watermark, ingress_progress);
+        node.context_mut().set_input_watermark(input_watermark);
         node.context_mut().set_rolling_metrics(rolling);
         node.on_end()
     }

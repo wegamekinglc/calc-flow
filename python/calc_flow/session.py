@@ -211,10 +211,13 @@ def _session_batch(
         # The native session validates the exact schema without a PyArrow copy.
         return data
     table = _arrow_table(data, path)
-    if not table.schema.equals(schema):
+    actual = table.schema
+    if actual.equals(schema, check_metadata=True):
+        return table
+    if not actual.equals(schema):
         raise ValueError(f"{path}.schema: expected declared Arrow schema")
-    if table.schema.metadata is not None or any(
-        field.metadata is not None for field in table.schema
+    if actual.metadata is not None or any(
+        field.metadata is not None for field in actual
     ):
         return _table_batch(table, path)
     return table

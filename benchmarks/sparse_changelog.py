@@ -116,6 +116,29 @@ def validate(batches: tuple[pa.Table, ...], outputs: list[pa.Table]) -> list[int
     return [table.num_rows for table in outputs]
 
 
+class SparseChangelogCase:
+    """Own the isolated benchmark worker's event loop and sealed input."""
+
+    def __init__(self, case: dict, _root: Path):
+        self.batches = load_fixture(Path(case["fixture"]))
+        self.loop = asyncio.new_event_loop()
+
+    def sample(self) -> dict:
+        elapsed, outputs = self.loop.run_until_complete(observe(self.batches))
+        rows = validate(self.batches, outputs)
+        return {
+            "seconds": elapsed / 1e9,
+            "verified_output_rows": rows,
+            "correctness": {"passed": True, "rows": sum(rows)},
+        }
+
+    def finish(self) -> dict:
+        return {"state": "completed"}
+
+    def close(self) -> None:
+        self.loop.close()
+
+
 async def collect(batches: tuple[pa.Table, ...], metadata: dict, output: Path) -> None:
     report = {**metadata, "observations": []}
     write_json(output, report, exclusive=True)

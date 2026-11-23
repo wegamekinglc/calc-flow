@@ -905,6 +905,63 @@ fn eviction_state() -> RunState {
 }
 
 #[test]
+fn test_tiny_ordered_append_merges_without_visiting_every_old_identity() {
+    const ROWS: i64 = 256;
+    let mut state = RunState::new(
+        "ordered-merge",
+        JoinStateLimits::new(1024, 1_000_000, 1024).unwrap(),
+        JoinTimeBounds::from_micros(1000, 1000).unwrap(),
+    )
+    .unwrap();
+    let group = GroupId::new(0).unwrap();
+    let apply = |state: &mut RunState, side, times: &[i64], ids: &[u64], values: &[i64]| {
+        let rows = times.len();
+        let batch = incoming(
+            &record(&vec![1; rows], values),
+            (0..rows).collect(),
+            vec![group; rows],
+            times,
+            ids,
+            vec![true; rows],
+            ids.last().unwrap() + 1,
+        );
+        state
+            .apply(
+                side,
+                batch,
+                &output_schema(),
+                Some(&[1, 3]),
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap()
+    };
+    let times = (0..ROWS).collect::<Vec<_>>();
+    let ids = (0..u64::try_from(ROWS).unwrap()).collect::<Vec<_>>();
+    apply(&mut state, JoinSide::Left, &times, &ids, &times);
+    super::runs::IDENTITY_READS.set(0);
+    apply(
+        &mut state,
+        JoinSide::Left,
+        &[ROWS - 1],
+        &[u64::try_from(ROWS).unwrap()],
+        &[ROWS],
+    );
+    let reads = super::runs::IDENTITY_READS.get();
+    let matched = apply(&mut state, JoinSide::Right, &[0], &[0], &[7]);
+    assert_eq!(
+        values(&matched.records[0], 0),
+        (0..=ROWS).collect::<Vec<_>>()
+    );
+    assert_eq!(values(&matched.records[0], 1), vec![7; times.len() + 1]);
+    assert!(
+        reads <= 32,
+        "{reads} locator identity reads on an ordered append"
+    );
+    eprintln!("ordered one-row append identity reads: {reads}");
+}
+
+#[test]
 fn test_prefix_eviction_and_snapshot_continue_bitwise() {
     let mut state = eviction_state();
     let none = state
@@ -1374,4 +1431,66 @@ fn test_hot_dictionary_routing_admits_new_keys_after_existing_groups() {
         .unwrap();
     let actual = route_hot_keys(&record, &[0], &mut actual).unwrap();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn test_eviction_releases_locator_indexes_for_a_small_live_tail() {
+    const ROWS: usize = 4096;
+    const KEEP: usize = 8;
+    let limits = JoinStateLimits::new(8192, 4_000_000, 8192).unwrap();
+    let bounds = JoinTimeBounds::from_micros(0, 0).unwrap();
+    let mut state = RunState::new("compact-locators", limits, bounds).unwrap();
+    let equal_key = GroupId::new(0).unwrap();
+    let times: Vec<_> = (0..ROWS).map(|i| i64::try_from(i).unwrap()).collect();
+    let ids: Vec<_> = (0..ROWS).map(|i| u64::try_from(i).unwrap()).collect();
+    let left = incoming(
+        &record(&vec![0; ROWS], &times),
+        (0..ROWS).collect(),
+        vec![equal_key; ROWS],
+        &times,
+        &ids,
+        vec![true; ROWS],
+        u64::try_from(ROWS).unwrap(),
+    );
+    state
+        .apply(
+            JoinSide::Left,
+            left,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let before = state.bytes(JoinSide::Left);
+    let retained_times = &times[ROWS - KEEP..];
+    let wm = EventTime::from_micros(retained_times[0]);
+    let expired = state.evict(JoinSide::Left, 0, wm).unwrap();
+    assert_eq!(expired.expired_rows, ROWS - KEEP);
+    assert_eq!(state.rows(JoinSide::Left), KEEP);
+    let after = state.bytes(JoinSide::Left);
+    let mut restored = RunState::restore(state.snapshot()).unwrap();
+    let right = incoming(
+        &record(&[0], &[99]),
+        vec![0],
+        vec![equal_key],
+        &retained_times[..1],
+        &[0],
+        vec![true],
+        1,
+    );
+    let matched = restored
+        .apply(
+            JoinSide::Right,
+            right,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(values(&matched.records[0], 0), [retained_times[0]]);
+    assert_eq!(values(&matched.records[0], 1), [99]);
+    eprintln!("eviction {ROWS} -> {KEEP} retained bytes {before} -> {after}");
+    assert!(after < before / 16, "retained {after} of {before} bytes");
 }

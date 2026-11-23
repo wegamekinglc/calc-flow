@@ -10,6 +10,7 @@ use datafusion::arrow::{
     datatypes::{SchemaRef, TimeUnit},
     record_batch::RecordBatch,
 };
+use smallvec::SmallVec;
 use tokio::sync::{mpsc, watch};
 
 use super::{
@@ -147,7 +148,7 @@ pub struct StreamSession {
     job: StreamJobContext,
     input: SessionInput,
     nodes: Vec<CallerDrivenOperator>,
-    outputs: Vec<(String, OperatorEdgeReceiver)>,
+    outputs: Vec<(Arc<str>, OperatorEdgeReceiver)>,
     lifecycle: Lifecycle,
     checkpoints: Option<checkpoint::SessionCheckpoints>,
 }
@@ -187,12 +188,16 @@ pub enum SessionWatermark {
 /// Each output keeps emission order; outputs have no combined order.
 /// Watermark, idle and end-of-input messages are not returned.
 #[derive(Debug, Default)]
-pub struct SessionOutput(BTreeMap<String, Vec<Batch>>);
+pub struct SessionOutput(SmallVec<[(Arc<str>, EmittedBatches); 1]>);
+
+type EmittedBatches = SmallVec<[Batch; 1]>;
 
 impl SessionOutput {
     /// The batches emitted on `output`, in emission order; empty when none.
     pub fn batches(&self, output: &str) -> &[Batch] {
-        self.0.get(output).map_or(&[], Vec::as_slice)
+        self.0
+            .binary_search_by(|(name, _)| name.as_ref().cmp(output))
+            .map_or(&[], |index| self.0[index].1.as_slice())
     }
 
     /// Whether the call emitted no batch on any output.
@@ -200,9 +205,28 @@ impl SessionOutput {
         self.0.is_empty()
     }
 
+    /// Borrows each nonempty output in graph output ID order.
+    ///
+    /// ```
+    /// # use calc_flow::SessionOutput;
+    /// fn emitted_rows(output: &SessionOutput) -> usize {
+    ///     output.iter_batches().flat_map(|(_, batches)| batches)
+    ///         .map(calc_flow::Batch::num_rows).sum()
+    /// }
+    /// ```
+    pub fn iter_batches(&self) -> impl Iterator<Item = (&str, &[Batch])> {
+        self.0
+            .iter()
+            .map(|(name, batches)| (name.as_ref(), batches.as_slice()))
+    }
+
     /// Consumes the output into batches by graph output ID.
     pub fn into_batches(self) -> BTreeMap<String, Vec<Batch>> {
-        self.0
+        let mut owned = BTreeMap::new();
+        for (name, batches) in self.0 {
+            owned.insert(name.to_string(), batches.into_vec());
+        }
+        owned
     }
 }
 
@@ -312,7 +336,7 @@ impl StreamSession {
 
     /// The graph output IDs in plan order.
     pub fn output_ids(&self) -> Vec<&str> {
-        self.outputs.iter().map(|(id, _)| id.as_str()).collect()
+        self.outputs.iter().map(|(id, _)| id.as_ref()).collect()
     }
 
     /// Whether an error after validation failed the session; later calls
@@ -474,15 +498,16 @@ async fn drain_in_order(nodes: &mut [CallerDrivenOperator]) -> Result<()> {
 }
 
 /// Takes every batch that reached a graph output during this call.
-fn collect_outputs(outputs: &mut [(String, OperatorEdgeReceiver)]) -> Result<SessionOutput> {
-    let mut emitted = BTreeMap::new();
-    for (output, receiver) in outputs.iter_mut() {
-        let mut batches = Vec::new();
+fn collect_outputs(outputs: &mut [(Arc<str>, OperatorEdgeReceiver)]) -> Result<SessionOutput> {
+    // Wiring follows the ordered sink route map; filtering empty outputs preserves it.
+    let mut emitted = SmallVec::new();
+    for (output, receiver) in outputs {
+        let mut batches = EmittedBatches::new();
         while let Some(message) = receiver.try_recv()? {
             batches.extend(message.into_data());
         }
         if !batches.is_empty() {
-            emitted.insert(output.clone(), batches);
+            emitted.push((Arc::clone(output), batches));
         }
     }
     Ok(SessionOutput(emitted))
@@ -1004,7 +1029,7 @@ fn generated_mode(
 type Wiring = (
     SessionInput,
     Vec<CallerDrivenOperator>,
-    Vec<(String, OperatorEdgeReceiver)>,
+    Vec<(Arc<str>, OperatorEdgeReceiver)>,
 );
 
 async fn wire(
@@ -1024,7 +1049,12 @@ async fn wire(
     let input = session_input(source_routes, &mut senders, watermarks)?;
     let outputs = sink_routes
         .into_values()
-        .map(|route| Ok((route.output_id, take_edge(&mut receivers, &route.edge_id)?)))
+        .map(|route| {
+            Ok((
+                Arc::from(route.output_id),
+                take_edge(&mut receivers, &route.edge_id)?,
+            ))
+        })
         .collect::<Result<Vec<_>>>()?;
     if !senders.is_empty() || !receivers.is_empty() {
         return Err(CalcFlowError::Internal {

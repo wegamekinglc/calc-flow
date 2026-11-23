@@ -10,8 +10,8 @@ use async_trait::async_trait;
 
 use super::{LateMetricSink, OperatorMetadata, rolling_metrics::RollingMetricsRecorder};
 use crate::{
-    Batch, CalcFlowError, EdgeBudget, Epoch, EventTime, IngressProgressSnapshot,
-    OperatorStateSnapshot, Port, Result, StreamJobContext,
+    Batch, CalcFlowError, EdgeBudget, Epoch, EventTime, OperatorStateSnapshot, Port, Result,
+    StreamJobContext,
     batch::TableBatchShell,
     runtime::streaming::{EnvelopeCost, OperatorEdgeSender, StreamJobControl, StreamMessage},
 };
@@ -32,15 +32,10 @@ impl<'a> PrepareContext<'a> {
 }
 
 /// Reusable callback context. Job control and metric sinks are cheap owned
-/// handles; only the changing watermark and progress snapshot are updated.
-#[allow(
-    dead_code,
-    reason = "P2.7 rolling consumes the complete late, progress, budget and recorder surface"
-)]
+/// handles. Each callback receives its current input watermark and recorder.
 pub(crate) struct SyncContext<'a> {
     operator_id: Arc<str>,
     input_watermark: Option<EventTime>,
-    ingress_progress: IngressProgressSnapshot,
     output_budget: EdgeBudget,
     late_metrics: Arc<dyn LateMetricSink>,
     rolling_metrics: Option<RollingMetricsRecorder>,
@@ -60,7 +55,6 @@ impl SyncContext<'static> {
         Self {
             operator_id,
             input_watermark: None,
-            ingress_progress: IngressProgressSnapshot::default(),
             output_budget,
             late_metrics,
             rolling_metrics: None,
@@ -72,18 +66,9 @@ impl SyncContext<'static> {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "P2.7 rolling consumes the complete late, progress, budget and recorder surface"
-)]
 impl SyncContext<'_> {
-    pub(crate) fn update(
-        &mut self,
-        input_watermark: Option<EventTime>,
-        ingress_progress: IngressProgressSnapshot,
-    ) {
-        self.input_watermark = input_watermark;
-        self.ingress_progress = ingress_progress;
+    pub(crate) fn set_input_watermark(&mut self, watermark: Option<EventTime>) {
+        self.input_watermark = watermark;
     }
 
     pub(crate) fn set_rolling_metrics(&mut self, metrics: Option<RollingMetricsRecorder>) {
@@ -96,10 +81,6 @@ impl SyncContext<'_> {
 
     pub(crate) const fn input_watermark(&self) -> Option<EventTime> {
         self.input_watermark
-    }
-
-    pub(crate) const fn ingress_progress(&self) -> &IngressProgressSnapshot {
-        &self.ingress_progress
     }
 
     pub(crate) const fn output_budget(&self) -> EdgeBudget {

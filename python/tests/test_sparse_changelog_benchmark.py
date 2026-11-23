@@ -79,3 +79,20 @@ def test_oracle_rejects_malformed_changes_even_if_final_values_match(fault):
         result.append(result[-1])
     with pytest.raises(ValueError):
         validate(inputs(), result)
+
+
+def test_isolated_worker_retains_per_batch_oracle_evidence(monkeypatch, tmp_path):
+    from benchmarks import sparse_changelog
+
+    monkeypatch.setattr(sparse_changelog, "load_fixture", lambda _: inputs())
+    active = sparse_changelog.SparseChangelogCase(
+        {"fixture": "fixture.arrow"}, tmp_path
+    )
+    try:
+        for sample in (active.sample(), active.sample()):
+            assert sample["verified_output_rows"] == [2, 4, 0]
+            assert sample["correctness"] == {"passed": True, "rows": 6}
+            assert sample["seconds"] > 0
+        assert active.finish() == {"state": "completed"}
+    finally:
+        active.close()

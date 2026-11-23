@@ -29,16 +29,7 @@ def release_identity(build_path: Path) -> dict:
     package = Path(calc_flow.__file__).resolve().parent
     if native.parent != package:
         raise ValueError("Python and native modules came from different packages")
-    with zipfile.ZipFile(wheel) as archive:
-        for member in archive.namelist():
-            if not member.startswith("calc_flow/") or member.endswith("/"):
-                continue
-            with archive.open(member) as content:
-                digest = hashlib.file_digest(content, "sha256").hexdigest()
-            if file_hash(package.parent / member) != digest:
-                raise ValueError(
-                    f"loaded package differs from the release wheel: {member}"
-                )
+    verify_package_files(wheel, package.parent)
     return {
         **proof,
         "python_executable": sys.executable,
@@ -46,3 +37,16 @@ def release_identity(build_path: Path) -> dict:
         "python_version": platform.python_version(),
         "instrument_sha256": file_hash(Path(__file__)),
     }
+
+
+def verify_package_files(wheel: Path, site: Path) -> None:
+    with zipfile.ZipFile(wheel) as archive:
+        for member in archive.namelist():
+            if not member.startswith("calc_flow/") or member.endswith("/"):
+                continue
+            with archive.open(member) as content:
+                digest = hashlib.file_digest(content, "sha256").hexdigest()
+            if file_hash(site / member) != digest:
+                raise ValueError(
+                    f"loaded package differs from the release wheel: {member}"
+                )
