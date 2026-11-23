@@ -7,11 +7,6 @@ use crate::{
     runtime::streaming::progress::aggregate::{AggregateInput, ProgressEmissionKind},
 };
 
-pub(super) struct DataTransition {
-    pub(super) input_watermark: Option<EventTime>,
-    pub(super) ingress_progress: IngressProgressSnapshot,
-}
-
 pub(super) struct ProgressTransition {
     pub(super) emissions: Vec<ProgressEmissionKind>,
     pub(super) previous_watermark: Option<EventTime>,
@@ -22,13 +17,10 @@ pub(super) struct ProgressTransition {
 pub(super) fn evaluate_data(
     progress: &mut OperatorInputProgress,
     ingress: &str,
-) -> Result<DataTransition> {
+) -> Result<Option<EventTime>> {
     let input_watermark = progress.input_watermark();
     progress.evaluate(ingress, AggregateInput::Data)?;
-    Ok(DataTransition {
-        input_watermark,
-        ingress_progress: progress.snapshot(),
-    })
+    Ok(input_watermark)
 }
 
 pub(super) fn evaluate_progress(

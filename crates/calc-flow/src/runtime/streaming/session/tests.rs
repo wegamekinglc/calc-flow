@@ -736,6 +736,33 @@ fn expression_plan(
 }
 
 #[test]
+fn test_sync_projection_reuses_its_ingress_snapshot_between_watermarks() {
+    let plan = pass_through_plan(&input_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(plan, BTreeMap::new());
+    assert!(session.advance(&input, micros(10)).unwrap().is_empty());
+    let identity = session.nodes[0].ingress_snapshot_identity();
+    let measured = allocation_counter::measure(|| {
+        assert!(session.advance(&input, micros(20)).unwrap().is_empty());
+    });
+    eprintln!("session watermark allocations: {measured:?}");
+    assert_eq!(session.nodes[0].ingress_snapshot_identity(), identity);
+    let output = session.output_ids()[0].to_owned();
+    let emitted = session
+        .push(&input, input_batch(&[(21, "k", 1, 7.0)]), None)
+        .unwrap();
+    assert_eq!(
+        emitted
+            .batches(&output)
+            .iter()
+            .map(Batch::num_rows)
+            .sum::<usize>(),
+        1
+    );
+    assert!(session.finish().unwrap().is_empty());
+}
+
+#[test]
 fn test_staging_an_explicit_watermark_requires_no_allocation() {
     let plan = pass_through_plan(&input_schema());
     let input = source_id(&plan);

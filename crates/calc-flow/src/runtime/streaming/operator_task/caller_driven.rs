@@ -55,6 +55,11 @@ impl CallerDrivenOperator {
     }
 
     #[cfg(test)]
+    pub(in crate::runtime::streaming) fn ingress_snapshot_identity(&self) -> usize {
+        std::ptr::from_ref(self.progress.cached_snapshot.by_ingress()).addr()
+    }
+
+    #[cfg(test)]
     pub(in crate::runtime::streaming) fn checkpointing(&self) -> bool {
         self.inputs.context.job().checkpointing()
     }
@@ -160,11 +165,7 @@ impl CallerDrivenOperator {
             return Ok(());
         }
         let result = catch_unwind(AssertUnwindSafe(|| {
-            sync_adapter::end_session(
-                &mut self.inputs,
-                self.progress.input_watermark(),
-                self.progress.snapshot(),
-            )
+            sync_adapter::end_session(&mut self.inputs, self.progress.input_watermark())
         }));
         match result {
             Ok(result) => result?,
@@ -264,13 +265,8 @@ fn sync_data(
     ingress: &str,
     message: StreamMessage,
 ) -> Result<Option<Batch>> {
-    let transition = control::evaluate_data(progress, ingress)?;
-    sync_adapter::data_session(
-        inputs,
-        &message,
-        transition.input_watermark,
-        transition.ingress_progress,
-    )?;
+    let watermark = control::evaluate_data(progress, ingress)?;
+    sync_adapter::data_session(inputs, &message, watermark)?;
     Ok(message.into_data())
 }
 

@@ -223,7 +223,7 @@ impl Fixture {
             "input",
             StreamMessage::data(batch.clone()),
             self.previous_watermark,
-            IngressProgressSnapshot::default(),
+            &IngressProgressSnapshot::default(),
         )
         .await
         .unwrap();
