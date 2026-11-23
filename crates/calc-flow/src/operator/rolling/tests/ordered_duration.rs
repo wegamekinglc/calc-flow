@@ -765,6 +765,7 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
         (1, "a", 1, Some(1.0)),
         (2, "a", 2, Some(2.0)),
         (3, "a", 3, Some(3.0)),
+        (3, "c", 7, Some(7.0)),
         (10, "a", 4, Some(10.0)),
         (20, "a", 5, Some(20.0)),
         (21, "b", 6, Some(21.0)),
@@ -773,7 +774,7 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
     let (expected, _) = reference_output(&operator, &input);
     let (job, store, mut output) = fixture(&operator);
     let job = job.with_checkpointing(false);
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 3)).await);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 4)).await);
     let mut emitted = close(&mut operator, &job, &store, &mut output, 3).await;
     let prior = format!("{:?}", operator.state.typed_kernel_state);
     let shapes = operator
@@ -783,7 +784,7 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
         .unwrap()
         .numeric_queue_shapes_for_test();
     let sequence = operator.state.next_output_sequence;
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(3, 3)).await);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(4, 3)).await);
     let charge = operator.state.charge;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
     let error = operator
