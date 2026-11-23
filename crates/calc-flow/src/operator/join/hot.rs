@@ -1,7 +1,7 @@
 use super::{HotProjection, JoinTimeBounds, StreamJoinOperator};
 use crate::Result;
 use datafusion::arrow::{
-    array::{ArrayRef, AsArray, Float64Array},
+    array::{Array, ArrayRef, AsArray, Float64Array},
     datatypes::{DataType, Float64Type, Schema, TimeUnit},
 };
 use std::sync::Arc;
@@ -92,14 +92,27 @@ impl HotProjection {
         }
         let left = column(self.left_price, &DataType::Float64)?;
         let right = column(self.right_price, &DataType::Float64)?;
-        let values = left
-            .as_primitive::<Float64Type>()
-            .iter()
-            .zip(right.as_primitive::<Float64Type>().iter())
-            .map(|(left, right)| left.zip(right).map(|(a, b)| a * b))
-            .collect::<Float64Array>();
+        let values = Self::products(
+            left.as_primitive::<Float64Type>(),
+            right.as_primitive::<Float64Type>(),
+        );
         columns.push(Arc::new(values));
         Ok(columns)
+    }
+
+    fn products(left: &Float64Array, right: &Float64Array) -> Float64Array {
+        let pairs = || left.values().iter().zip(right.values());
+        // Preserve the nullable kernel's choice of payload when both operands are NaN.
+        if left.null_count() == 0
+            && right.null_count() == 0
+            && !pairs().any(|(a, b)| a.is_nan() && b.is_nan())
+        {
+            return Float64Array::from_iter_values(pairs().map(|(a, b)| a * b));
+        }
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| left.zip(right).map(|(a, b)| a * b))
+            .collect()
     }
 }
 
