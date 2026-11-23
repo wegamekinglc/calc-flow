@@ -573,7 +573,7 @@ pub(super) struct EntityRow {
     pub(super) first: usize,
 }
 
-/// A one-entity batch keeps its routing facts inline.
+/// Routing one input row stores both values inline.
 pub(super) type EntityRows = smallvec::SmallVec<[EntityRow; 1]>;
 
 /// A transactional update of only the entities touched by a stream batch.
