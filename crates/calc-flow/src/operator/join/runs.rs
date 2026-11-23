@@ -1443,8 +1443,8 @@ impl RunState {
             &mut self.match_limit_failures,
             self.limits.max_matches_per_input_batch(),
             &self.name,
-        )?;
-        Ok(probe)
+        )
+        .map(|()| probe)
     }
 }
 

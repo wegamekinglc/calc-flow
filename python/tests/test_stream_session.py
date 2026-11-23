@@ -288,6 +288,45 @@ def test_table_output_session_requires_a_result_binding() -> None:
         assert error.value.args == ("result",)
 
 
+def test_program_session_preserves_mapping_lookup_and_input_errors() -> None:
+    class CustomMapping(dict):
+        def get(self, key, default=None):
+            raise AssertionError("a custom mapping must retain indexed lookup")
+
+    source = table_input("quotes", schema=SCHEMA)
+    program = Program("input_errors", mode="stream", outputs={"out": source})
+    table = _rows((0, "a", 0, 1.0))
+    with program.session(config=CONFIG) as session:
+        with pytest.raises(ValueError, match="quotes: missing table input"):
+            session.push({})
+        with pytest.raises(ValueError, match="bad: unexpected input name"):
+            session.push({"extra": table, "bad": table})
+        with pytest.raises(TypeError, match="session.inputs.quotes: expected"):
+            session.push({"quotes": None})
+        assert session.push(CustomMapping(quotes=table))["out"].equals(table)
+
+
+def test_single_program_input_looks_up_its_declared_name_once() -> None:
+    comparisons = 0
+
+    class SuppliedName(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            nonlocal comparisons
+            comparisons += 1
+            return super().__eq__(other)
+
+    source = table_input("quotes", schema=SCHEMA)
+    program = Program("one_input", mode="stream", outputs={"out": source})
+    table = _rows((0, "a", 0, 1.0))
+    supplied = {SuppliedName("quotes"): cf.Batch.from_pyarrow(table)}
+    with program.session(config=CONFIG) as session:
+        result = session.push(supplied)
+    assert result["out"].equals(table)
+    assert comparisons == 1
+
+
 def test_single_program_output_uses_one_physical_name_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
