@@ -185,3 +185,17 @@ class SparseChangelogCiTests(unittest.TestCase):
             ):
                 with self.subTest(digest=digest), self.assertRaises(ValueError):
                     wheels._wheel(content, digest, root)
+
+    def test_api_rejects_unknown_endpoints_before_starting_gh(self):
+        from unittest.mock import patch
+
+        with patch("subprocess.check_output") as subprocess_run:
+            for repository, path in (
+                ("--hostname", "actions/artifacts/7"),
+                ("owner/repo", "../other"),
+                ("owner/repo", "actions/runs/7/cancel"),
+                ("owner/repo", "git/commits/branch-name"),
+            ):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    wheels._api(repository, path)
+            subprocess_run.assert_not_called()

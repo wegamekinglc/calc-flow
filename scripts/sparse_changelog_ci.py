@@ -7,7 +7,6 @@ import asyncio
 import gzip
 import json
 import os
-import re
 import time
 from pathlib import Path
 
@@ -190,8 +189,6 @@ def main():
         asyncio.run(measure(root))
         return
     repository = os.environ["GITHUB_REPOSITORY"]
-    if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
-        raise ValueError("invalid GitHub repository")
     requested = {
         s: {
             "sha": os.environ[f"{s.upper()}_SHA"],

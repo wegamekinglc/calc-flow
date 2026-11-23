@@ -60,8 +60,17 @@ def build_proof(artifact: dict, run: dict, expected: str, log: str) -> dict:
 
 
 def _api(repository: str, path: str) -> bytes:
-    # GitHub-provided repository and fixed GET paths with validated numeric/SHA inputs.
-    return subprocess.check_output(  # noqa: S603  # nosec B603
+    allowed = (
+        r"actions/artifacts/[0-9]+(?:/zip)?|actions/jobs/[0-9]+/logs|"
+        r"actions/runs/[0-9]+(?:/attempts/[0-9]+/jobs\?per_page=100)?|"
+        r"git/commits/[0-9a-f]{40}"
+    )
+    if not re.fullmatch(r"\w[\w.-]*/\w[\w.-]*", repository) or not re.fullmatch(
+        allowed, path
+    ):
+        raise ValueError("invalid repository or Linux CI evidence endpoint")
+    # Only fixed GitHub GET endpoints above reach the resolved gh executable.
+    return subprocess.check_output(  # noqa: S603  # nosec B603  # nosemgrep
         [
             require_executable("gh"),
             "api",
@@ -71,6 +80,7 @@ def _api(repository: str, path: str) -> bytes:
             "GET",
             f"repos/{repository}/{path}",
         ],
+        shell=False,
         timeout=60,
     )
 
