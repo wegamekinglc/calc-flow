@@ -508,6 +508,20 @@ pub(super) fn hot_batch_charge(
     Ok((batch.num_rows(), bytes))
 }
 
+/// Reclaim a mostly expired locator array while keeping small watermark advances cheap.
+fn compact_locator_prefix(entries: &mut Vec<LocatorEntry>, head: &mut usize) -> usize {
+    let active = entries.len() - *head;
+    if *head < 64 || active > *head / 3 {
+        return 0;
+    }
+    let old_capacity = entries.capacity();
+    entries.copy_within(*head.., 0);
+    entries.truncate(active);
+    entries.shrink_to_fit();
+    *head = 0;
+    (old_capacity - entries.capacity()) * size_of::<LocatorEntry>()
+}
+
 #[derive(Clone)]
 struct Bucket {
     entries: Vec<LocatorEntry>,
@@ -1121,6 +1135,8 @@ impl RunState {
             bucket.head += cut;
             if bucket.head == bucket.entries.len() {
                 side.buckets.remove(&group);
+            } else {
+                side.bytes -= compact_locator_prefix(&mut bucket.entries, &mut bucket.head);
             }
         }
         side.expiration_head += plan.cut;
@@ -1132,6 +1148,8 @@ impl RunState {
             side.expiration = Vec::new();
             side.expiration_head = 0;
             side.bytes = 0;
+        } else if cut > 0 {
+            side.bytes -= compact_locator_prefix(&mut side.expiration, &mut side.expiration_head);
         }
         if cut > 0 {
             self.dirty.runs[index].extend(affected);
