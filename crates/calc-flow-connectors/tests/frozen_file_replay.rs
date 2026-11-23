@@ -610,18 +610,12 @@ async fn test_frozen_asof_checkpoint_restart_uses_original_unconsumed_history() 
     assert_eq!(right_values(root.path()), [5, 9]);
 }
 
-fn find_manifest(root: &Path, name: &str) -> Option<serde_json::Value> {
-    for entry in std::fs::read_dir(root).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            if let Some(manifest) = find_manifest(&path, name) {
-                return Some(manifest);
-            }
-        } else if path.file_name().and_then(|name| name.to_str()) == Some(name) {
-            return Some(serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap());
-        }
-    }
-    None
+fn checkpoint_manifest(root: &Path, epoch: calc_flow::Epoch) -> serde_json::Value {
+    let path = root
+        .join("manifests/lineage/manifests")
+        .join(format!("epoch-{}.json", epoch.as_u64()));
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 #[tokio::test]
@@ -651,11 +645,7 @@ async fn test_frozen_asof_checkpoint_stores_batch_coordinates_instead_of_rows() 
         .unwrap()
         .unwrap();
     assert_eq!(first.cancel().await.state, JobState::Cancelled);
-    let manifest = find_manifest(
-        &root.path().join("checkpoints"),
-        &format!("epoch-{}.json", epoch.as_u64()),
-    )
-    .unwrap();
+    let manifest = checkpoint_manifest(&root.path().join("checkpoints"), epoch);
     let operator_bytes = manifest["operators"]
         .as_object()
         .unwrap()
@@ -769,11 +759,7 @@ async fn test_frozen_asof_replay_compacts_and_resumes_after_33_cuts() {
     for cut in 1..=33 {
         paused_at_cut(&paused).await;
         let epoch = first.trigger_checkpoint().await.unwrap();
-        let manifest = find_manifest(
-            &root.path().join("checkpoints"),
-            &format!("epoch-{}.json", epoch.as_u64()),
-        )
-        .unwrap();
+        let manifest = checkpoint_manifest(&root.path().join("checkpoints"), epoch);
         let segments = manifest["operators"]
             .as_object()
             .unwrap()

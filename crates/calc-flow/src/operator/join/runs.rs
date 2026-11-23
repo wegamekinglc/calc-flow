@@ -1507,25 +1507,14 @@ impl Prepared {
         left_width: usize,
         range: std::ops::Range<usize>,
     ) -> Result<RecordBatch> {
+        let pairs = self.probe.selection.slice(range);
         let incoming = output_gather::SideGather::new(
-            self.probe
-                .selection
-                .iter()
-                .skip(range.start)
-                .take(range.len())
-                .map(|pair| self.incoming.payload_at(pair.pos)),
+            pairs.iter().map(|pair| self.incoming.payload_at(pair.pos)),
         );
-        let opposite = output_gather::SideGather::new(
-            self.probe
-                .selection
-                .iter()
-                .skip(range.start)
-                .take(range.len())
-                .map(|pair| {
-                    let locator = self.probe.opposite[pair.opposite_index];
-                    self.probe.payload(locator)
-                }),
-        );
+        let opposite = output_gather::SideGather::new(pairs.iter().map(|pair| {
+            let locator = self.probe.opposite[pair.opposite_index];
+            self.probe.payload(locator)
+        }));
         let (left, right) = if self.incoming_is_left {
             (incoming, opposite)
         } else {
@@ -1548,7 +1537,7 @@ impl Prepared {
         RecordBatch::try_new_with_options(
             Arc::clone(schema),
             columns,
-            &RecordBatchOptions::new().with_row_count(Some(range.len())),
+            &RecordBatchOptions::new().with_row_count(Some(pairs.len())),
         )
         .map_err(|error| operator_error(&state.name, &format!("run output failed: {error}")))
     }
