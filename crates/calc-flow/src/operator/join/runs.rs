@@ -1,8 +1,7 @@
 //! Immutable columnar Join runs and selection-driven probe/materialization.
 
 use super::{
-    JoinSide, JoinStateLimits, JoinTimeBounds, MatchedPair, PayloadRef,
-    matches::Selection,
+    JoinSide, JoinStateLimits, JoinTimeBounds, PayloadRef,
     native_dictionary::{TimedEntry, WindowBounds, WindowCursor, ordered_window_bounds},
     operator_error, output_gather,
 };
@@ -48,6 +47,7 @@ pub(super) fn merge_visits() -> usize {
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static GATHER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RUN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -676,25 +676,69 @@ impl SideUpdate {
     }
 }
 
+struct ProbeSpan {
+    first: usize,
+    position: usize,
+    window: std::ops::Range<usize>,
+}
+
 struct Probe {
-    selection: Selection,
-    opposite: Vec<RowLocator>,
-    runs: Vec<Option<Arc<Run>>>,
+    spans: Vec<ProbeSpan>,
+    count: usize,
 }
 
 impl Probe {
     fn len(&self) -> usize {
-        self.selection.len()
+        self.count
     }
 
-    fn payload(&self, locator: RowLocator) -> PayloadRef<'_> {
-        let run = usize::try_from(locator.run.0)
-            .ok()
-            .and_then(|index| self.runs.get(index))
-            .and_then(Option::as_ref)
-            .expect("probed run");
+    fn windows(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + Clone {
+        let spans = if range == (0..self.count) {
+            &self.spans[..]
+        } else {
+            let start = self
+                .spans
+                .partition_point(|span| span.first + span.window.len() <= range.start);
+            let end = self.spans.partition_point(|span| span.first < range.end);
+            &self.spans[start..end]
+        };
+        spans.iter().map(move |span| {
+            let start = range.start.saturating_sub(span.first);
+            let end = (range.end - span.first).min(span.window.len());
+            (
+                span.position,
+                span.window.start + start..span.window.start + end,
+            )
+        })
+    }
+}
+
+struct RunPayloads<'a> {
+    side: &'a Side,
+    by_id: BTreeMap<RunId, &'a RecordBatch>,
+    last: Option<(RunId, &'a RecordBatch)>,
+}
+
+impl<'a> RunPayloads<'a> {
+    fn payload(&mut self, locator: RowLocator) -> PayloadRef<'a> {
+        let record = if let Some((id, record)) = self.last
+            && id == locator.run
+        {
+            record
+        } else {
+            let record = *self.by_id.entry(locator.run).or_insert_with(|| {
+                #[cfg(test)]
+                RUN_LOOKUPS.with(|count| count.set(count.get() + 1));
+                &self.side.runs[&locator.run].run.payload
+            });
+            self.last = Some((locator.run, record));
+            record
+        };
         PayloadRef::Record(
-            &run.payload,
+            record,
             usize::try_from(locator.row).expect("u32 locator fits usize"),
         )
     }
@@ -1259,7 +1303,7 @@ impl RunState {
         let opposite = &self.sides[opposite_index];
         let mut cursors = Vec::<Option<WindowCursor>>::new();
         let mut sparse_cursors = None;
-        let mut bounds = Vec::with_capacity(incoming.len());
+        let mut spans = Vec::new();
         let mut count = 0usize;
         for row in 0..incoming.len() {
             let group = incoming.groups[row];
@@ -1286,12 +1330,17 @@ impl RunState {
             } else {
                 WindowBounds::EMPTY
             };
-            count = count
-                .checked_add(found.matches())
-                .ok_or_else(|| run_error("match count overflowed"))?;
-            bounds.push(found);
+            if found.matches() != 0 {
+                spans.push(ProbeSpan {
+                    first: count,
+                    position: row,
+                    window: found.range(),
+                });
+                count = count
+                    .checked_add(found.matches())
+                    .ok_or_else(|| run_error("match count overflowed"))?;
+            }
         }
-        let _ = opposite;
         *matches = matches
             .checked_add(count)
             .ok_or_else(|| run_error("input batch match count overflowed"))?;
@@ -1301,38 +1350,7 @@ impl RunState {
             self.limits.max_matches_per_input_batch(),
             &self.name,
         )?;
-        let opposite = &self.sides[opposite_index];
-        let mut selection = Selection::with_capacity(count, incoming.len());
-        let mut selected = Vec::with_capacity(count);
-        let mut runs = Vec::<Option<Arc<Run>>>::new();
-        for (row, found) in bounds.into_iter().enumerate() {
-            if found.matches() == 0 {
-                continue;
-            }
-            let group = incoming.groups[row];
-            let bucket = opposite.buckets.get(&group).expect("probed bucket");
-            let start = selected.len();
-            for entry in &bucket.active()[found.range()] {
-                let locator = entry.locator;
-                let index = usize::try_from(locator.run.0).expect("run locator fits usize");
-                if runs.len() <= index {
-                    runs.resize(index + 1, None);
-                }
-                if runs[index].is_none() {
-                    #[cfg(test)]
-                    RUN_LOOKUPS.with(|count| count.set(count.get() + 1));
-                    runs[index] = Some(Arc::clone(&opposite.runs[&locator.run].run));
-                }
-                selected.push(locator);
-            }
-            selection.append_run(row, start..selected.len());
-        }
-        debug_assert_eq!(selected.len(), count);
-        Ok(Probe {
-            selection,
-            opposite: selected,
-            runs,
-        })
+        Ok(Probe { spans, count })
     }
 }
 
@@ -1356,31 +1374,42 @@ impl Prepared {
         if self.probe.len() == 0 {
             return Ok(Vec::new());
         }
-        let ranges = self.ranges(
-            output.schema,
-            output.projection,
-            output.left_width,
-            output.budget,
-            check,
-        )?;
+        let opposite_side = if self.incoming_is_left {
+            JoinSide::Right
+        } else {
+            JoinSide::Left
+        };
+        let mut payloads = RunPayloads {
+            side: &state.sides[opposite_side.index()],
+            by_id: BTreeMap::new(),
+            last: None,
+        };
+        let ranges = self.ranges(output, &mut payloads, check)?;
         // Check planned ranges here; byte-budget splits are counted after materialization.
         let sequences = output_sequence_range(first_sequence, ranges.len())?;
         let mut records = Vec::with_capacity(ranges.len());
         for (sequence, range) in sequences.zip(ranges) {
             check()?;
-            self.materialize_range(state, output, range, sequence, &mut records)?;
+            self.materialize_range(
+                &state.name,
+                output,
+                &mut payloads,
+                range,
+                sequence,
+                &mut records,
+            )?;
         }
         Ok(records)
     }
 
     fn ranges(
         &self,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
-        budget: EdgeBudget,
+        output: &RunOutputContext<'_>,
+        payloads: &mut RunPayloads<'_>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<std::ops::Range<usize>>> {
+        let schema = output.schema;
+        let budget = output.budget;
         if let Some(row_bytes) = fixed_output_row_bytes(schema) {
             let per_chunk = if row_bytes == 0 {
                 budget.max_rows
@@ -1407,11 +1436,19 @@ impl Prepared {
         let mut ranges = Vec::new();
         let mut start = 0usize;
         let mut bytes = terminal;
-        for (index, pair) in self.probe.selection.iter().enumerate() {
+        let side = payloads.side;
+        let pairs = self
+            .probe
+            .windows(0..self.probe.len())
+            .flat_map(|(position, window)| {
+                let entries = &side.buckets[&self.incoming.groups[position]].active()[window];
+                entries.iter().map(move |entry| (position, entry.locator))
+            });
+        for (index, (position, locator)) in pairs.enumerate() {
             if index % MORSEL_ROWS == 0 {
                 check()?;
             }
-            let row = self.pair_charge(pair, schema, projection, left_width)?;
+            let row = self.pair_charge(position, payloads.payload(locator), output)?;
             let rows = index - start;
             let full = rows == budget.max_rows.min(OUTPUT_CHUNK_ROWS)
                 || bytes
@@ -1434,13 +1471,14 @@ impl Prepared {
 
     fn pair_charge(
         &self,
-        pair: MatchedPair,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
+        position: usize,
+        retained: PayloadRef<'_>,
+        output: &RunOutputContext<'_>,
     ) -> Result<usize> {
-        let incoming = self.incoming.payload_at(pair.pos);
-        let retained = self.probe.payload(self.probe.opposite[pair.opposite_index]);
+        let schema = output.schema;
+        let projection = output.projection;
+        let left_width = output.left_width;
+        let incoming = self.incoming.payload_at(position);
         let (left, right) = if self.incoming_is_left {
             (incoming, retained)
         } else {
@@ -1470,20 +1508,15 @@ impl Prepared {
 
     fn materialize_range(
         &self,
-        state: &RunState,
+        name: &str,
         output: &RunOutputContext<'_>,
+        payloads: &mut RunPayloads<'_>,
         range: std::ops::Range<usize>,
         sequence: u64,
         records: &mut Vec<RecordBatch>,
     ) -> Result<()> {
-        let record = self.record_range(
-            state,
-            output.schema,
-            output.projection,
-            output.left_width,
-            range.clone(),
-        )?;
-        let metadata = BatchMetadata::new(&state.name, sequence, BTreeMap::new())?;
+        let record = self.record_range(name, output, payloads, range.clone())?;
+        let metadata = BatchMetadata::new(name, sequence, BTreeMap::new())?;
         let bytes = Batch::table(vec![record.clone()], metadata)?.estimated_bytes()?;
         if range.len() <= output.budget.max_rows && bytes <= output.budget.max_bytes {
             records.push(record);
@@ -1495,26 +1528,48 @@ impl Prepared {
             );
         }
         let middle = range.start + range.len() / 2;
-        self.materialize_range(state, output, range.start..middle, sequence, records)?;
-        self.materialize_range(state, output, middle..range.end, sequence, records)
+        self.materialize_range(
+            name,
+            output,
+            payloads,
+            range.start..middle,
+            sequence,
+            records,
+        )?;
+        self.materialize_range(name, output, payloads, middle..range.end, sequence, records)
     }
 
     fn record_range(
         &self,
-        state: &RunState,
-        schema: &SchemaRef,
-        projection: Option<&[usize]>,
-        left_width: usize,
+        name: &str,
+        output: &RunOutputContext<'_>,
+        payloads: &mut RunPayloads<'_>,
         range: std::ops::Range<usize>,
     ) -> Result<RecordBatch> {
-        let pairs = self.probe.selection.slice(range);
-        let incoming = output_gather::SideGather::new(
-            pairs.iter().map(|pair| self.incoming.payload_at(pair.pos)),
+        let schema = output.schema;
+        let projection = output.projection;
+        let left_width = output.left_width;
+        let count = range.len();
+        let windows = self.probe.windows(range);
+        let incoming_rows = windows.clone().flat_map(|(position, window)| {
+            std::iter::repeat_n(self.incoming.payload_at(position), window.len())
+        });
+        #[cfg(test)]
+        let incoming_rows = incoming_rows.inspect(|_| GATHER_VISITS.set(GATHER_VISITS.get() + 1));
+        let incoming = output_gather::SideGather::with_capacity(incoming_rows, count);
+        let side = payloads.side;
+        let opposite = output_gather::SideGather::with_capacity(
+            windows
+                .flat_map(|(position, window)| {
+                    side.buckets[&self.incoming.groups[position]].active()[window].iter()
+                })
+                .map(|entry| {
+                    #[cfg(test)]
+                    GATHER_VISITS.set(GATHER_VISITS.get() + 1);
+                    payloads.payload(entry.locator)
+                }),
+            count,
         );
-        let opposite = output_gather::SideGather::new(pairs.iter().map(|pair| {
-            let locator = self.probe.opposite[pair.opposite_index];
-            self.probe.payload(locator)
-        }));
         let (left, right) = if self.incoming_is_left {
             (incoming, opposite)
         } else {
@@ -1537,9 +1592,9 @@ impl Prepared {
         RecordBatch::try_new_with_options(
             Arc::clone(schema),
             columns,
-            &RecordBatchOptions::new().with_row_count(Some(pairs.len())),
+            &RecordBatchOptions::new().with_row_count(Some(count)),
         )
-        .map_err(|error| operator_error(&state.name, &format!("run output failed: {error}")))
+        .map_err(|error| operator_error(name, &format!("run output failed: {error}")))
     }
 }
 
@@ -1784,4 +1839,42 @@ fn run_error(message: impl Into<String>) -> CalcFlowError {
         field: "join.runs".into(),
         message: message.into(),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn test_fanout_probe_stores_ranges_per_input_row() {
+    use super::run_tests::fanout_input;
+    let mut state = RunState::new(
+        "fanout-probe",
+        JoinStateLimits::new(256, 4_000_000, 20_000).unwrap(),
+        JoinTimeBounds::from_micros(0, 0).unwrap(),
+    )
+    .unwrap();
+    let retained = fanout_input(128, 0, true);
+    let schema = retained.payload.schema();
+    state
+        .apply(
+            JoinSide::Left,
+            retained,
+            &schema,
+            Some(&[0, 1]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let input = fanout_input(128, 500, false);
+    let mut matches = 0;
+    let mut result = None;
+    let cost = allocation_counter::measure(|| {
+        result = Some(
+            state
+                .probe(JoinSide::Right, &input, &mut || Ok(()), &mut matches)
+                .unwrap(),
+        );
+    });
+    assert_eq!(matches, 16_384);
+    assert_eq!(result.unwrap().len(), matches);
+    println!("128 by 128 probe peak allocation {} bytes", cost.bytes_max);
+    assert!(cost.bytes_max < 32 * 1024, "{cost:?}");
 }

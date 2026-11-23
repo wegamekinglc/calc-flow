@@ -5,7 +5,6 @@ use std::ops::Range;
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static CURSOR_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PAIR_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -250,8 +249,6 @@ impl Iterator for Cursor<'_> {
                 }
             }
         };
-        #[cfg(test)]
-        CURSOR_VISITS.set(CURSOR_VISITS.get() + 1);
         self.index = index + 1;
         self.remaining -= 1;
         Some(pair)
@@ -550,10 +547,6 @@ impl Selection {
 }
 
 impl Selection {
-    pub(super) fn slice(&self, range: Range<usize>) -> View<'_> {
-        self.view().slice(range)
-    }
-
     fn view(&self) -> View<'_> {
         match &self.opposite {
             Opposite::Ranges { ranges, len } => View::Intervals {
