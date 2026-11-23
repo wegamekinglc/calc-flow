@@ -35,7 +35,11 @@ use super::{
 
 #[derive(Clone, Default)]
 pub(super) struct OrderedStreamBuffer {
+    #[cfg(test)]
+    pub(super) closing_coordinates_checked: usize,
     records: VecDeque<RecordBatch>,
+    // Record ends checked against this operator's fixed allowed lateness.
+    checked_records: usize,
     retry_records: Vec<RecordBatch>,
     last_identity: Option<Vec<u8>>,
 }
@@ -54,6 +58,7 @@ impl OrderedStreamBuffer {
         records: Vec<RecordBatch>,
         last_identity: Option<Vec<u8>>,
     ) {
+        self.checked_records = 0;
         for record in records.into_iter().rev() {
             self.records.push_front(record);
         }
@@ -74,6 +79,7 @@ impl OrderedStreamBuffer {
     }
 
     pub(super) fn clear(&mut self) {
+        self.checked_records = 0;
         self.records.clear();
         self.retry_records.clear();
         self.last_identity = None;
@@ -84,6 +90,7 @@ impl OrderedStreamBuffer {
     }
 
     pub(super) fn take_all(&mut self) -> Vec<RecordBatch> {
+        self.checked_records = 0;
         self.last_identity = None;
         self.retry_records.clear();
         self.records.drain(..).collect()
@@ -113,6 +120,7 @@ impl OrderedStreamBuffer {
             }
             let record = self.records.pop_front().expect("front was present");
             if count == record.num_rows() {
+                self.checked_records -= 1;
                 closed.push(record);
             } else {
                 closed.push(record.slice(0, count));
@@ -130,14 +138,17 @@ impl OrderedStreamBuffer {
         Ok(closed)
     }
     fn validate_closing_coordinates(
-        &self,
+        &mut self,
         compiled: &CompiledRollingSpec,
         allowed_lateness_micros: u64,
         node_id: &str,
     ) -> Result<()> {
-        // Check every coordinate before changing the buffer, matching the
-        // general path's atomic closing-key validation.
-        for record in &self.records {
+        // Check appended records before removing any part of the buffered prefix.
+        for record in self.records.range(self.checked_records..) {
+            #[cfg(test)]
+            {
+                self.closing_coordinates_checked += 1;
+            }
             let times = timestamps(record, compiled)?;
             closing_coordinate(
                 times.value(record.num_rows() - 1),
@@ -145,6 +156,7 @@ impl OrderedStreamBuffer {
                 node_id,
             )?;
         }
+        self.checked_records = self.records.len();
         Ok(())
     }
 }
