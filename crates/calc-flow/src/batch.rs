@@ -5,15 +5,16 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use datafusion::arrow::{
+    array::Array,
+    datatypes::{Schema, SchemaRef},
+    error::ArrowError,
+    record_batch::{RecordBatch, RecordBatchOptions},
+};
 #[cfg(test)]
 use datafusion::arrow::{
     buffer::Buffer,
     datatypes::{DataType, Field},
-};
-use datafusion::arrow::{
-    datatypes::{Schema, SchemaRef},
-    error::ArrowError,
-    record_batch::{RecordBatch, RecordBatchOptions},
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -277,15 +278,39 @@ impl TableBatch {
             .filter(|batch| batch.num_rows() != 0)
             .try_fold(0_usize, |total, batch| {
                 batch.columns().iter().try_fold(total, |total, column| {
-                    let bytes = column.to_data().get_slice_memory_size().map_err(|error| {
-                        format!("Arrow slice memory could not be measured: {error}")
-                    })?;
+                    let bytes = column_slice_bytes(column.as_ref())?;
                     total
                         .checked_add(bytes)
                         .ok_or_else(|| "size sum overflowed usize".to_owned())
                 })
             })
     }
+}
+
+/// Matches Arrow's visible slice charge without assembling ArrayData for primitive leaves.
+fn column_slice_bytes(column: &dyn Array) -> std::result::Result<usize, String> {
+    // ArrayData slices can retain an all-valid bitmap. Its exported presence
+    // depends on the array implementation, so let Arrow charge this case.
+    if let Some(width) = column.data_type().primitive_width()
+        && !column.nulls().is_some_and(|nulls| nulls.null_count() == 0)
+    {
+        let validity = if column.null_count() == 0 {
+            0
+        } else {
+            column.len().div_ceil(8)
+        };
+        if let Some(bytes) = column
+            .len()
+            .checked_mul(width)
+            .and_then(|values| values.checked_add(validity))
+        {
+            return Ok(bytes);
+        }
+    }
+    column
+        .to_data()
+        .get_slice_memory_size()
+        .map_err(|error| format!("Arrow slice memory could not be measured: {error}"))
 }
 
 /// A uniquely owned table envelope whose Arrow values have been released.
