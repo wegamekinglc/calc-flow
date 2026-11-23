@@ -577,3 +577,34 @@ CALC_FLOW_BENCHMARK_SCALE=standard \
   uv run pytest benchmarks/test_symbolic_baseline.py -q --benchmark-only \
   --benchmark-json=<output>.json
 ```
+
+## Sparse changelog through the Python stream API
+
+The [public changelog baseline](sum-state/public-sparse-changelog-20261123/README.md)
+measures the full async stream lifecycle for 10,000 retained groups and checks
+every emitted retract and upsert against the same sparse trades used by the
+Rust grouped SUM benchmark.
+
+The [recorded reference](sum-state/public-sparse-changelog-20261123/baseline.json)
+contains all 20 timed observations, the two warmups, and host resource samples.
+Each run returned 13,200 changes across 21 batches. The two round medians on
+the reference wheel were 399.0 and 429.6 ms.
+
+These timings cover the complete 21-batch stream, including the opening
+10,000 rows. The 15 ms target for delivering an individual incremental batch
+requires a separate input-to-delivery clock.
+
+The reproduction command collects timings and validates outputs. For the
+recorded run, an external supervisor also set `OPENBLAS_NUM_THREADS=1` and
+`OMP_NUM_THREADS=1`, and checked three seconds of idle time before launch.
+During collection it sampled per-CPU utilization, available memory and
+`/proc/vmstat` every second. CPU 8 ran the worker. Both its SMT sibling
+(CPU 9) and mean utilization across all host CPUs had to stay below 50%.
+Each interval also required at least 10 GiB available memory, fewer than
+256 major faults and fewer than 1,024 total swap-in and swap-out pages. The
+reference JSON retains those observations. Reproducing this resource check
+requires an external monitor in addition to the timing command.
+
+The reference used the collector at commit `8438d481`; its complete file
+hash is in the reference JSON. A subsequent refactor extracted Arrow schema
+and change validation after the timer.
