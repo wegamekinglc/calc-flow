@@ -41,7 +41,7 @@ pub(super) struct OrderedStreamBuffer {
     // Record ends checked against this operator's fixed allowed lateness.
     checked_records: usize,
     retry_records: Vec<RecordBatch>,
-    last_identity: Option<Vec<u8>>,
+    last_identity: Option<Box<[u8]>>,
 }
 
 impl OrderedStreamBuffer {
@@ -50,7 +50,7 @@ impl OrderedStreamBuffer {
     }
 
     pub(super) fn last_identity(&self) -> Option<Vec<u8>> {
-        self.last_identity.clone()
+        self.last_identity.as_deref().map(<[u8]>::to_vec)
     }
 
     pub(super) fn restore_pending(
@@ -62,7 +62,7 @@ impl OrderedStreamBuffer {
         for record in records.into_iter().rev() {
             self.records.push_front(record);
         }
-        self.last_identity = last_identity;
+        self.last_identity = last_identity.map(Vec::into_boxed_slice);
     }
 
     pub(super) fn restore_front(
@@ -263,11 +263,14 @@ impl RollingOperator {
                 // one of those exact records is idempotent; it is not new state.
                 continue;
             }
-            if last.as_ref().is_some_and(|previous| previous >= &first) {
+            if last
+                .as_deref()
+                .is_some_and(|previous| previous >= first.as_slice())
+            {
                 return Ok(false);
             }
             prepared.push(record.clone());
-            last = Some(end);
+            last = Some(end.into_boxed_slice());
         }
         let Some(incoming) =
             super::budget::ordered_buffer_charge(prepared.iter(), &self.compiled, &self.name)?
