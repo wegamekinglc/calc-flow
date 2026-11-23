@@ -359,7 +359,7 @@ impl TableBatchShell {
         mut self,
         input: &Batch,
         indices: &[usize],
-        schema: SchemaRef,
+        schema: &SchemaRef,
         metadata: BatchMetadata,
         source_cursor: Option<Arc<crate::Cursor>>,
     ) -> std::result::Result<Batch, ArrowError> {
@@ -373,7 +373,7 @@ impl TableBatchShell {
             let (_, mut columns, _) = previous.into_parts();
             columns.clear();
             columns.extend(indices.iter().map(|&index| input.column(index).clone()));
-            *slot = RecordBatch::try_new(Arc::clone(&schema), columns)?;
+            *slot = RecordBatch::try_new(Arc::clone(schema), columns)?;
         }
         data.rows = input.0.rows;
         Ok(Batch {
@@ -1340,7 +1340,7 @@ mod tests {
             .project(
                 &source,
                 &[0],
-                source.table_payload().unwrap().schema().clone(),
+                source.table_payload().unwrap().schema(),
                 source.metadata().clone(),
                 None,
             )
