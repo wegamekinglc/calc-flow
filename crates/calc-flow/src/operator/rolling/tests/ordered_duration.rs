@@ -1328,8 +1328,9 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
         (10, "new", 6, Some(56.0)),
         (11, "b", 7, Some(-1.0)),
         (12, "a", 8, Some(-3.0)),
-        (20, "a", 9, Some(1.0)),
-        (21, "new", 10, None),
+        (13, "another-new", 9, Some(5.0)),
+        (20, "a", 10, Some(1.0)),
+        (21, "new", 11, None),
     ]);
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let (expected, _) = reference_output(&operator, &input);

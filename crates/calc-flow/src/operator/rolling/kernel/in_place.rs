@@ -33,7 +33,7 @@ pub(super) struct InPlaceUpdate {
     key_bytes: Vec<usize>,
     new_local_keys: Vec<(usize, Vec<u8>)>,
     new_direct_keys: Vec<(usize, String)>,
-    // New keys roll back by removing the whole entity.
+    // Empty for an all-new batch. Otherwise aligned with residents, with None for new keys.
     undo: Vec<Option<TypedEntityUndo>>,
     duration_windows: Vec<WindowBeforeImage>,
     previous_charge: StateCharge,
@@ -185,7 +185,8 @@ fn inspect_residents(
     let mut residents = Vec::with_capacity(entities.len());
     let mut key_bytes = Vec::with_capacity(entities.len());
     let mut new_local_keys = Vec::new();
-    let mut undo = Vec::with_capacity(entities.len());
+    let entity_count = entities.len();
+    let mut undo = Vec::new();
     let mut duration_windows = Vec::new();
     for (local, key) in entities.iter_mut().enumerate() {
         let (resident, encoded_bytes) = match key {
@@ -198,7 +199,9 @@ fn inspect_residents(
                     residents.push(usize::MAX);
                     key_bytes.push(bytes.len());
                     new_local_keys.push((local, std::mem::take(bytes)));
-                    undo.push(None);
+                    if !undo.is_empty() {
+                        undo.push(None);
+                    }
                     continue;
                 };
                 (resident, bytes.len())
@@ -219,6 +222,10 @@ fn inspect_residents(
         previous_charge = previous_charge.checked_add(charge, node_id)?;
         residents.push(resident);
         key_bytes.push(encoded_bytes);
+        if undo.is_empty() {
+            undo.reserve_exact(entity_count);
+            undo.resize_with(local, || None);
+        }
         let previous = if state.share_durations {
             None
         } else {
@@ -342,9 +349,9 @@ impl InPlaceUpdate {
     }
 
     pub(super) fn rollback(mut self, base: &mut RollingKernelState) {
-        for (local_index, previous) in self.undo.into_iter().enumerate().rev() {
-            let resident = self.residents[local_index];
-            if let Some(previous) = previous {
+        let mut undo = self.undo.into_iter().rev();
+        for (local_index, &resident) in self.residents.iter().enumerate().rev() {
+            if let Some(Some(previous)) = undo.next() {
                 previous.rollback(
                     Arc::get_mut(&mut base.states[resident])
                         .expect("in-place rolling entities remain exclusive"),
@@ -637,7 +644,7 @@ fn process_row(
         context.inputs,
         row_index,
         entity,
-        update.undo[local].as_mut(),
+        update.undo.get_mut(local).and_then(Option::as_mut),
         context.node_id,
     )?;
     super::append_typed_outputs::<false>(
@@ -861,6 +868,7 @@ mod tests {
             update.duration_windows.capacity()
         );
         assert_eq!(update.duration_windows.capacity(), 0);
+        assert_eq!(update.undo.capacity(), 0);
         update.rollback(&mut state);
         assert!(state.states.is_empty());
         assert!(state.entities.is_empty());
