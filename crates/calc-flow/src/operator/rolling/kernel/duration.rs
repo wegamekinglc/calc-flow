@@ -158,16 +158,22 @@ fn finish(
         .map_err(|error| float_arithmetic_error(error, node))
 }
 
+pub(super) type WindowBeforeImage = (WindowAccumulator, usize);
+
 pub(super) struct DurationUndo {
-    windows: Vec<(WindowAccumulator, usize)>,
+    first_window: usize,
     remaining: usize,
     capacity: usize,
     evicted: EvictedSamples,
 }
 
 impl DurationUndo {
-    pub(super) fn new(samples: &DurationSamples, groups: &[TypedWindowState]) -> Result<Self> {
-        let mut windows = Vec::with_capacity(groups.len());
+    pub(super) fn new(
+        samples: &DurationSamples,
+        groups: &[TypedWindowState],
+        windows: &mut Vec<WindowBeforeImage>,
+    ) -> Result<Self> {
+        let first_window = windows.len();
         for (group, &head) in groups.iter().zip(&samples.heads) {
             let TypedWindowState::Numeric(state) = group else {
                 return Err(internal_error(
@@ -177,7 +183,7 @@ impl DurationUndo {
             windows.push((state.accumulator, head));
         }
         Ok(Self {
-            windows,
+            first_window,
             remaining: samples.len(),
             capacity: samples.values.capacity(),
             evicted: EvictedSamples::None,
@@ -191,9 +197,15 @@ impl DurationUndo {
         }
     }
 
-    pub(super) fn rollback(self, samples: &mut DurationSamples, groups: &mut [TypedWindowState]) {
-        for ((group, head), (accumulator, old_head)) in
-            groups.iter_mut().zip(&mut samples.heads).zip(self.windows)
+    pub(super) fn rollback(
+        self,
+        samples: &mut DurationSamples,
+        groups: &mut [TypedWindowState],
+        windows: &[WindowBeforeImage],
+    ) {
+        let saved = &windows[self.first_window..][..groups.len()];
+        for ((group, head), &(accumulator, old_head)) in
+            groups.iter_mut().zip(&mut samples.heads).zip(saved)
         {
             let TypedWindowState::Numeric(state) = group else {
                 unreachable!("Duration undo validated the numeric state")

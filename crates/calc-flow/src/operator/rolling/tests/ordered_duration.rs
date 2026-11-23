@@ -1301,3 +1301,55 @@ fn test_pending_window_records_recheck_after_retry_and_drain() {
     buffer.clear();
     assert!(close(buffer, 3).unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn pool_rolls_back_mixed_duration_entities_before_retry() {
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "short", 3),
+        duration_output("sum", "price", "medium", 8),
+        duration_output("mean", "price", "long", 15),
+    ]));
+    let input = float64_fast_record(&[
+        (0, "a", 0, Some(1.0)),
+        (1, "b", 1, Some(8.0)),
+        (2, "a", 2, Some(2.0)),
+        (4, "a", 3, Some(3.0)),
+        (8, "b", 4, Some(6.0)),
+        (9, "b", 5, Some(4.0)),
+        (10, "new", 6, Some(56.0)),
+        (11, "b", 7, Some(-1.0)),
+        (12, "a", 8, Some(-3.0)),
+        (20, "a", 9, Some(1.0)),
+        (21, "new", 10, None),
+    ]);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 6)).await);
+    let mut emitted = close(&mut operator, &job, &store, &mut output, 9).await;
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(6, 5)).await);
+    let state = operator.state.typed_kernel_state.as_deref().unwrap();
+    assert!(state.shares_durations());
+    let before = format!("{state:?}");
+    let charge = operator.state.charge;
+    let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(9)));
+    let error = operator
+        .on_watermark(
+            EventTime::from_micros(21),
+            &context,
+            &mut crate::EdgeCollector::new(Vec::new()),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown output port"), "{error}");
+    assert_eq!(operator.state.charge, charge);
+    let state = operator.state.typed_kernel_state.as_deref().unwrap();
+    assert_eq!(format!("{state:?}"), before);
+    emitted.extend(close(&mut operator, &job, &store, &mut output, 21).await);
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+    assert_deferred_charge(&operator);
+}
