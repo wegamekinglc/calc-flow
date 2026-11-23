@@ -499,14 +499,31 @@ impl KeyStore {
         }
     }
 
-    pub(crate) fn rollback(&mut self, cut: KeyCut) {
-        self.route_cache = None;
-        for index in (cut.groups..self.hashes.len()).rev() {
+    fn remove_index_suffix(&mut self, retained: usize) {
+        if retained == 0 {
+            self.index.clear();
+            return;
+        }
+        // Usually only a few IDs are removed. Bound repeated cluster searches on collisions.
+        let mut probes_left = self.index.len();
+        for index in (retained..self.hashes.len()).rev() {
+            if probes_left == 0 {
+                self.index.retain(|id| id.index() < retained);
+                break;
+            }
             self.index
-                .find_entry(self.hashes[index], |id| id.index() == index)
+                .find_entry(self.hashes[index], |id| {
+                    probes_left = probes_left.saturating_sub(1);
+                    id.index() == index
+                })
                 .expect("each installed group is indexed until rollback")
                 .remove();
         }
+    }
+
+    pub(crate) fn rollback(&mut self, cut: KeyCut) {
+        self.route_cache = None;
+        self.remove_index_suffix(cut.groups);
         for column in &mut self.columns {
             column.truncate(cut.groups);
         }

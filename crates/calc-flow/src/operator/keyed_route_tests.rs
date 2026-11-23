@@ -131,6 +131,7 @@ fn test_equal_hashes_remain_distinct_across_growth_and_rollback() {
             &mut || Ok(()),
         )
     };
+    let empty = keys.cut();
     let prefix = route(&mut keys, 0, 16, 48).unwrap();
     let cut = keys.cut();
     let added = route(&mut keys, 16, 32, 48).unwrap();
@@ -146,4 +147,6 @@ fn test_equal_hashes_remain_distinct_across_growth_and_rollback() {
     assert_eq!(route(&mut keys, 0, 16, 16).unwrap(), prefix);
     assert!(route(&mut keys, 16, 1, 16).is_err());
     assert_eq!(route(&mut keys, 16, 32, 48).unwrap(), added);
+    keys.rollback(empty);
+    assert_eq!(route(&mut keys, 0, 16, 16).unwrap(), prefix);
 }
