@@ -88,8 +88,10 @@ class StreamSession(Generic[T]):
         self._outputs = outputs
         self._empty = dict(empty)
         self._table_output = table_output
-        self._copy_empty_program = not table_output and tuple(self._empty) == tuple(
-            name for name, _ in outputs
+        self._copy_empty_program = (
+            not table_output
+            and len(outputs) > 1
+            and tuple(self._empty) == tuple(name for name, _ in outputs)
         )
 
     def push(
