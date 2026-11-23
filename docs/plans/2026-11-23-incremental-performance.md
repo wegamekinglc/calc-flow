@@ -103,11 +103,18 @@ Idle 保留未决状态。右侧 EOF 后若仍有左行到达，先探测尚可�
 高重复测试先让 8,193 个左行各自得到一个匹配，再提交包含 4,096 个同键同时间右行的批次。
 该批次的匹配资格读取从 33,558,528 次降至 8,193 次，两版均输出零行。
 另一个用例在左侧仍活动时处理右侧 EOF，期间按序交付先前保留的 8,193 个
-无匹配左行，分 257 批，每批最多 32 行。这两组观测描述工作量和输出边界，水位推进到
-结果交付的耗时仍待独立测量。
+无匹配左行，分 257 批，每批最多 32 行。这两组观测分别记录重复探测工作量和 EOF 输出边界。
 [左半连接及恢复](https://github.com/wegamekinglc/calc-flow/pull/676) ·
 [左反连接、严格水位边界及验证](https://github.com/wegamekinglc/calc-flow/pull/686) ·
 [RisingWave 匹配与回收源码](https://github.com/risingwavelabs/risingwave/blob/bc563ec0330a6db01788959d249aee2126061d0d/src/stream/src/executor/hash_join.rs#L1215-L1244)
+
+活动水位的独立延迟实验让左右源始终保持活动。水位等于闭区间上界时目标行仍未输出，
+下一次推进严格越界后按序交付 257 个未匹配左行，形成九个输出块。原生 Rust 从进入
+水位回调，经过内存收集器接收全部输出、提交算子状态，计至回调返回，p50/p95 为
+54.594/66.568 µs。公开 Python 从投递
+水位到收到最后一张 Arrow 表为 1.406/1.474 ms。两种入口分别运行在各自的单核环境，
+各有 20 次正式观测，达到各自 1 ms 和 5 ms 的 p50 目标。p95 仅作小样本尾部参考。
+[原生与公开流的独立样本、时钟及校验](https://github.com/wegamekinglc/calc-flow/pull/694)
 
 融合 Join 的微基准让 `HotProjection::gather` 接收已收集到连续 Arrow 切片中的
 4,096 对 Float64 操作数，计至返回两列。每进程调用 256 次，进程均值的中位数
@@ -142,8 +149,7 @@ Rust 公开 `StreamSession::push` 的 p50/p95 从 5.692/12.370 变为 5.185/11.9
 两端均达到目标。Python 公开 `Program.session().push` 使用正常 GC 的独立实验，
 p50/p95 从 63.285/84.384 变为 62.334/82.315 µs，未达到该场景的 20/40 µs
 目标。每侧正式计时 1,280 次，验证水位、输出行及五列内容。两项实验均未证实
-超过 5% 的改善。该 Python 负载传入已封装的 Batch，后续单独测量参数与水位处理、
-PyO3 原生调用（含输出导出）、Python 结果封装，再用相同的公开入口判定收益。
+超过 5% 的改善。该 Python 负载传入已封装的 Batch。
 [Rust 配对记录](../../benchmarks/stream-session/20261123-native-push/README.md) ·
 [Python 正常 GC 和公开调用记录](https://github.com/wegamekinglc/calc-flow/pull/688)
 
@@ -154,3 +160,19 @@ PyO3 原生调用（含输出导出）、Python 结果封装，再用相同的�
 均跨零。路由分配达到目标，公开调用尚无可确认的延迟改善。
 [路由分配与正确性](https://github.com/wegamekinglc/calc-flow/pull/692#issuecomment-7102614957) ·
 [公开 Rust 调用样本与原始记录](https://github.com/wegamekinglc/calc-flow/pull/692#issuecomment-7102924755)
+
+对同一官方 wheel 单独做 Python 分段诊断，未插桩的单行公开调用 p50/p95 为
+59.621/80.661 µs，插桩后为 62.326/81.992 µs。插桩时各段 p50 分别是输入名称、
+批次和水位处理 8.646 µs，PyO3 调用（含 Rust 执行及 Arrow 输出导出）48.230 µs，
+Python 返回表封装 5.450 µs。每个进程先取 64 次公开调用的中位数，同轮十对进程的相对差再取中位数。
+两轮的观察器开销分别为 4.32% 和 4.70%。判定产品优化收益使用另行采集的未插桩样本。
+[三段诊断与观察器对照](https://github.com/wegamekinglc/calc-flow/actions/runs/45187056499)
+
+在 PyO3 绑定中，读取 `Batch.kind` 只需查看 payload 类型。保留读锁中的类型匹配后，
+64 次公开属性读取触发的临时批次克隆从 64 次降至 0 次，真正提交输入时仍取得所需的
+所有权。两个独立构建的 wheel 使用未插桩公开入口，各计时 1,280 次单行推送。
+p50 为 60.243 → 60.032 µs，p95 为 79.9105 → 79.6515 µs，两轮配对区间均跨零，
+尚未达到 20/40 µs 目标。此阶段证实了临时克隆的消除，整次公开调用仍需在 PyO3
+执行和输出导出内进一步定位。
+[绑定修订和两组原始样本](https://github.com/wegamekinglc/calc-flow/pull/695) ·
+[未插桩公开调用的独立配对](https://github.com/wegamekinglc/calc-flow/actions/runs/45194346131)
