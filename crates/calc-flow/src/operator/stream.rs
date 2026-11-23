@@ -307,6 +307,13 @@ impl IngressProgressSnapshot {
         self.by_ingress.get(ingress).copied()
     }
 
+    /// Updates an existing ingress while keeping earlier observations immutable.
+    pub(crate) fn update(&mut self, ingress: &str, progress: IngressProgress) {
+        *Arc::make_mut(&mut self.by_ingress)
+            .get_mut(ingress)
+            .expect("registered ingress has a progress entry") = progress;
+    }
+
     /// Returns all progress in deterministic ingress-name order.
     pub fn by_ingress(&self) -> &BTreeMap<String, IngressProgress> {
         &self.by_ingress
