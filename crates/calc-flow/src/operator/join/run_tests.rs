@@ -219,6 +219,89 @@ fn test_match_limit_rejects_before_run_or_frontier_commit() {
 }
 
 #[test]
+fn test_probe_cursor_memory_is_bounded_by_the_morsel() {
+    fn bytes(group: GroupId) -> u64 {
+        let mut state = state(10);
+        let left = incoming(
+            &record(&[1], &[8]),
+            vec![0],
+            vec![group],
+            &[10],
+            &[0],
+            vec![true],
+            1,
+        );
+        let schema = output_schema();
+        let output = RunOutputContext::new(&schema, Some(&[1, 3]), 2, EdgeBudget::default());
+        state
+            .apply_checked(JoinSide::Left, left, output, &mut || Ok(()))
+            .unwrap();
+        let right = incoming(
+            &record(&[1; 3], &[21, 22, 23]),
+            vec![0, 1, 2],
+            vec![group; 3],
+            &[10; 3],
+            &[0, 1, 2],
+            vec![false; 3],
+            3,
+        );
+        let mut result = None;
+        let cost = allocation_counter::measure(|| {
+            result = Some(
+                state
+                    .apply_checked(JoinSide::Right, right, output, &mut || Ok(()))
+                    .unwrap(),
+            );
+        });
+        let result = result.unwrap();
+        assert_eq!(result.sequences, [0]);
+        assert_eq!(values(&result.records[0], 0), [8; 3]);
+        assert_eq!(values(&result.records[0], 1), [21, 22, 23]);
+        cost.bytes_total
+    }
+    let dense = bytes(GroupId::new(0).unwrap());
+    let sparse = bytes(GroupId::new(32_768).unwrap());
+    println!("three-row probe allocated {dense} bytes for key 0 and {sparse} for key 32768");
+    assert!(sparse <= dense * 2, "dense={dense}, sparse={sparse}");
+}
+
+#[test]
+fn test_sparse_cursor_handles_time_reversal_and_missing_keys() {
+    let mut state = state(10);
+    let group = GroupId::new(32_768).unwrap();
+    let missing = GroupId::new(32_769).unwrap();
+    let schema = output_schema();
+    let output = RunOutputContext::new(&schema, Some(&[1, 3]), 2, EdgeBudget::default());
+    let left = incoming(
+        &record(&[1; 2], &[8, 9]),
+        vec![0, 1],
+        vec![group; 2],
+        &[10, 15],
+        &[0, 1],
+        vec![true; 2],
+        2,
+    );
+    state
+        .apply_checked(JoinSide::Left, left, output, &mut || Ok(()))
+        .unwrap();
+    let right = incoming(
+        &record(&[1, 2, 1], &[21, 22, 23]),
+        vec![0, 1, 2],
+        vec![group, missing, group],
+        &[15, 15, 10],
+        &[0, 1, 2],
+        vec![false; 3],
+        3,
+    );
+    let result = state
+        .apply_checked(JoinSide::Right, right, output, &mut || Ok(()))
+        .unwrap();
+    assert_eq!(result.sequences, [0]);
+    assert_eq!(values(&result.records[0], 0), [9, 8]);
+    assert_eq!(values(&result.records[0], 1), [21, 23]);
+}
+
+#[test]
 fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let mut keys = KeyStore::new(
