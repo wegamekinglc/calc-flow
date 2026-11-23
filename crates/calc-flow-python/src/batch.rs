@@ -173,9 +173,16 @@ impl PyBatch {
     }
 
     pub(crate) fn clone_inner(&self) -> PyResult<calc_flow::Batch> {
+        #[cfg(test)]
+        tests::CLONE_REQUESTS.set(tests::CLONE_REQUESTS.get() + 1);
+        self.read_inner(Clone::clone)
+    }
+
+    fn read_inner<T>(&self, read: impl FnOnce(&calc_flow::Batch) -> T) -> PyResult<T> {
         self.inner
             .read()
-            .clone()
+            .as_ref()
+            .map(read)
             .ok_or_else(|| PyRuntimeError::new_err(CLEARED_BATCH_MESSAGE))
     }
 
@@ -474,7 +481,7 @@ impl PyBatch {
 
     #[getter]
     fn kind(&self) -> PyResult<&'static str> {
-        Ok(match self.clone_inner()?.kind() {
+        Ok(match self.read_inner(calc_flow::Batch::kind)? {
             calc_flow::BatchKind::Table => "table",
             calc_flow::BatchKind::Array => "array",
         })
@@ -675,6 +682,32 @@ mod tests {
     };
 
     use super::*;
+
+    thread_local! {
+        pub(super) static CLONE_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn reading_the_python_kind_never_clones_the_envelope() {
+        Python::initialize();
+        Python::attach(|py| {
+            let (records, _) = table().0.into_inner();
+            let inner =
+                calc_flow::Batch::table(records, calc_flow::BatchMetadata::default()).unwrap();
+            let batch = Py::new(py, PyBatch::from_inner(inner)).unwrap();
+            let before = CLONE_REQUESTS.get();
+            for _ in 0..64 {
+                let kind = batch
+                    .bind(py)
+                    .getattr("kind")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap();
+                assert_eq!(kind, "table");
+            }
+            assert_eq!(CLONE_REQUESTS.get() - before, 0);
+        });
+    }
 
     fn table() -> (PyTable, ArrayRef) {
         let values: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 3]));
