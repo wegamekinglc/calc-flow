@@ -37,7 +37,6 @@ pub(super) struct Transaction {
     limit: usize,
     undo: Vec<(GroupId, SumValue)>,
     affected: Vec<GroupId>,
-    leased: Vec<GroupId>,
     undo_reservation: MemoryReservation,
     active: bool,
 }
@@ -207,7 +206,6 @@ impl KeyedSum {
             limit,
             undo: Vec::new(),
             affected: Vec::new(),
-            leased: Vec::new(),
             undo_reservation: state.keys.transaction_reservation(),
             active: true,
         })
@@ -278,6 +276,11 @@ impl KeyedSum {
     }
 
     #[cfg(test)]
+    pub(super) fn lease_counts(&self) -> Vec<u64> {
+        self.lock().keys.lease_counts().to_vec()
+    }
+
+    #[cfg(test)]
     pub(super) fn reserved_bytes(&self) -> usize {
         self.lock().keys.reserved_bytes()
     }
@@ -293,6 +296,11 @@ impl KeyedSum {
 }
 
 impl Transaction {
+    #[cfg(test)]
+    pub(super) fn change_log_bytes(&self) -> usize {
+        size_of_val(self.affected.as_slice()) + size_of_val(self.undo.as_slice())
+    }
+
     pub(super) fn apply(
         &mut self,
         keys: &[ArrayRef],
@@ -453,7 +461,6 @@ impl Transaction {
             sums.partitions[index] = outcome.values;
             sums.marks[index] = outcome.marks;
             self.affected.extend(outcome.affected);
-            self.leased.extend(outcome.leased);
             self.undo.extend(outcome.undo);
             if let Err(error) = outcome.result
                 && first_error.is_none()
@@ -474,7 +481,6 @@ impl Transaction {
             rows,
         } = work;
         let mut affected = Vec::new();
-        let mut leased = Vec::new();
         let mut undo = Vec::new();
         let mut result = Ok(());
         for (row, group) in rows {
@@ -496,7 +502,6 @@ impl Transaction {
                     &mut marks,
                     &mut TouchUndo {
                         affected: &mut affected,
-                        leased: &mut leased,
                         undo: &mut undo,
                         reservation: execution.undo_reservation,
                     },
@@ -527,7 +532,6 @@ impl Transaction {
             values,
             marks,
             affected,
-            leased,
             undo,
             result,
         }
@@ -536,7 +540,6 @@ impl Transaction {
     fn undo_parts(&mut self) -> TouchUndo<'_> {
         TouchUndo {
             affected: &mut self.affected,
-            leased: &mut self.leased,
             undo: &mut self.undo,
             reservation: &self.undo_reservation,
         }
@@ -802,15 +805,15 @@ impl Transaction {
             return;
         }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if !commit {
-            for (group, value) in self.undo.drain(..).rev() {
-                state.sums.set(group, Some(value));
+        for (group, previous) in self.undo.drain(..).rev() {
+            if !commit {
+                state.sums.set(group, Some(previous));
             }
+            let _ = state.keys.release(group);
+        }
+        if !commit {
             state.sums.truncate(self.old_groups);
             state.keys.rollback(self.cut);
-        }
-        for group in self.leased.drain(..) {
-            let _ = state.keys.release(group);
         }
         state.active = false;
         self.active = false;
@@ -819,7 +822,6 @@ impl Transaction {
 
 struct TouchUndo<'a> {
     affected: &'a mut Vec<GroupId>,
-    leased: &'a mut Vec<GroupId>,
     undo: &'a mut Vec<(GroupId, SumValue)>,
     reservation: &'a MemoryReservation,
 }
@@ -875,7 +877,6 @@ struct ParallelOutcome {
     values: Vec<SumValue>,
     marks: Vec<u64>,
     affected: Vec<GroupId>,
-    leased: Vec<GroupId>,
     undo: Vec<(GroupId, SumValue)>,
     result: Result<()>,
 }
@@ -928,8 +929,7 @@ fn touch(
         return Ok(());
     }
     let existing = usize::from(group.index() < context.old_groups);
-    let charge =
-        size_of::<GroupId>() + existing * (size_of::<GroupId>() + size_of::<(GroupId, SumValue)>());
+    let charge = size_of::<GroupId>() + existing * size_of::<(GroupId, SumValue)>();
     undo.reservation
         .try_grow(charge)
         .map_err(|error| super::df_error("keyed SUM", error))?;
@@ -945,7 +945,6 @@ fn touch(
             .unwrap_or_else(PoisonError::into_inner)
             .keys
             .acquire(group)?;
-        undo.leased.push(group);
         undo.undo.push((group, previous));
     }
     Ok(())
