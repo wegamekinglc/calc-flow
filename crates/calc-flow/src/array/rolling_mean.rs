@@ -424,6 +424,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_ordinary_array_mean_checks_cancellation_without_scanning_history() {
+        let mut history = RowsHistory::new(8193);
+        let mut summary = FloatSummary::mean_only();
+        for _ in 0..8193 {
+            history.push(Some(1.0));
+            summary.insert(1.0).unwrap();
+        }
+        let mut checks = 0;
+        repair(&mut summary, &history, 8193, &mut || {
+            checks += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(summary.mean().to_bits(), 1.0_f64.to_bits());
+        assert_eq!(checks, 1);
+    }
+
+    #[test]
     fn test_refold_visits_null_slots_with_the_compensated_contract() {
         let mut history = RowsHistory::new(8193);
         for _ in 0..8193 {

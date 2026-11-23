@@ -486,36 +486,34 @@ impl NumericAccumulator {
         window: usize,
         history: impl Iterator<Item = Option<f64>> + Clone,
     ) -> Result<(), ArithmeticError> {
-        let retained = history.clone().count();
-        self.since_rebuild = self
-            .since_rebuild
-            .checked_add(1)
-            .ok_or(ArithmeticError::CountOverflow)?;
         let cadence = u64::try_from(window.max(64)).unwrap_or(u64::MAX);
-        self.repair(cadence, retained, finite_samples(history));
-        Ok(())
+        self.finish(cadence, history)
     }
 
     pub(crate) fn finish_duration(
         &mut self,
         history: impl Iterator<Item = Option<f64>> + Clone,
     ) -> Result<(), ArithmeticError> {
-        let retained = history.clone().count();
+        self.finish(self.n_prev.max(64), history)
+    }
+
+    fn finish(
+        &mut self,
+        cadence: u64,
+        history: impl Iterator<Item = Option<f64>> + Clone,
+    ) -> Result<(), ArithmeticError> {
         self.since_rebuild = self
             .since_rebuild
             .checked_add(1)
             .ok_or(ArithmeticError::CountOverflow)?;
-        self.repair(self.n_prev.max(64), retained, finite_samples(history));
-        Ok(())
-    }
-
-    fn repair(&mut self, cadence: u64, retained: usize, finite: impl Iterator<Item = f64> + Clone) {
-        if u64::from(self.since_rebuild) >= cadence {
+        let retained = (u64::from(self.since_rebuild) >= cadence).then(|| history.clone().count());
+        let finite = finite_samples(history);
+        if let Some(retained) = retained {
             self.sum.rebuild(finite.clone());
             self.dispersion.rebuild(finite);
             self.since_rebuild = 0;
             self.n_prev = u64::try_from(retained).unwrap_or(u64::MAX);
-            return;
+            return Ok(());
         }
         if self.sum.is_non_finite() {
             self.sum.rebuild(finite.clone());
@@ -523,6 +521,7 @@ impl NumericAccumulator {
         if self.dispersion.is_non_finite() {
             self.dispersion.rebuild(finite);
         }
+        Ok(())
     }
 
     pub(crate) fn sum(&self) -> f64 {
@@ -699,6 +698,62 @@ fn update_infinity(positive: &mut u64, negative: &mut u64, sample: f64, add: boo
 #[cfg(test)]
 mod tests {
     use super::{DispersionFamily, NumericAccumulator, PairFamily, SumFamily, two_sum};
+
+    #[test]
+    fn test_ordinary_numeric_finishes_do_not_read_history() {
+        let visits = std::cell::Cell::new(0);
+        let history = [Some(3.0), None, Some(5.0)];
+        let tracked = || {
+            history
+                .iter()
+                .copied()
+                .inspect(|_| visits.set(visits.get() + 1))
+        };
+        let mut summary = NumericAccumulator::default();
+        summary.insert(3.0).unwrap();
+        summary.insert(5.0).unwrap();
+        summary.finish_rows(64, tracked()).unwrap();
+        let row_visits = visits.replace(0);
+        summary.finish_duration(tracked()).unwrap();
+        assert_eq!((row_visits, visits.get()), (0, 0));
+        assert_eq!(summary.mean().to_bits(), 4.0_f64.to_bits());
+        assert_eq!(summary.variance(0).to_bits(), 1.0_f64.to_bits());
+    }
+
+    #[test]
+    fn test_restored_duration_rebuild_uses_all_retained_slots_for_its_next_cadence() {
+        let mut history = [None; 70];
+        history[..4].copy_from_slice(&[Some(1e16), Some(1.0), Some(-1e16), Some(4.0)]);
+        let mut summary = NumericAccumulator::default();
+        for value in history.into_iter().flatten() {
+            summary.insert(value).unwrap();
+        }
+        let mut parts = summary.layout7();
+        parts.since_rebuild = 63;
+        let mut restored = NumericAccumulator::from_layout7(parts);
+        restored.finish_duration(history.into_iter()).unwrap();
+        assert_eq!((restored.since_rebuild, restored.n_prev), (0, 70));
+        assert_eq!(restored.sum().to_bits(), 5.0_f64.to_bits());
+        let bits = restored.variance(0).to_bits();
+        let mut restored = NumericAccumulator::from_layout7(restored.layout7());
+        for _ in 0..69 {
+            restored.finish_duration(history.into_iter()).unwrap();
+        }
+        assert_eq!(restored.since_rebuild, 69);
+        restored.finish_duration(history.into_iter()).unwrap();
+        assert_eq!((restored.since_rebuild, restored.n_prev), (0, 70));
+        assert_eq!(restored.sum().to_bits(), 5.0_f64.to_bits());
+        assert_eq!(restored.variance(0).to_bits(), bits);
+        restored.since_rebuild = u32::MAX;
+        assert_eq!(
+            restored.finish_rows(20, history.into_iter()),
+            Err(super::ArithmeticError::CountOverflow)
+        );
+        assert_eq!(
+            restored.finish_duration(history.into_iter()),
+            Err(super::ArithmeticError::CountOverflow)
+        );
+    }
 
     fn advance(
         accumulator: &mut NumericAccumulator,
