@@ -39,12 +39,12 @@ async fn round_trips(
     for (index, batch) in batches.iter().cloned().enumerate() {
         let start = Instant::now();
         sender.send(batch).await?;
-        let received = receiver.recv().await.ok_or("sink closed before output")?;
+        let emitted = receiver.recv().await.ok_or("sink closed before output")?;
         let elapsed = start.elapsed();
         if index != 0 {
             update_ns.push(u64::try_from(elapsed.as_nanos())?);
         }
-        output.push(received);
+        output.push(emitted);
     }
     drop(sender);
     receiver.close();
@@ -129,8 +129,8 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_tail_output_reserved_before_receiver_closure() {
         let data = crate::support::table(vec![("x", crate::support::ints(&[0]))]);
-        let (input, _source) = tokio::sync::mpsc::channel(1);
-        let (sink, outputs) = tokio::sync::mpsc::channel(1);
+        let (input, _source) = mpsc::channel(1);
+        let (sink, outputs) = mpsc::channel(1);
         let permit = sink.reserve_owned().await.unwrap();
         let (result, _) = tokio::join!(
             biased;
