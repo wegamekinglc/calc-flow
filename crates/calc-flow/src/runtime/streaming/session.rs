@@ -239,6 +239,7 @@ enum Lifecycle {
 
 struct SessionInput {
     binding_id: Arc<str>,
+    input_path: Box<str>,
     /// The route's expected kind and exact schema.
     port: Port,
     sender: SessionEdgeSender,
@@ -648,8 +649,7 @@ impl SessionInput {
     ) -> Result<Staged> {
         self.check_input(input)?;
         self.check_explicit(watermark)?;
-        self.port
-            .validate(batch, &format!("session.inputs.{}", self.binding_id))?;
+        self.port.validate(batch, &self.input_path)?;
         let mut next = self.progress.clone();
         let generated = self.stage_generated(batch, &mut next)?;
         let (sequence, data, cost) =
@@ -687,7 +687,7 @@ impl SessionInput {
             })?;
         if *ordered {
             if let Some(maximum) =
-                ordered_maximum(&self.binding_id, batch, event_time, &self.progress)?
+                ordered_maximum(&self.input_path, batch, event_time, &self.progress)?
             {
                 next.max_event_time = Some(maximum);
                 generator.observe_maximum(maximum);
@@ -748,28 +748,27 @@ fn advance_watermark(next: &mut InputProgress, candidate: Option<EventTime>) -> 
 /// observed in this batch, if any. Values compare in the declared unit; the first row is compared
 /// with the watermark after the runtime's import to microseconds.
 fn ordered_maximum(
-    binding_id: &str,
+    input_path: &str,
     batch: &Batch,
     event_time: &ResolvedEventTimeColumn,
     progress: &InputProgress,
 ) -> Result<Option<i64>> {
-    let field = format!("session.inputs.{binding_id}.event_time");
     let mut maximum = progress.max_event_time;
     let mut first = None;
     for record in batch.table_payload()?.batches() {
-        let values = event_time_values(record, event_time, &field)?;
-        maximum = nondecreasing_maximum(values, maximum, &field)?;
+        let values = event_time_values(record, event_time, input_path)?;
+        maximum = nondecreasing_maximum(values, maximum, input_path)?;
         first = first.or_else(|| values.first().copied());
     }
     if let (Some(first), Some(watermark)) = (first, progress.watermark) {
-        check_after_watermark(first, watermark, event_time.unit, &field)?;
+        check_after_watermark(first, watermark, event_time.unit, input_path)?;
     }
     Ok(first.and(maximum))
 }
 
-fn invalid_event_time(field: &str, message: &str) -> CalcFlowError {
+fn invalid_event_time(input_path: &str, message: &str) -> CalcFlowError {
     CalcFlowError::InvalidArgument {
-        field: field.into(),
+        field: format!("{input_path}.event_time"),
         message: message.into(),
     }
 }
@@ -778,27 +777,34 @@ fn invalid_event_time(field: &str, message: &str) -> CalcFlowError {
 fn event_time_values<'a>(
     record: &'a RecordBatch,
     event_time: &ResolvedEventTimeColumn,
-    field: &str,
+    input_path: &str,
 ) -> Result<&'a [i64]> {
     let column = record.column(event_time.index);
     if column.null_count() != 0 {
-        return Err(invalid_event_time(field, "expected non-null event time"));
+        return Err(invalid_event_time(
+            input_path,
+            "expected non-null event time",
+        ));
     }
     timestamp_values(column.as_ref(), event_time.unit).ok_or_else(|| {
         invalid_event_time(
-            field,
+            input_path,
             "record batch column type differs from the declared schema",
         )
     })
 }
 
 /// Extends `maximum` over `values`, rejecting any decrease.
-fn nondecreasing_maximum(values: &[i64], maximum: Option<i64>, field: &str) -> Result<Option<i64>> {
+fn nondecreasing_maximum(
+    values: &[i64],
+    maximum: Option<i64>,
+    input_path: &str,
+) -> Result<Option<i64>> {
     let mut previous = maximum;
     for &value in values {
         if previous.is_some_and(|previous| value < previous) {
             return Err(invalid_event_time(
-                field,
+                input_path,
                 "expected nondecreasing event time; use BoundedOutOfOrderness for out-of-order input",
             ));
         }
@@ -813,17 +819,20 @@ fn check_after_watermark(
     first: i64,
     watermark: EventTime,
     unit: ArrowTimestampUnit,
-    field: &str,
+    input_path: &str,
 ) -> Result<()> {
-    let first = EventTime::import_timestamp_unit(first, time_unit(unit), field).map_err(
-        |error| match error {
-            CalcFlowError::InvalidArgument { message, .. } => invalid_event_time(field, &message),
-            error => error,
-        },
-    )?;
+    let first =
+        EventTime::import_timestamp_unit(first, time_unit(unit), input_path).map_err(|error| {
+            match error {
+                CalcFlowError::InvalidArgument { message, .. } => {
+                    invalid_event_time(input_path, &message)
+                }
+                error => error,
+            }
+        })?;
     if first <= watermark {
         return Err(invalid_event_time(
-            field,
+            input_path,
             "expected event time after the current watermark; earlier rows would be late",
         ));
     }
@@ -1127,6 +1136,7 @@ fn session_input(
     )?;
     let sender = take_edge(senders, &route.edge_id)?.into_session()?;
     Ok(SessionInput {
+        input_path: format!("session.inputs.{binding_id}").into_boxed_str(),
         binding_id: binding_id.into(),
         port,
         sender,
