@@ -5,6 +5,7 @@ use datafusion::arrow::{
     record_batch::RecordBatch,
 };
 
+use super::duration::{DurationUndo, WindowBeforeImage};
 use super::{
     Array, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, EntityRows, Float64NumericState,
     RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan, RollingKernelState,
@@ -33,6 +34,7 @@ pub(super) struct InPlaceUpdate {
     new_local_keys: Vec<(usize, Vec<u8>)>,
     new_direct_keys: Vec<(usize, String)>,
     undo: Vec<EntityUndo>,
+    duration_windows: Vec<WindowBeforeImage>,
     previous_charge: StateCharge,
 }
 
@@ -53,7 +55,7 @@ struct TypedEntityUndo {
 enum NumericGroupsUndo {
     One(Float64NumericUndo),
     Many(Vec<Float64NumericUndo>),
-    Durations(super::duration::DurationUndo),
+    Durations(DurationUndo),
 }
 
 impl NumericGroupsUndo {
@@ -122,7 +124,10 @@ impl Float64NumericUndo {
 }
 
 impl TypedEntityUndo {
-    fn new(entity: &TypedEntityState) -> Result<Self> {
+    fn new(
+        entity: &TypedEntityState,
+        duration_windows: &mut Vec<WindowBeforeImage>,
+    ) -> Result<Self> {
         fn snapshot(group: &TypedWindowState) -> Result<Float64NumericUndo> {
             match group {
                 TypedWindowState::Numeric(state) => Ok(Float64NumericUndo::new(state)),
@@ -134,7 +139,7 @@ impl TypedEntityUndo {
 
         let groups = match (entity.shared_duration.as_deref(), entity.groups.as_ref()) {
             (Some(tape), groups) => {
-                NumericGroupsUndo::Durations(super::duration::DurationUndo::new(tape, groups)?)
+                NumericGroupsUndo::Durations(DurationUndo::new(tape, groups, duration_windows)?)
             }
             (None, [group]) => NumericGroupsUndo::One(snapshot(group)?),
             (None, groups) => {
@@ -147,7 +152,7 @@ impl TypedEntityUndo {
         })
     }
 
-    fn rollback(self, entity: &mut TypedEntityState) {
+    fn rollback(self, entity: &mut TypedEntityState, duration_windows: &[WindowBeforeImage]) {
         entity.transition_count = self.transition_count;
         match self.groups {
             NumericGroupsUndo::Durations(undo) => {
@@ -155,7 +160,7 @@ impl TypedEntityUndo {
                     .shared_duration
                     .as_deref_mut()
                     .expect("shared Duration undo has its tape");
-                undo.rollback(tape, &mut entity.groups);
+                undo.rollback(tape, &mut entity.groups, duration_windows);
             }
             NumericGroupsUndo::One(undo) => {
                 if let TypedWindowState::Numeric(state) = &mut entity.groups[0] {
@@ -173,25 +178,19 @@ impl TypedEntityUndo {
     }
 }
 
-struct ResidentInspection {
-    residents: Vec<usize>,
-    key_bytes: Vec<usize>,
-    undo: Vec<EntityUndo>,
-    new_local_keys: Vec<(usize, Vec<u8>)>,
-    previous_charge: StateCharge,
-}
-
 fn inspect_residents(
     state: &mut RollingKernelState,
     entities: &mut [RoutedEntity],
     direct_names: &[&str],
+    group_count: usize,
     node_id: &str,
-) -> Result<Option<ResidentInspection>> {
+) -> Result<Option<InPlaceUpdate>> {
     let mut previous_charge = StateCharge::default();
     let mut residents = Vec::with_capacity(entities.len());
     let mut key_bytes = Vec::with_capacity(entities.len());
-    let mut undo = Vec::with_capacity(entities.len());
     let mut new_local_keys = Vec::new();
+    let mut undo = Vec::with_capacity(entities.len());
+    let mut duration_windows = Vec::new();
     for (local, key) in entities.iter_mut().enumerate() {
         let (resident, encoded_bytes) = match key {
             RoutedEntity::Cached {
@@ -204,8 +203,8 @@ fn inspect_residents(
                     key_bytes.push(bytes.len());
                     new_local_keys.push((local, std::mem::take(bytes)));
                     undo.push(EntityUndo {
-                        previous: None,
                         is_new: true,
+                        previous: None,
                     });
                     continue;
                 };
@@ -227,18 +226,56 @@ fn inspect_residents(
         previous_charge = previous_charge.checked_add(charge, node_id)?;
         residents.push(resident);
         key_bytes.push(encoded_bytes);
+        let previous = if state.share_durations {
+            None
+        } else {
+            Some(TypedEntityUndo::new(entity, &mut duration_windows)?)
+        };
         undo.push(EntityUndo {
-            previous: Some(TypedEntityUndo::new(entity)?),
             is_new: false,
+            previous,
         });
     }
-    Ok(Some(ResidentInspection {
+    if state.share_durations {
+        duration_windows =
+            snapshot_duration_windows(state, &residents, &mut undo, group_count, node_id)?;
+    }
+    Ok(Some(InPlaceUpdate {
+        new_direct_keys: Vec::new(),
         residents,
         key_bytes,
         undo,
+        duration_windows,
         new_local_keys,
         previous_charge,
     }))
+}
+
+// Delay the pooled allocation until all resident entities passed the exclusivity check.
+fn snapshot_duration_windows(
+    state: &RollingKernelState,
+    residents: &[usize],
+    undo: &mut [EntityUndo],
+    group_count: usize,
+    node_id: &str,
+) -> Result<Vec<WindowBeforeImage>> {
+    let window_count = residents
+        .len()
+        .checked_mul(group_count)
+        .ok_or_else(|| operator_error(node_id, "rolling undo window count overflowed"))?;
+    let mut windows = Vec::new();
+    windows.try_reserve_exact(window_count).map_err(|error| {
+        operator_error(
+            node_id,
+            &format!("cannot reserve rolling undo windows: {error}"),
+        )
+    })?;
+    for (&resident, entry) in residents.iter().zip(undo) {
+        if !entry.is_new {
+            entry.previous = Some(TypedEntityUndo::new(&state.states[resident], &mut windows)?);
+        }
+    }
+    Ok(windows)
 }
 
 impl InPlaceUpdate {
@@ -260,18 +297,17 @@ impl InPlaceUpdate {
             recorder.add(RollingWork::TouchedEntities, entities.len());
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
-        let Some(ResidentInspection {
-            mut residents,
-            key_bytes,
-            mut undo,
-            new_local_keys,
-            previous_charge,
-        }) = inspect_residents(state, &mut entities, &direct_names, node_id)?
+        let Some(mut update) = inspect_residents(
+            state,
+            &mut entities,
+            &direct_names,
+            plan.groups.len(),
+            node_id,
+        )?
         else {
             return Ok(None);
         };
-        let mut new_direct_keys = Vec::new();
-        for (local, key) in &new_local_keys {
+        for (local, key) in &update.new_local_keys {
             #[cfg(test)]
             super::INSTALLATION_VISITS.with(|count| count.set(count.get() + 1));
             let local = *local;
@@ -284,31 +320,20 @@ impl InPlaceUpdate {
                     rows.counts[local],
                     state.share_durations,
                 )));
-            residents[local] = resident;
-            undo[local].previous = Some(
-                TypedEntityUndo::new(&state.states[resident])
+            update.residents[local] = resident;
+            update.undo[local].previous = Some(
+                TypedEntityUndo::new(&state.states[resident], &mut update.duration_windows)
                     .expect("a new numeric entity matches its plan"),
             );
             if let Some(name) = direct_names.get(local) {
                 let name = (*name).to_owned();
                 state
                     .direct_entities
-                    .insert(name.clone(), (resident, key_bytes[local]));
-                new_direct_keys.push((resident, name));
+                    .insert(name.clone(), (resident, update.key_bytes[local]));
+                update.new_direct_keys.push((resident, name));
             }
         }
-        Ok(Some((
-            Self {
-                residents,
-                key_bytes,
-                new_local_keys,
-                new_direct_keys,
-                undo,
-                previous_charge,
-            },
-            rows,
-            entity_ids,
-        )))
+        Ok(Some((update, rows, entity_ids)))
     }
 
     pub(super) fn charge_change(
@@ -335,6 +360,7 @@ impl InPlaceUpdate {
                     .rollback(
                         Arc::get_mut(&mut base.states[resident])
                             .expect("in-place rolling entities remain exclusive"),
+                        &self.duration_windows,
                     );
                 continue;
             }
@@ -830,6 +856,39 @@ mod tests {
     }
 
     #[test]
+    fn shared_duration_inspection_uses_one_batch_of_window_before_images() {
+        const ENTITIES: usize = 128;
+        let plans = [3, 8, 15].map(|width| super::super::TypedGroupPlan::Numeric {
+            input_index: 0,
+            frame: TypedFrame::Duration(width),
+            dispersion: true,
+        });
+        let mut state = RollingKernelState {
+            share_durations: true,
+            states: (0..ENTITIES)
+                .map(|_| Arc::new(TypedEntityState::with_duration_storage(&plans, 1, true)))
+                .collect(),
+            ..RollingKernelState::default()
+        };
+        let mut keys = (0..ENTITIES)
+            .map(|resident| RoutedEntity::Cached {
+                resident,
+                key_bytes: 8,
+            })
+            .collect::<Vec<_>>();
+        let measured = allocation_counter::measure(|| {
+            let inspected = inspect_residents(&mut state, &mut keys, &[], plans.len(), "r")
+                .unwrap()
+                .unwrap();
+            assert_eq!(inspected.undo.len(), ENTITIES);
+            assert!(inspected.undo.iter().all(|entry| entry.previous.is_some()));
+            std::hint::black_box(inspected);
+        });
+        eprintln!("shared Duration inspection {measured:?}");
+        assert!(measured.count_total <= 4, "{measured:?}");
+    }
+
+    #[test]
     fn test_shared_duration_undo_funds_all_accumulators_and_cursors_once() {
         let plans = [3, 8, 15].map(|width| super::super::TypedGroupPlan::Numeric {
             input_index: 0,
@@ -838,7 +897,7 @@ mod tests {
         });
         let entity = TypedEntityState::with_duration_storage(&plans, 1, true);
         let measured = allocation_counter::measure(|| {
-            std::hint::black_box(TypedEntityUndo::new(&entity).unwrap());
+            std::hint::black_box(TypedEntityUndo::new(&entity, &mut Vec::new()).unwrap());
         });
         assert_eq!(measured.count_total, 1, "{measured:?}");
     }
@@ -852,7 +911,7 @@ mod tests {
             transition_count: 1,
         };
         let measured = allocation_counter::measure(|| {
-            TypedEntityUndo::new(&entity).unwrap();
+            TypedEntityUndo::new(&entity, &mut Vec::new()).unwrap();
         });
         assert_eq!(measured.count_total, 0, "{measured:?}");
     }
