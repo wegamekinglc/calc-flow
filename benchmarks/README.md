@@ -590,9 +590,11 @@ contains all 20 timed observations, the two warmups, and host resource samples.
 Each run returned 13,200 changes across 21 batches. The two round medians on
 the reference wheel were 399.0 and 429.6 ms.
 
-These timings cover the complete 21-batch stream, including the opening
-10,000 rows. The 15 ms target for delivering an individual incremental batch
-requires a separate input-to-delivery clock.
+Stage 2 targets p50 ≤15 ms for this complete graph, including the opening
+10,000 rows and all 20 incremental batches, with every reconstructed
+snapshot checked. The single-hash group lookup candidate reached 23.460 ms
+p50, 8.460 ms above target. Timing an individual incremental batch requires
+a separate input-to-delivery clock. [Paired observations and checks](https://github.com/wegamekinglc/calc-flow/pull/649#issuecomment-7093482797).
 
 The reproduction command collects timings and validates outputs. For the
 recorded run, an external supervisor also set `OPENBLAS_NUM_THREADS=1` and
