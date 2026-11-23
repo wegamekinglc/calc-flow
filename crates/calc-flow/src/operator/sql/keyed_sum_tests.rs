@@ -616,6 +616,33 @@ async fn test_keyed_sum_ten_thousand_stock_groups_continue() {
     plan.commit(transaction);
 }
 
+fn check_rejected_sum_restore(
+    keyed: &keyed_sum::KeyedSum,
+    runtime: &DataFusionRuntime,
+    limit: u64,
+    baseline: usize,
+) {
+    let mut changed = fixture(false);
+    changed[0].value = Some(101);
+    changed[2].value = Some(202);
+    let replacement = record(false, &changed).project(&[0, 1, 2]).unwrap();
+    let chunks = [replacement.slice(0, 1), replacement.slice(2, 1)];
+    runtime
+        .set_compact_state_limit(Some(limit), "keyed-sum")
+        .unwrap();
+    let error = keyed
+        .restore_records(&chunks, 2, true, None, &mut || Ok(()))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("SQL compact state budget exceeded")
+    );
+    assert_eq!(keyed.lease_counts(), [1, 1]);
+    assert_eq!(runtime.compact_state_bytes(), baseline);
+    runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
+}
+
 async fn check_multibatch_undo_reservation(parallel: bool) {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let mut plan = plan(&runtime, false).await;
@@ -691,25 +718,7 @@ async fn check_multibatch_undo_reservation(parallel: bool) {
     runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
     assert_eq!(snapshot(), original);
     if !parallel {
-        let mut changed = fixture(false);
-        changed[0].value = Some(101);
-        changed[2].value = Some(202);
-        let replacement = record(false, &changed).project(&[0, 1, 2]).unwrap();
-        let chunks = [replacement.slice(0, 1), replacement.slice(2, 1)];
-        runtime
-            .set_compact_state_limit(Some(limit), "keyed-sum")
-            .unwrap();
-        let error = keyed
-            .restore_records(&chunks, 2, true, None, &mut || Ok(()))
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("SQL compact state budget exceeded")
-        );
-        assert_eq!(keyed.lease_counts(), [1, 1]);
-        assert_eq!(runtime.compact_state_bytes(), baseline);
-        runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
+        check_rejected_sum_restore(&keyed, &runtime, limit, baseline);
         assert_eq!(snapshot(), original);
     }
     let mut retry = keyed.begin(None).unwrap();
