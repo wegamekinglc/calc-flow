@@ -545,7 +545,7 @@ impl RollingKernelPlan {
         routing: &EntityRouting,
         node_id: &str,
         track_positions: bool,
-    ) -> Result<(Vec<EntityId>, Vec<EntityId>, Vec<u64>)> {
+    ) -> Result<(Vec<EntityId>, Vec<u64>)> {
         let resolved = routing
             .keys
             .iter()
@@ -569,7 +569,7 @@ impl RollingKernelPlan {
             })?;
             table.set_u64(0, entity, transitions)?;
         }
-        Ok((resolved, ids, positions))
+        Ok((ids, positions))
     }
 
     fn append_slab_outputs(
@@ -641,7 +641,7 @@ impl RollingKernelPlan {
                 TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. }
             )
         });
-        let (_, ids, mut positions) =
+        let (ids, mut positions) =
             Self::prepare_slab_entities(table, routing, node_id, track_positions)?;
         let mut builders = self
             .outputs
@@ -717,8 +717,6 @@ impl RollingKernelPlan {
         let previous_charge = charge(state.slab.as_ref().expect("slab initialized"), node_id)?;
         state.slab.as_mut().expect("slab initialized").begin()?;
         let entities = routing.keys.len();
-        let entity_rows = routing.rows.clone();
-        let local_ids = routing.entity_ids.clone();
         let result = self.fill_slab_rows(
             state.slab.as_mut().expect("slab initialized"),
             &batch.inputs,
@@ -728,6 +726,10 @@ impl RollingKernelPlan {
             observer,
         );
         let columns = Self::finish_slab_columns(state, created, result)?;
+        // Routing reserves for resident entities; delivery only retains the touched subset.
+        let mut entity_rows = routing.rows;
+        entity_rows.counts.shrink_to_fit();
+        entity_rows.first_rows.shrink_to_fit();
         let local = RollingKernelState {
             kernel_fingerprint: Some(self.fingerprint.clone()),
             last_identity: batch.last_identity,
@@ -736,7 +738,7 @@ impl RollingKernelPlan {
         Ok(StreamKernelUpdate {
             execution: RollingKernelExecution {
                 columns,
-                entity_ids: local_ids,
+                entity_ids: routing.entity_ids,
                 entity_rows,
                 metrics: RollingKernelMetrics {
                     entity_encode_ns,
@@ -875,6 +877,54 @@ mod tests {
         assert_eq!(mean.value(0).to_bits(), 4.0_f64.to_bits());
         update.rollback(&mut state);
         assert_eq!(state.canonical_state_for_test(), committed);
+    }
+
+    #[test]
+    fn sparse_slab_update_retains_only_touched_entity_statistics() {
+        const RESIDENTS: usize = 128;
+        let plan = plan();
+        let mut state = RollingKernelState::default();
+        let seed = input(&[1; RESIDENTS], &[Some(1.0); RESIDENTS]);
+        let mut columns = seed.columns().to_vec();
+        columns[1] = Arc::new(StringArray::from_iter_values(
+            (0..RESIDENTS).map(|id| format!("key-{id:03}")),
+        ));
+        let seed = RecordBatch::try_new(seed.schema(), columns).unwrap();
+        plan.prepare_slab_ordered_stream(&mut state, &seed, "r", None)
+            .unwrap()
+            .commit(&mut state);
+        let before = state.canonical_state_for_test();
+
+        let times = (2..).take(RESIDENTS).collect::<Vec<_>>();
+        let sparse = input(&times, &[Some(3.0); RESIDENTS]);
+        let mut columns = sparse.columns().to_vec();
+        columns[1] = Arc::new(StringArray::from_iter_values(std::iter::repeat_n(
+            "key-064", RESIDENTS,
+        )));
+        let sparse = RecordBatch::try_new(sparse.schema(), columns).unwrap();
+        let mut update = plan
+            .prepare_slab_ordered_stream(&mut state, &sparse, "r", None)
+            .unwrap();
+        let rows = update.entity_rows();
+        assert_eq!(rows.counts, [RESIDENTS]);
+        assert_eq!(rows.first_rows, [0]);
+        let capacities = [rows.counts.capacity(), rows.first_rows.capacity()];
+        assert_eq!(update.entity_ids(), [0; RESIDENTS]);
+        let output = update.take_columns();
+        let sums = output[1].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(sums.value(0).to_bits(), 4.0_f64.to_bits());
+        assert!(
+            sums.values()[1..]
+                .iter()
+                .all(|value| value.to_bits() == 6.0_f64.to_bits())
+        );
+        update.rollback(&mut state);
+        assert_eq!(state.canonical_state_for_test(), before);
+        assert_eq!(
+            capacities,
+            [1, 1],
+            "prepared capacities after touching one resident"
+        );
     }
 
     #[test]
