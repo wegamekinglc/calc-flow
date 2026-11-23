@@ -74,6 +74,17 @@ enum SumInput<'a> {
 }
 
 impl SumValue {
+    fn record(self, keys: &[ArrayRef], schema: &SchemaRef) -> Result<RecordBatch> {
+        let mut columns = keys.to_vec();
+        columns.push(
+            self.scalar()
+                .to_array_of_size(1)
+                .map_err(|error| super::df_error("keyed SUM", error))?,
+        );
+        RecordBatch::try_new(schema.clone(), columns)
+            .map_err(|error| super::df_error("keyed SUM", error))
+    }
+
     fn scalar(self) -> ScalarValue {
         match self {
             Self::Int64(value) => ScalarValue::Int64(value),
@@ -605,27 +616,7 @@ impl Transaction {
                 check()?;
             }
             let (group, previous) = item?;
-            let current = state.sums.value(group);
-            if previous == Some(current) {
-                continue;
-            }
-            reserve(
-                state.keys.output_charge(&[group])?,
-                1 + usize::from(previous.is_some()),
-            )?;
-            let keys = state.keys.columns(&[group])?;
-            let record = |value: SumValue| {
-                let mut columns = keys.clone();
-                columns.push(value.scalar().to_array_of_size(1)?);
-                RecordBatch::try_new(schema.clone(), columns)
-                    .map_err(datafusion::error::DataFusionError::from)
-            };
-            let before = previous
-                .map(record)
-                .transpose()
-                .map_err(|error| super::df_error("keyed SUM", error))?;
-            let after = record(current).map_err(|error| super::df_error("keyed SUM", error))?;
-            visit(before, after)?;
+            state.visit_change(group, previous, schema, &mut reserve, &mut visit)?;
         }
         Ok(())
     }
@@ -929,6 +920,29 @@ impl Drop for Transaction {
 }
 
 impl KeyedSumState {
+    fn visit_change(
+        &self,
+        group: GroupId,
+        previous: Option<SumValue>,
+        schema: &SchemaRef,
+        reserve: &mut impl FnMut(usize, usize) -> Result<()>,
+        visit: &mut impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        let current = self.sums.value(group);
+        if previous == Some(current) {
+            return Ok(());
+        }
+        reserve(
+            self.keys.output_charge(&[group])?,
+            1 + usize::from(previous.is_some()),
+        )?;
+        let keys = self.keys.columns(&[group])?;
+        let before = previous
+            .map(|value| value.record(&keys, schema))
+            .transpose()?;
+        visit(before, current.record(&keys, schema)?)
+    }
+
     fn records(
         &self,
         slots: Option<&[usize]>,

@@ -731,7 +731,6 @@ async fn test_changelog_prepays_multi_record_long_keys_and_rolls_back_pool_failu
         let seed = plan.update(&batch, &context, "changes").await.unwrap();
         plan.commit(seed);
         let mut update = plan.update(&batch, &context, "changes").await.unwrap();
-        let update_workspace = update._reservation.size();
         let (scratch, base) = plan.input_workspace(batch.num_rows(), "changes").unwrap();
         for record in table.batches() {
             plan.reserve_chunk(record, &scratch, base, "changes")
@@ -761,6 +760,7 @@ async fn test_changelog_prepays_multi_record_long_keys_and_rolls_back_pool_failu
             allocations.bytes_max,
             scratch.size()
         );
+        let update_workspace = scratch.size();
         drop((result, update, scratch));
         let available = input_workspace + (256 << 10);
         assert!(update_workspace > available);
