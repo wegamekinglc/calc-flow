@@ -1,0 +1,90 @@
+{
+  "candidate_pr": 638,
+  "baseline": {
+    "artifact": 14784193555,
+    "artifact_digest": "sha256:3c8e898f0da58bf0a63ca9af9166f0bc82bf047b0fd52abb614691270d252f33",
+    "build_profile": "release",
+    "checkout": "1c58e537908f21860b52d4adb32464a6374e3382",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "1c58e537908f21860b52d4adb32464a6374e3382",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137442008790,
+    "native_sha256": "1bb87c8482913352419cb2c7cb57dea49e0063bda002aec9c88bddc440439425",
+    "parents": [
+      "fced5062c1a6f05b6302674e8eda926182bb558a",
+      "d258797fa21da5e476eb052ce5ea510d6eecfed9"
+    ],
+    "requested_sha": "1c58e537908f21860b52d4adb32464a6374e3382",
+    "tree": "5fa8221108ac6dfe1fa8573ff129a61d1d65ad01",
+    "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+    "wheel_sha256": "d5fcd349f26ec8fff9b7778e9c0bc31cbd163dc11249a69e1dc2513e44c6549b",
+    "workflow_run": 45097969361
+  },
+  "candidate": {
+    "artifact": 14786477351,
+    "artifact_digest": "sha256:79715a1b3c7c5fcd4844558b3807ce1cf5e9151327d802e4c317d54ab66d04a4",
+    "build_profile": "release",
+    "checkout": "2421fa000b9a0cb837bd64a639d9be81757f3bbe",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "2421fa000b9a0cb837bd64a639d9be81757f3bbe",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137456616783,
+    "native_sha256": "eeb6ac76f444a927aceb62cf88f1b8dec60ef5732e3cbaba11bff17b6dadda2d",
+    "parents": [
+      "563f831495f635e4c12fd1cbc5bafa8ef901dbe6",
+      "74f440bfca8f293c13d33c599db0e11472e01836"
+    ],
+    "requested_sha": "74f440bfca8f293c13d33c599db0e11472e01836",
+    "tree": "b89bb91d27741830f762f42bcf474663927bc0a3",
+    "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+    "wheel_sha256": "52a361cf45328dfc1e16654be162844e00727cbe2d42e4ce86194be18379e5ca",
+    "workflow_run": 45102474285
+  },
+  "measurement": "Python public nullable float64 duration SUMs 30/60/90s on one rolling node",
+  "fixture": "100,000 sequenced rows, 1,000 interleaved entities, 1 ms apart; 100 x 1,000-row batches; nullable price",
+  "timing": "fresh declaration -> compiled/open stream -> retained Arrow results -> EOF/close; deterministic timestamp-prefix oracle outside clock",
+  "correctness": "Compare every row and 300,000 sums with independent prefix arithmetic and open lower bounds; retain null counts and strict project/Arrow schema proof.",
+  "comparison": "Two independent resident-worker rounds; one warmup per arm/round; ten adjacent AB/BA pairs each; exact median intervals and 5% maintained rule.",
+  "resources": "3s preflight at most 20% busy for selected CPU and siblings; steady sibling below 50%; host average below 50%, >=10 GiB available, <256 major faults, <1024 swap pages, including final 1s interval. One logical CPU, Tokio/Rayon/BLAS=1. Stop on pressure, budget or failed correctness; no retries.",
+  "budget": "180s Python total. Two local wheel acquisition/verification passes 28.88+21.86s, setup sanity <=10s, hosted job <=119s inclusive from GitHub recorded start through artifact upload; 45s acquisition reserve.",
+  "base_to_candidate_first_parent_independent_differences": [
+    "crates/calc-flow-connectors/tests/frozen_file_replay.rs",
+    "crates/calc-flow-connectors/tests/frozen_file_replay/window.rs",
+    "crates/calc-flow/src/operator/join/matches.rs",
+    "crates/calc-flow/src/operator/join/production.rs",
+    "crates/calc-flow/src/operator/join/run_tests.rs",
+    "crates/calc-flow/src/operator/join/runs.rs"
+  ],
+  "candidate_delta_vs_actual_first_parent": {
+    "base": "563f831495f635e4c12fd1cbc5bafa8ef901dbe6",
+    "files": [
+      "benchmarks/rust-workload-migrations.json",
+      "crates/calc-flow/benches/core.rs",
+      "crates/calc-flow/src/operator/rolling.rs",
+      "crates/calc-flow/src/operator/rolling/kernel.rs",
+      "crates/calc-flow/src/operator/rolling/kernel/duration.rs",
+      "crates/calc-flow/src/operator/rolling/kernel/entity_parallel.rs",
+      "crates/calc-flow/src/operator/rolling/kernel/entity_parallel_tests.rs",
+      "crates/calc-flow/src/operator/rolling/kernel/entity_parallel_tests/capabilities.rs",
+      "crates/calc-flow/src/operator/rolling/kernel/in_place.rs",
+      "crates/calc-flow/src/operator/rolling/ordered_stream.rs",
+      "crates/calc-flow/src/operator/rolling/state_codec.rs",
+      "crates/calc-flow/src/operator/rolling/tests.rs",
+      "crates/calc-flow/src/operator/rolling/tests/capability_profiles.rs",
+      "crates/calc-flow/src/operator/rolling/tests/ordered_duration.rs",
+      "docs/runtime-envelope.md"
+    ]
+  },
+  "immutable_measurement_source": {
+    "benchmarks/public_duration_sum.py": "e00f407bbd30d7be1b7a210528d1911dcb8203c978aed493ab48ee864d97d106",
+    "scripts/hosted_duration_sum.py": "baaef45a172dd4d9da020a1d2d474e887e780ee9c468cafda1ca996b555a1fa8",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3"
+  }
+}

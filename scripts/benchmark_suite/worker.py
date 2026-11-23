@@ -92,6 +92,10 @@ def prepare_case(case: dict, root: Path):
             factory = WarmCase
         case "engines":
             factory = EngineCase
+        case "public-duration-sum":
+            from benchmarks.public_duration_sum import DurationCase
+
+            factory = DurationCase
         case "sparse-changelog":
             from benchmarks.sparse_changelog import SparseChangelogCase
 
