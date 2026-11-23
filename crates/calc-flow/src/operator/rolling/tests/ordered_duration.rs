@@ -1338,7 +1338,16 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
     let job = job.with_checkpointing(false);
     assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 6)).await);
     let mut emitted = close(&mut operator, &job, &store, &mut output, 9).await;
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(6, 5)).await);
+    assert!(
+        observe_data(
+            &mut operator,
+            &job,
+            &store,
+            &mut output,
+            input.slice(6, input.num_rows() - 6)
+        )
+        .await
+    );
     let state = operator.state.typed_kernel_state.as_deref().unwrap();
     assert_eq!(state.shares_durations(), shared_duration);
     let before = format!("{state:?}");
