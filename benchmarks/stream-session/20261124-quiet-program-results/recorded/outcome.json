@@ -1,0 +1,8 @@
+{
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "host": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "reason": "ExceptionGroup('unhandled errors in a TaskGroup', [ValueError(\"sparse changelog resource gate: {'cpu': 0, 'cpu_busy': 77.8, 'siblings': [1], 'sibling_busy': 1.0, 'host_busy': 2.49375, 'available_bytes': 31200980992, 'major_faults': 302, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}\")])",
+  "state": "stopped",
+  "wall_seconds": 47.42502732004505
+}

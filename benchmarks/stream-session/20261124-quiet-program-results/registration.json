@@ -1,0 +1,21 @@
+{
+  "sources": {
+    "worker.py": "63b3817d0afed32b0ffb7a846277c2d0a245520d115728f812a1520a223dcc9a",
+    "collect.py": "f7c106845e4e4faaebd20b38abe3460b5ceeb3665a539d0ebed16a0ea0c56a66",
+    "protocol.md": "f3611a13bfba37f6496f7432efbf33b5a249170ae3ab2baf5c6b30751ca8f8d6"
+  },
+  "baseline": {
+    "artifact": 14854795340,
+    "sha": "bd10115a81a25c3b42fdfa8e5dc58d3d5fd5ac6e",
+    "tree": "236a5983038f73354bd1c3f8207ee140e13d851b",
+    "run": 45242945289,
+    "session_sha256": "d12b64c5abf963808a2ecfa33f09ddb01c9091c4219b1da510d973187304d163"
+  },
+  "candidate": {
+    "artifact": 14854846914,
+    "sha": "21a18502e2c7995ab7d5cc7be3086e91147a3f61",
+    "tree": "c08392103ddae8067a97f2333b484c875145d423",
+    "run": 45246419081,
+    "session_sha256": "d58bca679944a983bc60541364fe210f6908534af901188c0b394e106a17cefc"
+  }
+}
