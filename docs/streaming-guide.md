@@ -1526,7 +1526,13 @@ position, opposite event_time, opposite row_id)` order. Materialization
 translates the selections into source locations and gathers output columns
 through Arrow `take` for a single source owner or `interleave` for multiple
 owners, preserving direct-consumer projection and dictionary/nested payload
-behavior.
+behavior. When a direct expression fuses the sequence columns and a Float64
+price product into a Join, each matched pair contributes only those operands.
+The output edge's row and byte limits apply to the sequence columns and the
+computed product, including any Arrow validity buffers. Other input fields
+still count toward retained state. A large discarded field can fit the state
+budget even when it exceeds the output edge budget. More matches can then
+share one output sequence. Their row order stays the same.
 
 The run core's `max_state_rows_per_side` charge is the number of live retained
 rows. Its `max_state_bytes_per_side` logical charge covers retained Arrow

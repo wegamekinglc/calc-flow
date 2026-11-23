@@ -1,7 +1,7 @@
 //! Immutable columnar Join runs and selection-driven probe/materialization.
 
 use super::{
-    JoinSide, JoinStateLimits, JoinTimeBounds, PayloadRef,
+    HotProjection, JoinSide, JoinStateLimits, JoinTimeBounds, PayloadRef,
     native_dictionary::{TimedEntry, WindowBounds, WindowCursor, ordered_window_bounds},
     operator_error, output_gather,
 };
@@ -13,7 +13,7 @@ use crate::{
 use datafusion::arrow::{
     array::{Array, BooleanArray, StringArray, UInt64Array},
     compute::take,
-    datatypes::SchemaRef,
+    datatypes::{DataType, SchemaRef},
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 #[cfg(test)]
@@ -410,6 +410,10 @@ impl Run {
         self.row_ids.len()
     }
 
+    fn identity(&self, row: usize) -> (EventTime, u64) {
+        (EventTime::from_micros(self.times[row]), self.row_ids[row])
+    }
+
     fn entries(&self) -> impl Iterator<Item = LocatorEntry> + '_ {
         self.order.iter().map(|&row| LocatorEntry {
             time: EventTime::from_micros(self.times[row]),
@@ -428,6 +432,14 @@ struct LiveRun {
     run: Arc<Run>,
     head: usize,
     released_bytes: usize,
+}
+
+impl LiveRun {
+    fn first_live_identity(&self) -> (EventTime, u64) {
+        #[cfg(test)]
+        RESTORE_MEMBERSHIP_READS.set(RESTORE_MEMBERSHIP_READS.get() + 1);
+        self.run.identity(self.run.order[self.head])
+    }
 }
 
 pub(super) fn route_hot_keys(
@@ -771,6 +783,7 @@ struct Prepared {
 pub(super) struct RunOutputContext<'a> {
     schema: &'a SchemaRef,
     projection: Option<&'a [usize]>,
+    pub(super) product: Option<HotProjection>,
     left_width: usize,
     budget: EdgeBudget,
     #[cfg(feature = "benchmark-internals")]
@@ -787,6 +800,7 @@ impl<'a> RunOutputContext<'a> {
         RunOutputContext {
             schema,
             projection,
+            product: None,
             left_width,
             budget,
             #[cfg(feature = "benchmark-internals")]
@@ -1431,7 +1445,8 @@ impl Prepared {
     ) -> Result<Vec<std::ops::Range<usize>>> {
         let schema = output.schema;
         let budget = output.budget;
-        if let Some(row_bytes) = fixed_output_row_bytes(schema) {
+        // Final Arrow measurement includes validity buffers for nullable product columns.
+        if let Some(row_bytes) = fixed_output_row_bytes(schema, output.product.is_some()) {
             let per_chunk = if row_bytes == 0 {
                 budget.max_rows
             } else {
@@ -1596,20 +1611,29 @@ impl Prepared {
         } else {
             (opposite, incoming)
         };
-        let columns = schema
-            .fields()
-            .iter()
-            .enumerate()
-            .map(|(ordinal, field)| {
-                let logical = projection.map_or(ordinal, |columns| columns[ordinal]);
-                let (gather, column) = if logical < left_width {
-                    (left.as_ref(), logical)
-                } else {
-                    (right.as_ref(), logical - left_width)
-                };
-                output_gather::column(gather, column, field.data_type())
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let column = |logical: usize, data_type: &DataType| {
+            let (gather, index) = if logical < left_width {
+                (left.as_ref(), logical)
+            } else {
+                (right.as_ref(), logical - left_width)
+            };
+            output_gather::column(gather, index, data_type)
+        };
+        let columns = if let Some(product) = output.product {
+            product.gather(column)?
+        } else {
+            schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(ordinal, field)| {
+                    column(
+                        projection.map_or(ordinal, |indices| indices[ordinal]),
+                        field.data_type(),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         RecordBatch::try_new_with_options(
             Arc::clone(schema),
             columns,
@@ -1712,19 +1736,24 @@ impl RunState {
     }
 }
 
+#[cfg(test)]
+#[path = "run_restore_tests.rs"]
+mod restore_tests;
+
+#[cfg(test)]
+thread_local! {
+    static RESTORE_MEMBERSHIP_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
     for side in &snapshot.sides {
         let mut identities = BTreeSet::new();
         let mut live_rows = 0usize;
         let mut bytes = side.expiration_charge();
         for (&id, live) in &side.runs {
-            let released = live
-                .run
-                .charge
-                .rows_charge(live.run.order[..live.head].iter().copied())?;
+            pages::validate_run_order(&live.run)?;
             if id != live.run.id
                 || live.head >= live.run.len()
-                || live.released_bytes != released
                 || live
                     .run
                     .row_ids
@@ -1733,6 +1762,15 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
             {
                 return Err(run_error(
                     "restored run identity, prefix, or frontier is invalid",
+                ));
+            }
+            let released = live
+                .run
+                .charge
+                .rows_charge(live.run.order[..live.head].iter().copied())?;
+            if live.released_bytes != released {
+                return Err(run_error(
+                    "restored released charge differs from its run prefix",
                 ));
             }
             live_rows += live.run.len() - live.head;
@@ -1766,9 +1804,8 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
                 let row = usize::try_from(entry.locator.row).expect("u32 locator fits usize");
                 if row >= live.run.len()
                     || live.run.groups[row] != group
-                    || live.run.row_ids[row] != entry.row_id
-                    || live.run.times[row] != entry.time.as_micros()
-                    || !live.run.order[live.head..].contains(&row)
+                    || live.run.identity(row) != entry.identity()
+                    || entry.identity() < live.first_live_identity()
                     || !indexed.insert((entry.time, entry.row_id, entry.locator))
                 {
                     return Err(run_error("restored key locator differs from its run"));
@@ -1841,9 +1878,9 @@ fn merge(left: &[LocatorEntry], right: &[LocatorEntry]) -> Vec<LocatorEntry> {
     merged
 }
 
-fn fixed_output_row_bytes(schema: &SchemaRef) -> Option<usize> {
+fn fixed_output_row_bytes(schema: &SchemaRef, allow_nullable: bool) -> Option<usize> {
     schema.fields().iter().try_fold(0usize, |total, field| {
-        if field.is_nullable()
+        if (field.is_nullable() && !allow_nullable)
             || crate::operator::row_cost::terminal_offset_width(field.data_type()) != 0
         {
             return None;

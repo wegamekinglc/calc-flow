@@ -38,12 +38,13 @@ pub(super) struct Transaction {
     undo: Vec<(GroupId, SumValue)>,
     affected: Vec<GroupId>,
     leased: Vec<GroupId>,
-    undo_reservations: Vec<MemoryReservation>,
+    undo_reservation: MemoryReservation,
     active: bool,
 }
 
 pub(super) struct Committed {
     pub affected: Vec<GroupId>,
+    _affected_reservation: MemoryReservation,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -207,7 +208,7 @@ impl KeyedSum {
             undo: Vec::new(),
             affected: Vec::new(),
             leased: Vec::new(),
-            undo_reservations: Vec::new(),
+            undo_reservation: state.keys.transaction_reservation(),
             active: true,
         })
     }
@@ -310,9 +311,6 @@ impl Transaction {
             .route_selected_with_limit(keys, selection, self.limit, check)?;
         grow(&mut guard)?;
         let count = guard.sums.partitions.len();
-        self.undo_reservations = (0..count)
-            .map(|_| guard.keys.transaction_reservation())
-            .collect();
         let kind = guard.sums.kind;
         let parallel_min_rows = guard.sums.parallel_min_rows;
         let mut sums = std::mem::replace(&mut guard.sums, PartitionedSums::new(kind, count));
@@ -368,7 +366,7 @@ impl Transaction {
                 },
                 &mut partitions[owner],
                 &mut marks[owner],
-                &mut self.undo_parts(owner),
+                &mut self.undo_parts(),
             ) {
                 sums.partitions = partitions;
                 sums.marks = marks;
@@ -410,6 +408,7 @@ impl Transaction {
         let old_groups = self.old_groups;
         let execution = PartitionExecution {
             state,
+            undo_reservation: &self.undo_reservation,
             generation,
             old_groups,
             partitions: partition_count,
@@ -456,7 +455,6 @@ impl Transaction {
             self.affected.extend(outcome.affected);
             self.leased.extend(outcome.leased);
             self.undo.extend(outcome.undo);
-            self.undo_reservations[index] = outcome.reservation;
             if let Err(error) = outcome.result
                 && first_error.is_none()
             {
@@ -478,12 +476,6 @@ impl Transaction {
         let mut affected = Vec::new();
         let mut leased = Vec::new();
         let mut undo = Vec::new();
-        let mut reservation = execution
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys
-            .transaction_reservation();
         let mut result = Ok(());
         for (row, group) in rows {
             let attempt = catch_unwind(AssertUnwindSafe(|| {
@@ -506,7 +498,7 @@ impl Transaction {
                         affected: &mut affected,
                         leased: &mut leased,
                         undo: &mut undo,
-                        reservation: &mut reservation,
+                        reservation: execution.undo_reservation,
                     },
                 )
             }));
@@ -537,17 +529,16 @@ impl Transaction {
             affected,
             leased,
             undo,
-            reservation,
             result,
         }
     }
 
-    fn undo_parts(&mut self, partition: usize) -> TouchUndo<'_> {
+    fn undo_parts(&mut self) -> TouchUndo<'_> {
         TouchUndo {
             affected: &mut self.affected,
             leased: &mut self.leased,
             undo: &mut self.undo,
-            reservation: &mut self.undo_reservations[partition],
+            reservation: &self.undo_reservation,
         }
     }
 
@@ -698,6 +689,9 @@ impl Transaction {
     pub(super) fn commit(mut self) -> Committed {
         self.settle(true);
         Committed {
+            _affected_reservation: self
+                .undo_reservation
+                .split(size_of_val(self.affected.as_slice())),
             affected: std::mem::take(&mut self.affected),
         }
     }
@@ -718,9 +712,6 @@ impl Transaction {
         grow(&mut guard)?;
         let kind = guard.sums.kind;
         let count = guard.sums.partitions.len();
-        self.undo_reservations = (0..count)
-            .map(|_| guard.keys.transaction_reservation())
-            .collect();
         let mut sums = std::mem::replace(&mut guard.sums, PartitionedSums::new(kind, count));
         drop(guard);
         let mut result = Ok(());
@@ -745,7 +736,7 @@ impl Transaction {
                 seen,
                 &mut sums.partitions[owner],
                 &mut sums.marks[owner],
-                &mut self.undo_parts(owner),
+                &mut self.undo_parts(),
             ) {
                 result = Err(error);
                 break;
@@ -803,7 +794,7 @@ struct TouchUndo<'a> {
     affected: &'a mut Vec<GroupId>,
     leased: &'a mut Vec<GroupId>,
     undo: &'a mut Vec<(GroupId, SumValue)>,
-    reservation: &'a mut MemoryReservation,
+    reservation: &'a MemoryReservation,
 }
 
 fn grow(state: &mut KeyedSumState) -> Result<()> {
@@ -836,6 +827,7 @@ struct RowContext<'a> {
 
 #[derive(Clone, Copy)]
 struct PartitionExecution<'a> {
+    undo_reservation: &'a MemoryReservation,
     state: &'a Arc<Mutex<KeyedSumState>>,
     generation: u64,
     old_groups: usize,
@@ -858,7 +850,6 @@ struct ParallelOutcome {
     affected: Vec<GroupId>,
     leased: Vec<GroupId>,
     undo: Vec<(GroupId, SumValue)>,
-    reservation: MemoryReservation,
     result: Result<()>,
 }
 

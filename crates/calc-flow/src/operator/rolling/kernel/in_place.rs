@@ -721,9 +721,7 @@ impl Float64NumericState {
             TypedFrame::Duration(_) => {
                 self.update_duration_reversible(event_time, sample, undo, node_id)
             }
-        }?;
-        self.accumulator.sync_float_sum();
-        Ok(())
+        }
     }
 
     fn update_rows_reversible(

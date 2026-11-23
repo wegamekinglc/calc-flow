@@ -3527,13 +3527,11 @@ enum RunCoreMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum HotProjection {
-    Equi {
-        sequence: usize,
-        left_price: usize,
-        right_price: usize,
-    },
-    Band,
+pub(crate) struct HotProjection {
+    pub(crate) sequence: usize,
+    pub(crate) right_sequence: Option<usize>,
+    pub(crate) left_price: usize,
+    pub(crate) right_price: usize,
 }
 
 /// Stateful two-input bounded event-time Join.

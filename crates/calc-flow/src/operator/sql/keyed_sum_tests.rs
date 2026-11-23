@@ -615,3 +615,113 @@ async fn test_keyed_sum_ten_thousand_stock_groups_continue() {
     );
     plan.commit(transaction);
 }
+
+async fn check_multibatch_undo_reservation(parallel: bool) {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut plan = plan(&runtime, false).await;
+    partitioned(&mut plan, 2);
+    let keyed = plan.keyed_sum.as_ref().unwrap().clone();
+    if parallel {
+        keyed.force_parallel_for_test();
+    }
+    let full = record(false, &fixture(false));
+    let inputs = [full.slice(0, 1), full.slice(2, 1)];
+    let apply = |tx: &mut keyed_sum::Transaction, record: &RecordBatch| {
+        tx.apply(
+            &record.columns()[..2],
+            record.column(2),
+            None,
+            None,
+            &mut || Ok(()),
+        )
+    };
+    let mut seed = keyed.begin(None).unwrap();
+    for record in &inputs {
+        apply(&mut seed, record).unwrap();
+    }
+    drop(seed.commit());
+    let snapshot = || {
+        plan.export_native_state("keyed-sum", || Ok(()))
+            .unwrap()
+            .records()
+            .to_vec()
+    };
+    let original = snapshot();
+    let baseline = runtime.compact_state_bytes();
+    let mut tx = keyed.begin(None).unwrap();
+    apply(&mut tx, &inputs[0]).unwrap();
+    let first = runtime.compact_state_bytes() - baseline;
+    apply(&mut tx, &inputs[0]).unwrap();
+    let repeated = runtime.compact_state_bytes() - baseline;
+    apply(&mut tx, &inputs[1]).unwrap();
+    let both = runtime.compact_state_bytes() - baseline;
+    eprintln!(
+        "active SUM undo bytes after first, repeated and second keys: {first}/{repeated}/{both}"
+    );
+    assert!(first > 0);
+    assert_eq!(repeated, first);
+    assert_eq!(both, first * 2);
+    drop(tx);
+    assert_eq!(runtime.compact_state_bytes(), baseline);
+    assert_eq!(snapshot(), original);
+
+    let mut limited = keyed.begin(None).unwrap();
+    apply(&mut limited, &inputs[0]).unwrap();
+    // Leave enough room to route one row, but not to retain another undo entry.
+    let limit = u64::try_from(baseline + 2 * first - 1).unwrap();
+    runtime
+        .set_compact_state_limit(Some(limit), "keyed-sum")
+        .unwrap();
+    let second = &inputs[1];
+    let error = apply(&mut limited, second).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("SQL compact state budget exceeded")
+    );
+    drop(limited);
+    assert_eq!(runtime.compact_state_bytes(), baseline);
+    runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
+    assert_eq!(snapshot(), original);
+    if !parallel {
+        let mut changed = fixture(false);
+        changed[0].value = Some(101);
+        changed[2].value = Some(202);
+        let replacement = record(false, &changed).project(&[0, 1, 2]).unwrap();
+        let chunks = [replacement.slice(0, 1), replacement.slice(2, 1)];
+        runtime
+            .set_compact_state_limit(Some(limit), "keyed-sum")
+            .unwrap();
+        let error = keyed
+            .restore_records(&chunks, 2, true, None, &mut || Ok(()))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("SQL compact state budget exceeded")
+        );
+        assert_eq!(runtime.compact_state_bytes(), baseline);
+        runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
+        assert_eq!(snapshot(), original);
+    }
+    let mut retry = keyed.begin(None).unwrap();
+    apply(&mut retry, second).unwrap();
+    let committed = retry.commit();
+    assert_eq!(committed.affected.len(), 1);
+    assert_eq!(
+        runtime.compact_state_bytes() - baseline,
+        size_of_val(committed.affected.as_slice())
+    );
+    drop(committed);
+    assert_eq!(runtime.compact_state_bytes(), baseline);
+}
+
+#[tokio::test]
+async fn test_serial_sum_retains_undo_charge_across_morsels() {
+    check_multibatch_undo_reservation(false).await;
+}
+
+#[tokio::test]
+async fn test_parallel_sum_retains_undo_charge_across_morsels() {
+    check_multibatch_undo_reservation(true).await;
+}
