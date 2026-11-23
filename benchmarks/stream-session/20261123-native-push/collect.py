@@ -30,11 +30,14 @@ PROOFS = ("all_columns_validated", "input_unchanged", "finished_empty")
 
 
 def observations(proof: dict) -> list[int]:
-    if proof["history"] != 4096 or proof["appends"] != 64:
+    if (proof["history"], proof["appends"]) != (4096, 64):
         raise ValueError("worker used different input dimensions")
     if any(proof[field] is not True for field in PROOFS):
         raise ValueError("worker failed to verify every required property")
-    samples = proof["nanoseconds"]
+    return checked_nanoseconds(proof["nanoseconds"])
+
+
+def checked_nanoseconds(samples: list[int]) -> list[int]:
     if len(samples) != 64 or any(type(n) is not int or n <= 0 for n in samples):
         raise ValueError("expected 64 positive single-push timings in nanoseconds")
     return samples
@@ -72,10 +75,14 @@ async def workers(output: Path, paths: dict, cpu: int) -> list[dict]:
     return records
 
 
-def summarize(records: list[dict]) -> dict:
+def require_schedule(records: list[dict]) -> None:
     actual = [(row["round"], row["pair"], row["side"]) for row in records]
     if actual != list(schedule()):
         raise ValueError("incomplete or reordered process pairs or warmups")
+
+
+def summarize(records: list[dict]) -> dict:
+    require_schedule(records)
     blocks = {side: [[] for _ in range(ROUNDS)] for side in SIDES}
     pooled = {side: [] for side in SIDES}
     for record in records:

@@ -52,4 +52,5 @@ substitution at the last row failed validation in the baseline worker.
 
 See the [registration](protocol.md), [reproduction commands](reproduce.md),
 [raw per-process timings](workers.jsonl), and [build, host and statistical
-evidence](result.json).
+evidence](result.json). The reproduction commands recover the three
+checksum-verified source files used for the recorded timings.

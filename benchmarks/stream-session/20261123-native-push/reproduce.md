@@ -8,6 +8,12 @@ controller regenerates and verifies the three file digests before starting
 the workers. Apply the [registration](protocol.md) resource and budget
 requirements.
 
+The measured worker and controller are preserved at the [sampling
+revision](https://github.com/wegamekinglc/calc-flow/tree/93c4e4b78a9a1c6342dbab8bd76af4aa95be58e1/benchmarks/stream-session/20261123-native-push).
+The current files factor out argument handling, input verification and
+sample validation for maintenance. The commands below extract the exact
+sampling sources and check all three SHA-256 hashes against the report.
+
 Reconstruct the candidate's four changed files from the two published
 heads. Create the source directories in a fresh, ignored `target/`
 subdirectory. The worker overlay is identical on both sides.
@@ -15,12 +21,25 @@ subdirectory. The worker overlay is identical on both sides.
 ```bash
 set -eu
 repo=$(git rev-parse --show-toplevel)
-study="$repo/benchmarks/stream-session/20261123-native-push"
+relative=benchmarks/stream-session/20261123-native-push
+receipt=93c4e4b78a9a1c6342dbab8bd76af4aa95be58e1
 run="$repo/target/native-session-push-reproduction"
 base=4c3cc98e2ebaa8834b8f12931c33da64856daaae
 admission=2a968331b75e5f6bca38694eabfea464887245bd
 cost=49683169b9a53e6bcc0ca202bcb7aed010b624a7
-mkdir "$run"
+study="$run/measured"
+mkdir -p "$study"
+for name in fixture.py collect.py worker.rs; do
+    git show "$receipt:$relative/$name" > "$study/$name"
+done
+python - "$repo/$relative/result.json" "$study" <<'PYTHON'
+import hashlib, json, pathlib, sys
+record = json.loads(pathlib.Path(sys.argv[1]).read_text())
+for name, expected in record["source_sha256"].items():
+    actual = hashlib.sha256((pathlib.Path(sys.argv[2]) / name).read_bytes()).hexdigest()
+    if actual != expected:
+        raise SystemExit(f"{name} differs from its measured source")
+PYTHON
 git fetch origin refs/pull/674/head refs/pull/675/head
 git worktree add --detach "$run/base" "$base"
 git worktree add --detach "$run/head" "$base"

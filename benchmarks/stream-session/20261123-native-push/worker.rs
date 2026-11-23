@@ -1,4 +1,6 @@
-use std::{collections::BTreeMap, env, error::Error, fs, fs::File, path::Path, time::Instant};
+use std::{collections::BTreeMap, fs, fs::File, path::Path, time::Instant};
+
+mod support;
 
 use calc_flow::arrow::{
     array::{Float64Array, TimestampMicrosecondArray},
@@ -13,7 +15,9 @@ use calc_flow::{
 };
 use serde_json::json;
 
-type Run<T> = Result<T, Box<dyn Error>>;
+type Run<T> = support::ExampleResult<T>;
+const HISTORY: usize = 4096;
+const APPENDS: usize = 64;
 
 fn read_table(path: &Path) -> Run<RecordBatch> {
     let reader = FileReader::try_new(File::open(path)?, None)?;
@@ -61,15 +65,7 @@ fn verify(result: &SessionOutput, output: &str, expected: &RecordBatch) -> Run<(
     Ok(())
 }
 
-fn main() -> Run<()> {
-    let args = env::args_os().nth(1).ok_or("fixture directory required")?;
-    let fixture = Path::new(&args);
-    let verify_only = env::args_os()
-        .nth(2)
-        .is_some_and(|arg| arg == "--verify-only");
-    let input_columns = read_table(&fixture.join("inputs.arrow"))?;
-    let expected = read_table(&fixture.join("expected.arrow"))?;
-    let original = read_table(&fixture.join("inputs.arrow"))?;
+fn open_session(fixture: &Path) -> Run<StreamSession> {
     let project = import_project_json(&fs::read(fixture.join("project.json"))?)?;
     let compiled = compile_stream_project_graph(
         &project,
@@ -77,50 +73,94 @@ fn main() -> Run<()> {
         &UdfRegistry::new().snapshot(),
         &StreamRequirements::default(),
     )?;
-    let mut session =
-        StreamSession::new(compiled, &StreamRuntimeConfig::default(), BTreeMap::new())?;
+    Ok(StreamSession::new(
+        compiled,
+        &StreamRuntimeConfig::default(),
+        BTreeMap::new(),
+    )?)
+}
+
+fn envelope(table: &RecordBatch, start: usize, count: usize) -> calc_flow::Result<Batch> {
+    Batch::table(vec![table.slice(start, count)], BatchMetadata::default())
+}
+
+fn watermark(table: &RecordBatch, index: usize) -> Option<EventTime> {
+    let times = table
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    Some(EventTime::from_micros(times.value(index)))
+}
+
+fn append_samples(
+    session: &mut StreamSession,
+    input: &str,
+    output: &str,
+    source: &RecordBatch,
+    expected: &RecordBatch,
+    verify_only: bool,
+) -> Run<Vec<u128>> {
+    let mut nanos = Vec::with_capacity(APPENDS);
+    for row in HISTORY..HISTORY + APPENDS {
+        let batch = envelope(source, row, 1)?;
+        let mark = watermark(source, row);
+        let pushed = if verify_only {
+            session.push(input, batch, mark)?
+        } else {
+            let start = Instant::now();
+            let pushed = session.push(input, batch, mark)?;
+            nanos.push(start.elapsed().as_nanos());
+            pushed
+        };
+        verify(&pushed, output, &expected.slice(row, 1))?;
+    }
+    Ok(nanos)
+}
+
+fn run(
+    session: &mut StreamSession,
+    source: &RecordBatch,
+    expected: &RecordBatch,
+    verify_only: bool,
+) -> Run<Vec<u128>> {
+    assert_eq!(source.num_rows(), HISTORY + APPENDS);
     let inputs = session.input_ids();
     let outputs = session.output_ids();
     assert_eq!(inputs.len(), 1);
     assert_eq!(outputs.len(), 1);
     let input = inputs[0].to_owned();
     let output = outputs[0].to_owned();
-    let times = input_columns
-        .column(0)
-        .as_any()
-        .downcast_ref::<TimestampMicrosecondArray>()
-        .unwrap();
-    let envelope = |start: usize, count: usize| {
-        Batch::table(
-            vec![input_columns.slice(start, count)],
-            BatchMetadata::default(),
-        )
-    };
-    let watermark = |index: usize| Some(EventTime::from_micros(times.value(index)));
-    let history = 4096;
-    let sample_count = 64;
-    assert_eq!(input_columns.num_rows(), history + sample_count);
-    let warm = session.push(&input, envelope(0, history)?, watermark(history - 1))?;
-    verify(&warm, &output, &expected.slice(0, history))?;
-    let mut nanos = Vec::with_capacity(sample_count);
-    for row in history..history + sample_count {
-        let batch = envelope(row, 1)?;
-        let mark = watermark(row);
-        let pushed = if verify_only {
-            session.push(&input, batch, mark)?
-        } else {
-            let start = Instant::now();
-            let pushed = session.push(&input, batch, mark)?;
-            nanos.push(start.elapsed().as_nanos());
-            pushed
-        };
-        verify(&pushed, &output, &expected.slice(row, 1))?;
-    }
+    let warm = session.push(
+        &input,
+        envelope(source, 0, HISTORY)?,
+        watermark(source, HISTORY - 1),
+    )?;
+    verify(&warm, &output, &expected.slice(0, HISTORY))?;
+    let samples = append_samples(session, &input, &output, source, expected, verify_only)?;
     assert!(session.finish()?.is_empty());
-    assert_eq!(input_columns, original);
+    Ok(samples)
+}
+
+fn execute(fixture: &Path, verify_only: bool) -> Run<()> {
+    let source = read_table(&fixture.join("inputs.arrow"))?;
+    let expected = read_table(&fixture.join("expected.arrow"))?;
+    let original = read_table(&fixture.join("inputs.arrow"))?;
+    let mut session = open_session(fixture)?;
+    let nanos = run(&mut session, &source, &expected, verify_only)?;
+    assert_eq!(source, original);
     println!(
         "{}",
-        json!({"nanoseconds":nanos, "history":history,"appends":sample_count,"all_columns_validated":true,"input_unchanged":true,"finished_empty":true})
+        json!({"nanoseconds":nanos, "history":HISTORY,"appends":APPENDS,"all_columns_validated":true,"input_unchanged":true,"finished_empty":true})
     );
     Ok(())
+}
+
+fn main() -> Run<()> {
+    let args = support::arguments()?;
+    let directory = args.first().ok_or("fixture directory required")?;
+    execute(
+        Path::new(directory),
+        args.get(1).is_some_and(|arg| arg == "--verify-only"),
+    )
 }
