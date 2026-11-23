@@ -1112,9 +1112,9 @@ mod tests {
     fn stream_column_projection_uses_sql_identifier_case() {
         let schema = Arc::new(Schema::new(vec![
             Field::new("k", DataType::Int64, false),
-            Field::new("K", DataType::Int64, false),
+            Field::new("\u{212A}", DataType::Int64, false),
         ]));
-        let projection = ColumnProjection::parse(&["K AS value".into()]).unwrap();
+        let projection = ColumnProjection::parse(&["\u{212A} AS value".into()]).unwrap();
         let (columns, _) = projection.schema(&schema).unwrap();
         assert_eq!(columns, [1]);
     }
