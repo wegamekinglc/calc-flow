@@ -54,3 +54,6 @@ See the [registration](protocol.md), [reproduction commands](reproduce.md),
 [raw per-process timings](workers.jsonl), and [build, host and statistical
 evidence](result.json). The reproduction commands recover the three
 checksum-verified source files used for the recorded timings.
+
+The public Python study uses the same product trees, Arrow fixtures and
+64-push lifecycle under ordinary GC. [Python steady-session results](../20261123-public-steady-push/README.md)
