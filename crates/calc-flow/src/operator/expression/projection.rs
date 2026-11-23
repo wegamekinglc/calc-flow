@@ -132,7 +132,7 @@ impl PreparedColumnProjection {
                 .project(
                     batch,
                     &self.indices,
-                    Arc::clone(&self.schema),
+                    &self.schema,
                     batch.metadata().clone(),
                     batch.source_cursor(),
                 )
