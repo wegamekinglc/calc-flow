@@ -763,7 +763,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::{
-        array::{Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+        array::{Array, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
         datatypes::{DataType, Field, Schema, TimeUnit},
         record_batch::RecordBatch,
     };
@@ -872,6 +872,8 @@ mod tests {
             let mut update = update.unwrap();
             let output = update.take_columns();
             let means = output[0].as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(means.len(), times.len());
+            assert_eq!(means.null_count(), 0);
             for row in 0..rows {
                 let oldest = row - (row / entities).min(19) * entities;
                 let expected = f64::from(oldest + row) / 2.0;
@@ -887,6 +889,7 @@ mod tests {
         let complete = measure(9_984);
         let partial = measure(10_000);
         eprintln!("complete {complete:?}; partial {partial:?}");
+        assert!(complete.count_total < 1_024);
         assert!(partial.count_total <= complete.count_total + 64);
     }
 

@@ -334,8 +334,9 @@ fn numeric_tick_tail_requires_the_same_entity_prefix_before_any_write() {
 
     let mut table = StateTable::with_checkpointing(false);
     let history = table.add_numeric_rows_column("mean", 2);
-    let a = entity(&mut table, b"a");
+    // The input order differs from the order in which the residents were created.
     let b = entity(&mut table, b"b");
+    let a = entity(&mut table, b"a");
     let values = Float64Array::from(vec![Some(2.0), None, Some(6.0), Some(8.0), Some(10.0)]);
     table.begin().unwrap();
     let mut means = Vec::new();
@@ -345,6 +346,18 @@ fn numeric_tick_tail_requires_the_same_entity_prefix_before_any_write() {
         means.push((value.valid_count > 0).then(|| value.mean()));
         Ok(())
     };
+    assert!(
+        !table
+            .write_numeric_full_tick(
+                history,
+                &[a, a],
+                &[a, a, a, a, a],
+                &values,
+                false,
+                &mut emit
+            )
+            .unwrap()
+    );
     assert!(
         !table
             .write_numeric_full_tick(
