@@ -174,7 +174,7 @@ async fn parallel_batch(
     output
 }
 
-fn assert_complete_bits(actual: &RecordBatch, expected: &RecordBatch) {
+pub(super) fn assert_complete_bits(actual: &RecordBatch, expected: &RecordBatch) {
     assert_eq!(actual.schema(), expected.schema());
     assert_eq!(actual.num_rows(), expected.num_rows());
     for (actual, expected) in actual.columns().iter().zip(expected.columns()) {

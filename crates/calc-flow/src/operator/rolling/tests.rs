@@ -1082,7 +1082,7 @@ fn ewma_layout_two_restores_without_retained_history() {
     let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
     let (actual, state, _) = build_typed_stream_output(
         &continuation,
-        &restored.histories,
+        Some(&restored.histories),
         None,
         &compiled,
         &output_schema,
@@ -1154,7 +1154,7 @@ fn layout_one_history_bootstraps_the_typed_transition() {
     let output_schema = Arc::new(output_schema(&kernel_schema(), &compiled.outputs));
     let (actual, state, _) = build_typed_stream_output(
         &continuation,
-        &restored.histories,
+        Some(&restored.histories),
         None,
         &compiled,
         &output_schema,
@@ -4935,7 +4935,7 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
 
         let (first, _, touched) = build_typed_stream_output(
             &rows[..2],
-            &RollingHistories::default(),
+            Some(&RollingHistories::default()),
             None,
             &compiled,
             &output_schema,
@@ -4982,7 +4982,7 @@ fn typed_exponential_means_resume_from_columnar_checkpoints() {
         );
         let (second, _, _) = build_typed_stream_output(
             &rows[2..],
-            &restored.histories,
+            Some(&restored.histories),
             None,
             &compiled,
             &output_schema,

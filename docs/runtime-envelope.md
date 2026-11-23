@@ -1003,6 +1003,15 @@ retains existing queue capacity rather than adopting the smaller capacity of a
 Duration clone; logical state charges continue to reflect the actual retained
 representation.
 
+A fresh checkpoint-disabled job that first commits ordered output can defer
+history. In that mode, multiple floating-point numeric Duration groups on one
+input column share one timestamped value queue per entity. Jobs that first
+commit through the general unordered path keep their existing representation. Each group retains its own accumulator and open-lower-bound cursor.
+The row budget counts each physical sample once. The byte budget includes the
+queue capacity and all cursors. Lane scheduling includes the length of each
+logical window. Checkpoint-enabled and restored plans use their existing
+durable history and state layout.
+
 Ordered typed plans can assign whole entities to owned CPU lanes when every
 group supports the same independent owned transition and every output is
 Float64. This includes Rows, Duration and mixed windows, multiple groups and

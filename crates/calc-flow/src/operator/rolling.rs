@@ -1659,6 +1659,14 @@ struct RollingStreamState {
     charge: StateCharge,
 }
 
+impl RollingStreamState {
+    fn committed_kernel(&self) -> Option<&RollingKernelState> {
+        self.typed_kernel_state
+            .as_deref()
+            .filter(|kernel| self.deferred_history || !kernel.unused_shared_durations())
+    }
+}
+
 /// Bounded inline manifest contribution of one rolling checkpoint (SCE-00
 /// D11); retained rows never appear inline, only in segments.
 #[derive(Serialize, Deserialize)]
@@ -2300,10 +2308,13 @@ impl RollingOperator {
         let output_schema = self.output_ports[0]
             .schema()
             .expect("rolling output always has an exact schema");
+        let kernel = self.state.committed_kernel();
+        let share_durations =
+            self.state.deferred_history && kernel.is_some_and(RollingKernelState::shares_durations);
         let typed = build_typed_stream_output(
             &rows,
-            &self.state.histories,
-            self.state.typed_kernel_state.as_deref(),
+            (!share_durations).then_some(&self.state.histories),
+            kernel,
             &self.compiled,
             output_schema,
             context.operator_id(),

@@ -15,11 +15,11 @@ use super::{
     Array, ArrayRef, DataType, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, Float64Array,
     Float64Builder, KernelSelection, OutputStorage, PreparedTypedFill, RecordBatch,
     RollingKernelExecution, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
-    RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate, TimestampMicrosecondArray,
-    TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind, TypedFrame, TypedGroupInput,
-    TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState, append_numeric_float64,
-    internal_error, operator_error, read_typed_float, typed_output_mismatch, valid_float64,
-    with_float64_builder,
+    RollingWork, RollingWorkBatch, Statistic, StreamKernelUpdate, TimedSample,
+    TimestampMicrosecondArray, TypedEntityState, TypedFloatReadout, TypedFloatReadoutKind,
+    TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
+    TypedWindowState, append_numeric_float64, internal_error, operator_error, read_typed_float,
+    typed_output_mismatch, valid_float64, with_float64_builder,
 };
 use crate::runtime::streaming::morsel_pool::MorselLease;
 use crate::{CalcFlowError, Result};
@@ -834,7 +834,10 @@ fn parallel_frame(actual: TypedFrame, expected: TypedFrame, retained: usize) -> 
 }
 
 // Scheduling weight is a work heuristic, not a bound on profile-specific refolds.
-fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<(Vec<usize>, usize)> {
+pub(super) fn entity_work_weights(
+    fill: &PreparedTypedFill,
+    outputs: usize,
+) -> Option<(Vec<usize>, usize)> {
     if fill.stream.state.states.len() != fill.stream.entity_rows.counts.len() {
         return None;
     }
@@ -845,9 +848,16 @@ fn entity_work_weights(fill: &PreparedTypedFill, outputs: usize) -> Option<(Vec<
         .zip(&fill.stream.entity_rows.counts)
         .map(|(entity, &rows)| {
             let steps = entity.groups.len().checked_add(outputs)?;
-            let retained = entity.groups.iter().try_fold(0_usize, |work, state| {
-                work.checked_add(retained_group_work(state)?)
-            })?;
+            let duration_work = entity
+                .shared_duration
+                .as_ref()
+                .map_or(Some(0), |tape| tape.logical_work())?;
+            let retained = entity
+                .groups
+                .iter()
+                .try_fold(duration_work, |work, state| {
+                    work.checked_add(retained_group_work(state)?)
+                })?;
             let shared = entity
                 .shared_rows
                 .as_ref()
@@ -1427,6 +1437,16 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
                 self.input.nan_as_value,
             ));
         }
+        let duration_sample = entity.shared_duration.as_ref().map(|_| {
+            let TypedGroupInput::Single(values) = self.column(0) else {
+                unreachable!("shared Duration plans use one numeric column");
+            };
+            let index = row.original_row as usize;
+            TimedSample {
+                event_time: self.input.event_times.value(index),
+                value: valid_float64(values, index, self.input.nan_as_value),
+            }
+        });
         for ordinal in 0..self.group_count.min(entity.groups.len()) {
             let column = self.column(ordinal);
             check_cancelled(self.cancellation, progress)?;
@@ -1438,7 +1458,7 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
             progress.active_site = Some(site);
             #[cfg(test)]
             self.observe(NumericTestPoint::BeforeGroup(site));
-            self.update_group_state(entity, column, site)
+            self.update_group_state(entity, column, site, duration_sample)
                 .map_err(|error| NumericLaneStop::Ordinary(TaggedNumericError { site, error }))?;
             #[cfg(test)]
             self.observe(NumericTestPoint::AfterGroup(site));
@@ -1446,6 +1466,9 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
         }
         if entity.shared_rows.is_some() {
             entity.trim_shared_rows();
+        }
+        if let (Some(samples), Some(sample)) = (&mut entity.shared_duration, duration_sample) {
+            samples.commit(sample, |_| {});
         }
         Ok(())
     }
@@ -1455,7 +1478,16 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
         entity: &mut TypedEntityState,
         column: &TypedGroupInput,
         site: NumericSite,
+        duration_sample: Option<TimedSample<f64>>,
     ) -> Result<()> {
+        if let (Some(samples), Some(sample)) = (&mut entity.shared_duration, duration_sample) {
+            return samples.advance(
+                &mut entity.groups[site.ordinal],
+                site.ordinal,
+                sample,
+                &self.input.node_id,
+            );
+        }
         if entity.shared_rows.is_some() {
             let TypedGroupInput::Single(values) = self.column(0) else {
                 unreachable!("shared lane rows have Single inputs");
