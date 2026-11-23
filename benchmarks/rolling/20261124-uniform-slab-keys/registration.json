@@ -1,0 +1,29 @@
+{
+  "case": {
+    "backend": "calc-flow-stream",
+    "entities": 1,
+    "family": "warm",
+    "history_rows": 1000000,
+    "id": "warm/1000000/64000/sma20",
+    "rows": 64000,
+    "scenario": "sma20",
+    "scope": "warm-enqueue-to-arrow"
+  },
+  "job_seconds": 480,
+  "pairs_per_round": 10,
+  "protocol": "21043fb69ac50b721a4d4f497bd0ec454b4fa05e7501e5957a55da63a7b2a4b8",
+  "refs": {
+    "baseline": {
+      "artifact": 14874168836,
+      "digest": "sha256:6c8f4a24c7e2477fa49dc6d8b2b8b1c1a4e10814b2f03300832f9f7e3280bdc8",
+      "sha": "db584afd7f7d845df532774acc960672f9645647"
+    },
+    "candidate": {
+      "artifact": 14873419826,
+      "digest": "sha256:043ed0511bac842abcdc3c79f16d0cc1182649b6f81e4f5943b9f2867ad5a4c9",
+      "sha": "0e027db3eefb813832b6263fa63d8adfd8dcea5e"
+    }
+  },
+  "rounds": 2,
+  "workflow_sha": "35a5045dca9896156d8045970ebaa12f79208eb8"
+}

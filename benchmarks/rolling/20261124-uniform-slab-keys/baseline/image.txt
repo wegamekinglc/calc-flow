@@ -1,0 +1,2 @@
+ImageOS=ubuntu26
+ImageVersion=20261116.88.1

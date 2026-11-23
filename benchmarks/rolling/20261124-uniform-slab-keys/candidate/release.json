@@ -1,0 +1,27 @@
+{
+  "contract": "benchmark-release-v1",
+  "source": "/home/runner/work/calc-flow/calc-flow/target/source",
+  "git_sha": "0e027db3eefb813832b6263fa63d8adfd8dcea5e",
+  "git_clean": true,
+  "source_sha256": "da407be1779bc269cd36984f8edda0779666557e20cc3906afb63ed3661dad3a",
+  "cargo_lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+  "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+  "wheel_sha256": "ab36d49ed5fa1b5e488b27ad05c2ca9ab78b6e5d1af67ea6dff5aed1f83dc968",
+  "native_sha256": "4c0f85e509caae70a59b3beacd365686d865bd91943c638fe4edd2c93f179d91",
+  "build_profile": "release",
+  "command": [
+    "python",
+    "-m",
+    "maturin",
+    "build",
+    "--release",
+    "--locked",
+    "--features",
+    "pyo3/abi3-py313",
+    "--out",
+    "/home/runner/work/calc-flow/calc-flow/target/release"
+  ],
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+  "python": "3.13.18",
+  "python_executable": "/home/runner/work/calc-flow/calc-flow/target/benchmark-venv/bin/python"
+}
