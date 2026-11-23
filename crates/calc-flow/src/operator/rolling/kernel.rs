@@ -599,33 +599,28 @@ impl StreamKernelUpdate {
         std::mem::take(&mut self.execution.columns)
     }
 
-    pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<RecurrenceSeed>>> {
-        if let Some(slab) = &self.slab {
-            return slab.recurrence_seeds();
-        }
-        if let Some(in_place) = &self.in_place {
-            return in_place.recurrence_seeds();
-        }
-        self.execution
-            .state
-            .states
-            .iter()
-            .map(|entity| {
-                entity
-                    .groups
-                    .iter()
-                    .map(|group| match group {
-                        TypedWindowState::Ewma(state) if state.valid_count > 0 => {
-                            Some(RecurrenceSeed::Ewma(state.valid_count, state.value))
-                        }
-                        TypedWindowState::Cumulative(state) => {
-                            Some(RecurrenceSeed::Cumulative(state.accumulator.clone()))
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .collect()
+    /// Yields only recurrences that a retained row tail cannot reconstruct.
+    pub(super) fn recurrence_seeds(
+        &self,
+        entity: usize,
+    ) -> impl Iterator<Item = (usize, RecurrenceSeed)> + '_ {
+        let groups: &[TypedWindowState] = if self.slab.is_some() || self.in_place.is_some() {
+            &[]
+        } else {
+            &self.execution.state.states[entity].groups
+        };
+        groups.iter().enumerate().filter_map(|(index, group)| {
+            let seed = match group {
+                TypedWindowState::Ewma(state) if state.valid_count > 0 => {
+                    RecurrenceSeed::Ewma(state.valid_count, state.value)
+                }
+                TypedWindowState::Cumulative(state) => {
+                    RecurrenceSeed::Cumulative(state.accumulator.clone())
+                }
+                _ => return None,
+            };
+            Some((index, seed))
+        })
     }
 
     pub(super) fn charge_change(
@@ -6049,6 +6044,56 @@ mod tests {
                 ddof: 0,
             }],
         )
+    }
+
+    #[test]
+    fn test_duration_history_without_recurrences_needs_no_seed_allocations() {
+        let kernel = plan(
+            vec![TypedGroupPlan::Numeric {
+                input_index: 3,
+                frame: TypedFrame::Duration(60),
+                dispersion: false,
+            }],
+            vec![TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Statistic(Statistic::Sum),
+                storage: OutputStorage::Float64,
+                min_periods: 1,
+                ddof: 0,
+            }],
+        );
+        let names = (0..64)
+            .map(|i| format!("entity-{i:02}"))
+            .collect::<Vec<_>>();
+        let input = batch(
+            (0..64).map(Some).collect(),
+            (0..64).map(Some).collect(),
+            names.iter().map(String::as_str).collect(),
+            vec![Some(3.0); 64],
+        );
+        let mut state = RollingKernelState::default();
+        let mut update = kernel
+            .prepare_ordered_stream_with_history(
+                &state,
+                &input,
+                Some(&super::super::RollingHistories::default()),
+                "r",
+                None,
+            )
+            .unwrap();
+        assert!(update.in_place.is_none() && update.slab.is_none());
+        assert_eq!(update.entity_rows().counts, [1; 64]);
+        let measured = allocation_counter::measure(|| {
+            for entity in 0..update.entity_rows().counts.len() {
+                assert!(update.recurrence_seeds(entity).next().is_none());
+            }
+        });
+        let columns = update.take_columns();
+        let sums = columns[0].as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(sums.values().as_ref(), &[3.0; 64]);
+        update.rollback(&mut state);
+        assert!(state.states.is_empty());
+        assert_eq!(measured.count_total, 0, "{measured:?}");
     }
 
     #[test]

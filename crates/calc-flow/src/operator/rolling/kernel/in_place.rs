@@ -7,11 +7,11 @@ use datafusion::arrow::{
 
 use super::{
     Array, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, EntityRouting, Float64NumericState,
-    RecurrenceSeed, RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan,
-    RollingKernelState, RollingMetricsRecorder, RollingStage, RollingWork, StateCharge,
-    StreamKernelUpdate, TimedSample, TypedEntityState, TypedFrame, TypedGroupInput, TypedRowInputs,
-    TypedWindowState, WindowAccumulator, add_float64, dense_entity_ids, encode_arrays,
-    internal_error, nanos, operator_error, remove_float64, valid_float64,
+    RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan, RollingKernelState,
+    RollingMetricsRecorder, RollingStage, RollingWork, StateCharge, StreamKernelUpdate,
+    TimedSample, TypedEntityState, TypedFrame, TypedGroupInput, TypedRowInputs, TypedWindowState,
+    WindowAccumulator, add_float64, dense_entity_ids, encode_arrays, internal_error, nanos,
+    operator_error, remove_float64, valid_float64,
 };
 use crate::Result;
 
@@ -47,14 +47,6 @@ enum NumericGroupsUndo {
 }
 
 impl NumericGroupsUndo {
-    fn len(&self) -> usize {
-        match self {
-            Self::One(_) => 1,
-            Self::Many(groups) => groups.len(),
-            Self::Durations(undo) => undo.len(),
-        }
-    }
-
     fn as_mut_slice(&mut self) -> &mut [Float64NumericUndo] {
         match self {
             Self::One(group) => std::slice::from_mut(group),
@@ -345,15 +337,6 @@ impl InPlaceUpdate {
             rows,
             entity_ids,
         )))
-    }
-
-    pub(super) fn recurrence_seeds(&self) -> Vec<Vec<Option<RecurrenceSeed>>> {
-        let groups = self
-            .undo
-            .first()
-            .and_then(|entity| entity.previous.as_ref())
-            .map_or(0, |state| state.groups.len());
-        vec![vec![None; groups]; self.residents.len()]
     }
 
     pub(super) fn charge_change(
