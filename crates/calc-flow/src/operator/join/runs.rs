@@ -1277,27 +1277,34 @@ impl RunState {
         let opposite_index = opposite(incoming_side).index();
         let opposite = &self.sides[opposite_index];
         let mut cursors = Vec::<Option<WindowCursor>>::new();
+        let mut sparse_cursors = None;
         let mut bounds = Vec::with_capacity(incoming.len());
         let mut count = 0usize;
         for row in 0..incoming.len() {
             let group = incoming.groups[row];
-            if cursors.len() <= group.index() {
-                cursors.resize(group.index() + 1, None);
-            }
             let range = super::native_lookup::time_range(
                 self.bounds,
                 incoming_side == JoinSide::Left,
                 incoming.times[row],
             );
-            let found = opposite
-                .buckets
-                .get(&group)
-                .map_or(WindowBounds::EMPTY, |bucket| {
-                    ordered_window_bounds(bucket.active(), range, cursors[group.index()])
-                });
-            if opposite.buckets.contains_key(&group) {
-                cursors[group.index()] = Some(WindowCursor::new(range, found));
-            }
+            let found = if let Some(bucket) = opposite.buckets.get(&group) {
+                let cursor = if group.index() < incoming.len() {
+                    if group.index() >= cursors.len() {
+                        cursors.resize(group.index() + 1, None);
+                    }
+                    &mut cursors[group.index()]
+                } else {
+                    sparse_cursors
+                        .get_or_insert_with(hashbrown::HashMap::<_, _, ahash::RandomState>::default)
+                        .entry(group)
+                        .or_default()
+                };
+                let found = ordered_window_bounds(bucket.active(), range, *cursor);
+                *cursor = Some(WindowCursor::new(range, found));
+                found
+            } else {
+                WindowBounds::EMPTY
+            };
             count = count
                 .checked_add(found.matches())
                 .ok_or_else(|| run_error("match count overflowed"))?;
