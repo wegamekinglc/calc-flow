@@ -30,13 +30,13 @@ jobs:
         run: |
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock
-      - name: Measure and check the single 60-second duration SUM
+      - name: Measure public Duration phase boundaries on the verified wheel
         run: target/benchmark-venv/bin/python -m scripts.hosted_duration_sum measure
       - name: Preserve stopped or completed evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: hosted_duration_sum-${{ github.run_id }}-${{ github.run_attempt }}
+          name: hosted_duration_phases-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             target/hosted-evidence/*.json
             target/hosted-evidence/*.jsonl

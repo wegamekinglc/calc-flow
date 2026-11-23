@@ -14,10 +14,9 @@ from pathlib import Path
 from benchmarks.native_release_identity import verify_package_files
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.release import load_release
-from scripts.sparse_changelog_ci import _resource, guarded_measure
+from scripts.sparse_changelog_ci import _resource
 from scripts.sparse_changelog_wheels import _api, _wheel, build_proof
 from scripts.toolkit import (
-    linear_percentile,
     sha256_file,
     wheel_native_sha256,
     write_json,
@@ -35,7 +34,7 @@ def case():
 
 BUDGET = 105
 ROW_COUNT = 100000
-SIDES = ("baseline", "candidate")
+SIDES = ("candidate",)
 CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
 OUT = ROOT / "target/hosted-evidence"
 
@@ -120,13 +119,14 @@ def acquire() -> None:
         "requirements_sha256": sha256_file(ROOT / "benchmarks/requirements.lock"),
     }
     write_json(OUT / "registration.json", record, exclusive=True)
-    manifests = {side: ci_receipt(repository, record[side]) for side in SIDES}
-    if any(
-        manifests["baseline"][key] != manifests["candidate"][key]
-        for key in ("image", "image_version")
-    ):
-        raise ValueError("wheel build images differ")
-    for side, manifest in manifests.items():
+    for side in SIDES:
+        expected = record[side]
+        manifest = ci_receipt(repository, expected)
+        if (
+            manifest["artifact_digest"] != expected["artifact_digest"]
+            or manifest["image_version"] != expected["image_version"]
+        ):
+            raise ValueError("registered artifact, source or build image differ")
         directory = OUT / side
         directory.mkdir()
         wheel = _wheel(
@@ -134,7 +134,12 @@ def acquire() -> None:
             manifest["artifact_digest"],
             directory,
         )
-        write_json(directory / "release.json", download_receipt(manifest, wheel))
+        receipt = download_receipt(manifest, wheel)
+        if any(
+            expected[key] != receipt[key] for key in ("wheel_sha256", "native_sha256")
+        ):
+            raise ValueError("baseline reproduction changed the verified wheel bytes")
+        write_json(directory / "release.json", receipt)
         load_release(directory / "release.json")
 
 
@@ -152,35 +157,45 @@ async def observe() -> None:
         site = await install(release, OUT / side)
         verify_package_files(Path(release["wheel_path"]), site)
         sites[side] = (site, ROOT)
-    selected = case()
+    site, _ = sites["candidate"]
     fixture_path = OUT / "duration.arrow"
     await command(
         [sys.executable, "-m", "benchmarks.public_duration_sum", str(fixture_path)],
         cwd=ROOT,
         log=OUT / "fixture.log",
-        env=child_environment(sites["baseline"][0]),
+        env=child_environment(site),
     )
-    selected = {**selected, "fixture": str(fixture_path)}
     write_json(
         OUT / "fixture.json",
         {"sha256": verify_fixture(fixture_path), "rows": ROW_COUNT},
     )
     cpu = await _resource(OUT / "resources.jsonl", None)
     os.sched_setaffinity(0, {cpu})
-    row = await guarded_measure(OUT, cpu, selected, sites, releases)
-    write_json(OUT / "samples.json", row)
-    if row["status"] != "ok":
-        raise ValueError(f"paired measurement failed: {row.get('error')}")
-    samples = [s for r in row["evidence"] for arm in SIDES for s in r["samples"][arm]]
-    if len(samples) != 40 or any(
-        s["correctness"]["rows"] != ROW_COUNT for s in samples
+    async with asyncio.TaskGroup() as tasks:
+        collection = tasks.create_task(
+            command(
+                [
+                    sys.executable,
+                    "-m",
+                    "scripts.duration_public_phases",
+                    str(OUT / "observations.json"),
+                    str(fixture_path),
+                    str(site / "calc_flow"),
+                ],
+                cwd=ROOT,
+                log=OUT / "worker.log",
+                env=child_environment(
+                    site, source=ROOT, tokio_threads=1, polars_threads=1
+                ),
+            )
+        )
+        while not collection.done():
+            await _resource(OUT / "resources.jsonl", cpu)
+    rows = json.loads((OUT / "observations.json").read_text())["observations"]
+    if len(rows) != 7 or any(
+        r["expected_counts"] != [100000, 124] or r["cpu"] != [cpu] for r in rows
     ):
-        raise ValueError("complete output proof missing from measured pairs")
-    base = [s for r in row["baseline"] for s in r]
-    write_json(
-        OUT / "result.json",
-        {**row["result"], "base_p95": linear_percentile(base, 0.95)},
-    )
+        raise ValueError("incomplete baseline phase evidence")
 
 
 def main():

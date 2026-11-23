@@ -1,41 +1,51 @@
 {
   "candidate_pr": 660,
   "case": "one 60-second grouped rolling Float64 SUM through public TableExpr.stream",
-  "baseline_expected_checkout": "e7af54576aeaf94443560c87b7bb8c62fe1b22f5",
   "candidate_expected_checkout": "5989dde968c27ca1ea300129dc6dceed6dd371dd",
   "candidate_reviewed_head": "e2879d7267bfc2de3138e1223acd7ee0d80540c1",
   "job_seconds": 105,
   "external_provenance_seconds": 15,
   "reserved_cleanup_seconds": 45,
-  "p50_goal_ms": 12,
   "fixture_sha256": "36847ac453bd58a3a0a918d993ec726d56bbddb8c3af6e8362ca940999286ab0",
-  "rounds": 2,
-  "pairs_per_round": 10,
-  "warmups_per_arm_per_round": 1,
   "sources_sha256": {
-    "benchmarks/hosted-product-protocol.md": "464845a139314b0948d91ca0b76398c530d150d5258dde8d1e0b1adf08eb01a2",
+    "benchmarks/hosted-product-protocol.md": "09ab5585202b3c8d5c9deefd58b451c3b9766357f6f95e9e39ea760808e826cf",
     "benchmarks/public_duration_sum.py": "f17d62312ab7b2936651a0aa16659006e4705267900a40968d5bbe35c7a2c730",
-    "scripts/hosted_duration_sum.py": "bed1c65bbe4129ba7135c69900a1d7fd344e8e8d43f7cbd18a1d5b3974652333",
+    "scripts/hosted_duration_sum.py": "1a1385a34f0c71fe496adcc4c1ba8337035d83383657217dc374a606bc4f3efb",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
     "scripts/benchmark_suite/worker.py": "ace21bf5b816d16bec02d6d96781dba9f774ce024c32cccf0c8f119de4df3a1d",
     "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
     "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
     "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
     "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
-    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd"
-  },
-  "baseline": {
-    "workflow_run": 45125508389,
-    "job": 137528817633,
-    "requested_sha": "379f1c779e825a2da055cc59bf9cbcb8614692d3",
-    "checkout": "e7af54576aeaf94443560c87b7bb8c62fe1b22f5",
-    "tree": "125ffe4ce44e58810bd289077aa8cedb72e42ce6"
+    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd",
+    "scripts/duration_public_phases.py": "c910ccde50329d80a6ddd996c0ed2c9159d3c2246474135196174113f9b7b1bc",
+    ".github/workflows/benchmarks.yml": "0bc13b3e7f870ad045de2e84ddc39b1b6743e8d51f0d22857773b23b0a2ff393"
   },
   "candidate": {
-    "workflow_run": 45125023526,
-    "job": 137527353486,
-    "requested_sha": "e2879d7267bfc2de3138e1223acd7ee0d80540c1",
+    "artifact": 14796461266,
+    "artifact_digest": "sha256:f7dc63c45259ef14a6382dab9687a7df4168f8f9d88867467e0406111192e785",
+    "build_profile": "release",
     "checkout": "5989dde968c27ca1ea300129dc6dceed6dd371dd",
-    "tree": "61c8acc4f005363c1ce44ba8ffb90ad84427bbd8"
-  }
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "5989dde968c27ca1ea300129dc6dceed6dd371dd",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.88.1",
+    "job": 137527353486,
+    "native_sha256": "a800f7dd6400afc86cc912da9a091982b30077950dd286d515c5dbc4500e17de",
+    "requested_sha": "e2879d7267bfc2de3138e1223acd7ee0d80540c1",
+    "tree": "61c8acc4f005363c1ce44ba8ffb90ad84427bbd8",
+    "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+    "wheel_sha256": "b96aa68134ea402c491b07f192cbdd7035c7f827330f2501899cca66d62ac9a0",
+    "workflow_run": 45125023526
+  },
+  "observations": [
+    "warmup",
+    "plain",
+    "profile",
+    "profile",
+    "plain",
+    "plain",
+    "profile"
+  ]
 }
