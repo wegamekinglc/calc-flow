@@ -163,7 +163,7 @@ impl CallerDrivenOperator {
             sync_adapter::end_session(
                 &mut self.inputs,
                 self.progress.input_watermark(),
-                self.progress.snapshot()?,
+                self.progress.snapshot(),
             )
         }));
         match result {

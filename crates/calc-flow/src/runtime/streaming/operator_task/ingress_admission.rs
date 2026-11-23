@@ -199,7 +199,7 @@ impl Tasks {
                 Ok((name.clone(), plan))
             })
             .collect::<Result<Vec<_>>>()?;
-        let progress = progress.snapshot()?;
+        let progress = progress.snapshot();
         let stop = CancellationToken::new();
         let mut tasks = JoinSet::new();
         for (name, plan) in plans {
@@ -311,8 +311,7 @@ pub(super) fn acknowledge(
     {
         let watermark = progress
             .cached_snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.get(ingress_name))
+            .get(ingress_name)
             .and_then(IngressProgress::watermark);
         admission.acknowledge(watermark);
     }
