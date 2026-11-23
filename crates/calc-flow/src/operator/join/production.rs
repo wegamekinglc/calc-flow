@@ -107,18 +107,7 @@ impl RunCore {
     }
 
     fn seed_left(&mut self, operator: &StreamJoinOperator, batch: &Batch) -> Result<()> {
-        let mut next_row_id = self.state.next_row_id(JoinSide::Left);
-        let mut incoming = Vec::new();
-        for record in batch.table_payload()?.batches() {
-            let record = retained_left_record(operator, record)?;
-            for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
-                let rows = (record.num_rows() - start).min(MORSEL_ROWS);
-                let (chunk, next) =
-                    self.seed_morsel(operator, &record.slice(start, rows), next_row_id)?;
-                incoming.push(chunk);
-                next_row_id = next;
-            }
-        }
+        let incoming = self.left_seed_morsels(operator, batch)?;
         if incoming.is_empty() {
             return Ok(());
         }
@@ -133,6 +122,26 @@ impl RunCore {
                 .prepare_batch(JoinSide::Left, incoming, output, &mut || Ok(()))?;
         drop(prepared.commit(&mut self.state)?);
         Ok(())
+    }
+
+    fn left_seed_morsels(
+        &mut self,
+        operator: &StreamJoinOperator,
+        batch: &Batch,
+    ) -> Result<Vec<Incoming>> {
+        let mut next_row_id = self.state.next_row_id(JoinSide::Left);
+        let mut incoming = Vec::new();
+        for record in batch.table_payload()?.batches() {
+            let record = retained_left_record(operator, record)?;
+            for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
+                let rows = (record.num_rows() - start).min(MORSEL_ROWS);
+                let (chunk, next) =
+                    self.seed_morsel(operator, &record.slice(start, rows), next_row_id)?;
+                incoming.push(chunk);
+                next_row_id = next;
+            }
+        }
+        Ok(incoming)
     }
 
     fn seed_morsel(
