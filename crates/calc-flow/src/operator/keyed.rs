@@ -1721,21 +1721,30 @@ impl KeyColumn {
 
     fn array(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
         match self {
-            Self::Boolean(values) => Ok(Arc::new(BooleanArray::from_iter(
-                groups.iter().map(|group| values[group.index()]),
-            ))),
+            Self::Boolean(values) => Ok(Arc::new(
+                groups
+                    .iter()
+                    .map(|group| values[group.index()])
+                    .collect::<BooleanArray>(),
+            )),
             Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
                 self.array_signed(groups)
             }
             Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
                 self.array_unsigned(groups)
             }
-            Self::Utf8(values) => Ok(Arc::new(StringArray::from_iter(
-                groups.iter().map(|group| values[group.index()].as_deref()),
-            ))),
-            Self::LargeUtf8(values) => Ok(Arc::new(LargeStringArray::from_iter(
-                groups.iter().map(|group| values[group.index()].as_deref()),
-            ))),
+            Self::Utf8(values) => Ok(Arc::new(
+                groups
+                    .iter()
+                    .map(|group| values[group.index()].as_deref())
+                    .collect::<StringArray>(),
+            )),
+            Self::LargeUtf8(values) => Ok(Arc::new(
+                groups
+                    .iter()
+                    .map(|group| values[group.index()].as_deref())
+                    .collect::<LargeStringArray>(),
+            )),
             Self::Date32(_)
             | Self::Date64(_)
             | Self::TimestampSecond(_)
