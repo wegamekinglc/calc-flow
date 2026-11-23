@@ -6,12 +6,9 @@ use datafusion::{
     arrow::datatypes::SchemaRef,
     execution::FunctionRegistry,
     logical_expr::Volatility,
-    sql::{
-        parser::Statement as DFStatement,
-        sqlparser::ast::{
-            Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Query, Select,
-            SelectItem, SetExpr, Statement, Visit, Visitor,
-        },
+    sql::sqlparser::ast::{
+        Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Query, Select,
+        SelectItem, SetExpr, Statement, Visit, Visitor,
     },
 };
 
@@ -24,10 +21,7 @@ pub(in super::super) fn required_columns(
     if query.has_stream_aggregate() {
         return None;
     }
-    let DFStatement::Statement(statement) = query.statement() else {
-        return None;
-    };
-    let select = row_local_select(&statement)?;
+    let select = row_local_select(query.sql_statement()?)?;
     let mut visitor = Dependencies {
         input,
         columns: BTreeSet::new(),
@@ -54,7 +48,7 @@ pub(in super::super) fn required_columns(
     Some(visitor.columns.into_iter().collect())
 }
 
-fn row_local_select(statement: &Statement) -> Option<&Select> {
+pub(super) fn row_local_select(statement: &Statement) -> Option<&Select> {
     let Statement::Query(query) = statement else {
         return None;
     };

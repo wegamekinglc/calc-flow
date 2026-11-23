@@ -320,3 +320,112 @@ pub(in crate::pipeline) async fn execution_and_restore() {
         continuation(&[&["42 AS constant_value"]], None, v1).await;
     }
 }
+
+async fn projected_prices(select: &str, filter: Option<&str>) -> RecordBatch {
+    use datafusion::arrow::array::{Float64Array, StringArray, TimestampMicrosecondArray};
+    let graph = hot_graph_with_filter(&["quote__sequence AS sequence", select], false, filter);
+    let mut plan = graph
+        .compile_stream(
+            &UdfRegistry::new().snapshot(),
+            &StreamRequirements::default(),
+        )
+        .unwrap();
+    let job = StreamJobContext::new(
+        1,
+        &plan.fingerprint,
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let operator = join(&mut plan);
+    operator.enable_native_checkpoint().unwrap();
+    let make = |side: usize, columns| {
+        let schema = Arc::clone(operator.input_ports()[side].schema().unwrap());
+        Batch::table(
+            vec![RecordBatch::try_new(schema, columns).unwrap()],
+            crate::BatchMetadata::default(),
+        )
+        .unwrap()
+    };
+    let right = make(
+        1,
+        vec![
+            Arc::new(StringArray::from(vec!["A"])),
+            Arc::new(Float64Array::from(vec![2.0])),
+            Arc::new(UInt64Array::from(vec![0])),
+            Arc::new(TimestampMicrosecondArray::from(vec![0]).with_timezone("UTC")),
+        ],
+    );
+    let left = make(
+        0,
+        vec![
+            Arc::new(TimestampMicrosecondArray::from(vec![0, 0]).with_timezone("UTC")),
+            Arc::new(UInt64Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["A", "A"])),
+            Arc::new(Float64Array::from(vec![5.0, 12.0])),
+        ],
+    );
+    assert!(process(operator, right, "right", &job).await.is_empty());
+    let joined = process(operator, left, "left", &job).await;
+    let node = plan
+        .nodes
+        .iter_mut()
+        .find(|node| node.node_id == "result")
+        .unwrap();
+    let mut out = EdgeCollector::new(node.output_ports.values().cloned().collect());
+    for batch in joined {
+        node.operator
+            .process_data(
+                "input",
+                batch,
+                &StreamOperatorContext::new(&job, "result", None),
+                &mut out,
+            )
+            .await
+            .unwrap();
+    }
+    let outputs = out.drain("output");
+    let records = outputs
+        .iter()
+        .flat_map(|event| event.as_data().unwrap().table_payload().unwrap().batches())
+        .collect::<Vec<_>>();
+    datafusion::arrow::compute::concat_batches(&records[0].schema(), records.iter().copied())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn fused_join_preserves_the_filter_when_delivering_rows() {
+    use datafusion::arrow::array::Float64Array;
+    let result = projected_prices(
+        "quote__price * dimension__factor AS value",
+        Some("quote__price > 10"),
+    )
+    .await;
+    assert_eq!(result.num_rows(), 1);
+    assert_eq!(
+        result
+            .column(0)
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap()
+            .value(0),
+        2
+    );
+    assert_eq!(
+        result
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .value(0)
+            .to_bits(),
+        24.0_f64.to_bits()
+    );
+}
+
+#[tokio::test]
+async fn fused_join_retains_the_exact_quoted_output_alias() {
+    let result = projected_prices(r#"(quote__price * dimension__factor) AS "Va lue""#, None).await;
+    assert_eq!(result.num_rows(), 2);
+    assert_eq!(result.schema().field(1).name(), "Va lue");
+}

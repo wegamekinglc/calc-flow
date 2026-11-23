@@ -42,6 +42,16 @@ pub(super) fn push_output_projections(
     Ok(())
 }
 
+fn output_edges<'a>(
+    builder: &'a PipelineBuilder,
+    node_id: &'a str,
+) -> impl Iterator<Item = &'a crate::Edge> {
+    builder
+        .edges
+        .iter()
+        .filter(move |edge| edge.source.node_id == node_id && edge.source.port == "output")
+}
+
 fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
     let projections = builder
         .nodes
@@ -53,13 +63,9 @@ fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
             if !join.hot_projection_supported() {
                 return None;
             }
-            let mut edges = builder.edges.iter().filter(|edge| {
-                edge.source.node_id == *node_id
-                    && edge.source.port == "output"
-                    && edge.target.port == "input"
-            });
+            let mut edges = output_edges(builder, node_id);
             let edge = edges.next()?;
-            if edges.next().is_some() {
+            if edge.target.port != "input" || edges.next().is_some() {
                 return None;
             }
             let NodeOperator::Expression(expression) =
@@ -69,6 +75,12 @@ fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
             };
             let projection = hot_projection(join, expression)?;
             let schema = hot_projection_schema(join, projection)?;
+            if expression.output_ports()[0]
+                .schema()
+                .is_some_and(|declared| declared != &schema)
+            {
+                return None;
+            }
             Some(FusedProjection {
                 node_id: node_id.clone(),
                 consumer: edge.target.node_id.clone(),
@@ -100,18 +112,6 @@ fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
     Ok(())
 }
 
-fn normalized(select: &str) -> String {
-    select
-        .chars()
-        .filter(|character| !character.is_whitespace() && !matches!(character, '"' | '(' | ')'))
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn matches_projection(select: &str, expression: &str) -> bool {
-    normalized(select) == normalized(expression)
-}
-
 fn hot_projection(
     join: &StreamJoinOperator,
     expression: &ExpressionOperator,
@@ -127,19 +127,17 @@ fn hot_equi_projection(
     join: &StreamJoinOperator,
     expression: &ExpressionOperator,
 ) -> Option<HotProjection> {
-    let select = expression.stream_select();
-    if select.len() != 2 || join.spec().bounds().after_micros() != 0 {
+    if join.spec().bounds().after_micros() != 0 {
         return None;
     }
     let left_sequence = format!("{}__sequence", join.spec().left_prefix());
     let left_price = format!("{}__price", join.spec().left_prefix());
     let right_price = format!("{}__factor", join.spec().right_prefix());
-    if !matches_projection(&select[0], &format!("{left_sequence} AS sequence"))
-        || !matches_projection(
-            &select[1],
-            &format!("{left_price} * {right_price} AS value"),
-        )
-    {
+    if !expression.matches_stream_product(
+        &[(&left_sequence, "sequence")],
+        &left_price,
+        &right_price,
+    ) {
         return None;
     }
     let schema = join.output_ports()[0].schema()?;
@@ -155,23 +153,21 @@ fn hot_band_projection(
     join: &StreamJoinOperator,
     expression: &ExpressionOperator,
 ) -> Option<HotProjection> {
-    let select = expression.stream_select();
-    if select.len() != 3
-        || join.spec().bounds().before_micros() != join.spec().bounds().after_micros()
-    {
+    if join.spec().bounds().before_micros() != join.spec().bounds().after_micros() {
         return None;
     }
     let left_sequence = format!("{}__sequence", join.spec().left_prefix());
     let right_sequence = format!("{}__sequence", join.spec().right_prefix());
     let left_price = format!("{}__price", join.spec().left_prefix());
     let right_price = format!("{}__price", join.spec().right_prefix());
-    if !matches_projection(&select[0], &format!("{left_sequence} AS sequence"))
-        || !matches_projection(&select[1], &format!("{right_sequence} AS right_sequence"))
-        || !matches_projection(
-            &select[2],
-            &format!("{left_price} * {right_price} AS value"),
-        )
-    {
+    if !expression.matches_stream_product(
+        &[
+            (&left_sequence, "sequence"),
+            (&right_sequence, "right_sequence"),
+        ],
+        &left_price,
+        &right_price,
+    ) {
         return None;
     }
     let schema = join.output_ports()[0].schema()?;
@@ -218,10 +214,7 @@ fn output_projection(
     allow_join: bool,
 ) -> Option<OutputProjection> {
     let (schema, expressions) = projection_schema(operator, allow_join)?;
-    let consumers = builder
-        .edges
-        .iter()
-        .filter(|edge| edge.source.node_id == node_id && edge.source.port == "output")
+    let consumers = output_edges(builder, node_id)
         .map(|edge| projection_consumer(builder, edge, schema, expressions))
         .collect::<Option<Vec<_>>>()?;
     // No consumers means the full producer port is an external graph output.
