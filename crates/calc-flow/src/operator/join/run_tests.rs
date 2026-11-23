@@ -217,10 +217,10 @@ fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
             )
             .unwrap()
     };
-    let stale = prepare(&mut state, 0);
+    let earlier = prepare(&mut state, 0);
     let newer = prepare(&mut state, 1);
     newer.commit(&mut state).unwrap();
-    assert!(stale.commit(&mut state).is_err());
+    assert!(earlier.commit(&mut state).is_err());
     assert_eq!(state.next_row_id(JoinSide::Right), 2);
     assert_eq!(state.next_output_sequence(), 0);
 }
