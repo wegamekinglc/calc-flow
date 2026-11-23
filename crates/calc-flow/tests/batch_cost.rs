@@ -4,7 +4,10 @@ use std::{any::Any, sync::Arc};
 
 use calc_flow::{Batch, BatchMetadata, ExternalPayload};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Int64Array, ListArray, StringArray},
+    array::{
+        Array, ArrayRef, Decimal128Array, Int64Array, ListArray, StringArray,
+        TimestampNanosecondArray, UInt16Array,
+    },
     buffer::{OffsetBuffer, ScalarBuffer},
     datatypes::{DataType, Field, Int64Type, Schema},
     record_batch::RecordBatch,
@@ -94,6 +97,47 @@ fn table_batch_estimates_zero_rows_as_zero_bytes() {
         assert_eq!(mixed.num_rows(), record.num_rows());
         assert_eq!(mixed.estimated_bytes().unwrap(), expected);
     }
+}
+
+#[test]
+fn primitive_slice_cost_only_allocates_for_an_ambiguous_validity_bitmap() {
+    let quantities = (0..20_u16)
+        .map(|i| (i != 9).then_some(i))
+        .collect::<UInt16Array>();
+    let times = TimestampNanosecondArray::from_iter_values(0..20).with_timezone("UTC");
+    let prices = Decimal128Array::from_iter_values(0..20)
+        .with_precision_and_scale(12, 2)
+        .unwrap();
+    let record = RecordBatch::try_from_iter([
+        ("quantity", Arc::new(quantities) as ArrayRef),
+        ("time", Arc::new(times) as ArrayRef),
+        ("price", Arc::new(prices) as ArrayRef),
+    ])
+    .unwrap();
+    let records = vec![record.slice(1, 9), record.slice(10, 8), record.slice(5, 0)];
+    assert_eq!(records[0].column(0).null_count(), 1);
+    assert_eq!(records[1].column(0).null_count(), 0);
+    let all_valid = records[1].column(0);
+    assert!(all_valid.nulls().is_some());
+    // Slicing before or after exporting ArrayData can retain or discard the bitmap.
+    let retained = record.column(0).to_data().slice(10, 8);
+    assert_eq!(retained.get_slice_memory_size().unwrap(), 17);
+    let fallback = allocation_counter::measure(|| {
+        assert_eq!(all_valid.to_data().get_slice_memory_size().unwrap(), 16);
+    });
+    let expected = records
+        .iter()
+        .filter(|r| r.num_rows() > 0)
+        .flat_map(RecordBatch::columns)
+        .map(|column| column.to_data().get_slice_memory_size().unwrap())
+        .sum::<usize>();
+    assert_eq!(expected, 17 * (2 + 8 + 16) + 2);
+    let batch = Batch::table(records, BatchMetadata::default()).unwrap();
+    let measured =
+        allocation_counter::measure(|| assert_eq!(batch.estimated_bytes().unwrap(), expected));
+    eprintln!("primitive slice charge {measured:?}; all-valid Arrow fallback {fallback:?}");
+    assert_eq!(measured.count_total, fallback.count_total, "{measured:?}");
+    assert_eq!(measured.bytes_total, fallback.bytes_total, "{measured:?}");
 }
 
 #[test]
