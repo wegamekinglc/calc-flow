@@ -20,16 +20,21 @@ fn record(array: ArrayRef) -> RecordBatch {
 
 fn assert_index_allocation(source: &RecordBatch, offset: usize, bytes_per_index: usize) {
     let count = 32_768;
-    let mut gather = None;
-    let allocations = allocation_counter::measure(|| {
-        gather = SideGather::new((0..count).map(|_| PayloadRef::Record(source, offset)));
-    });
-    assert!(gather.is_some());
-    assert!(
-        allocations.bytes_total <= (count * bytes_per_index + 256) as u64,
-        "index buffers must be built directly at the selected width: {allocations:?}"
-    );
-    assert_eq!(gather.unwrap().selected_column(0).unwrap().len(), count);
+    for repeated in [false, true] {
+        let mut gather = None;
+        let allocations = allocation_counter::measure(|| {
+            gather = if repeated {
+                SideGather::repeated(source.columns(), std::iter::once((offset, count)), count)
+            } else {
+                SideGather::new((0..count).map(|_| PayloadRef::Record(source, offset)))
+            };
+        });
+        assert!(
+            allocations.bytes_total <= (count * bytes_per_index + 256) as u64,
+            "index buffers must be built directly at the selected width: {allocations:?}"
+        );
+        assert_eq!(gather.unwrap().selected_column(0).unwrap().len(), count);
+    }
 }
 
 #[test]

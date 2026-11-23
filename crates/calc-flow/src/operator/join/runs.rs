@@ -48,7 +48,6 @@ pub(super) fn merge_visits() -> usize {
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static GATHER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static RUN_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -1603,23 +1602,20 @@ impl Prepared {
         let left_width = output.left_width;
         let count = range.len();
         let windows = self.probe.windows(range);
-        let incoming_rows = windows.clone().flat_map(|(position, window)| {
-            std::iter::repeat_n(self.incoming.payload_at(position), window.len())
-        });
-        #[cfg(test)]
-        let incoming_rows = incoming_rows.inspect(|_| GATHER_VISITS.set(GATHER_VISITS.get() + 1));
-        let incoming = output_gather::SideGather::with_capacity(incoming_rows, count);
+        let incoming = output_gather::SideGather::repeated(
+            self.incoming.payload.columns(),
+            windows
+                .clone()
+                .map(|(position, window)| (self.incoming.physical[position], window.len())),
+            count,
+        );
         let side = payloads.side;
         let opposite = output_gather::SideGather::with_capacity(
             windows
                 .flat_map(|(position, window)| {
                     side.buckets[&self.incoming.groups[position]].active()[window].iter()
                 })
-                .map(|entry| {
-                    #[cfg(test)]
-                    GATHER_VISITS.set(GATHER_VISITS.get() + 1);
-                    payloads.payload(entry.locator)
-                }),
+                .map(|entry| payloads.payload(entry.locator)),
             count,
         );
         let (left, right) = if self.incoming_is_left {
