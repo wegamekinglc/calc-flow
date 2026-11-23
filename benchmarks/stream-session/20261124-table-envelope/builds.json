@@ -1,0 +1,32 @@
+{
+  "builds": {
+    "baseline": {
+      "revision": "7725c3e008f69e6838ed6a2ae6fb9eb6d330611b",
+      "tree": "43bed40a38cae697f95dfad1397a506beb99612b",
+      "vendor_tree": "54d9ca07618dde0b3060b7f36f7984638e8fc618",
+      "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+      "worker_source_sha256": "4ec836433948d930fc5c56ab2b07e14e0acdd33a6c96908d151a5f5fdd0cea22",
+      "binary_sha256": "4e40631350183a0bfd46b5fc60273d608bb69fb70f4242d150cc8b985b561afd",
+      "build_finish": "Finished `release` profile [optimized] target(s) in 11m 24s"
+    },
+    "candidate": {
+      "revision": "c061c29e91ce71e106fd418828c15407da787773",
+      "tree": "68738c394dc76571f7cafd886c90a409ea616ab1",
+      "vendor_tree": "54d9ca07618dde0b3060b7f36f7984638e8fc618",
+      "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+      "worker_source_sha256": "4ec836433948d930fc5c56ab2b07e14e0acdd33a6c96908d151a5f5fdd0cea22",
+      "binary_sha256": "79f7e3aa622ff382c24b31b9ca70a80e532045221f6acd0366f506df98bb3d71",
+      "build_finish": "Finished `release` profile [optimized] target(s) in 12m 54s"
+    }
+  },
+  "driver": {
+    "worker.rs": "4ec836433948d930fc5c56ab2b07e14e0acdd33a6c96908d151a5f5fdd0cea22",
+    "fixture.py": "21cc10f865c38186ee3e8281a0e1bea17d69a41d04e0873693a355f588b9ef46",
+    "collect.py": "7d3924851c44b854649e70f502d1d6dbef7d480d518109ea41e3f593e91671a0"
+  },
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+  "build_profile": "cargo build --locked --release -p calc-flow --example native_session_sample",
+  "build_jobs": 2,
+  "incremental": false,
+  "timestamp": "2026-11-23T18:10:38.230013+00:00"
+}

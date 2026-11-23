@@ -1,0 +1,10 @@
+{
+  "binary_sha256": {
+    "baseline": "4e40631350183a0bfd46b5fc60273d608bb69fb70f4242d150cc8b985b561afd",
+    "candidate": "79f7e3aa622ff382c24b31b9ca70a80e532045221f6acd0366f506df98bb3d71"
+  },
+  "controller_elapsed_seconds": 5.089085119077936,
+  "kernel": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+  "state": "completed"
+}

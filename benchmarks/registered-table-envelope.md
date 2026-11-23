@@ -1,8 +1,6 @@
-# Public single-row session comparison
+# Public single-row session with a shared table envelope
 
-Change only the Python binding's table/array kind getter. A prepared native
-Batch's kind is checked by every public synchronous Program push. Compare
-the preceding implementation against the change on the same maintained
+Compare the Rust table batch storage change in PR #699 on the maintained
 one-entity dual-SMA fixture under ordinary GC. Each worker opens a fresh
 session, uses default edge limits and explicit watermarks, warms 4,096 rows
 and times 64 consecutive append calls with one row each. The clock starts
@@ -14,7 +12,7 @@ schema metadata, nulls, and both moving averages' spread. Check the original
 input, zero-row flush and final cleanup. Keep all worker observations.
 
 Use official Linux release wheels with the same build image, toolchain,
-profile and ABI. Require matching runtime source except for the getter and
+profile and ABI. Require matching runtime source except for the table envelope change and
 record the exact two checkout trees, source equivalences, package hashes and
 installed native-module hashes before timing. Use two rounds of ten adjacent
 alternating A/B process pairs and one excluded warmup per arm per round.

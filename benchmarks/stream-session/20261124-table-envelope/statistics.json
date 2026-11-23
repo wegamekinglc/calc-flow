@@ -1,0 +1,47 @@
+{
+  "block_median_seconds": {
+    "base_p50": 4.846e-06,
+    "change_percent": 0.7274040445728547,
+    "head_max": 5.149e-06,
+    "head_min": 4.516e-06,
+    "head_p50": 4.88125e-06,
+    "head_p95": 5.008875e-06,
+    "round_changes": [
+      -2.114608023504261,
+      1.899776576284684
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 5.536143262721116,
+        "low": -8.217160808953473,
+        "median": -2.114608023504261
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 3.8125000000000187,
+        "low": -6.4891185531153805,
+        "median": 1.899776576284684
+      }
+    ],
+    "round_min_changes": [
+      -1.3758462546407557,
+      -0.08565310492506528
+    ],
+    "rows_per_second": null,
+    "samples": 20,
+    "verdict": "inconclusive"
+  },
+  "pooled_nanoseconds": {
+    "baseline": {
+      "count": 1280,
+      "p50": 4911.0,
+      "p95": 6359.349999999999
+    },
+    "candidate": {
+      "count": 1280,
+      "p50": 4876.0,
+      "p95": 6101.0999999999985
+    }
+  }
+}
