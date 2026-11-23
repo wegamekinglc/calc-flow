@@ -38,25 +38,26 @@ _ROLLING_EXPLAIN_CASES = frozenset(
 
 
 def _reviewed_rolling_explain(name: str, blocks: dict) -> bool:
-    if name not in _ROLLING_EXPLAIN_CASES:
+    return name in _ROLLING_EXPLAIN_CASES and all(
+        _matches_rolling_source(block[name]["metadata"], expected)
+        for side, expected in _ROLLING_EXPLAIN_SOURCES.items()
+        for block in blocks[side]
+    )
+
+
+def _matches_rolling_source(metadata: dict, expected: str) -> bool:
+    try:
+        validate_identity(metadata)
+    except ValueError:
         return False
-    for side, expected in _ROLLING_EXPLAIN_SOURCES.items():
-        for block in blocks[side]:
-            metadata = block[name]["metadata"]
-            support = metadata.get("benchmark_support_sha256")
-            if (
-                metadata.get("benchmark_source_sha256") != expected
-                or metadata.get("benchmark_symbolic_support_sha256")
-                != _ROLLING_SYMBOLIC_SUPPORT
-                or not isinstance(support, str)
-                or re.fullmatch(r"[0-9a-f]{64}", support) is None
-            ):
-                return False
-            try:
-                validate_identity(metadata)
-            except ValueError:
-                return False
-    return True
+    support = metadata.get("benchmark_support_sha256")
+    return (
+        metadata.get("benchmark_source_sha256") == expected
+        and metadata.get("benchmark_symbolic_support_sha256")
+        == _ROLLING_SYMBOLIC_SUPPORT
+        and isinstance(support, str)
+        and re.fullmatch(r"[0-9a-f]{64}", support) is not None
+    )
 
 
 def _pytest_source_hashes(source: Path, name: str) -> dict:
