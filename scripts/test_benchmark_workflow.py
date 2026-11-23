@@ -236,7 +236,7 @@ class BenchmarkWorkflowTests(unittest.TestCase):
                 self.assertNotIn(module, prepare)
                 self.assertIn(module, installed)
 
-    def test_array_and_p3_guards_use_installed_dependencies(self):
+    def test_array_and_profiling_guards_use_installed_dependencies(self):
         suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
             encoding="utf-8"
         )
@@ -249,6 +249,8 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         )[1].split("      - name:", 1)[0]
         self.assertNotIn("scripts.test_native_array_benchmarks", prepare)
         self.assertNotIn("test_profile_warm_stream_p3", prepare)
+        self.assertNotIn("scripts.test_profile_checkpoint_v4", prepare)
+        self.assertIn("scripts.test_profile_checkpoint_v4", warm)
         self.assertIn("if: matrix.id == 'python-overhead'", native)
         self.assertIn("target/releases/candidate/*.whl", native)
         self.assertIn("-m unittest scripts.test_native_array_benchmarks", native)
