@@ -567,3 +567,38 @@ def test_session_returns_arrow_output_without_generic_record_dispatch(
         assert session.finish().num_rows == 0
     assert emitted["avg"].to_pylist() == [1.0]
     factory.assert_not_called()
+
+
+def test_empty_program_results_copy_declared_tables_without_physical_lookups() -> None:
+    class EmptyEmissions(dict):
+        def get(self, *args):
+            raise AssertionError("looked up an output in an empty native emission")
+
+    quotes = _quotes()
+    outputs = [("later", _signals(quotes)), ("first", quotes)]
+    program = Program("empty", mode="stream", inputs=[quotes], outputs=outputs)
+    schemas = program.collect_schema()
+    with program.session(
+        config=CONFIG, watermarks={"quotes": cf.SourceProvidedWatermarks()}
+    ) as session:
+        first = session.advance({"quotes": _at(0)})
+        second = session._result(EmptyEmissions())
+        assert list(first) == [name for name, _ in session._outputs]
+        assert first is not second
+        for name, table in second.items():
+            assert table is first[name]
+            assert table.num_rows == 0
+            assert table.schema.equals(schemas[name], check_metadata=True)
+        first.clear()
+        assert list(second) == [name for name, _ in session._outputs]
+
+        reordered = dict(reversed(session._empty.items()))
+        reordered["extra"] = second["first"]
+        manual = cf.StreamSession(
+            session._native,
+            session._input,
+            session._outputs,
+            reordered,
+            table_output=False,
+        )
+        assert list(manual._result({})) == list(second)
