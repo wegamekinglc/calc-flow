@@ -99,13 +99,11 @@ fn keys_only_snapshot(
 ) -> std::collections::BTreeMap<String, crate::StateSegment> {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut state = state(declaration, &pool);
-    admit(&mut state, 1, &record(&[(1, 5, 1, Some("old"))])).unwrap();
-    state.evict(super::Progress {
-        left_ended: true,
-        right_ended: true,
-        ..super::Progress::default()
-    });
-    assert_eq!(state.state_rows(), 0);
+    // Older v11 checkpoints retained a key dictionary even after all runs retired.
+    state
+        .restore_keys(&record(&[(1, 5, 1, Some("old"))]).project(&[0]).unwrap())
+        .unwrap();
+    state.finish_restore(1);
     state.capture(1 << 20).unwrap()
 }
 
@@ -537,6 +535,24 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
     assert_eq!(state.persistent_bytes(), 0);
     assert_eq!(pool.reserved(), 0);
     let run_frontier = state.next_run;
+    assert!(matches!(
+        state.capture(1),
+        Err(crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+            ..
+        })
+    ));
+    let segments = state.capture(1 << 20).unwrap();
+    let mut state = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &segments,
+    )
+    .unwrap();
+    assert_eq!(state.next_run, run_frontier);
+    assert_eq!(state.capture(1 << 20).unwrap(), segments);
     admit(&mut state, 0, &record(&[(2, 20, 1, Some("new"))])).unwrap();
     assert!(state.next_run > run_frontier);
     let selection = state.select(Some(21), false, 10).unwrap();

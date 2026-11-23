@@ -164,7 +164,7 @@ struct RightBucket {
 }
 
 pub(in crate::operator::asof) struct ColumnarState {
-    name: String,
+    pub(super) name: String,
     pub(super) spec: StreamAsofJoinSpec,
     pub(super) schemas: [SchemaRef; 2],
     pub(super) keys: KeyStore,
