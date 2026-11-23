@@ -2071,7 +2071,6 @@ impl StateTable {
         !self.checkpointing
             && !order.is_empty()
             && ids.len() >= order.len()
-            && ids.len().is_multiple_of(order.len())
             && values.len() >= ids.len()
     }
 
@@ -2080,7 +2079,7 @@ impl StateTable {
             .iter()
             .enumerate()
             .any(|(index, entity)| order[..index].contains(entity))
-            && ids.chunks(order.len()).all(|chunk| chunk == order)
+            && ids.chunks(order.len()).all(|tick| order.starts_with(tick))
     }
 
     fn full_tick_entities_are_valid(&self, order: &[EntityId]) -> bool {

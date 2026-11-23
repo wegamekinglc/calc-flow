@@ -327,3 +327,46 @@ fn rollback_restores_keyed_page_capacity_after_growth() {
         );
     }
 }
+
+#[test]
+fn numeric_tick_tail_requires_the_same_entity_prefix_before_any_write() {
+    use datafusion::arrow::array::Float64Array;
+
+    let mut table = StateTable::with_checkpointing(false);
+    let history = table.add_numeric_rows_column("mean", 2);
+    let a = entity(&mut table, b"a");
+    let b = entity(&mut table, b"b");
+    let values = Float64Array::from(vec![Some(2.0), None, Some(6.0), Some(8.0), Some(10.0)]);
+    table.begin().unwrap();
+    let mut means = Vec::new();
+    let mut emit = |row, numeric: &[crate::accumulate::NumericAccumulator]| {
+        assert_eq!(row, means.len());
+        let value = numeric[0];
+        means.push((value.valid_count > 0).then(|| value.mean()));
+        Ok(())
+    };
+    assert!(
+        !table
+            .write_numeric_full_tick(
+                history,
+                &[a, b],
+                &[a, b, a, b, b],
+                &values,
+                false,
+                &mut emit
+            )
+            .unwrap()
+    );
+    assert!(
+        table
+            .write_numeric_full_tick(history, &[a, b], &[a, b, a, b, a], &values, false, emit)
+            .unwrap()
+    );
+    assert_eq!(
+        means,
+        vec![Some(2.0), None, Some(4.0), Some(8.0), Some(8.0)]
+    );
+    table.rollback().unwrap();
+    assert!(table.f64_history(history, a).unwrap().is_empty());
+    assert!(table.f64_history(history, b).unwrap().is_empty());
+}
