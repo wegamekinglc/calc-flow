@@ -9,7 +9,7 @@ import subprocess
 from pathlib import Path
 
 from benchmarks.native_release_identity import verify_package_files
-from scripts.benchmark_suite.catalog import engine_cases
+from scripts.benchmark_suite.catalog import warm_cases
 from scripts.benchmark_suite.process import ROOT, command, install
 from scripts.benchmark_suite.release import load_release
 from scripts.sparse_changelog_ci import _resource, guarded_measure
@@ -18,11 +18,11 @@ from scripts.toolkit import sha256_file, write_json
 SIDES = ("baseline", "candidate")
 CASE = next(
     c
-    for c in engine_cases(10_000)
-    if c["id"] == "engines/10000/calc-flow-stream-1t/sma20"
+    for c in warm_cases(1_000_000)
+    if c["id"] == "warm/1000000/64000/sma20"
 )
-OUT = ROOT / "target/partial-ticks"
-PROTOCOL = ROOT / "benchmarks/rolling/20261124-partial-ticks/protocol.md"
+OUT = ROOT / "target/uniform-slab-keys"
+PROTOCOL = ROOT / "benchmarks/rolling/20261124-uniform-slab-keys/protocol.md"
 
 
 def register():

@@ -102,7 +102,7 @@ jobs:
 
   sparse-changelog:
     needs: build
-    name: Public partial-tick single-thread SMA20
+    name: Public warm single-entity SMA20
     if: inputs.mode == 'sparse-changelog'
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -119,36 +119,36 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: benchmark-release-baseline-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/partial-ticks/baseline
+          path: target/uniform-slab-keys/baseline
           digest-mismatch: error
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: benchmark-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/partial-ticks/candidate
+          path: target/uniform-slab-keys/candidate
           digest-mismatch: error
       - name: Install locked benchmark dependencies
         run: |
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock
-      - name: Measure fresh stream through retained Arrow and cleanup
+      - name: Measure warm enqueue to Arrow delivery
         timeout-minutes: 3
         env:
           BASELINE_SHA: ${{ inputs.baseline_sha }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
           GH_TOKEN: ${{ github.token }}
-        run: target/benchmark-venv/bin/python -m scripts.measure_partial_ticks measure
+        run: target/benchmark-venv/bin/python -m scripts.measure_uniform_slab measure
       - name: Preserve provenance, resource checks, and complete or partial samples
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: partial-ticks-${{ github.run_id }}-${{ github.run_attempt }}
+          name: uniform-slab-keys-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            target/partial-ticks/*.json
-            target/partial-ticks/resources.jsonl
-            target/partial-ticks/*/release.json
-            target/partial-ticks/*/install.log
-            target/partial-ticks/*/compiler.log
-            target/partial-ticks/*/*.txt
-            target/partial-ticks/measurement/
+            target/uniform-slab-keys/*.json
+            target/uniform-slab-keys/resources.jsonl
+            target/uniform-slab-keys/*/release.json
+            target/uniform-slab-keys/*/install.log
+            target/uniform-slab-keys/*/compiler.log
+            target/uniform-slab-keys/*/*.txt
+            target/uniform-slab-keys/measurement/
           if-no-files-found: error
           retention-days: 90
