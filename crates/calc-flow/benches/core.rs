@@ -1282,15 +1282,28 @@ mod rolling_history {
     }
 
     fn verify_warm_rows_serial(metrics: &serde_json::Value) {
-        assert!(total(counts(metrics, "numeric_serial_calls")) > 0);
-        assert_eq!(total(counts(metrics, "numeric_general_calls")), 0);
-        assert_eq!(total(counts(metrics, "numeric_parallel_calls")), 0);
-        for callback in ["data", "watermark", "end"] {
-            for (name, count) in metrics[callback].as_object().unwrap() {
-                if name.starts_with("parallel_fallback_") {
-                    assert_eq!(count.as_u64(), Some(0), "{callback}.{name}");
-                }
-            }
+        let rows = counts(metrics, "numeric_rows");
+        let serial = counts(metrics, "numeric_serial_calls");
+        assert!(
+            rows.into_iter()
+                .zip(serial)
+                .all(|(rows, calls)| rows == 0 || calls > 0)
+        );
+        for name in [
+            "numeric_general_calls",
+            "numeric_parallel_calls",
+            "parallel_fallback_no_work_client",
+            "parallel_fallback_small_batch",
+            "parallel_fallback_unsupported_plan",
+            "parallel_fallback_cpu_limit",
+            "parallel_fallback_prepared_ineligible",
+            "parallel_fallback_lane_partition_rejected",
+            "parallel_fallback_owner_busy",
+            "parallel_fallback_owner_already_used",
+            "parallel_fallback_generation_exhausted",
+            "parallel_fallback_scratch_unrepresentable",
+        ] {
+            assert_eq!(counts(metrics, name), [0; 3], "{name}");
         }
     }
 

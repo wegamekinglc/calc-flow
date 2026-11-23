@@ -4,21 +4,21 @@
     {
       "target": "core",
       "baseline_sha256": "8465fa7b62e4d66c34224967a5d479257218c94f11594234c42d5ea8d57e11e5",
-      "candidate_sha256": "dd4e5ed606f9a148501c3e76099118bcabe88445f8c165a19fc9c0237c6a1fbc",
+      "candidate_sha256": "f1188db4f665772afc6a6678d53c4d2ea7e4a45f7f9d1659b329b1c9c75f0789",
       "reason": "The warm Rows20 mean control also admits a verified typed serial execution with zero general calls, parallel calls or fallback counters. The parallel path still requires real lanes. The dispatch assertions run after timing. The 132,075 input rows, outputs, full oracle, timing boundary, and lane counts retain their existing definitions. Formerly aborted samples have no timing result.",
       "reference": "Rust core failure in complete suite 45218290186. Current main db584afd."
     },
     {
       "target": "core",
       "baseline_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
-      "candidate_sha256": "dd4e5ed606f9a148501c3e76099118bcabe88445f8c165a19fc9c0237c6a1fbc",
+      "candidate_sha256": "f1188db4f665772afc6a6678d53c4d2ea7e4a45f7f9d1659b329b1c9c75f0789",
       "reason": "The warm Rows20 mean control also admits a verified typed serial execution with zero general calls, parallel calls or fallback counters. The parallel path still requires real lanes. The dispatch assertions run after timing. The 132,075 input rows, outputs, full oracle, timing boundary, and lane counts retain their existing definitions. Formerly aborted samples have no timing result.",
       "reference": "Rust core failure in complete suite 45218290186. November 14 release, including the previously registered additions to core."
     },
     {
       "target": "core",
       "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
-      "candidate_sha256": "dd4e5ed606f9a148501c3e76099118bcabe88445f8c165a19fc9c0237c6a1fbc",
+      "candidate_sha256": "f1188db4f665772afc6a6678d53c4d2ea7e4a45f7f9d1659b329b1c9c75f0789",
       "reason": "The warm Rows20 mean control also admits a verified typed serial execution with zero general calls, parallel calls or fallback counters. The parallel path still requires real lanes. The dispatch assertions run after timing. The 132,075 input rows, outputs, full oracle, timing boundary, and lane counts retain their existing definitions. Formerly aborted samples have no timing result.",
       "reference": "Rust core failure in complete suite 45218290186. Published dependency evidence 61a81f20, including the previously registered additions to core."
     },
