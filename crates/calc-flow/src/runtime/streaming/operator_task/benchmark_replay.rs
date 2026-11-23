@@ -340,7 +340,7 @@ impl Invocation<'_> {
         let previous = state.progress.input_watermark();
         let aggregate = aggregate_input(&kind);
         let emissions = state.progress.evaluate(self.ingress, aggregate)?;
-        let snapshot = state.progress.snapshot()?;
+        let snapshot = state.progress.snapshot();
         let mut collector = EdgeCollector::new(state.node.output_ports.values().cloned().collect());
         let mut pending = Vec::new();
         let controls = if let EventKind::Data(batch) = kind {
