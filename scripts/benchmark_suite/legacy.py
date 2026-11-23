@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -11,7 +10,11 @@ from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT, LEGACY_SCALES
 from scripts.benchmark_suite.dependency_migrations import dependency_migration_problem
-from scripts.benchmark_suite.identity import IDENTITIES, validate_component
+from scripts.benchmark_suite.identity import (
+    IDENTITIES,
+    validate_component,
+    validate_identity,
+)
 from scripts.benchmark_suite.normalize import pytest_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.provenance import harness_sha256
@@ -24,6 +27,9 @@ _ROLLING_EXPLAIN_SOURCES = {
     "baseline": "9abc1fc9a800ee545bc70c83b7c5550e0323f49eb34959b2d3f699a0d0b6fd4f",
     "candidate": "947f95f5b2093dd36a83a2f12cbcfeff76f56b72a992cabdcb57515dc847ed9a",
 }
+_ROLLING_SYMBOLIC_SUPPORT = (
+    "ed5f917ac167a31ca29e28e31c362dd2795ab9b045db136b060ed3426bcd03f9"
+)
 _ROLLING_EXPLAIN_CASES = frozenset(
     f"benchmarks/test_rolling_kernel.py::test_rolling_kernel_{indicator}[{scale}]"
     for indicator in ("sma20", "dual_sma")
@@ -32,15 +38,35 @@ _ROLLING_EXPLAIN_CASES = frozenset(
 
 
 def _reviewed_rolling_explain(name: str, blocks: dict) -> bool:
-    return name in _ROLLING_EXPLAIN_CASES and all(
-        len(blocks[side]) == 2
-        and all(
-            block.get(name, {}).get("metadata", {}).get("benchmark_source_sha256")
-            == expected
-            for block in blocks[side]
+    if name not in _ROLLING_EXPLAIN_CASES:
+        return False
+    for side, expected in _ROLLING_EXPLAIN_SOURCES.items():
+        for block in blocks[side]:
+            metadata = block[name]["metadata"]
+            support = metadata.get("benchmark_support_sha256")
+            if (
+                metadata.get("benchmark_source_sha256") != expected
+                or metadata.get("benchmark_symbolic_support_sha256")
+                != _ROLLING_SYMBOLIC_SUPPORT
+                or not isinstance(support, str)
+                or re.fullmatch(r"[0-9a-f]{64}", support) is None
+            ):
+                return False
+            try:
+                validate_identity(metadata)
+            except ValueError:
+                return False
+    return True
+
+
+def _pytest_source_hashes(source: Path, name: str) -> dict:
+    benchmark = source / name.split("::", 1)[0]
+    hashes = {"benchmark_source_sha256": sha256_file(benchmark)}
+    if name in _ROLLING_EXPLAIN_CASES:
+        hashes["benchmark_symbolic_support_sha256"] = sha256_file(
+            source / "benchmarks/symbolic_support.py"
         )
-        for side, expected in _ROLLING_EXPLAIN_SOURCES.items()
-    )
+    return hashes
 
 
 def pytest_arguments(family: str) -> list[str]:
@@ -80,9 +106,7 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
             "metadata": {
                 **row["metadata"],
                 "benchmark_support_sha256": sha256_file(ROOT / "benchmarks/support.py"),
-                "benchmark_source_sha256": hashlib.sha256(
-                    (source / name.split("::", 1)[0]).read_bytes()
-                ).hexdigest(),
+                **_pytest_source_hashes(source, name),
             },
         }
         for name, row in rows.items()

@@ -698,8 +698,10 @@ The two Python rolling-kernel cases (`sma20` and `dual_sma`) accept one
 reviewed source change from the November 14 release. Commit `83088c5d`
 removed `profile=stable_v1` from an untimed plan-explanation assertion.
 The direct-window oracle, paired plans, inputs and timed code are identical.
-When all four blocks match the two pinned source hashes in release-to-main
-order, the report retains both under `rolling_explain_source_sha256`.
+Each block also records its checkout's `benchmarks/symbolic_support.py` hash.
+The comparison requires the reviewed helper, valid raw identities and a
+matching shared-support digest in all four blocks. The report retains the
+two pinned source hashes in release-to-main order under `rolling_explain_source_sha256`.
 All other fingerprint, support, dimension and sample checks still apply.
 
 The Rust suite retains the full `Cargo.lock` hash and aggregate compiled

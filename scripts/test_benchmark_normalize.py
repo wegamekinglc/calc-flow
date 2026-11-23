@@ -83,9 +83,13 @@ class BenchmarkNormalizeTests(unittest.TestCase):
         self.assertEqual(rows[0]["status"], "error")
 
     def test_only_reviewed_rolling_diagnostics_compare_across_releases(self):
+        from scripts.toolkit import fingerprint_json
+
         original = "9abc1fc9a800ee545bc70c83b7c5550e0323f49eb34959b2d3f699a0d0b6fd4f"
         current = "947f95f5b2093dd36a83a2f12cbcfeff76f56b72a992cabdcb57515dc847ed9a"
         shard = {"id": "python-overhead", "family": "python"}
+
+        helper = "ed5f917ac167a31ca29e28e31c362dd2795ab9b045db136b060ed3426bcd03f9"
 
         def row(digest, workload):
             return {
@@ -94,13 +98,28 @@ class BenchmarkNormalizeTests(unittest.TestCase):
                 "scope": "pytest-native-boundary",
                 "metadata": {
                     "benchmark_source_sha256": digest,
-                    "workload_fingerprint": workload,
-                    "dependency_fingerprint": "b" * 64,
-                    "machine_fingerprint": "c" * 64,
+                    "benchmark_symbolic_support_sha256": helper,
+                    "benchmark_support_sha256": "b" * 64,
+                    "workload_identity": {"version": workload},
+                    "workload_fingerprint": fingerprint_json({"version": workload}),
+                    "machine_identity": {"cpu": "test"},
+                    "machine_fingerprint": fingerprint_json({"cpu": "test"}),
+                    "dependency_identity": {"python": "test"},
+                    "dependency_fingerprint": fingerprint_json({"python": "test"}),
                 },
             }
 
-        def compare(case, base, head, workload="a" * 64, *, last=None, support=None):
+        def compare(
+            case,
+            base,
+            head,
+            workload="a" * 64,
+            *,
+            last=None,
+            support=None,
+            omit=(),
+            helper_hash=None,
+        ):
             blocks = {
                 "baseline": [{case: row(base, "a" * 64)}] * 2,
                 "candidate": [{case: row(head, workload)}] * 2,
@@ -111,6 +130,12 @@ class BenchmarkNormalizeTests(unittest.TestCase):
                 blocks["candidate"][0][case]["metadata"]["benchmark_support_sha256"] = (
                     support
                 )
+            for block in blocks["baseline"] + blocks["candidate"]:
+                metadata = block[case]["metadata"]
+                if helper_hash is not None:
+                    metadata["benchmark_symbolic_support_sha256"] = helper_hash
+                for key in omit:
+                    metadata.pop(key, None)
             return combine_blocks(shard, blocks)[0]
 
         for case in ("sma20", "dual_sma"):
@@ -125,6 +150,22 @@ class BenchmarkNormalizeTests(unittest.TestCase):
             )
             for result in (
                 compare(name, current, original),
+                compare(
+                    name, original, current, omit=("benchmark_symbolic_support_sha256",)
+                ),
+                compare(name, original, current, helper_hash="f" * 64),
+                compare(
+                    name,
+                    original,
+                    current,
+                    omit=(
+                        "machine_identity",
+                        "workload_identity",
+                        "dependency_identity",
+                        "benchmark_support_sha256",
+                    ),
+                ),
+                compare(name, original, current, omit=("benchmark_support_sha256",)),
                 compare(name, original, current, last=original),
                 compare(name, original, current, support="f" * 64),
                 compare(name, original, "d" * 64),
