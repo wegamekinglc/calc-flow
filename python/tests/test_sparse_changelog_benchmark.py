@@ -96,3 +96,19 @@ def test_isolated_worker_retains_per_batch_oracle_evidence(monkeypatch, tmp_path
         assert active.finish() == {"state": "completed"}
     finally:
         active.close()
+
+
+def test_open_stream_warm_updates_exclude_seed_and_verify_all_prefixes():
+    from benchmarks.sparse_changelog import validate
+    from benchmarks.sparse_warm_update import observe_updates, validate_snapshots
+
+    batches = inputs()
+    clocks, changes = asyncio.run(observe_updates(batches, "changelog"))
+    snapshot_clocks, snapshots = asyncio.run(observe_updates(batches, "snapshot"))
+    assert len(clocks) == len(snapshot_clocks) == 2
+    assert all(t > 0 for t in (*clocks, *snapshot_clocks))
+    assert validate(batches, changes) == [2, 4, 0]
+    assert validate_snapshots(batches, snapshots) == [2, 2, 2]
+    broken = [snapshots[0], snapshots[1].take([1, 0]), snapshots[2]]
+    with pytest.raises(ValueError, match="ordered snapshot at batch 1"):
+        validate_snapshots(batches, broken)

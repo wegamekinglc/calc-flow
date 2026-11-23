@@ -36,13 +36,8 @@ def load_fixture(path: Path) -> tuple[pa.Table, ...]:
     return batches
 
 
-async def observe(batches: tuple[pa.Table, ...]) -> tuple[int, list[pa.Table]]:
-    async def source():
-        for batch in batches:
-            yield batch
-
-    started = perf_counter_ns()
-    flows = cf.table_input("trades", schema=batches[0].schema)
+def position_stream(schema: pa.Schema, *, changelog: bool):
+    flows = cf.table_input("trades", schema=schema)
     trades = flows.filter(flows["flow_type"] == "trade")
     deltas = trades.select(
         "account",
@@ -51,13 +46,24 @@ async def observe(batches: tuple[pa.Table, ...]) -> tuple[int, list[pa.Table]]:
             trades["side"] == "buy", trades["quantity"], -trades["quantity"]
         ),
     )
-    positions = deltas.changelog_sql(
+    aggregate = deltas.changelog_sql if changelog else deltas.sql
+    positions = aggregate(
         "SELECT account, stock, SUM(delta) AS position "
         "FROM input GROUP BY account, stock"
     )
     config = cf.StreamRuntimeConfig(
         checkpointing=False, sql_compact_state_budget=cf.StateBudget(10_000, 2**53 - 1)
     )
+    return positions, config
+
+
+async def observe(batches: tuple[pa.Table, ...]) -> tuple[int, list[pa.Table]]:
+    async def source():
+        for batch in batches:
+            yield batch
+
+    started = perf_counter_ns()
+    positions, config = position_stream(batches[0].schema, changelog=True)
     async with positions.stream(source(), config=config) as stream:
         outputs = [table async for table in stream]
     return perf_counter_ns() - started, outputs
