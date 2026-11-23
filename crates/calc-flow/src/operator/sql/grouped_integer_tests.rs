@@ -674,3 +674,127 @@ async fn test_mixed_utf8_large_keys_restore_and_continue_exact_snapshots() {
     drop(job);
     assert_eq!(pools.iter().map(|pool| pool.reserved()).sum::<usize>(), 0);
 }
+
+fn multi_record_long_keys(dtype: &DataType, value: i64) -> Batch {
+    use datafusion::arrow::array::LargeStringArray;
+    let prefix = "k".repeat(16_384);
+    let names = (0..64).map(|i| format!("{prefix}-{i}")).collect::<Vec<_>>();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", dtype.clone(), true),
+        Field::new("value", DataType::Int64, true),
+    ]));
+    let records = names
+        .chunks(2)
+        .map(|pair| {
+            let strings = pair.iter().map(String::as_str);
+            let keys: ArrayRef = match dtype {
+                DataType::Utf8 => Arc::new(StringArray::from_iter_values(strings)),
+                DataType::LargeUtf8 => Arc::new(LargeStringArray::from_iter_values(strings)),
+                _ => unreachable!("fixture takes a variable-width string key"),
+            };
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![keys, Arc::new(Int64Array::from(vec![value; pair.len()]))],
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    Batch::table(records, crate::BatchMetadata::default()).unwrap()
+}
+
+#[tokio::test]
+async fn test_changelog_prepays_multi_record_long_keys_and_rolls_back_pool_failure() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool};
+
+    const CAPACITY: usize = 64 << 20;
+    let query = crate::expression::parse_select_query(
+        "SELECT key, SUM(value) AS total FROM events GROUP BY key",
+    )
+    .unwrap();
+    for dtype in [DataType::Utf8, DataType::LargeUtf8] {
+        let batch = multi_record_long_keys(&dtype, 1);
+        let table = batch.table_payload().unwrap();
+        let schema = table.schema().clone();
+        let pool = Arc::new(GreedyMemoryPool::new(CAPACITY));
+        let runtime =
+            DataFusionRuntime::with_benchmark_pool(DataFusionConfig::default(), pool.clone())
+                .unwrap();
+        let mut plan = IncrementalSql::plan(&runtime, &query, "events", schema, "changes")
+            .await
+            .unwrap()
+            .unwrap();
+        plan.set_output_mode(SqlAggregateOutputMode::Changelog)
+            .unwrap();
+        let job =
+            StreamJobContext::new(1, "changes", JsonMap::new(), None, CancellationToken::new());
+        let context = StreamOperatorContext::new(&job, "changes", None);
+        let seed = plan.update(&batch, &context, "changes").await.unwrap();
+        plan.commit(seed);
+        let mut update = plan.update(&batch, &context, "changes").await.unwrap();
+        let (scratch, base) = plan.input_workspace(batch.num_rows(), "changes").unwrap();
+        for record in table.batches() {
+            plan.reserve_chunk(record, &scratch, base, "changes")
+                .unwrap();
+        }
+        let input_workspace = scratch.size();
+        let mut result = None;
+        let allocations = allocation_counter::measure(|| {
+            result = Some(
+                plan.prepare_sum_changes(
+                    update.keyed_sum.as_mut().unwrap(),
+                    &scratch,
+                    &context,
+                    "changes",
+                )
+                .unwrap(),
+            );
+        });
+        eprintln!(
+            "{dtype} changelog output peak {} bytes, paid workspace {} bytes",
+            allocations.bytes_max,
+            scratch.size()
+        );
+        assert!(
+            allocations.bytes_max <= u64::try_from(scratch.size()).unwrap(),
+            "{dtype}: peak {} bytes exceeds {} bytes prepaid",
+            allocations.bytes_max,
+            scratch.size()
+        );
+        let update_workspace = scratch.size();
+        drop((result, update, scratch));
+        let available = input_workspace + (256 << 10);
+        assert!(update_workspace > available);
+        let blocker = runtime.incremental_reservation("hold remaining output workspace");
+        blocker
+            .try_grow(CAPACITY - pool.reserved() - available)
+            .unwrap();
+        let noop = multi_record_long_keys(&dtype, 0);
+        let unchanged = plan.update(&noop, &context, "changes").await.unwrap();
+        assert!(
+            unchanged
+                .records
+                .iter()
+                .all(|record| record.num_rows() == 0)
+        );
+        plan.commit(unchanged);
+        assert!(plan.update(&batch, &context, "changes").await.is_err());
+        drop(blocker);
+        let retried = plan.update(&batch, &context, "changes").await.unwrap();
+        let totals = retried
+            .records
+            .iter()
+            .flat_map(|r| {
+                r.column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .iter()
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(totals, [1, 2].repeat(batch.num_rows()));
+        drop((retried, plan));
+        assert_eq!(pool.reserved(), 0);
+    }
+}

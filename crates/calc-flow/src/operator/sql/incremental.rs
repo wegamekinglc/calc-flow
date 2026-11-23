@@ -172,6 +172,8 @@ pub(super) struct IncrementalSql {
     container_fee: Option<MemoryReservation>,
     reservation: MemoryReservation,
     #[cfg(test)]
+    pub(super) keyed_output_rows: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     pub(super) finalized_groups: Arc<std::sync::atomic::AtomicUsize>,
     #[cfg(test)]
     pub(super) partial_groups: Arc<std::sync::atomic::AtomicUsize>,
@@ -846,34 +848,6 @@ impl SnapshotTransaction for keyed_state::Transaction {
     }
 }
 
-impl SnapshotTransaction for keyed_sum::KeyedSum {
-    fn group_count(&self) -> usize {
-        keyed_sum::KeyedSum::group_count(self)
-    }
-
-    fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
-        keyed_sum::KeyedSum::first_key(self, slot)
-    }
-
-    fn dirty_chunks(&self) -> std::collections::BTreeSet<usize> {
-        (0..keyed_sum::KeyedSum::group_count(self).div_ceil(CHUNK_ROWS)).collect()
-    }
-
-    fn charge(&self) -> Result<usize> {
-        keyed_sum::KeyedSum::output_charge(self, None)
-    }
-
-    fn record(
-        &self,
-        start: usize,
-        end: usize,
-        schema: SchemaRef,
-        check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<RecordBatch> {
-        keyed_sum::KeyedSum::record(self, start, end, schema, check)
-    }
-}
-
 impl SnapshotTransaction for keyed_state::KeyedState {
     fn group_count(&self) -> usize {
         keyed_state::KeyedState::group_count(self)
@@ -1079,6 +1053,8 @@ impl IncrementalSql {
             container_fee: None,
             index: HashMap::with_hasher(RandomState::new()),
             reservation: parts.reservation,
+            #[cfg(test)]
+            keyed_output_rows: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             finalized_groups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -1419,14 +1395,15 @@ impl IncrementalSql {
     ) -> Result<Transaction> {
         let table = batch.table_payload()?;
         self.validate_input_schema(batch.num_rows(), table.schema())?;
+        if self.keyed_sum.is_some() {
+            return self.update_keyed_sum(batch, context, name).await;
+        }
         let baseline = if self.output_mode == SqlAggregateOutputMode::Changelog {
             Some(self.visible_group_rows_current(context, name)?)
         } else {
             None
         };
-        let mut transaction = if self.keyed_sum.is_some() {
-            self.update_keyed_sum(batch, context, name).await?
-        } else if self.keyed_state.is_some() {
+        let mut transaction = if self.keyed_state.is_some() {
             self.update_keyed_aggregates(batch, input_owner, context, name)
                 .await?
         } else {
@@ -1456,7 +1433,13 @@ impl IncrementalSql {
         };
         if let Some(baseline) = baseline {
             let updated = self.visible_group_rows_transaction(&transaction, context, name)?;
-            transaction.records = self.changelog_records(&baseline, &updated, name)?;
+            let mut changes = Vec::new();
+            let mut old = baseline.into_iter();
+            let mut new = updated.into_iter();
+            for _ in 0..old.len().max(new.len()) {
+                push_visible_changes(&mut changes, old.next().flatten(), new.next().flatten());
+            }
+            transaction.records = self.changelog_records(changes, name)?;
         }
         Ok(transaction)
     }
@@ -1818,17 +1801,20 @@ impl IncrementalSql {
         )?;
         #[cfg(not(test))]
         let _ = rows;
+        let prepared = match self.output_mode {
+            SqlAggregateOutputMode::Snapshot => {
+                self.prepare_keyed_records(&transaction, &reservation, context, name)
+            }
+            SqlAggregateOutputMode::Changelog => {
+                self.prepare_sum_changes(&mut transaction, &reservation, context, name)
+            }
+        };
         let PreparedKeyedOutput {
             records,
             checkpointing,
             dirty,
         } = self
-            .prepare_keyed_output(
-                self.prepare_keyed_records(&transaction, &reservation, context, name),
-                &reservation,
-                context,
-                name,
-            )
+            .prepare_keyed_output(prepared, &reservation, context, name)
             .await?;
         Ok(Transaction {
             keyed_sum: Some(transaction),
@@ -1909,6 +1895,40 @@ impl IncrementalSql {
         )
     }
 
+    fn prepare_sum_changes(
+        &self,
+        transaction: &mut keyed_sum::Transaction,
+        reservation: &MemoryReservation,
+        context: &StreamOperatorContext<'_>,
+        name: &str,
+    ) -> Result<PreparedKeyedRecords> {
+        let width = self.keyed_output_charge(0, 1, name)?;
+        let mut changes = Vec::new();
+        let visible = |record: &RecordBatch| {
+            visible_record_row(&self.keyed_output_record(record, name)?, name)
+        };
+        transaction.visit_changes(
+            &self.aggregate_schema,
+            || context.check_cancelled(),
+            |key_bytes, versions| {
+                // Projected scalars coexist with growing Arrow string buffers.
+                let row_bytes = checked_bytes(width, [(key_bytes, 3)], name)?;
+                reservation
+                    .try_grow(checked_bytes(0, [(row_bytes, versions)], name)?)
+                    .map_err(|error| df_error(name, error))
+            },
+            |previous, current| {
+                let old = previous.as_ref().map(visible).transpose()?.flatten();
+                push_visible_changes(&mut changes, old, visible(&current)?);
+                Ok(())
+            },
+        )?;
+        Ok((
+            self.changelog_records(changes, name)?,
+            transaction.group_count(),
+        ))
+    }
+
     fn prepare_keyed_records<T: SnapshotTransaction>(
         &self,
         transaction: &T,
@@ -1956,16 +1976,16 @@ impl IncrementalSql {
         transaction: &T,
         name: &str,
     ) -> Result<usize> {
+        self.keyed_output_charge(transaction.charge()?, transaction.group_count(), name)
+    }
+
+    fn keyed_output_charge(&self, key_bytes: usize, rows: usize, name: &str) -> Result<usize> {
         let width = checked_bytes(
             0,
             [(self.aggregates.len(), 128), (self.projection_nodes, 128)],
             name,
         )?;
-        checked_bytes(
-            transaction.charge()?,
-            [(transaction.group_count(), width)],
-            name,
-        )
+        checked_bytes(key_bytes, [(rows, width)], name)
     }
 
     fn keyed_snapshot_records<T: SnapshotTransaction>(
@@ -2035,6 +2055,9 @@ impl IncrementalSql {
     }
 
     fn keyed_output_record(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
+        #[cfg(test)]
+        self.keyed_output_rows
+            .fetch_add(aggregate.num_rows(), std::sync::atomic::Ordering::Relaxed);
         let aggregate = self.apply_having(aggregate.clone(), name)?;
         if self
             .post_order
@@ -2827,9 +2850,6 @@ impl IncrementalSql {
         if let Some(state) = &self.keyed_state {
             return self.visible_keyed_rows(state, context, name);
         }
-        if let Some(state) = &self.keyed_sum {
-            return self.visible_keyed_rows(state, context, name);
-        }
         let mut rows = Vec::with_capacity(self.groups.len());
         for (slot, group) in self.groups.iter().enumerate() {
             if slot % 128 == 0 {
@@ -2847,9 +2867,6 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<Vec<Option<Vec<ScalarValue>>>> {
         if let Some(state) = &transaction.keyed_state {
-            return self.visible_keyed_rows(state, context, name);
-        }
-        if let Some(state) = &transaction.keyed_sum {
             return self.visible_keyed_rows(state, context, name);
         }
         let count = transaction.standard_group_count(self.groups.len());
@@ -2910,36 +2927,20 @@ impl IncrementalSql {
 
     fn changelog_records(
         &self,
-        old: &[Option<Vec<ScalarValue>>],
-        new: &[Option<Vec<ScalarValue>>],
+        mut changes: Vec<(Vec<ScalarValue>, &'static str)>,
         name: &str,
     ) -> Result<Vec<RecordBatch>> {
-        let mut changes = Vec::new();
-        for slot in 0..old.len().max(new.len()) {
-            let old = old.get(slot).and_then(Option::as_ref);
-            let new = new.get(slot).and_then(Option::as_ref);
-            let differs = match (old, new) {
-                (Some(old), Some(new)) => !visible_row_eq(old, new),
-                (None, None) => false,
-                _ => true,
-            };
-            if !differs {
-                continue;
-            }
-            if let Some(old) = old {
-                changes.push((old.clone(), "retract"));
-            }
-            if let Some(new) = new {
-                changes.push((new.clone(), "upsert"));
-            }
-        }
         if changes.is_empty() {
             return Ok(vec![RecordBatch::new_empty(self.changelog_schema())]);
         }
         let mut columns = (0..self.output_schema.fields().len())
             .map(|column| {
-                ScalarValue::iter_to_array(changes.iter().map(|(row, _)| row[column].clone()))
-                    .map_err(|error| df_error(name, error))
+                ScalarValue::iter_to_array(
+                    changes
+                        .iter_mut()
+                        .map(|(row, _)| std::mem::replace(&mut row[column], ScalarValue::Null)),
+                )
+                .map_err(|error| df_error(name, error))
             })
             .collect::<Result<Vec<_>>>()?;
         columns.push(Arc::new(StringArray::from(
@@ -3994,6 +3995,22 @@ fn visible_record_row(record: &RecordBatch, name: &str) -> Result<Option<Vec<Sca
             "one aggregate group produced multiple visible rows",
         )),
     }
+}
+
+fn push_visible_changes(
+    changes: &mut Vec<(Vec<ScalarValue>, &'static str)>,
+    old: Option<Vec<ScalarValue>>,
+    new: Option<Vec<ScalarValue>>,
+) {
+    if old
+        .as_ref()
+        .zip(new.as_ref())
+        .is_some_and(|(old, new)| visible_row_eq(old, new))
+    {
+        return;
+    }
+    changes.extend(old.map(|row| (row, "retract")));
+    changes.extend(new.map(|row| (row, "upsert")));
 }
 
 fn visible_row_eq(left: &[ScalarValue], right: &[ScalarValue]) -> bool {

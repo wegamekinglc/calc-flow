@@ -392,13 +392,13 @@ async fn test_keyed_sum_fixed_partitions_preserve_output_and_owner() {
             plan.commit(first);
             let keyed = plan.keyed_sum.as_ref().unwrap().clone();
             assert_eq!(keyed.partition_count_for_test(), partitions);
-            let owners = (0..keyed.group_count())
+            let owners = (0..keyed.len())
                 .map(|group| {
                     let group = crate::operator::keyed::GroupId::new(group).unwrap();
                     keyed.owner_for_test(group)
                 })
                 .collect::<Vec<_>>();
-            let expected_owners = (0..keyed.group_count())
+            let expected_owners = (0..keyed.len())
                 .map(|group| group % partitions)
                 .collect::<Vec<_>>();
             assert_eq!(owners, expected_owners);
@@ -410,7 +410,7 @@ async fn test_keyed_sum_fixed_partitions_preserve_output_and_owner() {
             let history = [rows.clone(), rows.clone()].concat();
             assert_eq!(output_rows(&second.records), expected(unsigned, &history));
             plan.commit(second);
-            let owners_after = (0..keyed.group_count())
+            let owners_after = (0..keyed.len())
                 .map(|group| {
                     let group = crate::operator::keyed::GroupId::new(group).unwrap();
                     keyed.owner_for_test(group)

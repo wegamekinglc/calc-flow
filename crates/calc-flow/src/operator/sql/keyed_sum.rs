@@ -74,6 +74,17 @@ enum SumInput<'a> {
 }
 
 impl SumValue {
+    fn record(self, keys: &[ArrayRef], schema: &SchemaRef) -> Result<RecordBatch> {
+        let mut columns = keys.to_vec();
+        columns.push(
+            self.scalar()
+                .to_array_of_size(1)
+                .map_err(|error| super::df_error("keyed SUM", error))?,
+        );
+        RecordBatch::try_new(schema.clone(), columns)
+            .map_err(|error| super::df_error("keyed SUM", error))
+    }
+
     fn scalar(self) -> ScalarValue {
         match self {
             Self::Int64(value) => ScalarValue::Int64(value),
@@ -166,38 +177,6 @@ impl KeyedSum {
     #[cfg(test)]
     pub(super) fn clear_panic_for_test(&self) {
         self.lock().panic_group = None;
-    }
-
-    pub(super) fn group_count(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys
-            .len()
-    }
-
-    pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
-        let group = GroupId::new(slot)?;
-        Ok(self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys
-            .canonical(group))
-    }
-
-    pub(super) fn record(
-        &self,
-        start: usize,
-        end: usize,
-        schema: SchemaRef,
-        check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<RecordBatch> {
-        check()?;
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(start, end, None, schema)
     }
 
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
@@ -616,6 +595,32 @@ impl Transaction {
             .record(start, end, None, schema)
     }
 
+    pub(super) fn visit_changes(
+        &mut self,
+        schema: &SchemaRef,
+        mut check: impl FnMut() -> Result<()>,
+        mut reserve: impl FnMut(usize, usize) -> Result<()>,
+        mut visit: impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        check()?;
+        self.undo.sort_unstable_by_key(|(group, _)| *group);
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let existing = self
+            .undo
+            .iter()
+            .map(|&(group, previous)| Result::Ok((group, Some(previous))));
+        // New groups occupy the suffix after every pre-existing group ID.
+        let added = (self.old_groups..state.keys.len()).map(|slot| Ok((GroupId::new(slot)?, None)));
+        for (index, item) in existing.chain(added).enumerate() {
+            if index % 128 == 0 {
+                check()?;
+            }
+            let (group, previous) = item?;
+            state.visit_change(group, previous, schema, &mut reserve, &mut visit)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn dirty_output_chunks(&self) -> std::collections::BTreeSet<usize> {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let mut chunks = std::collections::BTreeSet::new();
@@ -915,6 +920,29 @@ impl Drop for Transaction {
 }
 
 impl KeyedSumState {
+    fn visit_change(
+        &self,
+        group: GroupId,
+        previous: Option<SumValue>,
+        schema: &SchemaRef,
+        reserve: &mut impl FnMut(usize, usize) -> Result<()>,
+        visit: &mut impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        let current = self.sums.value(group);
+        if previous == Some(current) {
+            return Ok(());
+        }
+        reserve(
+            self.keys.output_charge(&[group])?,
+            1 + usize::from(previous.is_some()),
+        )?;
+        let keys = self.keys.columns(&[group])?;
+        let before = previous
+            .map(|value| value.record(&keys, schema))
+            .transpose()?;
+        visit(before, current.record(&keys, schema)?)
+    }
+
     fn records(
         &self,
         slots: Option<&[usize]>,
