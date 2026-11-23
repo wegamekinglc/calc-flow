@@ -1193,3 +1193,71 @@ fn checkpoint_output_values(messages: Vec<calc_flow::StreamMessage>) -> Vec<(i64
     }
     values
 }
+
+#[tokio::test(start_paused = true)]
+async fn cancellation_interrupts_unacknowledged_asof_delivery() {
+    struct CancelOnEmit {
+        cancel: CancellationToken,
+        acknowledge: bool,
+    }
+    #[async_trait::async_trait]
+    impl calc_flow::StreamCollector for CancelOnEmit {
+        async fn emit(&mut self, _port: &str, _batch: calc_flow::Batch) -> calc_flow::Result<()> {
+            self.cancel.cancel();
+            if self.acknowledge {
+                Ok(())
+            } else {
+                std::future::pending().await
+            }
+        }
+    }
+
+    let cancel = CancellationToken::new();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, cancel.clone());
+    let mut op = operator(10);
+    let mut output = EdgeCollector::new(op.output_ports().to_vec());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    op.process_data("left", batch(&[("A", 5, 1, 10)]), &cx, &mut output)
+        .await
+        .unwrap();
+    let frontier = EventTime::from_micros(10);
+    let progress = IngressProgressSnapshot::new(BTreeMap::from(["left", "right"].map(|side| {
+        (
+            side.into(),
+            IngressProgress::new(IngressState::Active, Some(frontier)),
+        )
+    })));
+    let cx = StreamOperatorContext::with_ingress_progress(&job, "asof", Some(frontier), progress);
+    let mut blocked = CancelOnEmit {
+        cancel,
+        acknowledge: false,
+    };
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        op.on_watermark(frontier, &cx, &mut blocked),
+    )
+    .await
+    .expect("cancelled ASOF delivery remained pending")
+    .unwrap_err();
+    assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+    assert_eq!(op.status().pending_left_rows, 1);
+    assert_eq!(op.status().emitted_left_rows, 0);
+
+    let snapshot = op.checkpoint(calc_flow::Epoch::INITIAL).unwrap();
+    let mut restored = operator(10);
+    restored.restore(&snapshot).unwrap();
+    let retry = CancellationToken::new();
+    let job = StreamJobContext::new(2, "asof", JsonMap::new(), None, retry.clone());
+    let cx = StreamOperatorContext::new(&job, "asof", None);
+    let mut acknowledged = CancelOnEmit {
+        cancel: retry,
+        acknowledge: true,
+    };
+    let error = restored
+        .on_watermark(frontier, &cx, &mut acknowledged)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+    assert_eq!(restored.status().pending_left_rows, 0);
+    assert_eq!(restored.status().emitted_left_rows, 1);
+}

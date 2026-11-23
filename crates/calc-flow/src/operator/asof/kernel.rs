@@ -1,8 +1,9 @@
 //! Cancellation and bounded output shared by finite calls and stream callbacks.
-use crate::{EdgeBudget, Result, RunContext, StreamOperatorContext};
+use crate::{CancellationToken, EdgeBudget, Result, RunContext, StreamOperatorContext};
 
 pub(super) trait KernelContext: Sync {
     fn check_cancelled(&self) -> Result<()>;
+    fn cancellation(&self) -> &CancellationToken;
     fn ingress_preparation(&self) -> Option<&crate::operator::ingress::Preparation>;
     fn output_budget(&self) -> EdgeBudget;
 }
@@ -10,6 +11,10 @@ pub(super) trait KernelContext: Sync {
 impl KernelContext for StreamOperatorContext<'_> {
     fn check_cancelled(&self) -> Result<()> {
         self.check_cancelled()
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        self.job().cancellation()
     }
 
     fn ingress_preparation(&self) -> Option<&crate::operator::ingress::Preparation> {
@@ -42,6 +47,10 @@ impl<'a> FiniteContext<'a> {
 impl KernelContext for FiniteContext<'_> {
     fn check_cancelled(&self) -> Result<()> {
         self.run.check_cancelled()
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        self.run.cancellation()
     }
 
     fn ingress_preparation(&self) -> Option<&crate::operator::ingress::Preparation> {

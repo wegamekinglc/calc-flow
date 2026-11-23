@@ -46,7 +46,13 @@ impl StreamAsofJoinOperator {
             let matched = prepared.matched;
             let status = self.output_status(rows, matched)?;
             let next_output_sequence = checked(&self.name, self.next_output_sequence, rows as u64)?;
-            output.emit("output", prepared.batch).await?;
+            context.check_cancelled()?;
+            tokio::select! {
+                biased;
+                // An acknowledged delivery belongs to the committed prefix.
+                result = output.emit("output", prepared.batch) => result?,
+                () = context.cancellation().cancelled() => return context.check_cancelled(),
+            }
             self.state.commit(&prepared.selection)?;
             self.status = status;
             self.next_output_sequence = next_output_sequence;
