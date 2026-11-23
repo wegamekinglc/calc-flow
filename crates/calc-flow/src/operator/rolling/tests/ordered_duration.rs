@@ -654,28 +654,78 @@ async fn test_checkpoint_disabled_rows_mean_rejection_restores_full_window() {
 }
 
 #[tokio::test]
-async fn test_warm_direct_entities_skip_canonical_key_encoding() {
-    let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
-    let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "b", 2, Some(2.0))]);
-    let second = float64_fast_record(&[(3, "a", 3, Some(3.0)), (4, "b", 4, Some(4.0))]);
-    let input = concat_batches(&first.schema(), [&first, &second]).unwrap();
+async fn test_encoded_warm_entities_reuse_each_composite_key() {
+    let mut spec = kernel_spec(json!([duration_output("sum", "price", "sum", 16)]));
+    spec.partition_by.push("volume".into());
+    let seed = float64_fast_record(&[
+        (1, "a", 1, Some(2.0)),
+        (2, "a", 2, Some(5.0)),
+        (3, "a", 3, Some(7.0)),
+        (4, "a", 4, Some(11.0)),
+        (5, "b", 5, Some(13.0)),
+    ]);
+    let mut columns = seed.columns().to_vec();
+    columns[seed.schema().index_of("volume").unwrap()] =
+        Arc::new(Int64Array::from(vec![1, 2, 2, 1, 2]));
+    let input = RecordBatch::try_new(seed.schema(), columns).unwrap();
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let (expected, _) = reference_output(&operator, &input);
     let (job, store, mut output) = fixture(&operator);
     let job = job.with_checkpointing(false);
     let mut emitted = Vec::new();
-    for (record, watermark) in [(first, 2), (second, 4)] {
-        assert!(observe_data(&mut operator, &job, &store, &mut output, record).await);
+    for (offset, len, watermark, births) in [(0, 2, 2, 2), (2, 3, 5, 1)] {
+        kernel::INSTALLATION_VISITS.with(|count| count.set(0));
+        assert!(
+            observe_data(
+                &mut operator,
+                &job,
+                &store,
+                &mut output,
+                input.slice(offset, len)
+            )
+            .await
+        );
         emitted.extend(close(&mut operator, &job, &store, &mut output, watermark).await);
-        if watermark == 2 {
-            assert_eq!(kernel::take_direct_entity_key_encodings(), 2);
-        }
+        assert_eq!(
+            kernel::INSTALLATION_VISITS.with(|count| count.replace(0)),
+            births
+        );
     }
-    assert_eq!(kernel::take_direct_entity_key_encodings(), 0);
     assert_eq!(
         concat_batches(&expected.schema(), &emitted).unwrap(),
         expected
     );
+}
+
+#[tokio::test]
+async fn test_warm_direct_entities_skip_canonical_key_encoding() {
+    let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
+    let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "b", 2, Some(2.0))]);
+    let second = float64_fast_record(&[(3, "a", 3, Some(3.0)), (4, "b", 4, Some(4.0))]);
+    let mixed = float64_fast_record(&[
+        (5, "b", 5, Some(5.0)),
+        (6, "c", 6, Some(6.0)),
+        (7, "a", 7, Some(7.0)),
+    ]);
+    let input = concat_batches(&first.schema(), [&first, &second, &mixed]).unwrap();
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    let mut emitted = Vec::new();
+    let mut visits = Vec::new();
+    kernel::INSTALLATION_VISITS.with(|count| count.set(0));
+    for (record, watermark, births) in [(first, 2, 2), (second, 4, 0), (mixed, 7, 1)] {
+        assert!(observe_data(&mut operator, &job, &store, &mut output, record).await);
+        emitted.extend(close(&mut operator, &job, &store, &mut output, watermark).await);
+        visits.push(kernel::INSTALLATION_VISITS.with(|count| count.replace(0)));
+        assert_eq!(kernel::take_direct_entity_key_encodings(), births);
+    }
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+    assert_eq!(visits, [2, 0, 1]);
 }
 
 #[tokio::test]
@@ -759,6 +809,7 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
         (1, "a", 1, Some(1.0)),
         (2, "a", 2, Some(2.0)),
         (3, "a", 3, Some(3.0)),
+        (3, "c", 7, Some(7.0)),
         (10, "a", 4, Some(10.0)),
         (20, "a", 5, Some(20.0)),
         (21, "b", 6, Some(21.0)),
@@ -767,7 +818,7 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
     let (expected, _) = reference_output(&operator, &input);
     let (job, store, mut output) = fixture(&operator);
     let job = job.with_checkpointing(false);
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 3)).await);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 4)).await);
     let mut emitted = close(&mut operator, &job, &store, &mut output, 3).await;
     let prior = format!("{:?}", operator.state.typed_kernel_state);
     let shapes = operator
@@ -777,7 +828,7 @@ async fn test_deferred_numeric_history_restores_state_after_output_rejection() {
         .unwrap()
         .numeric_queue_shapes_for_test();
     let sequence = operator.state.next_output_sequence;
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(3, 3)).await);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(4, 3)).await);
     let charge = operator.state.charge;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
     let error = operator
@@ -895,7 +946,7 @@ async fn test_aliased_duration_state_uses_transactional_update_and_preserves_cap
             .collect::<Vec<_>>(),
     );
     let gap = float64_fast_record(&[(1_000, "a", 33, Some(1_000.0))]);
-    let next = float64_fast_record(&[(1_001, "a", 34, Some(1_001.0))]);
+    let next = float64_fast_record(&[(1_001, "b", 34, Some(5.0)), (1_002, "a", 35, Some(1_002.0))]);
     let input = concat_batches(&burst.schema(), [&burst, &gap, &next]).unwrap();
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let (expected, _) = reference_output(&operator, &input);
@@ -918,7 +969,7 @@ async fn test_aliased_duration_state_uses_transactional_update_and_preserves_cap
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(1_000)))
         .with_rolling_metrics(callback.recorder());
     let result = operator
-        .on_watermark(EventTime::from_micros(1_001), &context, &mut Reject)
+        .on_watermark(EventTime::from_micros(1_002), &context, &mut Reject)
         .await;
     callback.complete(&result);
     let error = result.unwrap_err();
@@ -933,7 +984,7 @@ async fn test_aliased_duration_state_uses_transactional_update_and_preserves_cap
     assert_eq!(operator.state.charge, charge);
     assert_deferred_charge(&operator);
     assert!(store.snapshot().watermark.copied_entities > copied);
-    emitted.extend(close(&mut operator, &job, &store, &mut output, 1_001).await);
+    emitted.extend(close(&mut operator, &job, &store, &mut output, 1_002).await);
     assert_eq!(
         concat_batches(&expected.schema(), &emitted).unwrap(),
         expected

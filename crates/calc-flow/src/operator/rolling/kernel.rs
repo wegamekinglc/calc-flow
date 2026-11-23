@@ -77,6 +77,7 @@ const ENTITY_PARALLEL_MIN_ROWS: usize = 64_000;
 #[cfg(test)]
 thread_local! {
     pub(super) static GENERIC_F64_BUILDER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static INSTALLATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DIRECT_ENTITY_KEY_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 

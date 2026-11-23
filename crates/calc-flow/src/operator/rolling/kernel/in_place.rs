@@ -6,7 +6,7 @@ use datafusion::arrow::{
 };
 
 use super::{
-    Array, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, EntityRouting, Float64NumericState,
+    Array, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, EntityRows, Float64NumericState,
     RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan, RollingKernelState,
     RollingMetricsRecorder, RollingStage, RollingWork, StateCharge, StreamKernelUpdate,
     TimedSample, TypedEntityState, TypedFrame, TypedGroupInput, TypedRowInputs, TypedWindowState,
@@ -15,12 +15,22 @@ use super::{
 };
 use crate::Result;
 
-type DirectRouting<'a> = (EntityRouting, Vec<Option<(usize, usize)>>, Vec<&'a str>);
+enum RoutedEntity {
+    Cached { resident: usize, key_bytes: usize },
+    Canonical(Vec<u8>),
+}
+
+struct InPlaceRouting<'a> {
+    entities: Vec<RoutedEntity>,
+    rows: EntityRows,
+    entity_ids: Vec<usize>,
+    direct_names: Vec<&'a str>,
+}
 
 pub(super) struct InPlaceUpdate {
     residents: Vec<usize>,
     key_bytes: Vec<usize>,
-    new_keys: Vec<(usize, Vec<u8>)>,
+    new_local_keys: Vec<(usize, Vec<u8>)>,
     new_direct_keys: Vec<(usize, String)>,
     undo: Vec<EntityUndo>,
     previous_charge: StateCharge,
@@ -167,102 +177,66 @@ struct ResidentInspection {
     residents: Vec<usize>,
     key_bytes: Vec<usize>,
     undo: Vec<EntityUndo>,
+    new_local_keys: Vec<(usize, Vec<u8>)>,
     previous_charge: StateCharge,
-}
-
-#[allow(
-    clippy::large_enum_variant,
-    reason = "resident undo is short-lived and must not allocate on the hot path"
-)]
-enum ResidentMatch {
-    Existing {
-        resident: usize,
-        key_bytes: usize,
-        charge: StateCharge,
-        undo: TypedEntityUndo,
-    },
-    New,
-}
-
-fn inspect_resident(
-    state: &mut RollingKernelState,
-    key: &[u8],
-    known: Option<(usize, usize)>,
-    direct_name: Option<&str>,
-    node_id: &str,
-) -> Result<Option<ResidentMatch>> {
-    let existing = known.or_else(|| {
-        state
-            .entities
-            .get(key)
-            .map(|&resident| (resident, key.len()))
-    });
-    let Some((resident, key_bytes)) = existing else {
-        return Ok(Some(ResidentMatch::New));
-    };
-    let entity = &state.states[resident];
-    if Arc::strong_count(entity) != 1 {
-        return Ok(None);
-    }
-    let charge = entity.charge(key_bytes, node_id)?;
-    if known.is_none()
-        && let Some(name) = direct_name
-    {
-        state
-            .direct_entities
-            .insert(name.to_owned(), (resident, key_bytes));
-    }
-    Ok(Some(ResidentMatch::Existing {
-        resident,
-        key_bytes,
-        charge,
-        undo: TypedEntityUndo::new(entity)?,
-    }))
 }
 
 fn inspect_residents(
     state: &mut RollingKernelState,
-    keys: &[Vec<u8>],
-    known_residents: &[Option<(usize, usize)>],
+    entities: &mut [RoutedEntity],
     direct_names: &[&str],
     node_id: &str,
 ) -> Result<Option<ResidentInspection>> {
     let mut previous_charge = StateCharge::default();
-    let mut residents = Vec::with_capacity(keys.len());
-    let mut key_bytes = Vec::with_capacity(keys.len());
-    let mut undo = Vec::with_capacity(keys.len());
-    for (local, key) in keys.iter().enumerate() {
-        let known = known_residents.get(local).copied().flatten();
-        match inspect_resident(state, key, known, direct_names.get(local).copied(), node_id)? {
-            Some(ResidentMatch::Existing {
+    let mut residents = Vec::with_capacity(entities.len());
+    let mut key_bytes = Vec::with_capacity(entities.len());
+    let mut undo = Vec::with_capacity(entities.len());
+    let mut new_local_keys = Vec::new();
+    for (local, key) in entities.iter_mut().enumerate() {
+        let (resident, encoded_bytes) = match key {
+            RoutedEntity::Cached {
                 resident,
-                key_bytes: encoded_bytes,
-                charge,
-                undo: previous,
-            }) => {
-                previous_charge = previous_charge.checked_add(charge, node_id)?;
-                residents.push(resident);
-                key_bytes.push(encoded_bytes);
-                undo.push(EntityUndo {
-                    previous: Some(previous),
-                    is_new: false,
-                });
+                key_bytes,
+            } => (*resident, *key_bytes),
+            RoutedEntity::Canonical(bytes) => {
+                let Some(&resident) = state.entities.get(bytes.as_slice()) else {
+                    residents.push(usize::MAX);
+                    key_bytes.push(bytes.len());
+                    new_local_keys.push((local, std::mem::take(bytes)));
+                    undo.push(EntityUndo {
+                        previous: None,
+                        is_new: true,
+                    });
+                    continue;
+                };
+                (resident, bytes.len())
             }
-            Some(ResidentMatch::New) => {
-                residents.push(usize::MAX);
-                key_bytes.push(key.len());
-                undo.push(EntityUndo {
-                    previous: None,
-                    is_new: true,
-                });
-            }
-            None => return Ok(None),
+        };
+        let entity = &state.states[resident];
+        if Arc::strong_count(entity) != 1 {
+            return Ok(None);
         }
+        let charge = entity.charge(encoded_bytes, node_id)?;
+        if matches!(key, RoutedEntity::Canonical(_))
+            && let Some(name) = direct_names.get(local)
+        {
+            state
+                .direct_entities
+                .insert((*name).to_owned(), (resident, encoded_bytes));
+        }
+        previous_charge = previous_charge.checked_add(charge, node_id)?;
+        residents.push(resident);
+        key_bytes.push(encoded_bytes);
+        undo.push(EntityUndo {
+            previous: Some(TypedEntityUndo::new(entity)?),
+            is_new: false,
+        });
     }
     Ok(Some(ResidentInspection {
         residents,
         key_bytes,
         undo,
+        new_local_keys,
         previous_charge,
     }))
 }
@@ -271,37 +245,36 @@ impl InPlaceUpdate {
     fn resolve(
         plan: &RollingKernelPlan,
         state: &mut RollingKernelState,
-        routing: EntityRouting,
-        known_residents: &[Option<(usize, usize)>],
-        direct_names: &[&str],
+        routing: InPlaceRouting<'_>,
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<Option<(Self, super::EntityRows, Vec<usize>)>> {
-        let EntityRouting {
-            keys,
+    ) -> Result<Option<(Self, EntityRows, Vec<usize>)>> {
+        let InPlaceRouting {
+            mut entities,
             rows,
             entity_ids,
+            direct_names,
         } = routing;
         if let Some(recorder) = observer {
             recorder.add(RollingWork::ResolvedRows, entity_ids.len());
-            recorder.add(RollingWork::TouchedEntities, keys.len());
+            recorder.add(RollingWork::TouchedEntities, entities.len());
         }
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
         let Some(ResidentInspection {
             mut residents,
             key_bytes,
             mut undo,
+            new_local_keys,
             previous_charge,
-        }) = inspect_residents(state, &keys, known_residents, direct_names, node_id)?
+        }) = inspect_residents(state, &mut entities, &direct_names, node_id)?
         else {
             return Ok(None);
         };
-        let mut new_keys = Vec::new();
         let mut new_direct_keys = Vec::new();
-        for (local, key) in keys.into_iter().enumerate() {
-            if !undo[local].is_new {
-                continue;
-            }
+        for (local, key) in &new_local_keys {
+            #[cfg(test)]
+            super::INSTALLATION_VISITS.with(|count| count.set(count.get() + 1));
+            let local = *local;
             let resident = state.states.len();
             state.entities.insert(key.clone(), resident);
             state
@@ -323,13 +296,12 @@ impl InPlaceUpdate {
                     .insert(name.clone(), (resident, key_bytes[local]));
                 new_direct_keys.push((resident, name));
             }
-            new_keys.push((resident, key));
         }
         Ok(Some((
             Self {
                 residents,
                 key_bytes,
-                new_keys,
+                new_local_keys,
                 new_direct_keys,
                 undo,
                 previous_charge,
@@ -366,11 +338,11 @@ impl InPlaceUpdate {
                     );
                 continue;
             }
-            let (key_resident, key) = self
-                .new_keys
+            let (key_local, key) = self
+                .new_local_keys
                 .pop()
                 .expect("in-place rolling new entity has a resident key");
-            debug_assert_eq!(key_resident, resident);
+            debug_assert_eq!(key_local, local_index);
             base.entities.remove(key.as_slice());
             if let Some((direct_resident, name)) = self.new_direct_keys.pop() {
                 debug_assert_eq!(direct_resident, resident);
@@ -386,39 +358,43 @@ fn route_direct_entities<'a>(
     state: &RollingKernelState,
     entities: &'a StringArray,
     node_id: &str,
-) -> Result<DirectRouting<'a>> {
+) -> Result<InPlaceRouting<'a>> {
     let values = (0..entities.len()).map(|row| entities.value(row));
     let (names, rows, entity_ids) = dense_entity_ids(values, state.states.len().max(16));
-    let mut known = Vec::with_capacity(names.len());
-    let mut keys = vec![Vec::new(); names.len()];
     let mut misses = Vec::new();
-    for (local, name) in names.iter().copied().enumerate() {
-        let resident = state.direct_entities.get(name).copied();
-        known.push(resident);
-        if resident.is_none() {
-            misses.push((local, name));
-        }
-    }
+    let mut routed = names
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(local, name)| {
+            if let Some(&(resident, key_bytes)) = state.direct_entities.get(name) {
+                RoutedEntity::Cached {
+                    resident,
+                    key_bytes,
+                }
+            } else {
+                misses.push((local, name));
+                RoutedEntity::Canonical(Vec::new())
+            }
+        })
+        .collect::<Vec<_>>();
     if !misses.is_empty() {
         let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(
             misses.iter().map(|(_, name)| *name),
         ));
         let encoded = encode_arrays(&[distinct], node_id)?;
         for (row, (local, _)) in misses.iter().enumerate() {
-            keys[*local] = encoded.row(row).data().to_vec();
+            routed[*local] = RoutedEntity::Canonical(encoded.row(row).data().to_vec());
         }
         #[cfg(test)]
         super::record_direct_entity_key_encodings(misses.len());
     }
-    Ok((
-        EntityRouting {
-            keys,
-            rows,
-            entity_ids,
-        },
-        known,
-        names,
-    ))
+    Ok(InPlaceRouting {
+        entities: routed,
+        rows,
+        entity_ids,
+        direct_names: names,
+    })
 }
 
 impl RollingKernelPlan {
@@ -438,16 +414,22 @@ impl RollingKernelPlan {
         input: &'a RecordBatch,
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
-    ) -> Result<DirectRouting<'a>> {
+    ) -> Result<InPlaceRouting<'a>> {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
-        match super::direct_entity_column(self, input) {
-            Some(entities) => route_direct_entities(state, entities, node_id),
-            None => Ok((
-                self.encoded_entity_routing(input, state.states.len().max(16), node_id)?,
-                Vec::new(),
-                Vec::new(),
-            )),
+        if let Some(entities) = super::direct_entity_column(self, input) {
+            return route_direct_entities(state, entities, node_id);
         }
+        let routing = self.encoded_entity_routing(input, state.states.len().max(16), node_id)?;
+        Ok(InPlaceRouting {
+            entities: routing
+                .keys
+                .into_iter()
+                .map(RoutedEntity::Canonical)
+                .collect(),
+            rows: routing.rows,
+            entity_ids: routing.entity_ids,
+            direct_names: Vec::new(),
+        })
     }
 
     fn ordered_event_times(
@@ -480,17 +462,9 @@ impl RollingKernelPlan {
         let event_times = self.ordered_event_times(input, node_id)?;
         let last_identity = self.last_ordered_identity(input, node_id)?;
         let started = Instant::now();
-        let (routing, known_residents, direct_names) =
-            self.route_in_place(state, input, node_id, observer)?;
-        let Some((mut in_place, entity_rows, entity_ids)) = InPlaceUpdate::resolve(
-            self,
-            state,
-            routing,
-            &known_residents,
-            &direct_names,
-            node_id,
-            observer,
-        )?
+        let routing = self.route_in_place(state, input, node_id, observer)?;
+        let Some((mut in_place, entity_rows, entity_ids)) =
+            InPlaceUpdate::resolve(self, state, routing, node_id, observer)?
         else {
             return Ok(None);
         };
@@ -811,6 +785,43 @@ impl super::SlidingSampleQueue<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_direct_routing_uses_one_slot_per_resident() {
+        let names = (0..128).map(|id| format!("key-{id}")).collect::<Vec<_>>();
+        let entities = StringArray::from_iter_values(&names);
+        let encoded = encode_arrays(&[Arc::new(entities.clone()) as ArrayRef], "r").unwrap();
+        let plan = super::super::TypedGroupPlan::Numeric {
+            input_index: 0,
+            frame: TypedFrame::Duration(6),
+            dispersion: false,
+        };
+        let mut state = RollingKernelState::default();
+        for (resident, name) in names.iter().enumerate() {
+            let key = encoded.row(resident).data().to_vec();
+            state
+                .direct_entities
+                .insert(name.clone(), (resident, key.len()));
+            state.entities.insert(key, resident);
+            state
+                .states
+                .push(Arc::new(TypedEntityState::new(&[plan], 1)));
+        }
+        let dense = allocation_counter::measure(|| {
+            let values = (0..entities.len()).map(|row| entities.value(row));
+            std::hint::black_box(dense_entity_ids(values, state.states.len().max(16)));
+        });
+        let routed = allocation_counter::measure(|| {
+            std::hint::black_box(route_direct_entities(&state, &entities, "r").unwrap());
+        });
+        let scratch = routed.bytes_total - dense.bytes_total;
+        let one_slot_per_resident = u64::try_from(names.len() * size_of::<Vec<u8>>()).unwrap();
+        eprintln!(
+            "additional direct routing storage {scratch} B for {} residents",
+            names.len()
+        );
+        assert!(scratch <= one_slot_per_resident, "{routed:?} vs {dense:?}");
+    }
 
     fn warm_state() -> Float64NumericState {
         let mut state = Float64NumericState::new(TypedFrame::Duration(6), 1);
