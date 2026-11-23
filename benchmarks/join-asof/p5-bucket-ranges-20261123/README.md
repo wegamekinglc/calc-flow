@@ -1,0 +1,15 @@
+# Interval join bucket ranges
+
+The native Rust handler received 10,000 right rows after a 10,000-row left seed and emitted 100,000 matching pairs. Across 20 paired observations, median time moved from 8.455 to 8.425 ms and P95 from 8.807 to 8.792 ms. Paired changes were −0.17% [−5.04%, +0.54%] and +1.08% [−1.76%, +5.75%]. The maintained latency verdict was inconclusive.
+
+In separate current-thread allocation tests, the 128 × 128 probe peaked at 397,504 bytes before the change and 6,304 bytes after it. One three-row apply following 4,096 retired runs allocated 35,880 and 2,840 bytes respectively. The fresh-run control allocated 3,136 and 2,840 bytes. The release handler clock includes gathering its output. The allocation tests have narrower scopes.
+
+## Reproduction
+
+Use the public source revisions in [result.json](result.json) and apply [the same diagnostic adapter](range-sample.patch) to each checkout. The recorded baseline build includes an additional test-only change in `join/run_tests.rs`. The candidate runtime tree matches the published revision. Build each using `cargo bench --locked -p calc-flow --bench stream_join_perf --no-run` and the recorded toolchain. Start a new process with `--range-sample` for every observation, including warmups. Each process performs the maintained correctness preflight, builds a fresh operator, times the right handler, and verifies all six visible output columns in sequence. The ten historical rows for each key have identical fixture values and timestamps. Separate native tests use distinguishable rows to check tie ordering.
+
+Both arms used logical CPU 8 with one worker. The two rounds each had one excluded warmup per arm followed by ten alternating pairs. The first measured pair was candidate then baseline in round one and baseline then candidate in round two. The three-second preflight required CPU 8 and its sibling 9 each at or below 20% busy. During acquisition the sibling had to stay below 50%, mean host utilization below 50%, available RAM at least 10 GiB, major faults below 256, and total swap movement below 1,024 pages per sampling interval. Each interval, including the final one, had to qualify. The 180-second inclusive limit covered startup, the oracle and cleanup. Acquisition took 36.2 seconds. The separate release builds took 16.2 and 16.9 minutes.
+
+The JSON stores per-run handler nanoseconds, process RSS and high-water marks in KiB, and each host interval. Sample index −1 marks a warmup. This evidence covers the Rust handler. Public Python iteration and Arrow concatenation use their own clock and workload.
+
+The native allocation cases are `test_fanout_probe_stores_ranges_per_input_row` and `test_probe_storage_after_many_retired_runs`. To reproduce the baseline, transplant the test fixtures onto the public baseline, including the candidate’s `pub(super)` visibility for the `fanout_input` test helper. Keep the baseline probe and gather implementation intact. Run the focused tests with `--nocapture` to read their counter values. The baseline prints the counters before it fails the candidate allocation limits.

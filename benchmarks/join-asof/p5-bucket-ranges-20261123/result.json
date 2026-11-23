@@ -1,0 +1,1014 @@
+{
+  "id": "join/handler/right_10k_fanout10",
+  "inputs": 10000,
+  "outputs": 100000,
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "topology": "8-9",
+  "cpu": "8",
+  "controller_affinity": [
+    31
+  ],
+  "thread_environment": {
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "POLARS_MAX_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "TOKIO_WORKER_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1"
+  },
+  "status": "completed",
+  "summary": {
+    "base_p50": 0.00845506,
+    "change_percent": -0.3585131270505526,
+    "head_max": 0.008821689,
+    "head_min": 0.008100533,
+    "head_p50": 0.0084247475,
+    "head_p95": 0.0087924214,
+    "round_changes": [
+      -0.17401575043141104,
+      1.0766010965332695
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 0.5430890697932567,
+        "low": -5.03862628577113,
+        "median": -0.17401575043141104
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 5.754752365924043,
+        "low": -1.759967056110745,
+        "median": 1.0766010965332695
+      }
+    ],
+    "round_min_changes": [
+      -1.0585066069636717,
+      2.714633449705639
+    ],
+    "rows_per_second": 1186979.194331937,
+    "samples": 20,
+    "verdict": "inconclusive"
+  },
+  "wall_s": 36.16166498500388,
+  "host": {
+    "system": "Linux",
+    "release": "5.15.167.4-microsoft-standard-WSL2",
+    "machine": "x86_64"
+  },
+  "clock": "Single right process_data after the left seed. All Arrow columns and ordered pairs validated after the clock.",
+  "builds": {
+    "baseline": {
+      "source_sha": "8fb70534aa25f8cb10c8cbe84374f20a25153d37",
+      "runtime_tree": "a5cf1cb7910b8e1aceedbbb223a4e601e0831c76",
+      "binary_sha256": "aba2a06ab46c35505beec9ed6ea5bf11c1d36eecf84eb720e58c5172238341f4",
+      "harness_sha256": "367775868966f9e87b7afaf13cdd1c27675175a692e647c2b33edf581956d988",
+      "adapter_sha256": "6c3fef7e9b97ab9ba4332bed716024835bc979e4eda86fd746e704cfe989d1fe",
+      "lock_sha256": "fe3a5c9b99de6bdb59a5c78a24fa7700e0b6b9cc8934316f58a83ab85440ddfe",
+      "profile": {
+        "debug_assertions": false,
+        "debuginfo": 0,
+        "opt_level": "3",
+        "overflow_checks": false,
+        "test": true
+      },
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "seconds": 969.9426118909614,
+      "public_revision": "563f831495f635e4c12fd1cbc5bafa8ef901dbe6"
+    },
+    "candidate": {
+      "source_sha": "d702d7675a5559f3650da2de842a167d3b5d0da7",
+      "runtime_tree": "9f9f0f2123e49cfbc5bb14d8ccb5b15b93cfc876",
+      "binary_sha256": "6e7a2326e69050e6c5821a03a4de259c9355da06f095cc0288d5c182f2e304ee",
+      "harness_sha256": "367775868966f9e87b7afaf13cdd1c27675175a692e647c2b33edf581956d988",
+      "adapter_sha256": "6c3fef7e9b97ab9ba4332bed716024835bc979e4eda86fd746e704cfe989d1fe",
+      "lock_sha256": "fe3a5c9b99de6bdb59a5c78a24fa7700e0b6b9cc8934316f58a83ab85440ddfe",
+      "profile": {
+        "debug_assertions": false,
+        "debuginfo": 0,
+        "opt_level": "3",
+        "overflow_checks": false,
+        "test": true
+      },
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "seconds": 1015.4290431200061,
+      "public_revision": "560bf843e8024d3c64c1b96fb2ed68ab91893e91"
+    }
+  },
+  "observations": [
+    {
+      "round": 0,
+      "sample": -1,
+      "arm": "baseline",
+      "ns": 8588367,
+      "rss_kib": 179356,
+      "hwm_kib": 288144
+    },
+    {
+      "round": 0,
+      "sample": -1,
+      "arm": "candidate",
+      "ns": 8901727,
+      "rss_kib": 180620,
+      "hwm_kib": 288716
+    },
+    {
+      "round": 0,
+      "sample": 0,
+      "arm": "candidate",
+      "ns": 8100533,
+      "rss_kib": 180308,
+      "hwm_kib": 288468
+    },
+    {
+      "round": 0,
+      "sample": 0,
+      "arm": "baseline",
+      "ns": 8798934,
+      "rss_kib": 179816,
+      "hwm_kib": 288668
+    },
+    {
+      "round": 0,
+      "sample": 1,
+      "arm": "baseline",
+      "ns": 8337982,
+      "rss_kib": 179868,
+      "hwm_kib": 288720
+    },
+    {
+      "round": 0,
+      "sample": 1,
+      "arm": "candidate",
+      "ns": 8349452,
+      "rss_kib": 180488,
+      "hwm_kib": 288648
+    },
+    {
+      "round": 0,
+      "sample": 2,
+      "arm": "candidate",
+      "ns": 8200249,
+      "rss_kib": 180308,
+      "hwm_kib": 288468
+    },
+    {
+      "round": 0,
+      "sample": 2,
+      "arm": "baseline",
+      "ns": 8187195,
+      "rss_kib": 179620,
+      "hwm_kib": 288404
+    },
+    {
+      "round": 0,
+      "sample": 3,
+      "arm": "baseline",
+      "ns": 8553157,
+      "rss_kib": 179672,
+      "hwm_kib": 288460
+    },
+    {
+      "round": 0,
+      "sample": 3,
+      "arm": "candidate",
+      "ns": 8543796,
+      "rss_kib": 180504,
+      "hwm_kib": 288600
+    },
+    {
+      "round": 0,
+      "sample": 4,
+      "arm": "candidate",
+      "ns": 8790881,
+      "rss_kib": 180116,
+      "hwm_kib": 288276
+    },
+    {
+      "round": 0,
+      "sample": 4,
+      "arm": "baseline",
+      "ns": 8550679,
+      "rss_kib": 179784,
+      "hwm_kib": 288572
+    },
+    {
+      "round": 0,
+      "sample": 5,
+      "arm": "baseline",
+      "ns": 8712987,
+      "rss_kib": 179500,
+      "hwm_kib": 288352
+    },
+    {
+      "round": 0,
+      "sample": 5,
+      "arm": "candidate",
+      "ns": 8503497,
+      "rss_kib": 180364,
+      "hwm_kib": 288524
+    },
+    {
+      "round": 0,
+      "sample": 6,
+      "arm": "candidate",
+      "ns": 8647324,
+      "rss_kib": 180496,
+      "hwm_kib": 288656
+    },
+    {
+      "round": 0,
+      "sample": 6,
+      "arm": "baseline",
+      "ns": 8600615,
+      "rss_kib": 179812,
+      "hwm_kib": 288664
+    },
+    {
+      "round": 0,
+      "sample": 7,
+      "arm": "baseline",
+      "ns": 8403757,
+      "rss_kib": 179812,
+      "hwm_kib": 288600
+    },
+    {
+      "round": 0,
+      "sample": 7,
+      "arm": "candidate",
+      "ns": 8212087,
+      "rss_kib": 180444,
+      "hwm_kib": 288608
+    },
+    {
+      "round": 0,
+      "sample": 8,
+      "arm": "candidate",
+      "ns": 8462219,
+      "rss_kib": 180104,
+      "hwm_kib": 288328
+    },
+    {
+      "round": 0,
+      "sample": 8,
+      "arm": "baseline",
+      "ns": 8482457,
+      "rss_kib": 179616,
+      "hwm_kib": 288404
+    },
+    {
+      "round": 0,
+      "sample": 9,
+      "arm": "baseline",
+      "ns": 8725017,
+      "rss_kib": 179816,
+      "hwm_kib": 288604
+    },
+    {
+      "round": 0,
+      "sample": 9,
+      "arm": "candidate",
+      "ns": 8285396,
+      "rss_kib": 180228,
+      "hwm_kib": 288384
+    },
+    {
+      "round": 1,
+      "sample": -1,
+      "arm": "candidate",
+      "ns": 8361031,
+      "rss_kib": 180304,
+      "hwm_kib": 288464
+    },
+    {
+      "round": 1,
+      "sample": -1,
+      "arm": "baseline",
+      "ns": 8360986,
+      "rss_kib": 179824,
+      "hwm_kib": 288612
+    },
+    {
+      "round": 1,
+      "sample": 0,
+      "arm": "baseline",
+      "ns": 8967573,
+      "rss_kib": 179372,
+      "hwm_kib": 288224
+    },
+    {
+      "round": 1,
+      "sample": 0,
+      "arm": "candidate",
+      "ns": 8821689,
+      "rss_kib": 180188,
+      "hwm_kib": 288344
+    },
+    {
+      "round": 1,
+      "sample": 1,
+      "arm": "candidate",
+      "ns": 8347236,
+      "rss_kib": 180348,
+      "hwm_kib": 288512
+    },
+    {
+      "round": 1,
+      "sample": 1,
+      "arm": "baseline",
+      "ns": 8704989,
+      "rss_kib": 179756,
+      "hwm_kib": 288544
+    },
+    {
+      "round": 1,
+      "sample": 2,
+      "arm": "baseline",
+      "ns": 8254683,
+      "rss_kib": 179796,
+      "hwm_kib": 288584
+    },
+    {
+      "round": 1,
+      "sample": 2,
+      "arm": "candidate",
+      "ns": 8657247,
+      "rss_kib": 180308,
+      "hwm_kib": 288468
+    },
+    {
+      "round": 1,
+      "sample": 3,
+      "arm": "candidate",
+      "ns": 8737864,
+      "rss_kib": 180504,
+      "hwm_kib": 288600
+    },
+    {
+      "round": 1,
+      "sample": 3,
+      "arm": "baseline",
+      "ns": 8436852,
+      "rss_kib": 180084,
+      "hwm_kib": 288808
+    },
+    {
+      "round": 1,
+      "sample": 4,
+      "arm": "baseline",
+      "ns": 8473268,
+      "rss_kib": 179396,
+      "hwm_kib": 288248
+    },
+    {
+      "round": 1,
+      "sample": 4,
+      "arm": "candidate",
+      "ns": 8387276,
+      "rss_kib": 180052,
+      "hwm_kib": 288276
+    },
+    {
+      "round": 1,
+      "sample": 5,
+      "arm": "candidate",
+      "ns": 8367418,
+      "rss_kib": 180552,
+      "hwm_kib": 288716
+    },
+    {
+      "round": 1,
+      "sample": 5,
+      "arm": "baseline",
+      "ns": 8416093,
+      "rss_kib": 179560,
+      "hwm_kib": 288348
+    },
+    {
+      "round": 1,
+      "sample": 6,
+      "arm": "baseline",
+      "ns": 8163618,
+      "rss_kib": 179804,
+      "hwm_kib": 288656
+    },
+    {
+      "round": 1,
+      "sample": 6,
+      "arm": "candidate",
+      "ns": 8633414,
+      "rss_kib": 180056,
+      "hwm_kib": 288216
+    },
+    {
+      "round": 1,
+      "sample": 7,
+      "arm": "candidate",
+      "ns": 8220891,
+      "rss_kib": 180680,
+      "hwm_kib": 288844
+    },
+    {
+      "round": 1,
+      "sample": 7,
+      "arm": "baseline",
+      "ns": 8368168,
+      "rss_kib": 179688,
+      "hwm_kib": 288480
+    },
+    {
+      "round": 1,
+      "sample": 8,
+      "arm": "baseline",
+      "ns": 8038964,
+      "rss_kib": 179680,
+      "hwm_kib": 288532
+    },
+    {
+      "round": 1,
+      "sample": 8,
+      "arm": "candidate",
+      "ns": 8258553,
+      "rss_kib": 180380,
+      "hwm_kib": 288540
+    },
+    {
+      "round": 1,
+      "sample": 9,
+      "arm": "candidate",
+      "ns": 8762192,
+      "rss_kib": 180380,
+      "hwm_kib": 288540
+    },
+    {
+      "round": 1,
+      "sample": 9,
+      "arm": "baseline",
+      "ns": 8003622,
+      "rss_kib": 179688,
+      "hwm_kib": 288540
+    }
+  ],
+  "qualification": [
+    {
+      "available_bytes": 31141462016,
+      "cpu": 8,
+      "cpu_busy": 0.0,
+      "host_busy": 0.09999999999999999,
+      "major_faults": 5,
+      "preflight": true,
+      "seconds": 3.0006546130171046,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 5,
+      "swap_out_pages": 0,
+      "swap_pages": 5
+    },
+    {
+      "available_bytes": 30938329088,
+      "cpu": 8,
+      "cpu_busy": 75.0,
+      "host_busy": 3.25,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0036973130190745,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30845943808,
+      "cpu": 8,
+      "cpu_busy": 87.1,
+      "host_busy": 3.4656249999999997,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0024641179479659,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 30913556480,
+      "cpu": 8,
+      "cpu_busy": 76.5,
+      "host_busy": 3.615625,
+      "major_faults": 6,
+      "preflight": false,
+      "seconds": 1.0189946420723572,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 6,
+      "swap_out_pages": 0,
+      "swap_pages": 6
+    },
+    {
+      "available_bytes": 30861737984,
+      "cpu": 8,
+      "cpu_busy": 87.0,
+      "host_busy": 3.528125,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.002337023965083,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30992265216,
+      "cpu": 8,
+      "cpu_busy": 76.2,
+      "host_busy": 3.6750000000000003,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0158427039859816,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30864072704,
+      "cpu": 8,
+      "cpu_busy": 86.3,
+      "host_busy": 3.3375,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0213969059986994,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 31141367808,
+      "cpu": 8,
+      "cpu_busy": 76.3,
+      "host_busy": 3.315625,
+      "major_faults": 7,
+      "preflight": false,
+      "seconds": 1.1426470449659973,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 7,
+      "swap_out_pages": 0,
+      "swap_pages": 7
+    },
+    {
+      "available_bytes": 30944972800,
+      "cpu": 8,
+      "cpu_busy": 84.2,
+      "host_busy": 3.25625,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0106602100422606,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 30864162816,
+      "cpu": 8,
+      "cpu_busy": 87.0,
+      "host_busy": 3.275,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0155303940409794,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 31140597760,
+      "cpu": 8,
+      "cpu_busy": 75.5,
+      "host_busy": 3.296875,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.1011850379873067,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30906032128,
+      "cpu": 8,
+      "cpu_busy": 87.3,
+      "host_busy": 3.284375,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0126510909758508,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 30965207040,
+      "cpu": 8,
+      "cpu_busy": 88.1,
+      "host_busy": 3.3093749999999997,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0083676299545914,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30908481536,
+      "cpu": 8,
+      "cpu_busy": 76.2,
+      "host_busy": 4.16875,
+      "major_faults": 3,
+      "preflight": false,
+      "seconds": 1.0129540840862319,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 3,
+      "swap_out_pages": 0,
+      "swap_pages": 3
+    },
+    {
+      "available_bytes": 30844801024,
+      "cpu": 8,
+      "cpu_busy": 87.0,
+      "host_busy": 3.559375,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0028710939222947,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 31038943232,
+      "cpu": 8,
+      "cpu_busy": 75.2,
+      "host_busy": 3.371875,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0069252240937203,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30861381632,
+      "cpu": 8,
+      "cpu_busy": 87.3,
+      "host_busy": 3.196875,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.014097552979365,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 31129051136,
+      "cpu": 8,
+      "cpu_busy": 75.5,
+      "host_busy": 3.2125,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0139573030173779,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 30925885440,
+      "cpu": 8,
+      "cpu_busy": 87.1,
+      "host_busy": 3.30625,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.016313448897563,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30870691840,
+      "cpu": 8,
+      "cpu_busy": 85.4,
+      "host_busy": 3.25625,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.017949377070181,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30997049344,
+      "cpu": 8,
+      "cpu_busy": 75.8,
+      "host_busy": 3.221875,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0012138469610363,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30868221952,
+      "cpu": 8,
+      "cpu_busy": 86.1,
+      "host_busy": 3.2468749999999997,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.009827260975726,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 31110504448,
+      "cpu": 8,
+      "cpu_busy": 76.0,
+      "host_busy": 3.396875,
+      "major_faults": 3,
+      "preflight": false,
+      "seconds": 1.0025195539928973,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 3,
+      "swap_out_pages": 0,
+      "swap_pages": 3
+    },
+    {
+      "available_bytes": 30856626176,
+      "cpu": 8,
+      "cpu_busy": 88.2,
+      "host_busy": 3.465625,
+      "major_faults": 2,
+      "preflight": false,
+      "seconds": 1.0159609291004017,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 31131373568,
+      "cpu": 8,
+      "cpu_busy": 77.5,
+      "host_busy": 3.23125,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0201584799215198,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30877544448,
+      "cpu": 8,
+      "cpu_busy": 88.1,
+      "host_busy": 3.940625,
+      "major_faults": 3,
+      "preflight": false,
+      "seconds": 1.0019480959745124,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 31143604224,
+      "cpu": 8,
+      "cpu_busy": 77.7,
+      "host_busy": 3.4250000000000003,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0273548300610855,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 30876151808,
+      "cpu": 8,
+      "cpu_busy": 88.1,
+      "host_busy": 3.25,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.013593522948213,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 31142940672,
+      "cpu": 8,
+      "cpu_busy": 76.5,
+      "host_busy": 3.340625,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0236547060776502,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 30875754496,
+      "cpu": 8,
+      "cpu_busy": 89.1,
+      "host_busy": 3.40625,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0111903989454731,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    },
+    {
+      "available_bytes": 31144345600,
+      "cpu": 8,
+      "cpu_busy": 75.8,
+      "host_busy": 3.3625,
+      "major_faults": 0,
+      "preflight": false,
+      "seconds": 1.0006678130012006,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    },
+    {
+      "available_bytes": 31145054208,
+      "cpu": 8,
+      "cpu_busy": 54.0,
+      "host_busy": 1.875,
+      "major_faults": 1,
+      "preflight": false,
+      "seconds": 1.0004792340332642,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 1,
+      "swap_out_pages": 0,
+      "swap_pages": 1
+    }
+  ],
+  "allocations_bytes": {
+    "128x128_peak_before_gather": {
+      "baseline": 397504,
+      "candidate": 6304
+    },
+    "three_rows_after_4096_retired_runs_cumulative": {
+      "baseline": 35880,
+      "candidate": 2840
+    },
+    "three_rows_fresh_cumulative": {
+      "baseline": 3136,
+      "candidate": 2840
+    }
+  }
+}

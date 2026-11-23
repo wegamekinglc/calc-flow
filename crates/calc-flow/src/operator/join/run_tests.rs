@@ -226,6 +226,60 @@ fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
 }
 
 #[test]
+fn test_probe_storage_after_many_retired_runs() {
+    fn bytes(retired: u64) -> u64 {
+        let mut state = state(10);
+        let schema = output_schema();
+        let output = RunOutputContext::new(&schema, Some(&[1, 3]), 2, EdgeBudget::default());
+        let left = record(&[1], &[8]);
+        let group = GroupId::new(0).unwrap();
+        for row in 0..=retired {
+            let batch = incoming(
+                &left,
+                vec![0],
+                vec![group],
+                &[10],
+                &[row],
+                vec![true],
+                row + 1,
+            );
+            state
+                .apply_checked(JoinSide::Left, batch, output, &mut || Ok(()))
+                .unwrap();
+            if row < retired {
+                assert_eq!(state.evict_end(JoinSide::Left).unwrap().retired_runs, 1);
+            }
+        }
+        let probe = incoming(
+            &record(&[1; 3], &[21, 22, 23]),
+            vec![0, 1, 2],
+            vec![group; 3],
+            &[10; 3],
+            &[0, 1, 2],
+            vec![false; 3],
+            3,
+        );
+        let mut result = None;
+        let cost = allocation_counter::measure(|| {
+            result = Some(
+                state
+                    .apply_checked(JoinSide::Right, probe, output, &mut || Ok(()))
+                    .unwrap(),
+            );
+        });
+        let result = result.unwrap();
+        assert_eq!(result.sequences, [0]);
+        assert_eq!(values(&result.records[0], 0), [8; 3]);
+        assert_eq!(values(&result.records[0], 1), [21, 22, 23]);
+        cost.bytes_total
+    }
+    let fresh = bytes(0);
+    let aged = bytes(4096);
+    println!("three-row probe after 0 vs 4096 retired runs allocated {fresh} and {aged} bytes");
+    assert!(aged <= fresh * 2, "fresh={fresh}, aged={aged}");
+}
+
+#[test]
 fn test_retained_run_shares_dense_input_buffers() {
     let record = record(&[1, 1], &[10, 11]);
     let expected = record
@@ -532,7 +586,7 @@ fn test_retained_row_and_byte_limits_reject_the_whole_run() {
     assert_eq!(bytes_limited.next_row_id(JoinSide::Left), 0);
 }
 
-fn fanout_input(rows: usize, first_value: i64, retain: bool) -> Incoming {
+pub(super) fn fanout_input(rows: usize, first_value: i64, retain: bool) -> Incoming {
     let values = (0..rows)
         .map(|row| first_value + i64::try_from(row).unwrap())
         .collect::<Vec<_>>();
@@ -569,7 +623,7 @@ fn fanout_state(rows: usize) -> (RunState, Incoming) {
 #[test]
 fn test_chunked_run_gather_visits_only_its_matched_pairs() {
     let (mut state, right) = fanout_state_with_rows(8, 11);
-    super::matches::CURSOR_VISITS.set(0);
+    super::runs::GATHER_VISITS.set(0);
     let output = state
         .apply(
             JoinSide::Right,
@@ -580,7 +634,7 @@ fn test_chunked_run_gather_visits_only_its_matched_pairs() {
             EdgeBudget::new(7, 1_000_000).unwrap(),
         )
         .unwrap();
-    let visits = super::matches::CURSOR_VISITS.get();
+    let visits = super::runs::GATHER_VISITS.get();
     let expected = (100..111)
         .flat_map(|right| (0..8).map(move |left| (left, right)))
         .collect::<Vec<_>>();

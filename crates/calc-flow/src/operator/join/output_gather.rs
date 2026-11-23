@@ -46,7 +46,15 @@ impl Indices {
 }
 
 impl<'a> SideGather<'a> {
-    pub(super) fn new(mut payloads: impl Iterator<Item = PayloadRef<'a>>) -> Option<Self> {
+    pub(super) fn new(payloads: impl Iterator<Item = PayloadRef<'a>>) -> Option<Self> {
+        let capacity = payloads.size_hint().0;
+        Self::with_capacity(payloads, capacity)
+    }
+
+    pub(super) fn with_capacity(
+        mut payloads: impl Iterator<Item = PayloadRef<'a>>,
+        capacity: usize,
+    ) -> Option<Self> {
         let first = payloads.next()?;
         let columns = first.columns();
         // Array lengths bound logical source coordinates, including sliced arrays.
@@ -58,11 +66,11 @@ impl<'a> SideGather<'a> {
                     .is_some_and(|last| u32::try_from(last).is_ok())
         });
         if narrow {
-            Self::single(first, payloads, |rows: Vec<u32>| {
+            Self::single(first, payloads, capacity, |rows: Vec<u32>| {
                 Indices::Narrow(UInt32Array::from(rows))
             })
         } else {
-            Self::single(first, payloads, |rows: Vec<u64>| {
+            Self::single(first, payloads, capacity, |rows: Vec<u64>| {
                 Indices::Wide(UInt64Array::from(rows))
             })
         }
@@ -71,6 +79,7 @@ impl<'a> SideGather<'a> {
     fn single<I>(
         first: PayloadRef<'a>,
         mut payloads: impl Iterator<Item = PayloadRef<'a>>,
+        capacity: usize,
         finish: impl FnOnce(Vec<I>) -> Indices,
     ) -> Option<Self>
     where
@@ -78,11 +87,16 @@ impl<'a> SideGather<'a> {
         usize: TryFrom<I>,
     {
         let columns = first.columns();
-        let mut rows = Vec::with_capacity(payloads.size_hint().0 + 1);
+        let mut rows = Vec::with_capacity(capacity.max(payloads.size_hint().0 + 1));
         rows.push(I::try_from(first.offset()).ok()?);
         for payload in payloads.by_ref() {
             if !std::ptr::eq(columns, payload.columns()) {
-                return Self::multiple(columns, rows, std::iter::once(payload).chain(payloads));
+                return Self::multiple(
+                    columns,
+                    rows,
+                    std::iter::once(payload).chain(payloads),
+                    capacity,
+                );
             }
             rows.push(I::try_from(payload.offset()).ok()?);
         }
@@ -96,6 +110,7 @@ impl<'a> SideGather<'a> {
         first_columns: &'a [ArrayRef],
         first_rows: Vec<I>,
         payloads: impl Iterator<Item = PayloadRef<'a>>,
+        capacity: usize,
     ) -> Option<Self>
     where
         usize: TryFrom<I>,
@@ -103,7 +118,7 @@ impl<'a> SideGather<'a> {
         let mut columns = vec![first_columns];
         let mut previous = ((first_columns.as_ptr(), first_columns.len()), 0);
         let mut sources = BTreeMap::from([previous]);
-        let mut rows = Vec::with_capacity(first_rows.len() + payloads.size_hint().0);
+        let mut rows = Vec::with_capacity(capacity.max(first_rows.len() + payloads.size_hint().0));
         for row in first_rows {
             rows.push((0, usize::try_from(row).ok()?));
         }

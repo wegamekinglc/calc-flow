@@ -3705,6 +3705,7 @@ enum RowAdmission {
 }
 
 /// One time-qualified key-equal pair, ordered for emission.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct MatchedPair {
     pos: usize,
@@ -4305,6 +4306,7 @@ mod columnar_quantum;
 mod data_work;
 #[cfg(test)]
 mod expiration;
+#[cfg(test)]
 mod matches;
 #[cfg(test)]
 mod retained;
