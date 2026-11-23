@@ -87,6 +87,15 @@ def _ordered_changes(previous, positions):
             yield (*key, value, "upsert")
 
 
+def _checked_changes(table: pa.Table, expected, index: int):
+    if not table.schema.equals(OUTPUT, check_metadata=True):
+        raise ValueError(f"unexpected output schema at batch {index}: {table.schema}")
+    changes = list(zip(*table.to_pydict().values()))
+    if changes != list(expected):
+        raise ValueError(f"incorrect ordered changelog at batch {index}")
+    return changes
+
+
 def validate(batches: tuple[pa.Table, ...], outputs: list[pa.Table]) -> list[int]:
     if len(batches) != len(outputs):
         raise ValueError(f"expected {len(batches)} outputs, got {len(outputs)}")
@@ -95,13 +104,7 @@ def validate(batches: tuple[pa.Table, ...], outputs: list[pa.Table]) -> list[int
     for index, (batch, table) in enumerate(zip(batches, outputs)):
         previous = positions
         positions = _positions_after(previous, batch)
-        if not table.schema.equals(OUTPUT, check_metadata=True):
-            raise ValueError(
-                f"unexpected output schema at batch {index}: {table.schema}"
-            )
-        changes = list(zip(*table.to_pydict().values()))
-        if changes != list(_ordered_changes(previous, positions)):
-            raise ValueError(f"incorrect ordered changelog at batch {index}")
+        changes = _checked_changes(table, _ordered_changes(previous, positions), index)
         for account, stock, value, op in changes:
             key = (account, stock)
             if op == "retract":

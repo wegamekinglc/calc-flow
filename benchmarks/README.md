@@ -604,3 +604,7 @@ Each interval also required at least 10 GiB available memory, fewer than
 256 major faults and fewer than 1,024 total swap-in and swap-out pages. The
 reference JSON retains those observations. Reproducing this resource check
 requires an external monitor in addition to the timing command.
+
+The reference used the collector at commit `8438d481`; its complete file
+hash is in the reference JSON. A subsequent refactor extracted Arrow schema
+and change validation after the timer.
