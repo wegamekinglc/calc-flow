@@ -1,0 +1,27 @@
+{
+  "case": {
+    "backend": "calc-flow-stream-1t",
+    "family": "engines",
+    "id": "engines/10000/calc-flow-stream-1t/sma20",
+    "rows": 10000,
+    "scenario": "sma20",
+    "scope": "ready-enqueue-to-arrow/bounded-feeds-v7"
+  },
+  "job_seconds": 480,
+  "pairs_per_round": 10,
+  "protocol": "0a4d484479ec9ab777b4cbaf9a39a82d99b8941159c5ecd8ab8f5bc5410361df",
+  "refs": {
+    "baseline": {
+      "artifact": 14872194267,
+      "digest": "sha256:60ebef8ca3ffe9ddfe6a8ff3bce1719f30b00faf2390339c1c1d376d783d05d2",
+      "sha": "db584afd7f7d845df532774acc960672f9645647"
+    },
+    "candidate": {
+      "artifact": 14873945223,
+      "digest": "sha256:562d255efa621987509e71d5f9c292abe9a9a37a846611048856bbaf80a2d3c2",
+      "sha": "579adcefd2890471c6ac5d82a5f4b0b39479c158"
+    }
+  },
+  "rounds": 2,
+  "workflow_sha": "8dd170d94bad08720237783ce1d14970ed3b6f82"
+}

@@ -1,0 +1,550 @@
+{
+  "backend": "calc-flow-stream-1t",
+  "baseline": [
+    [
+      0.001990936,
+      0.001852358,
+      0.001737033,
+      0.002016734,
+      0.001787136,
+      0.001896149,
+      0.00187546,
+      0.001886832,
+      0.001730451,
+      0.001883546
+    ],
+    [
+      0.001887914,
+      0.001833773,
+      0.001772489,
+      0.001804638,
+      0.001814417,
+      0.002251941,
+      0.001900396,
+      0.001815549,
+      0.001858529,
+      0.002022915
+    ]
+  ],
+  "candidate": [
+    [
+      0.001511533,
+      0.001269873,
+      0.001390448,
+      0.001215903,
+      0.001459897,
+      0.001283449,
+      0.001360692,
+      0.001329595,
+      0.001317903,
+      0.001282366
+    ],
+    [
+      0.001356274,
+      0.001373757,
+      0.001429671,
+      0.001231412,
+      0.001351015,
+      0.001458925,
+      0.001400677,
+      0.001332309,
+      0.00130559,
+      0.001295091
+    ]
+  ],
+  "comparison": "interleaved",
+  "correctness": true,
+  "evidence": [
+    {
+      "completion": {
+        "baseline": {
+          "state": "completed"
+        },
+        "candidate": {
+          "state": "completed"
+        }
+      },
+      "environment": {
+        "cpu_affinity": [
+          0
+        ],
+        "logical_cpus": 4,
+        "numpy": "2.5.2",
+        "packages": {
+          "TA-Lib": "0.7.1",
+          "datafusion": "55.0.0",
+          "jax": "0.11.1",
+          "jaxlib": "0.11.1",
+          "polars": "2.0.0"
+        },
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "polars_threads": 4,
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "thread_environment": {
+          "MKL_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "1",
+          "POLARS_MAX_THREADS": "4",
+          "XLA_FLAGS": null
+        },
+        "tokio_worker_threads": "1"
+      },
+      "native_sha256": {
+        "baseline": "07da6f9ed13145756d9d0a3743d7c82f62b7f6d46737e303ce2226295c305559",
+        "candidate": "537499631dbc1a9c91712c439e88630ad031e40116a5f16a2e947e0ea4c84bed"
+      },
+      "samples": {
+        "baseline": [
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001990936
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001852358
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001737033
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.002016734
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001787136
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001896149
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.00187546
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001886832
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001730451
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001883546
+          }
+        ],
+        "candidate": [
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001511533
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001269873
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001390448
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001215903
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001459897
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001283449
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001360692
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001329595
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001317903
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001282366
+          }
+        ]
+      }
+    },
+    {
+      "completion": {
+        "baseline": {
+          "state": "completed"
+        },
+        "candidate": {
+          "state": "completed"
+        }
+      },
+      "environment": {
+        "cpu_affinity": [
+          0
+        ],
+        "logical_cpus": 4,
+        "numpy": "2.5.2",
+        "packages": {
+          "TA-Lib": "0.7.1",
+          "datafusion": "55.0.0",
+          "jax": "0.11.1",
+          "jaxlib": "0.11.1",
+          "polars": "2.0.0"
+        },
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "polars_threads": 4,
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "thread_environment": {
+          "MKL_NUM_THREADS": "1",
+          "OMP_NUM_THREADS": "1",
+          "OPENBLAS_NUM_THREADS": "1",
+          "POLARS_MAX_THREADS": "4",
+          "XLA_FLAGS": null
+        },
+        "tokio_worker_threads": "1"
+      },
+      "native_sha256": {
+        "baseline": "07da6f9ed13145756d9d0a3743d7c82f62b7f6d46737e303ce2226295c305559",
+        "candidate": "537499631dbc1a9c91712c439e88630ad031e40116a5f16a2e947e0ea4c84bed"
+      },
+      "samples": {
+        "baseline": [
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001887914
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001833773
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001772489
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001804638
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001814417
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.002251941
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001900396
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001815549
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001858529
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.002022915
+          }
+        ],
+        "candidate": [
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001356274
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001373757
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001429671
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001231412
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001351015
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001458925
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001400677
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001332309
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.00130559
+          },
+          {
+            "correctness": {
+              "finite_rows": 8784,
+              "max_abs_error": 2.842170943040401e-14,
+              "passed": true,
+              "rows": 10000
+            },
+            "seconds": 0.001295091
+          }
+        ]
+      }
+    }
+  ],
+  "family": "engines",
+  "id": "engines/10000/calc-flow-stream-1t/sma20",
+  "result": {
+    "base_p50": 0.0018669945,
+    "change_percent": -28.13787078644313,
+    "head_max": 0.001511533,
+    "head_min": 0.001215903,
+    "head_p50": 0.001341662,
+    "head_p95": 0.0014624788,
+    "round_changes": [
+      -28.490250760798688,
+      -27.38846169949469
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": -19.952700956170666,
+        "low": -32.31286148926059,
+        "median": -28.490250760798688
+      },
+      {
+        "coverage": 0.978515625,
+        "high": -25.08576579543924,
+        "low": -35.21477694131418,
+        "median": -27.38846169949469
+      }
+    ],
+    "round_min_changes": [
+      -29.73490725828123,
+      -30.526395368321037
+    ],
+    "rows_per_second": 7453442.074084233,
+    "samples": 20,
+    "verdict": "improved"
+  },
+  "rows": 10000,
+  "scenario": "sma20",
+  "scope": "ready-enqueue-to-arrow/bounded-feeds-v7",
+  "status": "ok"
+}
