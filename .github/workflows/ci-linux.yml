@@ -11,7 +11,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: 131aa898d1b7910c84248405399eefec4b8db776
+          ref: 86781a39f51fcbd49e3c4d50f96e3a84ddce350b
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
