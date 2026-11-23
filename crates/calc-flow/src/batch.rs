@@ -287,12 +287,12 @@ impl TableBatch {
     }
 }
 
-/// Matches Arrow's visible slice charge without assembling ArrayData for primitive leaves.
+/// Matches Arrow's visible slice charge without assembling `ArrayData` for primitive leaves.
 fn column_slice_bytes(column: &dyn Array) -> std::result::Result<usize, String> {
     // ArrayData slices can retain an all-valid bitmap. Its exported presence
     // depends on the array implementation, so let Arrow charge this case.
     if let Some(width) = column.data_type().primitive_width()
-        && !column.nulls().is_some_and(|nulls| nulls.null_count() == 0)
+        && column.nulls().is_none_or(|nulls| nulls.null_count() != 0)
     {
         let validity = if column.null_count() == 0 {
             0
