@@ -91,89 +91,92 @@ class BenchmarkNormalizeTests(unittest.TestCase):
 
         helper = "ed5f917ac167a31ca29e28e31c362dd2795ab9b045db136b060ed3426bcd03f9"
 
-        def row(digest, workload):
-            return {
-                "samples": [1.0] * 20,
-                "rows": 990,
-                "scope": "pytest-native-boundary",
-                "metadata": {
-                    "benchmark_source_sha256": digest,
-                    "benchmark_symbolic_support_sha256": helper,
-                    "benchmark_support_sha256": "b" * 64,
-                    "workload_identity": {"version": workload},
-                    "workload_fingerprint": fingerprint_json({"version": workload}),
-                    "machine_identity": {"cpu": "test"},
-                    "machine_fingerprint": fingerprint_json({"cpu": "test"}),
-                    "dependency_identity": {"python": "test"},
-                    "dependency_fingerprint": fingerprint_json({"python": "test"}),
-                },
-            }
+        common = {
+            "benchmark_symbolic_support_sha256": helper,
+            "benchmark_support_sha256": "b" * 64,
+            "workload_identity": {"version": 1},
+            "workload_fingerprint": fingerprint_json({"version": 1}),
+            "machine_identity": {"cpu": "test"},
+            "machine_fingerprint": fingerprint_json({"cpu": "test"}),
+            "dependency_identity": {"python": "test"},
+            "dependency_fingerprint": fingerprint_json({"python": "test"}),
+        }
+        baseline = {**common, "benchmark_source_sha256": original}
+        candidate = {**common, "benchmark_source_sha256": current}
 
-        def compare(
-            case,
-            base,
-            head,
-            workload="a" * 64,
-            *,
-            last=None,
-            support=None,
-            omit=(),
-            helper_hash=None,
-        ):
-            blocks = {
-                "baseline": [{case: row(base, "a" * 64)}] * 2,
-                "candidate": [{case: row(head, workload)}] * 2,
-            }
-            if last is not None:
-                blocks["candidate"][1] = {case: row(last, workload)}
-            if support is not None:
-                blocks["candidate"][0][case]["metadata"]["benchmark_support_sha256"] = (
-                    support
-                )
-            for block in blocks["baseline"] + blocks["candidate"]:
-                metadata = block[case]["metadata"]
-                if helper_hash is not None:
-                    metadata["benchmark_symbolic_support_sha256"] = helper_hash
-                for key in omit:
-                    metadata.pop(key, None)
-            return combine_blocks(shard, blocks)[0]
+        def compare(name, base, head, final=None):
+            def block(metadata):
+                return {
+                    name: {
+                        "samples": [1.0] * 20,
+                        "rows": 990,
+                        "scope": "pytest-native-boundary",
+                        "metadata": metadata,
+                    }
+                }
+
+            return combine_blocks(
+                shard,
+                {
+                    "baseline": [block(base)] * 2,
+                    "candidate": [block(head), block(head if final is None else final)],
+                },
+            )[0]
 
         for case in ("sma20", "dual_sma"):
-            name = "benchmarks/test_rolling_kernel.py::" + (
-                f"test_rolling_kernel_{case}[overhead]"
+            name = (
+                "benchmarks/test_rolling_kernel.py::"
+                + f"test_rolling_kernel_{case}[overhead]"
             )
-            result = compare(name, original, current)
+            result = compare(name, baseline, candidate)
             self.assertEqual(result["status"], "ok", result.get("error"))
             self.assertEqual(
                 result["metadata"]["rolling_explain_source_sha256"],
                 {"baseline": original, "candidate": current},
             )
+            for missing in (
+                {"benchmark_symbolic_support_sha256"},
+                {"benchmark_support_sha256"},
+                {
+                    "machine_identity",
+                    "workload_identity",
+                    "dependency_identity",
+                    "benchmark_support_sha256",
+                },
+            ):
+                left, right = (
+                    {k: v for k, v in meta.items() if k not in missing}
+                    for meta in (baseline, candidate)
+                )
+                self.assertEqual(compare(name, left, right)["status"], "error")
+
             for result in (
-                compare(name, current, original),
+                compare(name, candidate, baseline),
+                compare(name, baseline, candidate, baseline),
                 compare(
-                    name, original, current, omit=("benchmark_symbolic_support_sha256",)
+                    name, baseline, {**candidate, "benchmark_support_sha256": "f" * 64}
                 ),
-                compare(name, original, current, helper_hash="f" * 64),
+                compare(
+                    name, baseline, {**candidate, "benchmark_source_sha256": "d" * 64}
+                ),
                 compare(
                     name,
-                    original,
-                    current,
-                    omit=(
-                        "machine_identity",
-                        "workload_identity",
-                        "dependency_identity",
-                        "benchmark_support_sha256",
-                    ),
+                    baseline,
+                    {
+                        **candidate,
+                        "workload_identity": {"version": 2},
+                        "workload_fingerprint": fingerprint_json({"version": 2}),
+                    },
                 ),
-                compare(name, original, current, omit=("benchmark_support_sha256",)),
-                compare(name, original, current, last=original),
-                compare(name, original, current, support="f" * 64),
-                compare(name, original, "d" * 64),
-                compare(name, original, current, "f" * 64),
+                compare(
+                    name,
+                    {**baseline, "benchmark_symbolic_support_sha256": "f" * 64},
+                    {**candidate, "benchmark_symbolic_support_sha256": "f" * 64},
+                ),
                 compare(
                     name.replace("test_rolling_kernel.py", "test_other.py"),
-                    original,
-                    current,
+                    baseline,
+                    candidate,
                 ),
             ):
                 self.assertEqual(result["status"], "error")
