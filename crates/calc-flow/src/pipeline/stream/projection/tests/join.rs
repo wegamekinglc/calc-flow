@@ -9,6 +9,10 @@ mod execution;
 pub(super) use execution::execution_and_restore;
 
 fn hot_graph(select: &[&str], band: bool) -> PipelineBuilder {
+    hot_graph_with_filter(select, band, None)
+}
+
+fn hot_graph_with_filter(select: &[&str], band: bool, filter: Option<&str>) -> PipelineBuilder {
     use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
     let quote = || {
@@ -64,7 +68,7 @@ fn hot_graph(select: &[&str], band: bool) -> PipelineBuilder {
         "result",
         "",
         select.iter().map(|value| (*value).into()).collect(),
-        None,
+        filter.map(str::to_owned),
         vec![],
     )
     .unwrap()
@@ -108,6 +112,84 @@ fn hot_join_fuses_native_final_projection() {
             true,
         )),
         ["sequence", "right_sequence", "value"]
+    );
+}
+
+#[test]
+fn fused_join_keeps_the_full_output_for_named_union_inputs() {
+    let graph = hot_graph(
+        &[
+            "quote__sequence AS sequence",
+            "quote__price * dimension__factor AS value",
+        ],
+        false,
+    );
+    let output = graph.nodes["asof"].operator.output_ports()[0]
+        .schema()
+        .unwrap()
+        .clone();
+    let inputs = ["joined", "other"]
+        .map(|name| {
+            Port::with_schema_ref(name, BatchKind::Table, true, Some(Arc::clone(&output))).unwrap()
+        })
+        .to_vec();
+    let graph = graph
+        .add_node(
+            "audit",
+            Box::new(crate::UnionOperator::new("audit", inputs).unwrap()),
+        )
+        .unwrap()
+        .connect(Edge::new(
+            PortEndpoint::new("asof", "output").unwrap(),
+            PortEndpoint::new("audit", "joined").unwrap(),
+        ))
+        .unwrap();
+    let expected = output
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(super::physical_fields(graph), expected);
+}
+
+#[test]
+fn fused_join_preserves_the_declared_consumer_schema() {
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    let mut graph = hot_graph(
+        &[
+            "quote__sequence AS sequence",
+            "quote__price * dimension__factor AS value",
+        ],
+        false,
+    );
+    let declared = Arc::new(Schema::new_with_metadata(
+        vec![
+            Field::new("sequence", DataType::UInt64, false),
+            Field::new("value", DataType::Float64, false),
+        ],
+        [("unit".into(), "USD".into())].into(),
+    ));
+    let NodeOperator::Expression(expression) = &mut graph.nodes.get_mut("result").unwrap().operator
+    else {
+        unreachable!()
+    };
+    *expression = expression
+        .clone()
+        .with_ports(
+            expression.input_ports()[0].clone(),
+            Port::with_schema_ref(
+                "output",
+                BatchKind::Table,
+                true,
+                Some(Arc::clone(&declared)),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    super::super::push_output_projections(&mut graph, None).unwrap();
+    assert_eq!(
+        graph.nodes["result"].operator.output_ports()[0].schema(),
+        Some(&declared)
     );
 }
 

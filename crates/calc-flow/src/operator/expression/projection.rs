@@ -8,7 +8,7 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     sql::sqlparser::{
-        ast::{Expr, Ident, SelectItem, SetExpr, Statement},
+        ast::{BinaryOperator, Expr, Ident, SelectItem, SetExpr, Statement},
         dialect::GenericDialect,
         parser::Parser,
     },
@@ -201,10 +201,62 @@ fn parse_column(source: &str) -> Option<(String, String)> {
     Some((identifier(column), identifier(alias.unwrap_or(column))))
 }
 
+/// Match a row-preserving projection of columns followed by one Float64 product.
+pub(super) fn matches_product(
+    query: &crate::expression::ValidatedQuery,
+    sequences: &[(&str, &str)],
+    left: &str,
+    right: &str,
+) -> bool {
+    let Some(select) = query
+        .sql_statement()
+        .and_then(dependencies::row_local_select)
+    else {
+        return false;
+    };
+    let Some((product, columns)) = select.projection.split_last() else {
+        return false;
+    };
+    if select.selection.is_some() || columns.len() != sequences.len() {
+        return false;
+    }
+    let Some(Expr::BinaryOp {
+        left: lhs,
+        op: BinaryOperator::Multiply,
+        right: rhs,
+    }) = aliased_expression(product, "value")
+    else {
+        return false;
+    };
+    column_matches(lhs, left)
+        && column_matches(rhs, right)
+        && columns.iter().zip(sequences).all(|(item, &(name, alias))| {
+            aliased_expression(item, alias).is_some_and(|expr| column_matches(expr, name))
+        })
+}
+
+fn aliased_expression<'a>(item: &'a SelectItem, name: &str) -> Option<&'a Expr> {
+    let SelectItem::ExprWithAlias { expr, alias } = item else {
+        return None;
+    };
+    (identifier(alias) == name).then(|| without_parentheses(expr))
+}
+
+fn without_parentheses(mut expr: &Expr) -> &Expr {
+    while let Expr::Nested(inner) = expr {
+        expr = inner;
+    }
+    expr
+}
+
+fn column_matches(expr: &Expr, name: &str) -> bool {
+    matches!(without_parentheses(expr), Expr::Identifier(column) if identifier(column) == name)
+}
+
 fn identifier(value: &Ident) -> String {
     if value.quote_style.is_some() {
         value.value.clone()
     } else {
-        value.value.to_lowercase()
+        value.value.to_ascii_lowercase()
     }
 }

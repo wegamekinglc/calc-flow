@@ -226,12 +226,7 @@ impl ExpressionOperator {
         input: &SchemaRef,
         output: Option<&SchemaRef>,
     ) -> bool {
-        self.udfs.is_empty()
-            && self
-                .stream_state
-                .resources
-                .as_ref()
-                .is_none_or(|(_, _, selected)| selected.is_empty())
+        !self.has_stream_udfs()
             && self.input_ports[0].schema() == Some(input)
             && self.output_ports[0].schema() == output
             && self
@@ -256,13 +251,7 @@ impl ExpressionOperator {
         if let Some(columns) = self.stream_projection_columns() {
             return Some(columns);
         }
-        if !self.udfs.is_empty()
-            || self
-                .stream_state
-                .resources
-                .as_ref()
-                .is_some_and(|(_, _, selected)| !selected.is_empty())
-        {
+        if self.has_stream_udfs() {
             return None;
         }
         projection::required_columns(&self.query, self.input_ports[0].schema()?)
@@ -298,8 +287,13 @@ impl ExpressionOperator {
             })
     }
 
-    pub(crate) fn stream_select(&self) -> &[String] {
-        &self.select
+    pub(crate) fn matches_stream_product(
+        &self,
+        sequences: &[(&str, &str)],
+        left: &str,
+        right: &str,
+    ) -> bool {
+        projection::matches_product(&self.query, sequences, left, right)
     }
 
     pub(crate) fn replace_with_identity_projection(&mut self, schema: SchemaRef) -> Result<()> {
@@ -1112,6 +1106,17 @@ mod tests {
             assert_eq!(actual.metadata(), expected.metadata());
             assert!(!fast.stream_runtime_initialized());
         }
+    }
+
+    #[test]
+    fn stream_column_projection_uses_sql_identifier_case() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Int64, false),
+            Field::new("K", DataType::Int64, false),
+        ]));
+        let projection = ColumnProjection::parse(&["K AS value".into()]).unwrap();
+        let (columns, _) = projection.schema(&schema).unwrap();
+        assert_eq!(columns, [1]);
     }
 
     #[tokio::test]

@@ -73,6 +73,13 @@ impl ValidatedQuery {
         self.statement.clone()
     }
 
+    pub(crate) fn sql_statement(&self) -> Option<&SqlStatement> {
+        match &self.statement {
+            DFStatement::Statement(statement) => Some(statement),
+            _ => None,
+        }
+    }
+
     /// Whether the query contains a grouping or a non-window aggregate.
     pub(crate) fn has_stream_aggregate(&self) -> bool {
         let names = datafusion::functions_aggregate::all_default_aggregate_functions()
