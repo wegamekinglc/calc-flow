@@ -694,6 +694,14 @@ identities with SHA-256 fingerprints. Workload identity includes scenario,
 timing scope, backend, scale, dimensions, row counts, and seed; array cases
 retain their more specific contract-v2 identities.
 
+The two Python rolling-kernel cases (`sma20` and `dual_sma`) accept one
+reviewed source change from the November 14 release. Commit `83088c5d`
+removed `profile=stable_v1` from an untimed plan-explanation assertion.
+The direct-window oracle, paired plans, inputs and timed code are identical.
+When all four blocks match the two pinned source hashes in release-to-main
+order, the report retains both under `rolling_explain_source_sha256`.
+All other fingerprint, support, dimension and sample checks still apply.
+
 The Rust suite retains the full `Cargo.lock` hash and aggregate compiled
 dependency identity for provenance. Each case's comparison fingerprint covers
 only its own benchmark target's compiled packages, enabled features, target
