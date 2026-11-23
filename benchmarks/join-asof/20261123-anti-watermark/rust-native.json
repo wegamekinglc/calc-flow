@@ -1,0 +1,246 @@
+{
+  "protocol": "protocol.md",
+  "unit": "one active right-watermark callback, 257 rows into the in-memory output collector",
+  "target_p50_us": 1000,
+  "build": {
+    "source": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+    "tree": "d22e0c7693ad29181778653dff63d34a0ed86dac",
+    "binary_sha256": "95f790257dba38c14bee06a49dea010ea5b8531acd5a6a754f2a650593628d9f",
+    "worker_sha256": "3ea5d5ff16828199d1f31fdb6df618389f3f61ab74fb79e60c8db78a76a9ef0b",
+    "cargo_lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+    "build_seconds": 614.1232409769436,
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+    "profile": {
+      "opt_level": "3",
+      "debuginfo": 0,
+      "debug_assertions": false,
+      "overflow_checks": false,
+      "test": false
+    },
+    "features": [
+      "benchmark-internals"
+    ]
+  },
+  "host_cpu": {
+    "Architecture": "x86_64",
+    "CPU(s)": "32",
+    "Model name": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "Thread(s) per core": "2"
+  },
+  "outcome": {
+    "elapsed_seconds": 4.019086599349976,
+    "mode": "rust",
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "started": 1795442071.7103417,
+    "state": "completed",
+    "statistics": {
+      "cpu": 0,
+      "p50_us": 54.5935,
+      "p95_us": 66.5678,
+      "round_p50_us": [
+        54.0185,
+        57.295500000000004
+      ],
+      "rows_per_second_at_p50": 4707520.126022329
+    }
+  },
+  "verified_each_process": {
+    "setup_sequence": [
+      260,
+      0,
+      261
+    ],
+    "target_sequence_inclusive": [
+      1,
+      257
+    ],
+    "target_chunk_sizes": [
+      32,
+      32,
+      32,
+      32,
+      32,
+      32,
+      32,
+      32,
+      1
+    ],
+    "tail_sequence": [
+      259
+    ],
+    "fields": "exact, including nulls and UTC schema",
+    "extra_end_rows": 0
+  },
+  "workers": [
+    {
+      "round": 1,
+      "index": 0,
+      "warmup": true,
+      "elapsed_ns": 64533
+    },
+    {
+      "round": 1,
+      "index": 1,
+      "warmup": false,
+      "elapsed_ns": 53608
+    },
+    {
+      "round": 1,
+      "index": 2,
+      "warmup": false,
+      "elapsed_ns": 53930
+    },
+    {
+      "round": 1,
+      "index": 3,
+      "warmup": false,
+      "elapsed_ns": 53453
+    },
+    {
+      "round": 1,
+      "index": 4,
+      "warmup": false,
+      "elapsed_ns": 59181
+    },
+    {
+      "round": 1,
+      "index": 5,
+      "warmup": false,
+      "elapsed_ns": 54681
+    },
+    {
+      "round": 1,
+      "index": 6,
+      "warmup": false,
+      "elapsed_ns": 54107
+    },
+    {
+      "round": 1,
+      "index": 7,
+      "warmup": false,
+      "elapsed_ns": 55049
+    },
+    {
+      "round": 1,
+      "index": 8,
+      "warmup": false,
+      "elapsed_ns": 54333
+    },
+    {
+      "round": 1,
+      "index": 9,
+      "warmup": false,
+      "elapsed_ns": 52296
+    },
+    {
+      "round": 1,
+      "index": 10,
+      "warmup": false,
+      "elapsed_ns": 52302
+    },
+    {
+      "round": 2,
+      "index": 0,
+      "warmup": true,
+      "elapsed_ns": 52467
+    },
+    {
+      "round": 2,
+      "index": 1,
+      "warmup": false,
+      "elapsed_ns": 53009
+    },
+    {
+      "round": 2,
+      "index": 2,
+      "warmup": false,
+      "elapsed_ns": 54506
+    },
+    {
+      "round": 2,
+      "index": 3,
+      "warmup": false,
+      "elapsed_ns": 58089
+    },
+    {
+      "round": 2,
+      "index": 4,
+      "warmup": false,
+      "elapsed_ns": 66409
+    },
+    {
+      "round": 2,
+      "index": 5,
+      "warmup": false,
+      "elapsed_ns": 58870
+    },
+    {
+      "round": 2,
+      "index": 6,
+      "warmup": false,
+      "elapsed_ns": 55197
+    },
+    {
+      "round": 2,
+      "index": 7,
+      "warmup": false,
+      "elapsed_ns": 58904
+    },
+    {
+      "round": 2,
+      "index": 8,
+      "warmup": false,
+      "elapsed_ns": 56502
+    },
+    {
+      "round": 2,
+      "index": 9,
+      "warmup": false,
+      "elapsed_ns": 69585
+    },
+    {
+      "round": 2,
+      "index": 10,
+      "warmup": false,
+      "elapsed_ns": 54047
+    }
+  ],
+  "resource_intervals": [
+    {
+      "preflight": true,
+      "utc_seconds": 1795442074.7268329,
+      "interval_seconds": 3.0047579710371792,
+      "cpu": 0,
+      "cpu_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "sibling_busy": 0.0,
+      "host_busy": 0.1125,
+      "available_bytes": 29558231040,
+      "major_faults": 4,
+      "swap_pages": 14,
+      "swap_in_pages": 14,
+      "swap_out_pages": 0,
+      "suitable": true
+    },
+    {
+      "preflight": false,
+      "utc_seconds": 1795442075.729158,
+      "interval_seconds": 1.0021809900645167,
+      "cpu": 0,
+      "cpu_busy": 4.0,
+      "siblings": [
+        1
+      ],
+      "sibling_busy": 1.0,
+      "host_busy": 0.28125,
+      "available_bytes": 29557673984,
+      "major_faults": 0,
+      "swap_pages": 0,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "suitable": true
+    }
+  ]
+}
