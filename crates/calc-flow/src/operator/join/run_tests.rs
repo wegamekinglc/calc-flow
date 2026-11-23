@@ -349,42 +349,64 @@ fn test_retained_row_and_byte_limits_reject_the_whole_run() {
     assert_eq!(bytes_limited.next_row_id(JoinSide::Left), 0);
 }
 
-fn fanout_state(left_rows: usize) -> (RunState, Incoming) {
+fn fanout_input(rows: usize, first_value: i64, retain: bool) -> Incoming {
+    let values = (0..rows)
+        .map(|row| first_value + i64::try_from(row).unwrap())
+        .collect::<Vec<_>>();
+    incoming(
+        &record(&vec![1; rows], &values),
+        (0..rows).collect(),
+        vec![GroupId::new(0).unwrap(); rows],
+        &vec![10; rows],
+        &(0..rows as u64).collect::<Vec<_>>(),
+        vec![retain; rows],
+        rows as u64,
+    )
+}
+
+fn fanout_state(left_rows: usize, right_rows: usize) -> (RunState, Incoming) {
     let mut state = state(100);
-    let left = record(
-        &vec![1; left_rows],
-        &(0..i64::try_from(left_rows).unwrap()).collect::<Vec<_>>(),
-    );
-    let left = incoming(
-        &left,
-        (0..left_rows).collect(),
-        vec![GroupId::new(0).unwrap(); left_rows],
-        &vec![10; left_rows],
-        &(0..left_rows as u64).collect::<Vec<_>>(),
-        vec![true; left_rows],
-        left_rows as u64,
-    );
     state
         .apply(
             JoinSide::Left,
-            left,
+            fanout_input(left_rows, 0, true),
             &output_schema(),
             Some(&[1, 3]),
             2,
             EdgeBudget::default(),
         )
         .unwrap();
-    let right = record(&[1], &[100]);
-    let right = incoming(
-        &right,
-        vec![0],
-        vec![GroupId::new(0).unwrap()],
-        &[10],
-        &[0],
-        vec![false],
-        1,
-    );
-    (state, right)
+    (state, fanout_input(right_rows, 100, false))
+}
+
+#[test]
+fn test_chunked_run_gather_visits_only_its_matched_pairs() {
+    let (mut state, right) = fanout_state(8, 11);
+    super::matches::CURSOR_VISITS.set(0);
+    let output = state
+        .apply(
+            JoinSide::Right,
+            right,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::new(7, 1_000_000).unwrap(),
+        )
+        .unwrap();
+    let visits = super::matches::CURSOR_VISITS.get();
+    let expected = (100..111)
+        .flat_map(|right| (0..8).map(move |left| (left, right)))
+        .collect::<Vec<_>>();
+    assert_eq!(output.sequences, (0..13).collect::<Vec<_>>());
+    for (record, pairs) in output.records.iter().zip(expected.chunks(7)) {
+        let actual: Vec<_> = values(record, 0)
+            .into_iter()
+            .zip(values(record, 1))
+            .collect();
+        assert_eq!(actual, pairs);
+    }
+    assert_eq!(output.records.len(), 13);
+    assert_eq!(visits, 2 * expected.len());
 }
 
 fn estimated(record: &RecordBatch, sequence: u64) -> usize {
@@ -399,7 +421,7 @@ fn estimated(record: &RecordBatch, sequence: u64) -> usize {
 
 #[test]
 fn test_selection_materialization_preflights_row_and_byte_chunks() {
-    let (mut state, right) = fanout_state(3);
+    let (mut state, right) = fanout_state(3, 1);
     let output = state
         .apply(
             JoinSide::Right,
@@ -428,7 +450,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
         [0, 1, 2]
     );
 
-    let (mut state, right) = fanout_state(3);
+    let (mut state, right) = fanout_state(3, 1);
     let whole = state
         .apply(
             JoinSide::Right,
@@ -440,7 +462,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
         )
         .unwrap();
     let whole_bytes = estimated(&whole.records[0], 0);
-    let (mut state, right) = fanout_state(3);
+    let (mut state, right) = fanout_state(3, 1);
     let split = state
         .apply(
             JoinSide::Right,
@@ -461,7 +483,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
 
 #[test]
 fn test_one_byte_short_output_row_does_not_commit_input() {
-    let (mut measured, right) = fanout_state(1);
+    let (mut measured, right) = fanout_state(1, 1);
     let output = measured
         .apply(
             JoinSide::Right,
@@ -474,7 +496,7 @@ fn test_one_byte_short_output_row_does_not_commit_input() {
         .unwrap();
     let row_bytes = estimated(&output.records[0], 0);
 
-    let (mut state, right) = fanout_state(1);
+    let (mut state, right) = fanout_state(1, 1);
     let before = state.snapshot();
     let error = state
         .apply(

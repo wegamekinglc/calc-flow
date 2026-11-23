@@ -5,6 +5,7 @@ use std::ops::Range;
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static CURSOR_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static PAIR_PUSHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -105,8 +106,10 @@ impl<'a> View<'a> {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn slice(self, range: Range<usize>) -> Self {
+        if range == (0..self.len()) {
+            return self;
+        }
         match self {
             #[cfg(test)]
             Self::Pairs(pairs) => Self::Pairs(&pairs[range]),
@@ -169,14 +172,12 @@ impl Matches for View<'_> {
     }
 }
 
-#[cfg(test)]
 fn run_containing(runs: &[(usize, usize)], index: usize) -> usize {
     #[cfg(test)]
     tests::RUN_SEARCHES.with(|count| count.set(count.get() + 1));
     runs.partition_point(|(first, _)| *first <= index) - 1
 }
 
-#[cfg(test)]
 fn run_containing_ranges(ranges: &[RangeMatch], index: usize) -> usize {
     ranges.partition_point(|matched| matched.first <= index) - 1
 }
@@ -249,6 +250,8 @@ impl Iterator for Cursor<'_> {
                 }
             }
         };
+        #[cfg(test)]
+        CURSOR_VISITS.set(CURSOR_VISITS.get() + 1);
         self.index = index + 1;
         self.remaining -= 1;
         Some(pair)
@@ -547,6 +550,10 @@ impl Selection {
 }
 
 impl Selection {
+    pub(super) fn slice(&self, range: Range<usize>) -> View<'_> {
+        self.view().slice(range)
+    }
+
     fn view(&self) -> View<'_> {
         match &self.opposite {
             Opposite::Ranges { ranges, len } => View::Intervals {
