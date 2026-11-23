@@ -3161,7 +3161,8 @@ impl EwmaAccumulator {
 enum SumState {
     Signed(i128),
     Unsigned(u128),
-    Float(f64),
+    /// The compensated total lives in the numeric accumulator.
+    Float,
 }
 
 impl WindowAccumulator {
@@ -3173,7 +3174,7 @@ impl WindowAccumulator {
         let sum = match sum_class {
             SumClass::Signed => Some(SumState::Signed(0)),
             SumClass::Unsigned => Some(SumState::Unsigned(0)),
-            SumClass::Float => Some(SumState::Float(0.0)),
+            SumClass::Float => Some(SumState::Float),
             SumClass::CountOnly => None,
         };
         Self {
@@ -3203,13 +3204,7 @@ impl WindowAccumulator {
                     .ok_or_else(|| operator_error(node_id, "rolling integer sum overflowed"))?;
                 self.numeric.insert(float_sample(value))
             }
-            Some(SumState::Float(total)) => {
-                if let Err(error) = self.numeric.insert(float_sample(value)) {
-                    return Err(kernel::float_arithmetic_error(error, node_id));
-                }
-                *total = self.numeric.sum();
-                Ok(())
-            }
+            Some(SumState::Float) => self.numeric.insert(float_sample(value)),
             None => self.numeric.insert_count_only(),
         }
         .map_err(|error| kernel::float_arithmetic_error(error, node_id))
@@ -3230,13 +3225,7 @@ impl WindowAccumulator {
                     .ok_or_else(|| internal_error("rolling sum removal diverged from the adds"))?;
                 self.numeric.evict(float_sample(value))
             }
-            Some(SumState::Float(total)) => {
-                if let Err(error) = self.numeric.evict(float_sample(value)) {
-                    return Err(kernel::float_arithmetic_error(error, ""));
-                }
-                *total = self.numeric.sum();
-                Ok(())
-            }
+            Some(SumState::Float) => self.numeric.evict(float_sample(value)),
             None => self.numeric.evict_count_only(),
         };
         result.map_err(|error| kernel::float_arithmetic_error(error, ""))
@@ -3271,9 +3260,7 @@ impl WindowAccumulator {
         }
         self.numeric
             .rows(leaving.map(float_sample), entering.map(float_sample))
-            .map_err(|error| kernel::float_arithmetic_error(error, node_id))?;
-        self.sync_float_sum();
-        Ok(())
+            .map_err(|error| kernel::float_arithmetic_error(error, node_id))
     }
 
     fn add_exact_scalar(&mut self, value: &ScalarValue, node_id: &str) -> Result<()> {
@@ -3310,12 +3297,6 @@ impl WindowAccumulator {
         Ok(())
     }
 
-    fn sync_float_sum(&mut self) {
-        if let Some(SumState::Float(total)) = &mut self.sum {
-            *total = self.numeric.sum();
-        }
-    }
-
     #[allow(
         clippy::cast_precision_loss,
         reason = "integer mean divides its exact numerator only at readout"
@@ -3324,7 +3305,7 @@ impl WindowAccumulator {
         match self.sum {
             Some(SumState::Signed(total)) => total as f64 / self.valid_count as f64,
             Some(SumState::Unsigned(total)) => total as f64 / self.valid_count as f64,
-            Some(SumState::Float(_)) | None => self.numeric.mean(),
+            Some(SumState::Float) | None => self.numeric.mean(),
         }
     }
 }
@@ -4088,9 +4069,7 @@ fn slide_numeric_window(
             }
         }
     }
-    finish_numeric_window(accumulator, context, input_index, frame)?;
-    accumulator.sync_float_sum();
-    Ok(())
+    finish_numeric_window(accumulator, context, input_index, frame)
 }
 
 fn finish_numeric_window(
@@ -4859,7 +4838,7 @@ fn evaluate_aggregate(
             Some(SumState::Unsigned(total)) => u64::try_from(total)
                 .map(|narrowed| ScalarValue::UInt64(Some(narrowed)))
                 .map_err(|_| operator_error(node_id, "rolling integer sum overflowed")),
-            Some(SumState::Float(total)) => Ok(ScalarValue::Float64(Some(total))),
+            Some(SumState::Float) => Ok(ScalarValue::Float64(Some(accumulator.numeric.sum()))),
             None => Err(operator_error(
                 node_id,
                 "rolling sum requires a numeric window group",
