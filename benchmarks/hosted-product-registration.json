@@ -1,42 +1,42 @@
 {
-  "candidate_pr": 648,
+  "candidate_pr": 671,
   "baseline": {
-    "artifact": 14790641255,
-    "artifact_digest": "sha256:9c69ba58603ff6e594e382305a5e81f49b5add075ecb4685ad9da7713b89371e",
+    "artifact": 14801538873,
+    "artifact_digest": "sha256:91c76cac57e7d831d7d62c3aa1f8350f56f1b4396fecf8cd7e912a6a34935395",
     "build_profile": "release",
-    "checkout": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+    "checkout": "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
     "contract": "benchmark-release-v1",
     "git_clean": true,
-    "git_sha": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+    "git_sha": "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
     "image": "ubuntu-26.04",
     "image_version": "20261116.202.1",
-    "job": 137485177741,
+    "job": 137568109532,
     "parents": [
-      "fdde1528efcf1424c3a9a19db10495c1032aac19",
-      "2d305594a169a4d96f34d1cd566762afd4d09aa5"
+      "131aa898d1b7910c84248405399eefec4b8db776",
+      "8b32087d1fc25a3317e10a73d965bc01902797f4"
     ],
-    "requested_sha": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
-    "tree": "d44c5afab211c2b6a66520de160a37d300868397",
-    "workflow_run": 45111620503
+    "requested_sha": "60c776d925266c839c25b14a65f9ea2fe60bb152",
+    "tree": "9cf8ba8aff3c06139518617e340b2755b80b9227",
+    "workflow_run": 45137782839
   },
   "candidate": {
-    "artifact": 14791381040,
-    "artifact_digest": "sha256:34d17055cee28e47256fe435a6a0f1a562f7518d3621e3c3b643c4ce1b3ddc91",
+    "artifact": 14801157509,
+    "artifact_digest": "sha256:d45770efac08ac4d93d64a562bf7bfb155dd4c01052914554503eb5b42b64af0",
     "build_profile": "release",
-    "checkout": "b35be8a96f9b805da9a69298987790eb4527153a",
+    "checkout": "237230a56fd7ccbe084e347a70fb63db5c5d2b9e",
     "contract": "benchmark-release-v1",
     "git_clean": true,
-    "git_sha": "b35be8a96f9b805da9a69298987790eb4527153a",
+    "git_sha": "237230a56fd7ccbe084e347a70fb63db5c5d2b9e",
     "image": "ubuntu-26.04",
     "image_version": "20261116.202.1",
-    "job": 137488576872,
+    "job": 137564451262,
     "parents": [
-      "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
-      "8eba4a2e718a99bfb0724dd543b2947601bef9d0"
+      "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
+      "283118ca5b1a27472ab761ec4ddba6307d92563a"
     ],
-    "requested_sha": "8eba4a2e718a99bfb0724dd543b2947601bef9d0",
-    "tree": "4da388b2f560703f66067c2db2c3bf141c5c3c02",
-    "workflow_run": 45112496432
+    "requested_sha": "283118ca5b1a27472ab761ec4ddba6307d92563a",
+    "tree": "6c934c5f74260623e1b015fbc1e59821185d17f7",
+    "workflow_run": 45136027271
   },
   "catalog_case": {
     "id": "engines/1000000/calc-flow-stream-1t/interval_join",
@@ -56,24 +56,19 @@
       "right"
     ]
   },
-  "fixture": "One 1,000,000-row batch per side; 64 symbols; ±5s; 10,998,080 ordered interval pairs. Fixed public EngineCase.",
+  "fixture": "One 1,000,000-row batch per side; 64 symbols; \u00b15s; 10,998,080 ordered interval pairs. Fixed public EngineCase.",
   "timing": "ready enqueue through expected Arrow output and final table concatenate; check all source-sequence pairs and values against the independent oracle; validate EOF and replay outside clock",
   "comparison": "Two independent worker pairs, one excluded warmup per arm per round, ten adjacent AB/BA pairs per round; exact paired median intervals and 5 percent rule.",
   "resources": "One logical CPU and one Tokio/Rayon/BLAS thread. A 3 s preflight requires target CPU and all SMT siblings <=20% busy. In every interval require host average <50%, >=10 GiB available, <256 major faults and <1024 total swap pages. Steady-state check every second includes final interval; sibling <50%. Stop on failed oracle, resource gate or deadline. No retries.",
-  "budget": "300s Python total; metadata, source comparison and setup checks reserve 50s; hosted job capped at 250s including download, fixtures, startup, oracle, cleanup and upload. 45s reserved for settling workers and releasing evidence.",
-  "actual_common_parent": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+  "budget": "250s inclusive on one new hosted VM for acquisition, fixture, startup, oracle, and cleanup; 45s reserved for settling workers and preserving evidence. Rust independent, 180s.",
+  "actual_common_parent": "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
   "candidate_files": {
-    "base": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+    "base": "86781a39f51fcbd49e3c4d50f96e3a84ddce350b",
     "files": [
-      "benchmarks/join-asof/projected-gather-20261123/README.md",
-      "benchmarks/join-asof/projected-gather-20261123/result.json",
-      "crates/calc-flow/src/operator/join.rs",
-      "crates/calc-flow/src/operator/join/hot.rs",
-      "crates/calc-flow/src/operator/join/hot/tests/projected_gather.rs",
-      "crates/calc-flow/src/operator/join/production.rs",
-      "crates/calc-flow/src/operator/join/runs.rs",
-      "crates/calc-flow/src/pipeline/stream/projection.rs",
-      "docs/streaming-guide.md"
+      "crates/calc-flow/src/operator/join/output_gather.rs",
+      "crates/calc-flow/src/operator/join/output_gather/tests.rs",
+      "crates/calc-flow/src/operator/join/run_tests.rs",
+      "crates/calc-flow/src/operator/join/runs.rs"
     ]
   },
   "source_hashes": {
@@ -106,7 +101,7 @@
       "\"right__sequence\" AS \"right_sequence\"",
       "(\"left__price\" * \"right__price\") AS \"value\""
     ],
-    "operator": "StreamJoinOperator hot_band_projection and HotProjection::gather",
+    "operator": "StreamJoinOperator projected Band run path, lossless incoming span expansion in SideGather::repeated",
     "public_entry": "benchmarks.engine_stream.stream_program('interval_join').to_project()",
     "fixture_and_driver_source": "1fb04897d1a5bd964431c7d54d5a146bf6624d62"
   }
