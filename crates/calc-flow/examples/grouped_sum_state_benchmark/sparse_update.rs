@@ -26,7 +26,7 @@ async fn round_trips(
     }
     drop(sender);
     receiver.close();
-    if receiver.try_recv().is_ok() {
+    if receiver.recv().await.is_some() {
         return Err("unexpected output after final update".into());
     }
     Ok((output, update_ns))
@@ -94,6 +94,25 @@ pub(super) async fn command(args: &[String]) -> ExampleResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_a_tail_output_reserved_before_receiver_closure() {
+        let data = crate::support::table(vec![("x", crate::support::ints(&[0]))]);
+        let (input, _source) = tokio::sync::mpsc::channel(1);
+        let (sink, outputs) = tokio::sync::mpsc::channel(1);
+        let permit = sink.reserve_owned().await.unwrap();
+        let (result, _) = tokio::join!(
+            biased;
+            round_trips(&[], input, outputs),
+            async move { permit.send(data) },
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unexpected output")
+        );
+    }
 
     #[tokio::test]
     async fn warmed_updates_exclude_the_seed_and_reconstruct_each_result() {
