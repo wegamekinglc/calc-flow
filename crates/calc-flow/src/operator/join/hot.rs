@@ -1,7 +1,7 @@
 use super::{HotProjection, JoinTimeBounds, StreamJoinOperator};
 use crate::Result;
 use datafusion::arrow::{
-    array::{ArrayRef, AsArray, Float64Array},
+    array::{Array, ArrayRef, AsArray, Float64Array},
     datatypes::{DataType, Float64Type, Schema, TimeUnit},
 };
 use std::sync::Arc;
@@ -89,12 +89,18 @@ impl HotProjection {
         }
         let left = column(self.left_price, &DataType::Float64)?;
         let right = column(self.right_price, &DataType::Float64)?;
-        let values = left
-            .as_primitive::<Float64Type>()
-            .iter()
-            .zip(right.as_primitive::<Float64Type>().iter())
-            .map(|(left, right)| left.zip(right).map(|(a, b)| a * b))
-            .collect::<Float64Array>();
+        let left = left.as_primitive::<Float64Type>();
+        let right = right.as_primitive::<Float64Type>();
+        let values = if left.null_count() == 0 && right.null_count() == 0 {
+            Float64Array::from_iter_values(
+                left.values().iter().zip(right.values()).map(|(a, b)| a * b),
+            )
+        } else {
+            left.iter()
+                .zip(right)
+                .map(|(left, right)| left.zip(right).map(|(a, b)| a * b))
+                .collect()
+        };
         columns.push(Arc::new(values));
         Ok(columns)
     }

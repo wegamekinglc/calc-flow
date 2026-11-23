@@ -352,3 +352,36 @@ async fn assert_nullable_products(budget: EdgeBudget) {
         );
     }
 }
+
+#[test]
+fn test_dense_product_on_sliced_nullable_operands_preserves_ieee_values() {
+    let nan = f64::from_bits(0x7ff8_0000_0000_0042);
+    let left = Float64Array::from(vec![None, Some(-0.0), Some(nan), Some(f64::INFINITY), None]);
+    let right = Float64Array::from(vec![Some(2.0), Some(2.0), Some(-2.0), None]);
+    let sequence: ArrayRef = Arc::new(UInt64Array::from(vec![7, 8, 9]));
+    let columns: [ArrayRef; 3] = [
+        sequence.clone(),
+        Arc::new(left.slice(1, 3)),
+        Arc::new(right.slice(0, 3)),
+    ];
+    let projection = HotProjection {
+        sequence: 0,
+        right_sequence: None,
+        left_price: 1,
+        right_price: 2,
+    };
+    let output = projection
+        .gather(|index, _| Ok(columns[index].clone()))
+        .unwrap();
+    assert!(Arc::ptr_eq(&output[0], &sequence));
+    let products = output[1].as_primitive::<Float64Type>();
+    assert!(products.nulls().is_none());
+    assert_eq!(products.to_data().get_slice_memory_size().unwrap(), 24);
+    for (actual, expected) in products
+        .values()
+        .iter()
+        .zip([-0.0, nan * 2.0, f64::NEG_INFINITY])
+    {
+        assert_eq!(actual.to_bits(), expected.to_bits());
+    }
+}
