@@ -98,7 +98,7 @@ pub(crate) enum RelationKind {
         spec: crate::StreamAsofJoinSpec,
         sql: bool,
     },
-    InnerJoin {
+    IntervalJoin {
         inputs: [TableExpr; 2],
         spec: crate::StreamJoinSpec,
         ordering: Option<JoinOutputOrdering>,
@@ -529,7 +529,7 @@ impl TableExpr {
             }
             RelationKind::Input { .. }
             | RelationKind::AsofJoin { .. }
-            | RelationKind::InnerJoin { .. }
+            | RelationKind::IntervalJoin { .. }
             | RelationKind::Window { .. }
             | RelationKind::Order { .. }
             | RelationKind::Distinct { .. }
@@ -601,7 +601,7 @@ impl TableExpr {
             ),
             RelationKind::Sql { .. }
             | RelationKind::AsofJoin { .. }
-            | RelationKind::InnerJoin { .. } => None,
+            | RelationKind::IntervalJoin { .. } => None,
         }
     }
     /// References a field from this row lineage.
@@ -1106,6 +1106,15 @@ impl TableExpr {
 }
 
 pub use crate::sql::JoinOutputOrdering;
+
+pub(crate) fn interval_join_name(kind: crate::StreamJoinType, sql: bool) -> &'static str {
+    match (sql, kind) {
+        (true, _) => "sql.inner_join",
+        (false, crate::StreamJoinType::Inner) => "inner_join",
+        (false, crate::StreamJoinType::LeftSemi) => "interval_join",
+    }
+}
+
 impl TableExpr {
     /// Declares a bounded inner join using the native pair kernel in either lifecycle.
     /// Output ordering names pair identity for nested joins; it never sorts rows.
@@ -1119,40 +1128,62 @@ impl TableExpr {
         spec: crate::StreamJoinSpec,
         output_ordering: Option<JoinOutputOrdering>,
     ) -> Result<Self> {
-        self.inner_join_relation(right, spec, output_ordering, false)
+        if spec.join_type() != crate::StreamJoinType::Inner {
+            return Err(invalid(
+                "inner_join.join_type",
+                "capability_mismatch",
+                "inner_join requires join_type inner",
+            ));
+        }
+        self.interval_join(right, spec, output_ordering)
     }
-    pub(crate) fn inner_join_relation(
+
+    /// Declares a bounded interval join in either lifecycle. A left semi join
+    /// emits an original left row when its first eligible right witness arrives.
+    ///
+    /// # Errors
+    /// Incomplete explicit output identities fail immediately. Compilation checks
+    /// the key, time and sequence columns against the declared input schemas.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use calc_flow::{TableExpr, StreamJoinSpec, Result};
+    /// fn join(left: &TableExpr, right: &TableExpr, spec: StreamJoinSpec) -> Result<TableExpr> {
+    ///     left.interval_join(right, spec, None)
+    /// }
+    /// ```
+    pub fn interval_join(
+        &self,
+        right: &TableExpr,
+        spec: crate::StreamJoinSpec,
+        output_ordering: Option<JoinOutputOrdering>,
+    ) -> Result<Self> {
+        self.interval_join_relation(right, spec, output_ordering, false)
+    }
+
+    pub(crate) fn interval_join_relation(
         &self,
         right: &TableExpr,
         spec: crate::StreamJoinSpec,
         ordering: Option<JoinOutputOrdering>,
         sql: bool,
     ) -> Result<Self> {
+        let operation = interval_join_name(spec.join_type(), sql);
         if let Some(order) = &ordering
             && (order.entity_by.is_empty()
                 || order.event_time.is_empty()
                 || order.sequence_by.is_empty())
         {
             return Err(invalid(
-                if sql {
-                    "sql.inner_join.output_ordering"
-                } else {
-                    "inner_join.output_ordering"
-                },
+                &format!("{operation}.output_ordering"),
                 "ordering_required",
                 "all three identity fields must be nonempty",
             ));
         }
-        let id = digest(&json!([
-            if sql { "sql.inner_join" } else { "inner_join" },
-            self.0.id,
-            right.0.id,
-            spec,
-            ordering
-        ]));
+        let id = digest(&json!([operation, self.0.id, right.0.id, spec, ordering]));
         Ok(Self(Arc::new(Relation {
             id,
-            kind: RelationKind::InnerJoin {
+            kind: RelationKind::IntervalJoin {
                 inputs: [self.clone(), right.clone()],
                 spec,
                 ordering,

@@ -191,6 +191,7 @@ fn metrics_bytes() -> Result<usize> {
 fn spec_bytes(spec: &StreamJoinSpec) -> Result<usize> {
     let join_type = match spec.join_type() {
         StreamJoinType::Inner => "inner",
+        StreamJoinType::LeftSemi => "left_semi",
     };
     sum(&[
         object_bytes(SPEC_FIELDS)?,

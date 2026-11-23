@@ -568,6 +568,7 @@ def _stream_join_node(
                     _cint(node.attr("max_state_bytes_per_side")),
                     _cint(node.attr("max_matches_per_input_batch")),
                 ),
+                join_type=_cstr(node.attr("join_type")) or "inner",
             ),
         },
         "output_ports": [],

@@ -207,7 +207,7 @@ impl RunCore {
             }
         }
         let metadata = JoinCheckpointMetadata {
-            layout_version: 12,
+            layout_version: operator.spec.join_type.native_layout(),
             spec: operator.spec.clone(),
             next_left_row_id: self.state.next_row_id(JoinSide::Left),
             next_right_row_id: self.state.next_row_id(JoinSide::Right),
@@ -285,13 +285,8 @@ impl RunCore {
         segments: &BTreeMap<String, crate::StateSegment>,
     ) -> Result<Self> {
         let mut core = Self::new(operator)?;
-        core.state = RunState::restore_native(
-            &operator.name,
-            metadata.spec.limits,
-            metadata.spec.bounds,
-            segments,
-            &mut core.keys,
-        )?;
+        core.state =
+            RunState::restore_native(&operator.name, &metadata.spec, segments, &mut core.keys)?;
         core.deferred_left = DeferredLeft::Disabled;
         Ok(core)
     }
@@ -759,6 +754,7 @@ fn run_output_context(
         budget,
     );
     output.product = operator.hot_projection;
+    output.join_type = operator.spec.join_type;
     output
 }
 

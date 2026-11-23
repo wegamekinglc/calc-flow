@@ -246,6 +246,25 @@ fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
 }
 
 #[test]
+fn test_stale_left_semi_witness_cannot_commit_after_left_eviction() {
+    let (mut state, right) = fanout_state(2);
+    let schema = record(&[1], &[1]).schema();
+    let mut output = RunOutputContext::new(&schema, None, 2, EdgeBudget::default());
+    output.join_type = super::StreamJoinType::LeftSemi;
+    let prepared = state
+        .prepare_batch(JoinSide::Right, vec![right], output, &mut || Ok(()))
+        .unwrap();
+    assert_eq!(prepared.matched_rows(), 2);
+    state.evict_end(JoinSide::Left).unwrap();
+    let error = prepared
+        .commit(&mut state)
+        .expect_err("eviction invalidated the witness positions");
+    assert!(error.to_string().contains("stale"), "{error}");
+    assert_eq!(state.next_output_sequence(), 0);
+    assert_eq!(state.next_row_id(JoinSide::Right), 0);
+}
+
+#[test]
 fn test_probe_storage_after_many_retired_runs() {
     fn bytes(retired: u64) -> u64 {
         let mut state = state(10);

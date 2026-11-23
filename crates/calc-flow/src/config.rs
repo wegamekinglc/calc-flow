@@ -2741,12 +2741,13 @@ fn validate_join_output_prefixes(
     base: &str,
     issues: &mut Vec<ValidationIssue>,
 ) {
-    let collision = left_schema.iter().any(|field| {
-        let prefixed = format!("{}__{}", spec.left_prefix(), field.name);
-        right_schema
-            .iter()
-            .any(|other| format!("{}__{}", spec.right_prefix(), other.name) == prefixed)
-    });
+    let collision = spec.join_type() == crate::StreamJoinType::Inner
+        && left_schema.iter().any(|field| {
+            let prefixed = format!("{}__{}", spec.left_prefix(), field.name);
+            right_schema
+                .iter()
+                .any(|other| format!("{}__{}", spec.right_prefix(), other.name) == prefixed)
+        });
     if spec.left_prefix() == spec.right_prefix() || collision {
         issues.push(issue(
             format!("{base}.right_prefix"),

@@ -45,7 +45,7 @@ fn joined_relation(query: &str, tables: &BTreeMap<String, TableExpr>) -> Result<
     }
     if let Some(plan) = inner_join_query(query, &aliases)? {
         return tables[&plan.left_alias]
-            .inner_join_relation(
+            .interval_join_relation(
                 &tables[&plan.right_alias],
                 plan.spec,
                 plan.output_ordering,

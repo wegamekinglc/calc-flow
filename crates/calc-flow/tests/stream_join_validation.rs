@@ -140,7 +140,7 @@ fn unsupported_join_type_scalar_reports_the_stable_issue() {
             vec![(
                 "graph.nodes[0].operator.spec.join_type".into(),
                 "unsupported_join_type".into(),
-                "join_type must be the string inner".into(),
+                "join_type must be inner or left_semi".into(),
             )],
             "join_type = {join_type}"
         );
@@ -152,7 +152,7 @@ fn unsupported_join_type_scalar_reports_the_stable_issue() {
         vec![(
             "graph.nodes[0].operator.spec.join_type".into(),
             "unsupported_join_type".into(),
-            "join_type must be the string inner".into(),
+            "join_type must be inner or left_semi".into(),
         )]
     );
 }
@@ -442,6 +442,35 @@ fn semantic_issues(project: &ProjectSpec) -> Vec<(String, String, String)> {
         .filter(|issue| issue.path.contains("operator.spec"))
         .map(|issue| (issue.path, issue.code, issue.message))
         .collect()
+}
+
+#[test]
+fn test_left_semi_raw_and_typed_projects_ignore_unused_prefixed_collisions() {
+    for kind in ["inner", "left_semi"] {
+        let mut spec = valid_spec();
+        spec["join_type"] = kind.into();
+        spec["left_prefix"] = "x".into();
+        spec["right_prefix"] = "x__z".into();
+        let mut document = join_document(&spec);
+        let ports = &mut document["graph"]["nodes"][0]["input_ports"];
+        for (side, name) in ["z__q", "q"].into_iter().enumerate() {
+            ports[side]["schema"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"name":name,"data_type":"int64","nullable":false}));
+        }
+        let typed: ProjectSpec = serde_json::from_value(document.clone()).unwrap();
+        let issues = semantic_issues(&typed);
+        let raw_accepts = import_project_json(document.to_string().as_bytes()).is_ok();
+        let typed_accepts = !issues
+            .iter()
+            .any(|(_, code, _)| code == "invalid_output_prefix");
+        assert_eq!(
+            (raw_accepts, typed_accepts),
+            (kind == "left_semi", kind == "left_semi"),
+            "{kind}: {issues:?}"
+        );
+    }
 }
 
 #[test]

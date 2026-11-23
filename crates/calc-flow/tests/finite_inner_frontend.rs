@@ -21,6 +21,64 @@ async fn typed_and_sql_inner_join_export_and_compile_both_modes() -> Result<()> 
     stream::verify(stream_plan(&p).await?, inputs).await
 }
 
+fn left_semi_program(entity: &str) -> Result<Program> {
+    let left = table_input("a", schema(), options())?;
+    let right = table_input("b", schema(), options())?;
+    let spec = StreamJoinSpec::new(
+        calc_flow::StreamJoinType::LeftSemi,
+        ["k"],
+        ["k"],
+        "ts",
+        "ts",
+        JoinTimeBounds::new(Duration::from_micros(2), Duration::from_micros(3))?,
+        JoinStateLimits::new(100, 1_000_000, 2)?,
+    )?;
+    assert!(left.inner_join(&right, spec.clone(), None).is_err());
+    let ordering = calc_flow::JoinOutputOrdering {
+        entity_by: vec![entity.into()],
+        event_time: "ts".into(),
+        sequence_by: vec!["seq".into()],
+    };
+    let joined = left.interval_join(&right, spec, Some(ordering))?;
+    Program::new(
+        "semi",
+        CompileMode::Batch,
+        BTreeMap::from([("exists".into(), joined)]),
+    )
+}
+
+#[tokio::test]
+async fn test_typed_left_semi_rejects_prefixed_identity() -> Result<()> {
+    let registry = calc_flow::UdfRegistry::new().snapshot();
+    let error = left_semi_program("left__k")?
+        .collect_schema(&registry)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("interval_join.output_ordering.entity_by"),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()> {
+    let registry = calc_flow::UdfRegistry::new().snapshot();
+    let program = left_semi_program("k")?;
+    let plan = program
+        .compile_batch(&registry, &calc_flow::CompileOptions::default())
+        .await?;
+    let result = plan
+        .execute(fixture_inputs()?, calc_flow::ExecutionOptions::default())
+        .await?;
+    let output = &result.outputs["exists"];
+    assert_eq!(output.num_rows(), 2);
+    assert_eq!(output.table_payload()?.schema(), &schema());
+    assert!(stream_plan(&program).await.is_ok());
+    Ok(())
+}
+
 fn schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("k", DataType::Int64, false),

@@ -33,7 +33,15 @@ fn data(times: Vec<Option<i64>>) -> Batch {
     .unwrap()
 }
 fn plan(limits: JoinStateLimits) -> Result<calc_flow::BatchExecutionPlan> {
-    let spec = StreamJoinSpec::inner(
+    join_plan(calc_flow::StreamJoinType::Inner, limits)
+}
+
+fn join_plan(
+    kind: calc_flow::StreamJoinType,
+    limits: JoinStateLimits,
+) -> Result<calc_flow::BatchExecutionPlan> {
+    let spec = StreamJoinSpec::new(
+        kind,
         ["k"],
         ["k"],
         "ts",
@@ -48,6 +56,43 @@ fn plan(limits: JoinStateLimits) -> Result<calc_flow::BatchExecutionPlan> {
         )?
         .compile_batch(&UdfRegistry::new().snapshot())
 }
+
+#[tokio::test]
+async fn test_left_semi_finite_counts_witnessed_left_rows_once() -> Result<()> {
+    let plan = join_plan(
+        calc_flow::StreamJoinType::LeftSemi,
+        JoinStateLimits::new(100, 1_000_000, 2)?,
+    )?;
+    let output = plan
+        .execute(
+            BTreeMap::from([
+                (
+                    "left".into(),
+                    data(vec![Some(10), Some(10), None, Some(20)]),
+                ),
+                ("right".into(), data(vec![Some(8), Some(13), Some(13)])),
+            ]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    let table = output.outputs["output"].table_payload()?;
+    assert_eq!(table.schema(), &schema());
+    let times = table
+        .batches()
+        .iter()
+        .flat_map(|record| {
+            record
+                .column(1)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .iter()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(times, [Some(10), Some(10)]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn finite_join_boundaries_duplicates_nulls_and_same_plan_isolation() -> Result<()> {
     let plan = plan(JoinStateLimits::new(100, 1_000_000, 100)?)?;

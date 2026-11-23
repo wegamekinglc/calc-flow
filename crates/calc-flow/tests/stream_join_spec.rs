@@ -76,6 +76,36 @@ fn derives_exact_prefixed_ports() {
 }
 
 #[test]
+fn test_left_semi_spec_keeps_the_complete_left_schema() {
+    let left = Arc::new(
+        left_schema()
+            .as_ref()
+            .clone()
+            .with_metadata([("source".to_string(), "authorizations".to_string())].into()),
+    );
+    let mut wire = serde_json::to_value(spec()).unwrap();
+    wire["join_type"] = "left_semi".into();
+    let semi: StreamJoinSpec = serde_json::from_value(wire.clone()).unwrap();
+    let operator =
+        StreamJoinOperator::new("witnessed", left.clone(), right_schema(), semi.clone()).unwrap();
+    assert_eq!(operator.output_ports()[0].schema(), Some(&left));
+    assert_eq!(serde_json::to_value(semi).unwrap(), wire);
+}
+
+#[test]
+fn test_cf_inner_join_rejects_left_semi_spec() {
+    let mut wire = serde_json::to_value(spec()).unwrap();
+    wire["join_type"] = "left_semi".into();
+    let config = serde_json::json!({ "spec": wire });
+    let sql = format!("SELECT * FROM CF_INNER_JOIN('lhs','rhs','{config}')");
+    let error = calc_flow::sql::inner_join_query(&sql, &["lhs".into(), "rhs".into()]).unwrap_err();
+    assert!(
+        error.to_string().contains("requires join_type inner"),
+        "{error}"
+    );
+}
+
+#[test]
 fn rejects_values_beyond_the_json_safe_integer_domain() {
     let too_large = STREAM_JOIN_MAX_SAFE_JSON_INTEGER + 1;
     assert!(JoinStateLimits::new(too_large, 1, 1).is_err());

@@ -10,15 +10,15 @@ use datafusion::sql::{
 use serde::{Deserialize, Serialize};
 use std::ops::ControlFlow;
 
-/// Explicit temporal identity of a joined pair; this declaration does not sort rows.
+/// Explicit temporal identity of interval join output in its declared column names.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JoinOutputOrdering {
-    /// Prefixed left equality keys in declaration order.
+    /// Output left equality keys in declaration order.
     pub entity_by: Vec<String>,
-    /// One prefixed, non-null UTC microsecond join timestamp.
+    /// One non-null UTC microsecond output join timestamp.
     pub event_time: String,
-    /// Complete prefixed left sequence followed by the right sequence.
+    /// Left input sequence, followed by the right sequence for inner joins.
     pub sequence_by: Vec<String>,
 }
 
@@ -204,6 +204,9 @@ fn read_configuration(text: &str) -> Result<Config> {
     validate_numbers(&raw)?;
     let config: Config = serde_json::from_value(raw)
         .map_err(|e| invalid("sql.inner_join.configuration", "invalid_literal", e))?;
+    if config.spec.join_type() != crate::StreamJoinType::Inner {
+        return Err(error("CF_INNER_JOIN requires join_type inner"));
+    }
     validate_ordering(config.output_ordering.as_ref())?;
     Ok(config)
 }

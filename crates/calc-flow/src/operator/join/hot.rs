@@ -13,6 +13,9 @@ pub(super) enum HotKind {
 }
 
 pub(super) fn projection_kind(operator: &StreamJoinOperator) -> Option<HotKind> {
+    if operator.spec.join_type != super::StreamJoinType::Inner {
+        return None;
+    }
     let kind = HotKind::from_bounds(operator.spec.bounds)?;
     let schema = operator.output_ports[0]
         .schema()
@@ -156,6 +159,20 @@ mod tests {
         .unwrap()
         .with_prefixes("quote", "dimension")
         .unwrap()
+    }
+
+    #[test]
+    fn test_left_semi_excludes_inner_pair_projection_for_hot_schemas() {
+        let mut wire = serde_json::to_value(spec()).unwrap();
+        wire["join_type"] = "left_semi".into();
+        let operator = StreamJoinOperator::new(
+            "semi",
+            quote_schema(),
+            dimension_schema(),
+            serde_json::from_value(wire).unwrap(),
+        )
+        .unwrap();
+        assert!(!operator.hot_projection_supported());
     }
 
     fn static_inputs() -> (RecordBatch, RecordBatch) {

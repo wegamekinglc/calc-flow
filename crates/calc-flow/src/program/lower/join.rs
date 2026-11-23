@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) fn contains_join(table: &TableExpr) -> bool {
     matches!(
         table.0.kind,
-        RelationKind::InnerJoin { .. } | RelationKind::AsofJoin { .. }
+        RelationKind::IntervalJoin { .. } | RelationKind::AsofJoin { .. }
     ) || children(table, "").iter().any(|(_, c, _)| contains_join(c))
 }
 pub(super) fn sql_paths(order: &[(TableExpr, String)]) -> BTreeSet<String> {
@@ -22,7 +22,7 @@ pub(super) fn sql_paths(order: &[(TableExpr, String)]) -> BTreeSet<String> {
         if contains_join(table) {
             paths.insert(table.0.id.clone());
         }
-        if let RelationKind::InnerJoin { inputs, .. } | RelationKind::AsofJoin { inputs, .. } =
+        if let RelationKind::IntervalJoin { inputs, .. } | RelationKind::AsofJoin { inputs, .. } =
             &table.0.kind
         {
             for input in inputs {
@@ -132,28 +132,41 @@ impl Lowered {
         output: &SchemaRef,
         path: &str,
     ) -> Result<QueryTemporalIdentity> {
+        let left_only = spec.join_type() == crate::StreamJoinType::LeftSemi;
+        let output_name = |prefix: &str, name: &str| {
+            if left_only {
+                name.to_owned()
+            } else {
+                format!("{prefix}__{name}")
+            }
+        };
         let entities: Vec<_> = spec
             .left_keys()
             .iter()
-            .map(|k| format!("{}__{k}", spec.left_prefix()))
+            .map(|key| output_name(spec.left_prefix(), key))
             .collect();
-        let sequences: Vec<_> = inputs
+        let mut sequences = Vec::new();
+        let mut expected_times = Vec::new();
+        for ((input, prefix), time) in inputs
             .iter()
             .zip([spec.left_prefix(), spec.right_prefix()])
-            .flat_map(|(input, prefix)| {
-                self.orderings[&input.0.id]
-                    .temporal_identity
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(move |id| {
-                        id.sequence_by.iter().map(move |k| format!("{prefix}__{k}"))
-                    })
-            })
-            .collect();
-        let expected_times = [
-            format!("{}__{}", spec.left_prefix(), spec.left_event_time()),
-            format!("{}__{}", spec.right_prefix(), spec.right_event_time()),
-        ];
+            .zip([spec.left_event_time(), spec.right_event_time()])
+        {
+            let identity = self.orderings[&input.0.id]
+                .temporal_identity
+                .as_ref()
+                .expect("validated join input");
+            sequences.extend(
+                identity
+                    .sequence_by
+                    .iter()
+                    .map(|name| output_name(prefix, name)),
+            );
+            expected_times.push(output_name(prefix, time));
+            if left_only {
+                break;
+            }
+        }
         for (field, valid) in [
             ("entity_by", order.entity_by == entities),
             ("event_time", expected_times.contains(&order.event_time)),
@@ -166,7 +179,7 @@ impl Lowered {
                 return Err(invalid(
                     &format!("{path}.output_ordering.{field}"),
                     "ordering_required",
-                    "expected prefixed left keys, one join timestamp and complete left then right sequence",
+                    "expected the output left keys, one output join timestamp and the complete output sequence",
                 ));
             }
         }
@@ -243,7 +256,7 @@ fn validate_time(schema: &SchemaRef, name: &str, path: &str) -> Result<()> {
 fn input_path(table: &TableExpr, path: &str) -> Result<()> {
     match &table.0.kind {
         RelationKind::Input { .. }
-        | RelationKind::InnerJoin { .. }
+        | RelationKind::IntervalJoin { .. }
         | RelationKind::AsofJoin { .. } => Ok(()),
         RelationKind::Filter { input, .. } | RelationKind::Project { input, .. } => {
             input_path(input, path)
@@ -273,7 +286,7 @@ fn time_source(table: &TableExpr, name: &str) -> Result<bool> {
         RelationKind::AsofJoin { spec, .. } => {
             Ok(name == format!("{}__{}", spec.left().prefix(), spec.left().event_time()))
         }
-        RelationKind::InnerJoin { ordering, .. } => {
+        RelationKind::IntervalJoin { ordering, .. } => {
             Ok(ordering.as_ref().is_some_and(|o| o.event_time == name))
         }
         RelationKind::Filter { input, .. } => time_source(input, name),

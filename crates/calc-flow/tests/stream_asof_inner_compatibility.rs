@@ -263,3 +263,20 @@ fn test_inner_historical_segments_require_native_layout() {
         Err(CalcFlowError::CheckpointMismatch { message }) if message.contains("native layout 12")
     ));
 }
+
+#[test]
+fn test_semi_historical_segments_require_native_layout_thirteen() {
+    let mut wire = serde_json::to_value(operator().spec()).unwrap();
+    wire["join_type"] = json!("left_semi");
+    let mut semi = StreamJoinOperator::new(
+        "match",
+        schema(true),
+        schema(false),
+        serde_json::from_value(wire).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        semi.restore(&historical_snapshot()),
+        Err(CalcFlowError::CheckpointMismatch { message }) if message.contains("native layout 13")
+    ));
+}
