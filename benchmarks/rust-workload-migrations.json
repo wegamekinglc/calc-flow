@@ -3,6 +3,34 @@
   "migrations": [
     {
       "target": "core",
+      "baseline_sha256": "c1d3eede2a9976de0215e144dfcc4a75efd724a38aae336e1b5a4c117dc71c13",
+      "candidate_sha256": "8465fa7b62e4d66c34224967a5d479257218c94f11594234c42d5ea8d57e11e5",
+      "reason": "Apply the same pinned core benchmark to both products. The 60-second rolling SUM case exports callback metrics from its validated warmup. The primary job retains the input, output oracle, worker count and timing boundary.",
+      "reference": "2026-11-23 rolling Duration SUM warmup metrics, current main 131aa898"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "232884032f87b6f3de844aab8e531c171908e39a13a090ad1c4a13b92dcb090f",
+      "candidate_sha256": "8465fa7b62e4d66c34224967a5d479257218c94f11594234c42d5ea8d57e11e5",
+      "reason": "Apply the same pinned core benchmark to both products. The 60-second rolling SUM case exports callback metrics from its validated warmup. The primary job retains the input, output oracle, worker count and timing boundary.",
+      "reference": "2026-11-23 rolling Duration SUM warmup metrics, main 1c58e537"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
+      "candidate_sha256": "8465fa7b62e4d66c34224967a5d479257218c94f11594234c42d5ea8d57e11e5",
+      "reason": "Apply the same pinned core benchmark to both products. The 60-second rolling SUM case exports callback metrics from its validated warmup. The primary job retains the input, output oracle, worker count and timing boundary.",
+      "reference": "2026-11-23 rolling Duration SUM warmup metrics, calc-flow-python-v2026.11.14"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "8465fa7b62e4d66c34224967a5d479257218c94f11594234c42d5ea8d57e11e5",
+      "reason": "Apply the same pinned core benchmark to both products. The 60-second rolling SUM case exports callback metrics from its validated warmup. The primary job retains the input, output oracle, worker count and timing boundary.",
+      "reference": "2026-11-23 rolling Duration SUM warmup metrics, published benchmark anchor 61a81f20"
+    },
+    {
+      "target": "core",
       "baseline_sha256": "232884032f87b6f3de844aab8e531c171908e39a13a090ad1c4a13b92dcb090f",
       "candidate_sha256": "c1d3eede2a9976de0215e144dfcc4a75efd724a38aae336e1b5a4c117dc71c13",
       "reason": "Apply the same native benchmark source to both exact products. The new same-column 30/60/90-second SUM has an independent per-row, per-window oracle and its own case ID. Existing case IDs keep their clocks and historical measurements.",

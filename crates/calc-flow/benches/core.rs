@@ -1171,7 +1171,7 @@ mod rolling_history {
         metrics: Option<BTreeMap<String, RollingMetrics>>,
     }
 
-    async fn run(fixture: &Fixture) -> CompletedRun {
+    async fn run(fixture: &Fixture, collect_metrics: bool) -> CompletedRun {
         let state = Arc::new(Mutex::new(Vec::new()));
         let spec = RollingSpec {
             configuration_version: ROLLING_CONFIGURATION_VERSION,
@@ -1236,7 +1236,7 @@ mod rolling_history {
         let outcome = job.wait().await;
         assert_eq!(outcome.state, JobState::Completed, "{outcome:?}");
         let batches = state.lock().await.clone();
-        let metrics = fixture.case.observes_lanes().then(|| job.rolling_metrics());
+        let metrics = collect_metrics.then(|| job.rolling_metrics());
         drop(job);
         CompletedRun { batches, metrics }
     }
@@ -1480,6 +1480,11 @@ mod rolling_history {
             "output_columns":fixture.case.names(), "tokio_workers":4,
             "checkpointing":false, "validated_all_columns":true, "validated_input_immutable":true,
             "result_sha256":fixture.expected_sha256, "validated_iterations":iterations});
+        if matches!(fixture.case, Case::DurationSum) {
+            report["native_metrics_validated_warmup_job"] = snapshot.unwrap().clone();
+            report["last_primary_elapsed"] =
+                serde_json::to_value(last_primary_elapsed.unwrap()).unwrap();
+        }
         if matches!(fixture.case, Case::SharedDurationSum) {
             report["duration_windows_micros"] = json!([30_000_000, 60_000_000, 90_000_000]);
             report["last_primary_elapsed"] =
@@ -1564,7 +1569,16 @@ mod rolling_history {
             group.bench_function(case.name(), |b| {
                 let fixture = fixture.get_or_init(|| {
                     let fixture = Fixture::new(case);
-                    let warm = runtime.block_on(run(&fixture));
+                    let trace_duration = matches!(case, Case::DurationSum);
+                    let mut warm =
+                        runtime.block_on(run(&fixture, case.observes_lanes() || trace_duration));
+                    if trace_duration {
+                        let metrics = warm.metrics.take().unwrap();
+                        let rolling = metrics.get("rolling").unwrap();
+                        assert!(!rolling.overflowed);
+                        assert_eq!(rolling.data.input_rows, case.rows() as u64);
+                        drop(last_metrics.replace(Some(serde_json::to_value(rolling).unwrap())));
+                    }
                     verify(&fixture, &warm);
                     validated.set(1);
                     fixture
@@ -1573,7 +1587,7 @@ mod rolling_history {
                     let mut elapsed = Duration::ZERO;
                     for _ in 0..iterations {
                         let start = Instant::now();
-                        let result = runtime.block_on(run(fixture));
+                        let result = runtime.block_on(run(fixture, case.observes_lanes()));
                         let duration = start.elapsed();
                         elapsed += duration;
                         last_primary_elapsed.set(Some(duration));
