@@ -1715,7 +1715,7 @@ impl EntityTail {
         input: &RetainedInput<'_>,
         histories: &RollingHistories,
         compiled: &CompiledRollingSpec,
-        seeds: &[Option<RecurrenceSeed>],
+        seeds: impl Iterator<Item = (usize, RecurrenceSeed)>,
         node_id: &str,
         work: &mut RollingWorkBatch<'_>,
     ) -> Result<RetainedHistoryAppend> {
@@ -1813,7 +1813,6 @@ fn retained_histories(
         retention,
         times: times.values(),
     };
-    let seeds = update.recurrence_seeds();
     entity_tails(
         update.entity_ids(),
         update.entity_rows(),
@@ -1822,7 +1821,7 @@ fn retained_histories(
         node_id,
     )?
     .map(|tail| {
-        let seeds = &seeds[tail.entity_id];
+        let seeds = update.recurrence_seeds(tail.entity_id);
         tail.prepare(&input, histories, compiled, seeds, node_id, &mut work)
     })
     .collect()

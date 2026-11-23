@@ -572,13 +572,6 @@ fn restore_run(payload: &StateSegment, identity: &RecordBatch) -> Result<(RunId,
         .into_iter()
         .map(|row| usize::try_from(row).map_err(|_| page_error("run ordinal exceeds usize")))
         .collect::<Result<Vec<_>>>()?;
-    let mut permutation = BTreeSet::new();
-    if order
-        .iter()
-        .any(|row| *row >= rows || !permutation.insert(*row))
-    {
-        return Err(page_error("run order is not a permutation"));
-    }
     let charge = RunCharge::read(&payload)?;
     let bytes = charge.total(rows)?;
     let run = Run {
@@ -599,6 +592,23 @@ fn restore_run(payload: &StateSegment, identity: &RecordBatch) -> Result<(RunId,
             released_bytes,
         },
     ))
+}
+
+pub(super) fn validate_run_order(run: &Run) -> Result<()> {
+    // A strictly ordered list of as many in-range ordinals as rows is a permutation.
+    if run.order.len() != run.len()
+        || run.order.iter().any(|&row| row >= run.len())
+        || !run
+            .order
+            .iter()
+            .map(|&row| run.identity(row))
+            .is_sorted_by(|a, b| a < b)
+    {
+        return Err(page_error(
+            "run order is not a strictly ordered permutation",
+        ));
+    }
+    Ok(())
 }
 
 fn restore_index(side: &mut Side, records: &[RecordBatch]) -> Result<()> {

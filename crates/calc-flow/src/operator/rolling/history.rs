@@ -76,7 +76,6 @@ pub(super) fn prepare_scalar_appends(
     observer: Option<&RollingMetricsRecorder>,
 ) -> Result<PreparedHistoryUpdate> {
     let mut work = RollingWorkBatch::new(observer);
-    let seeds = update.recurrence_seeds();
     let tails = group_rows_by_entity(rows)
         .into_iter()
         .map(|(entity, indices)| {
@@ -91,7 +90,8 @@ pub(super) fn prepare_scalar_appends(
                 .ok_or_else(|| {
                     operator_error(node, "rolling entity transition count overflowed")
                 })?;
-            let mut windows = recurrence_windows(compiled, &seeds[update.entity_ids()[indices[0]]]);
+            let entity_id = update.entity_ids()[indices[0]];
+            let mut windows = recurrence_windows(compiled, update.recurrence_seeds(entity_id));
             if windows.is_empty()
                 && compiled
                     .window_groups

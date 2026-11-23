@@ -184,10 +184,6 @@ impl DurationUndo {
         })
     }
 
-    pub(super) fn len(&self) -> usize {
-        self.windows.len()
-    }
-
     pub(super) fn removed(&mut self, sample: TimedSample<f64>) {
         if self.remaining > 0 {
             self.remaining -= 1;

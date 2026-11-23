@@ -12,12 +12,16 @@ use datafusion::common::ScalarValue;
 use datafusion::execution::memory_pool::MemoryReservation;
 use hashbrown::HashTable;
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 use std::{mem::size_of, sync::Arc};
 
 pub(crate) const MORSEL_ROWS: usize = 4096;
 const VARIABLE_STEP_BYTES: usize = 64 * 1024;
 const KEY_COLUMN_PAGE_ROWS: usize = 1024;
 const CANONICAL_PAGE_BYTES: usize = 64 * 1024;
+
+/// Temporary encoding for one new group. Common short composite keys stay inline.
+type CanonicalRow = SmallVec<[u8; 64]>;
 const KEY_LAYOUT_ID: &str = "shared-keyed-columns-v1";
 const CANONICAL_ENCODING: &str = "typed-length-delimited-v1";
 const HASH_EQUALITY: &str = "typed-row-hash-exact-column-equality-v1";
@@ -450,7 +454,7 @@ impl KeyStore {
         let group = GroupId::new(self.next)?;
         let canonical = canonical_row(arrays, row, variable)?;
         self.charge_birth(&canonical, arrays, row)?;
-        self.install_birth(arrays, row, hash, group, canonical)
+        self.install_birth(arrays, row, hash, group, &canonical)
     }
 
     fn charge_birth(&mut self, canonical: &[u8], arrays: &[ArrayRef], row: usize) -> Result<()> {
@@ -471,7 +475,7 @@ impl KeyStore {
         row: usize,
         hash: u64,
         group: GroupId,
-        canonical: Vec<u8>,
+        canonical: &[u8],
     ) -> Result<GroupId> {
         for (column, array) in self.columns.iter_mut().zip(arrays) {
             column.push(array, row)?;
@@ -1027,8 +1031,8 @@ fn canonical_row(
     arrays: &[ArrayRef],
     row: usize,
     variable: &mut VariableWork<'_>,
-) -> Result<Vec<u8>> {
-    let mut canonical = Vec::new();
+) -> Result<CanonicalRow> {
+    let mut canonical = CanonicalRow::new();
     for array in arrays {
         canonical.push(canonical_tag(array.data_type())?);
         let is_null = array.is_null(row);
@@ -1097,7 +1101,7 @@ fn canonical_temporal_tag(data_type: &DataType) -> Result<u8> {
     }
 }
 
-fn canonical_scalar(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+fn canonical_scalar(value: &ScalarValue, output: &mut CanonicalRow) -> Result<()> {
     match value {
         ScalarValue::Boolean(value) => {
             if let Some(value) = value {
@@ -1115,7 +1119,7 @@ fn canonical_scalar(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
 
 fn canonical_string(
     value: &str,
-    output: &mut Vec<u8>,
+    output: &mut CanonicalRow,
     variable: &mut VariableWork<'_>,
 ) -> Result<()> {
     output.extend_from_slice(&(value.len() as u64).to_le_bytes());
@@ -1123,6 +1127,11 @@ fn canonical_string(
     let mut offset = 0;
     while offset < bytes.len() {
         let count = variable.chunk(bytes.len() - offset)?;
+        if count > output.capacity() - output.len() {
+            // Avoid rounding the first cancellation-sized chunk up to a second page.
+            // Later spills still grow geometrically.
+            output.reserve_exact(count.max(output.capacity()));
+        }
         output.extend_from_slice(&bytes[offset..offset + count]);
         offset += count;
     }
@@ -1137,7 +1146,7 @@ macro_rules! canonical_fixed {
     };
 }
 
-fn canonical_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+fn canonical_integer(value: &ScalarValue, output: &mut CanonicalRow) -> Result<()> {
     match value {
         ScalarValue::Int8(_)
         | ScalarValue::Int16(_)
@@ -1153,7 +1162,7 @@ fn canonical_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
     }
 }
 
-fn canonical_signed_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+fn canonical_signed_integer(value: &ScalarValue, output: &mut CanonicalRow) -> Result<()> {
     match value {
         ScalarValue::Int8(value) => canonical_fixed!(value, output),
         ScalarValue::Int16(value) => canonical_fixed!(value, output),
@@ -1168,7 +1177,7 @@ fn canonical_signed_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result
     Ok(())
 }
 
-fn canonical_unsigned_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+fn canonical_unsigned_integer(value: &ScalarValue, output: &mut CanonicalRow) -> Result<()> {
     match value {
         ScalarValue::UInt8(value) => canonical_fixed!(value, output),
         ScalarValue::UInt16(value) => canonical_fixed!(value, output),
@@ -1179,7 +1188,7 @@ fn canonical_unsigned_integer(value: &ScalarValue, output: &mut Vec<u8>) -> Resu
     Ok(())
 }
 
-fn canonical_timestamp(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
+fn canonical_timestamp(value: &ScalarValue, output: &mut CanonicalRow) -> Result<()> {
     let (ScalarValue::TimestampSecond(value, _)
     | ScalarValue::TimestampMillisecond(value, _)
     | ScalarValue::TimestampMicrosecond(value, _)

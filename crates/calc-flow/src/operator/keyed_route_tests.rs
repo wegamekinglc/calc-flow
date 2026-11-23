@@ -83,6 +83,41 @@ fn rollback_invalidates_repeated_key_run() {
 }
 
 #[test]
+fn test_short_composite_key_encodes_without_temporary_heap_storage() {
+    let arrays = [strings(&["A0001"]), strings(&["S000123"])];
+    let mut expected = Vec::new();
+    for value in ["A0001", "S000123"] {
+        expected.extend_from_slice(&[10, 0]);
+        expected.extend_from_slice(&u64::try_from(value.len()).unwrap().to_le_bytes());
+        expected.extend_from_slice(value.as_bytes());
+    }
+    assert_eq!(expected.len(), 32);
+    let allocated = allocation_counter::measure(|| {
+        let actual =
+            super::canonical_row(&arrays, 0, &mut super::VariableWork::new(&mut || Ok(())))
+                .unwrap();
+        assert_eq!(actual.as_slice(), expected.as_slice());
+    });
+    eprintln!("short composite key allocations: {allocated:?}");
+    assert_eq!(allocated.count_total, 0);
+}
+
+#[test]
+fn test_spilled_string_encoding_keeps_exact_bytes_at_the_inline_boundary() {
+    for size in [54usize, 55, 1024] {
+        let value = "a".repeat(size);
+        let arrays = [strings(&[value.as_str()])];
+        let encoded =
+            super::canonical_row(&arrays, 0, &mut super::VariableWork::new(&mut || Ok(())))
+                .unwrap();
+        assert_eq!(encoded.spilled(), size > 54);
+        assert_eq!(&encoded[..2], &[10, 0]);
+        assert_eq!(&encoded[2..10], &u64::try_from(size).unwrap().to_le_bytes());
+        assert_eq!(&encoded[10..], value.as_bytes());
+    }
+}
+
+#[test]
 fn test_cancelled_key_encoding_allocates_only_the_first_page() {
     use datafusion::arrow::array::LargeStringArray;
 
@@ -132,7 +167,7 @@ fn test_sliced_string_keys_keep_their_canonical_encoding() {
         let actual =
             super::canonical_row(&arrays, row, &mut super::VariableWork::new(&mut || Ok(())))
                 .unwrap();
-        assert_eq!(actual, expected);
+        assert_eq!(actual.as_slice(), expected.as_slice());
     }
 }
 

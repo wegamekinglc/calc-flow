@@ -1360,25 +1360,23 @@ fn build_value_record(
 
 pub(super) fn recurrence_windows(
     compiled: &CompiledRollingSpec,
-    seeds: &[Option<kernel::RecurrenceSeed>],
+    seeds: impl Iterator<Item = (usize, kernel::RecurrenceSeed)>,
 ) -> Vec<WindowState> {
-    if !seeds.iter().any(Option::is_some) {
+    let mut seeds = seeds.peekable();
+    if seeds.peek().is_none() {
         return Vec::new();
     }
     let mut windows = fresh_windows(compiled);
-    for (window, seed) in windows.iter_mut().zip(seeds) {
-        match seed {
-            Some(kernel::RecurrenceSeed::Ewma(valid_count, value)) => {
-                *window = WindowState::Ewma(EwmaAccumulator {
-                    valid_count: *valid_count,
-                    value: *value,
-                });
+    for (index, seed) in seeds {
+        let Some(window) = windows.get_mut(index) else {
+            break;
+        };
+        *window = match seed {
+            kernel::RecurrenceSeed::Ewma(valid_count, value) => {
+                WindowState::Ewma(EwmaAccumulator { valid_count, value })
             }
-            Some(kernel::RecurrenceSeed::Cumulative(summary)) => {
-                *window = WindowState::Cumulative(summary.clone());
-            }
-            None => {}
-        }
+            kernel::RecurrenceSeed::Cumulative(summary) => WindowState::Cumulative(summary),
+        };
     }
     windows
 }

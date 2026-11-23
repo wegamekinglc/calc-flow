@@ -22,17 +22,10 @@ use crate::{
 
 pub(super) struct SlabUpdate {
     previous_charge: StateCharge,
-    entities: usize,
     created: bool,
 }
 
 impl SlabUpdate {
-    pub(in crate::operator::rolling) fn recurrence_seeds(
-        &self,
-    ) -> Vec<Vec<Option<super::RecurrenceSeed>>> {
-        vec![vec![None]; self.entities]
-    }
-
     pub(in crate::operator::rolling) fn charge_change(
         &self,
         base: &RollingKernelState,
@@ -758,7 +751,6 @@ impl RollingKernelPlan {
             in_place: None,
             slab: Some(SlabUpdate {
                 previous_charge,
-                entities,
                 created,
             }),
         })
