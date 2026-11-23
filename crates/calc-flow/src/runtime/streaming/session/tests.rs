@@ -500,6 +500,13 @@ fn ordered_restore_case(unit: TimeUnit, arrow_unit: ArrowTimestampUnit, raw: i64
     drop(durable);
 
     let mut restored = restore_session(unit, &config, watermarks.clone(), &root);
+    let assert_restored_progress = |session: &StreamSession| {
+        assert_eq!(session.input.progress.max_event_time, Some(raw));
+        let generator = session.input.progress.generator.as_ref().unwrap();
+        let durable_nanos = expected_nanos(raw, arrow_unit).div_euclid(1_000) * 1_000;
+        assert_eq!(generator.max_observed_nanos(), Some(durable_nanos));
+    };
+    assert_restored_progress(&restored);
     assert_restored_call_matches(
         &mut control,
         &mut restored,
@@ -507,6 +514,7 @@ fn ordered_restore_case(unit: TimeUnit, arrow_unit: ArrowTimestampUnit, raw: i64
         &output,
         timestamp_batch(unit, &[]),
     );
+    assert_restored_progress(&restored);
     assert_eq!(restored.checkpoint().unwrap(), Epoch::new(2).unwrap());
     drop(restored);
 
@@ -533,6 +541,7 @@ fn durable_ordered_restore_preserves_timestamp_units() {
             ordered_restore_case(unit, arrow_unit, raw);
         }
     }
+    ordered_restore_case(TimeUnit::Nanosecond, ArrowTimestampUnit::Nanosecond, -101);
 }
 
 fn bounded_restore_case(unit: TimeUnit, arrow_unit: ArrowTimestampUnit, raw: i64) {
