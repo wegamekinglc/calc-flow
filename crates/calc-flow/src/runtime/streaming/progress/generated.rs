@@ -46,17 +46,15 @@ impl GeneratedWatermarkState {
     }
 
     pub(crate) fn observe_batch(&mut self, batch: &Batch, binding: &str) -> Result<()> {
-        let event_time_path = format!("sources.{binding}.watermark_policy.event_time_column");
         let table = batch
             .table_payload()
             .map_err(|_| CalcFlowError::InvalidArgument {
-                field: event_time_path.clone(),
+                field: event_time_column_path(binding),
                 message: "generated watermarks require table batches".into(),
             })?;
         for record in table.batches() {
             let column = record.column(self.event_time.index);
-            let maximum =
-                maximum_timestamp_nanos(column.as_ref(), self.event_time.unit, &event_time_path)?;
+            let maximum = maximum_timestamp_nanos(column.as_ref(), self.event_time.unit, binding)?;
             if let Some(maximum) = maximum {
                 self.max_observed_nanos = Some(
                     self.max_observed_nanos
@@ -86,7 +84,7 @@ impl GeneratedWatermarkState {
                 })?;
         let candidate_micros = i64::try_from(candidate_nanos.div_euclid(1_000)).map_err(|_| {
             CalcFlowError::InvalidArgument {
-                field: format!("sources.{binding}.watermark_policy.event_time_column"),
+                field: event_time_column_path(binding),
                 message: "generated watermark exceeds the EventTime range".into(),
             }
         })?;
@@ -127,30 +125,25 @@ impl GeneratedWatermarkState {
     }
 }
 
+fn event_time_column_path(binding: &str) -> String {
+    format!("sources.{binding}.watermark_policy.event_time_column")
+}
+
 fn maximum_timestamp_nanos(
     column: &dyn Array,
     unit: ArrowTimestampUnit,
-    event_time_path: &str,
+    binding: &str,
 ) -> Result<Option<i128>> {
     macro_rules! maximum {
         ($array:ty, $factor:expr) => {{
             let array = column.as_any().downcast_ref::<$array>().ok_or_else(|| {
                 CalcFlowError::InvalidArgument {
-                    field: event_time_path.into(),
+                    field: event_time_column_path(binding),
                     message: "record batch column type differs from the prepared schema".into(),
                 }
             })?;
-            array.iter().flatten().try_fold(None, |maximum, value| {
-                let nanos = i128::from(value).checked_mul($factor).ok_or_else(|| {
-                    CalcFlowError::InvalidArgument {
-                        field: event_time_path.into(),
-                        message: "timestamp unit conversion overflowed".into(),
-                    }
-                })?;
-                Ok::<_, CalcFlowError>(Some(
-                    maximum.map_or(nanos, |current: i128| current.max(nanos)),
-                ))
-            })
+            // The positive unit scale preserves order, and even i64 seconds fit in i128 nanos.
+            Ok(datafusion::arrow::compute::max(array).map(|value| i128::from(value) * $factor))
         }};
     }
     match unit {
@@ -237,6 +230,53 @@ mod tests {
             BatchMetadata::default(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_observing_one_timestamp_avoids_temporary_allocations() {
+        let mut generated = state(ArrowTimestampUnit::Microsecond, Duration::from_micros(1));
+        let input = batch(
+            Arc::new(TimestampMicrosecondArray::from(vec![Some(-7)])),
+            TimeUnit::Microsecond,
+        );
+        let cost = allocation_counter::measure(|| generated.observe_batch(&input, "left").unwrap());
+        assert_eq!(
+            generated.on_timer("left").unwrap(),
+            Some(EventTime::from_micros(-8))
+        );
+        eprintln!("one-row watermark observation allocations: {cost:?}");
+        assert_eq!(cost.count_total, 0);
+    }
+
+    #[test]
+    fn test_maximum_uses_only_valid_physical_values_inside_the_timestamp_slice() {
+        let times = TimestampSecondArray::from(vec![
+            Some(i64::MAX),
+            None,
+            Some(i64::MIN),
+            Some(-2),
+            Some(-9),
+            None,
+            Some(6),
+        ]);
+        let values = times.slice(1, 5);
+        let mut generated = state(ArrowTimestampUnit::Second, Duration::ZERO);
+        generated
+            .observe_batch(&batch(Arc::new(values), TimeUnit::Second), "left")
+            .unwrap();
+        assert_eq!(generated.max_observed_nanos(), Some(-2_000_000_000));
+        assert_eq!(
+            generated.on_timer("left").unwrap(),
+            Some(EventTime::from_micros(-2_000_000))
+        );
+        generated
+            .observe_batch(&batch(Arc::new(times), TimeUnit::Second), "left")
+            .unwrap();
+        assert_eq!(
+            generated.max_observed_nanos(),
+            Some(i128::from(i64::MAX) * 1_000_000_000)
+        );
+        assert!(generated.on_timer("left").is_err());
     }
 
     #[test]
