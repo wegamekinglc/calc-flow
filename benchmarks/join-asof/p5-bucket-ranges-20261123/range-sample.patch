@@ -1,0 +1,40 @@
+diff --git a/crates/calc-flow/benches/stream_join_perf.rs b/crates/calc-flow/benches/stream_join_perf.rs
+index 96a05448..06f4c866 100644
+--- a/crates/calc-flow/benches/stream_join_perf.rs
++++ b/crates/calc-flow/benches/stream_join_perf.rs
+@@ -480,6 +480,10 @@ criterion_group!(benches, baseline);
+ fn main() {
+     // Select a benchmark workload; argv[0] never establishes identity or authorization.
+     let arguments = std::env::args().skip(1).collect::<Vec<_>>(); // nosemgrep: args
++    if arguments.as_slice() == ["--range-sample"] {
++        range_sample();
++        return;
++    }
+     if arguments.first().map(String::as_str) == Some("--matched-fixture") {
+         run_matched(&arguments);
+     } else if arguments.first().map(String::as_str) == Some("--native-component") {
+@@ -538,3 +542,24 @@ fn run_native_component(arguments: &[String]) {
+         println!("{observation}");
+     }
+ }
++
++fn range_sample() {
++    let runtime = tokio::runtime::Runtime::new().unwrap();
++    let batches = ScenarioBatches::new();
++    run_probe(&runtime, &batches);
++    runtime.block_on(async {
++        let job = job();
++        let mut operator = new_operator();
++        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
++        feed(&mut operator, &job, &mut collector, "left", &batches.left_fan).await;
++        let start = Instant::now();
++        operator.process_data(
++            "right", (*batches.right_fan).clone(), &plain_ctx(&job), &mut collector,
++        ).await.unwrap();
++        let elapsed = start.elapsed();
++        check_pairs(&mut collector, &batches.left_fan, &batches.right_fan, 10);
++        assert_eq!(operator.status().emitted_match_rows, 100_000);
++        let (rss, hwm) = read_rss();
++        println!("RANGE_SAMPLE {},{},{}", elapsed.as_nanos(), rss, hwm);
++    });
++}
