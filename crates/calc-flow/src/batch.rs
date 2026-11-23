@@ -125,6 +125,13 @@ impl BatchMetadata {
         self.sequence
     }
 
+    pub(crate) fn with_sequence(&self, sequence: u64) -> Self {
+        Self {
+            sequence,
+            ..self.clone()
+        }
+    }
+
     pub fn attributes(&self) -> &JsonMap {
         &self.attributes
     }

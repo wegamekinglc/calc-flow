@@ -6,13 +6,13 @@ use super::{
     },
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
-use crate::{Batch, BatchMetadata, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
+use crate::{Batch, DataFusionConfig, DataFusionRuntime, EdgeBudget, EventTime};
 use datafusion::arrow::{
     array::{Array, ArrayRef, DictionaryArray, Int32Array, Int64Array, ListArray, StringArray},
     datatypes::{DataType, Field, Int32Type, Int64Type, Schema},
     record_batch::RecordBatch,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 fn record(keys: &[i64], values: &[i64]) -> RecordBatch {
     RecordBatch::try_from_iter(vec![
@@ -62,8 +62,19 @@ pub(super) fn output_schema() -> Arc<Schema> {
     ]))
 }
 
-fn values(batch: &RecordBatch, column: usize) -> Vec<i64> {
-    batch
+fn output_record(batch: &Batch) -> &RecordBatch {
+    &batch.table_payload().unwrap().batches()[0]
+}
+
+fn sequences(output: &[Batch]) -> Vec<u64> {
+    output
+        .iter()
+        .map(|batch| batch.metadata().sequence())
+        .collect()
+}
+
+fn values(batch: &Batch, column: usize) -> Vec<i64> {
+    output_record(batch)
         .column(column)
         .as_any()
         .downcast_ref::<Int64Array>()
@@ -95,7 +106,7 @@ fn test_run_probe_orders_locators_by_time_then_physical_row_id() {
             EdgeBudget::new(100, 1_000_000).unwrap(),
         )
         .unwrap();
-    assert!(seeded.records.is_empty());
+    assert!(seeded.is_empty());
 
     let right = record(&[1, 1], &[100, 101]);
     let right = incoming(
@@ -117,10 +128,10 @@ fn test_run_probe_orders_locators_by_time_then_physical_row_id() {
             EdgeBudget::new(100, 1_000_000).unwrap(),
         )
         .unwrap();
-    assert_eq!(output.records.len(), 1);
-    assert_eq!(values(&output.records[0], 0), [10, 12, 11]);
-    assert_eq!(values(&output.records[0], 1), [100, 100, 101]);
-    assert_eq!(output.sequences, [0]);
+    assert_eq!(output.len(), 1);
+    assert_eq!(values(&output[0], 0), [10, 12, 11]);
+    assert_eq!(values(&output[0], 1), [100, 100, 101]);
+    assert_eq!(sequences(&output), [0]);
     assert_eq!(state.rows(JoinSide::Left), 3);
     assert_eq!(state.rows(JoinSide::Right), 0);
 }
@@ -152,9 +163,9 @@ fn test_prepared_outputs_release_unretained_input_before_commit() {
     assert_eq!(prepared.matched_rows(), 2);
     assert_eq!(state.next_row_id(JoinSide::Right), 0);
     let output = prepared.commit(&mut state).unwrap();
-    assert_eq!(values(&output[0].records[0], 0), [0, 1]);
-    assert_eq!(values(&output[0].records[0], 1), [100, 100]);
-    assert_eq!(output[0].sequences, [0]);
+    assert_eq!(values(&output[0][0], 0), [0, 1]);
+    assert_eq!(values(&output[0][0], 1), [100, 100]);
+    assert_eq!(sequences(&output[0]), [0]);
     assert_eq!(state.next_row_id(JoinSide::Right), 1);
 }
 
@@ -268,9 +279,9 @@ fn test_probe_storage_after_many_retired_runs() {
             );
         });
         let result = result.unwrap();
-        assert_eq!(result.sequences, [0]);
-        assert_eq!(values(&result.records[0], 0), [8; 3]);
-        assert_eq!(values(&result.records[0], 1), [21, 22, 23]);
+        assert_eq!(sequences(&result), [0]);
+        assert_eq!(values(&result[0], 0), [8; 3]);
+        assert_eq!(values(&result[0], 1), [21, 22, 23]);
         cost.bytes_total
     }
     let fresh = bytes(0);
@@ -408,9 +419,9 @@ fn test_probe_cursor_memory_is_bounded_by_the_morsel() {
             );
         });
         let result = result.unwrap();
-        assert_eq!(result.sequences, [0]);
-        assert_eq!(values(&result.records[0], 0), [8; 3]);
-        assert_eq!(values(&result.records[0], 1), [21, 22, 23]);
+        assert_eq!(sequences(&result), [0]);
+        assert_eq!(values(&result[0], 0), [8; 3]);
+        assert_eq!(values(&result[0], 1), [21, 22, 23]);
         cost.bytes_total
     }
     let dense = bytes(GroupId::new(0).unwrap());
@@ -450,9 +461,9 @@ fn test_sparse_cursor_handles_time_reversal_and_missing_keys() {
     let result = state
         .apply_checked(JoinSide::Right, right, output, &mut || Ok(()))
         .unwrap();
-    assert_eq!(result.sequences, [0]);
-    assert_eq!(values(&result.records[0], 0), [9, 8]);
-    assert_eq!(values(&result.records[0], 1), [21, 23]);
+    assert_eq!(sequences(&result), [0]);
+    assert_eq!(values(&result[0], 0), [9, 8]);
+    assert_eq!(values(&result[0], 1), [21, 23]);
 }
 
 #[test]
@@ -516,7 +527,7 @@ fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
             EdgeBudget::default(),
         )
         .unwrap();
-    assert_eq!(values(&output.records[0], 0), [10]);
+    assert_eq!(values(&output[0], 0), [10]);
     assert_eq!(state.rows(JoinSide::Right), 0);
 }
 
@@ -638,26 +649,23 @@ fn test_chunked_run_gather_visits_only_its_matched_pairs() {
     let expected = (100..111)
         .flat_map(|right| (0..8).map(move |left| (left, right)))
         .collect::<Vec<_>>();
-    assert_eq!(output.sequences, (0..13).collect::<Vec<_>>());
-    for (record, pairs) in output.records.iter().zip(expected.chunks(7)) {
+    assert_eq!(sequences(&output), (0..13).collect::<Vec<_>>());
+    for (record, pairs) in output.iter().zip(expected.chunks(7)) {
         let actual: Vec<_> = values(record, 0)
             .into_iter()
             .zip(values(record, 1))
             .collect();
         assert_eq!(actual, pairs);
     }
-    assert_eq!(output.records.len(), 13);
+    assert_eq!(output.len(), 13);
     assert_eq!(visits, 2 * expected.len());
 }
 
-fn estimated(record: &RecordBatch, sequence: u64) -> usize {
-    Batch::table(
-        vec![record.clone()],
-        BatchMetadata::new("run-test", sequence, BTreeMap::new()).unwrap(),
-    )
-    .unwrap()
-    .estimated_bytes()
-    .unwrap()
+fn estimated(batch: &Batch) -> usize {
+    Batch::table(vec![output_record(batch).clone()], batch.metadata().clone())
+        .unwrap()
+        .estimated_bytes()
+        .unwrap()
 }
 
 #[test]
@@ -674,17 +682,12 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
         )
         .unwrap();
     assert_eq!(
-        output
-            .records
-            .iter()
-            .map(RecordBatch::num_rows)
-            .collect::<Vec<_>>(),
+        output.iter().map(Batch::num_rows).collect::<Vec<_>>(),
         [2, 1]
     );
-    assert_eq!(output.sequences, [0, 1]);
+    assert_eq!(sequences(&output), [0, 1]);
     assert_eq!(
         output
-            .records
             .iter()
             .flat_map(|record| values(record, 0))
             .collect::<Vec<_>>(),
@@ -702,7 +705,7 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
             EdgeBudget::default(),
         )
         .unwrap();
-    let whole_bytes = estimated(&whole.records[0], 0);
+    let whole_bytes = estimated(&whole[0]);
     let (mut state, right) = fanout_state(3);
     let split = state
         .apply(
@@ -714,11 +717,9 @@ fn test_selection_materialization_preflights_row_and_byte_chunks() {
             EdgeBudget::new(100, whole_bytes - 1).unwrap(),
         )
         .unwrap();
-    assert!(split.records.len() > 1);
-    for index in 0..split.records.len() {
-        let record = &split.records[index];
-        let sequence = split.sequences[index];
-        assert!(estimated(record, sequence) < whole_bytes);
+    assert!(split.len() > 1);
+    for batch in &split {
+        assert!(estimated(batch) < whole_bytes);
     }
 }
 
@@ -735,7 +736,7 @@ fn test_one_byte_short_output_row_does_not_commit_input() {
             EdgeBudget::default(),
         )
         .unwrap();
-    let row_bytes = estimated(&output.records[0], 0);
+    let row_bytes = estimated(&output[0]);
 
     let (mut state, right) = fanout_state(1);
     let before = state.snapshot();
@@ -838,7 +839,7 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
     assert!(work.output_column_interleaves >= 2);
     assert!(work.output_column_takes >= 1);
 
-    let labels = output.records[0]
+    let labels = output_record(&output[0])
         .column(0)
         .as_any()
         .downcast_ref::<DictionaryArray<Int32Type>>()
@@ -849,10 +850,11 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
         "unused dictionary values are detached"
     );
     let labels =
-        datafusion::arrow::compute::cast(output.records[0].column(0), &DataType::Utf8).unwrap();
+        datafusion::arrow::compute::cast(output_record(&output[0]).column(0), &DataType::Utf8)
+            .unwrap();
     let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
     assert_eq!((labels.value(0), labels.value(1)), ("left-a", "left-b"));
-    let items = output.records[0]
+    let items = output_record(&output[0])
         .column(1)
         .as_any()
         .downcast_ref::<ListArray>()
@@ -869,7 +871,7 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
             [expected]
         );
     }
-    assert_eq!(values(&output.records[0], 2), [100, 100]);
+    assert_eq!(values(&output[0], 2), [100, 100]);
 }
 
 pub(super) fn eviction_state() -> RunState {
@@ -949,11 +951,8 @@ fn test_tiny_ordered_append_merges_without_visiting_every_old_identity() {
     );
     let reads = super::runs::IDENTITY_READS.get();
     let matched = apply(&mut state, JoinSide::Right, &[0], &[0], &[7]);
-    assert_eq!(
-        values(&matched.records[0], 0),
-        (0..=ROWS).collect::<Vec<_>>()
-    );
-    assert_eq!(values(&matched.records[0], 1), vec![7; times.len() + 1]);
+    assert_eq!(values(&matched[0], 0), (0..=ROWS).collect::<Vec<_>>());
+    assert_eq!(values(&matched[0], 1), vec![7; times.len() + 1]);
     assert!(
         reads <= 32,
         "{reads} locator identity reads on an ordered append"
@@ -1015,9 +1014,14 @@ fn test_prefix_eviction_and_snapshot_continue_bitwise() {
             EdgeBudget::default(),
         )
         .unwrap();
-    assert_eq!(actual.sequences, expected.sequences);
-    assert_eq!(actual.records, expected.records);
-    assert_eq!(values(&actual.records[0], 0), [20, 30]);
+    assert_eq!(sequences(&actual), sequences(&expected));
+    assert!(
+        actual
+            .iter()
+            .map(output_record)
+            .eq(expected.iter().map(output_record))
+    );
+    assert_eq!(values(&actual[0], 0), [20, 30]);
     assert_eq!(
         restored.snapshot().fingerprint(),
         state.snapshot().fingerprint()
@@ -1144,7 +1148,19 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
             &mut || Ok(()),
         )
         .unwrap();
-    assert_eq!(prepared.outputs().len(), 2);
+    let [first, second] = prepared.outputs() else {
+        panic!("each morsel must produce one output");
+    };
+    let (first, second) = (first[0].metadata(), second[0].metadata());
+    assert_eq!((first.sequence(), second.sequence()), (0, 1));
+    assert_eq!(
+        (
+            std::ptr::eq(first.source(), second.source()),
+            std::ptr::eq(first.attributes(), second.attributes()),
+        ),
+        (true, true),
+        "source and attributes should share storage across the input",
+    );
     assert_eq!(accepted.rows(JoinSide::Right), 0);
     assert_eq!(accepted.next_output_sequence(), 0);
     prepared.commit(&mut accepted).unwrap();
@@ -1200,7 +1216,7 @@ fn test_morsel_preparation_chains_across_unretained_rows() {
             EdgeBudget::default(),
         )
         .unwrap();
-    assert_eq!(values(&output.records[0], 0), [10]);
+    assert_eq!(values(&output[0], 0), [10]);
     RunState::restore(state.snapshot()).unwrap();
 }
 
@@ -1357,14 +1373,7 @@ fn test_run_interval_large_batch_emits_every_match() {
         .unwrap();
     assert_eq!(prepared.matched_rows(), 108_080);
     assert_eq!(run_lookups(), 7);
-    assert_eq!(
-        prepared
-            .outputs()
-            .iter()
-            .map(|output| output.records.len())
-            .sum::<usize>(),
-        3
-    );
+    assert_eq!(prepared.outputs().iter().map(Vec::len).sum::<usize>(), 3);
 }
 
 fn assert_hot_route_matches_full_routing(record: &RecordBatch, field: Field) {
@@ -1489,8 +1498,8 @@ fn test_eviction_releases_locator_indexes_for_a_small_live_tail() {
             EdgeBudget::default(),
         )
         .unwrap();
-    assert_eq!(values(&matched.records[0], 0), [retained_times[0]]);
-    assert_eq!(values(&matched.records[0], 1), [99]);
+    assert_eq!(values(&matched[0], 0), [retained_times[0]]);
+    assert_eq!(values(&matched[0], 1), [99]);
     eprintln!("eviction {ROWS} -> {KEEP} retained bytes {before} -> {after}");
     assert!(after < before / 16, "retained {after} of {before} bytes");
 }
