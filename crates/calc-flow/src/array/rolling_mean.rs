@@ -332,38 +332,22 @@ fn repair(
     window: usize,
     check: &mut dyn FnMut() -> Result<()>,
 ) -> Result<()> {
-    use std::{cell::RefCell, rc::Rc};
-
-    let check = Rc::new(RefCell::new(check));
-    let failure = Rc::new(RefCell::new(None));
-    let controlled = history.iter().enumerate().map({
-        let check = Rc::clone(&check);
-        let failure = Rc::clone(&failure);
-        move |(index, value)| {
-            if failure.borrow().is_some() {
-                return None;
-            }
-            if index.is_multiple_of(4096)
-                && let Err(error) = (check.borrow_mut())()
-            {
-                *failure.borrow_mut() = Some(error);
-                return None;
-            }
-            value
+    let control = std::cell::RefCell::new(Ok(check));
+    let controlled = history.iter().enumerate().map(|(index, value)| {
+        let mut control = control.borrow_mut();
+        let check = control.as_mut().ok()?;
+        if index.is_multiple_of(4096)
+            && let Err(error) = check()
+        {
+            *control = Err(error);
+            return None;
         }
+        value
     });
     summary
         .finish_rows(window, controlled)
         .map_err(arithmetic_error)?;
-    if let Some(error) = Rc::try_unwrap(failure)
-        .expect("controlled iterator released")
-        .into_inner()
-    {
-        return Err(error);
-    }
-    let check = Rc::try_unwrap(check)
-        .unwrap_or_else(|_| panic!("controlled iterator retained"))
-        .into_inner();
+    let check = control.into_inner()?;
     check()
 }
 
@@ -422,6 +406,26 @@ impl RowsHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_eager_mean_pushes_without_allocating_repair_state() {
+        let options = RollingMeanOptions::new(20).unwrap();
+        let mut kernel = MeanKernel::new(21);
+        let mut checks = 0;
+        let allocations = allocation_counter::measure(|| {
+            for _ in 0..64 {
+                let mean = kernel
+                    .push(Some(1.0), options, 20, &mut || {
+                        checks += 1;
+                        Ok(())
+                    })
+                    .unwrap();
+                assert_eq!(mean.map(f64::to_bits), Some(1.0_f64.to_bits()));
+            }
+        });
+        assert_eq!(checks, 66);
+        assert_eq!(allocations.count_total, 0);
+    }
 
     #[test]
     fn test_ordinary_array_mean_checks_cancellation_without_scanning_history() {
