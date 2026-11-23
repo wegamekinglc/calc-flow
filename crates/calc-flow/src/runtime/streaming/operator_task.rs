@@ -849,7 +849,7 @@ fn acknowledge_entry(
         Err(error) => (Err(error), None),
     };
     if let Some(progress) = &input_progress {
-        observe_join_status(inputs, progress)?;
+        observe_join_status(inputs, progress);
         observe_asof_status(inputs, progress.output_frontier);
     }
     restore_ingress_completion(inputs, input_progress.is_some());
@@ -937,7 +937,7 @@ async fn reset_managed_asof(inputs: &mut OperatorTaskInputs, task_id: TaskId) ->
         &restore.progress,
         restore.output_frontier,
     )?
-    .snapshot()?;
+    .snapshot();
     let snapshot = crate::state::PreloadedSnapshot::take_legacy(&mut restore.snapshot)?;
     restore_asof_managed(
         &mut inputs.operator,
@@ -1013,7 +1013,7 @@ fn restore_operator_state(
     )?;
     operator.restore_with_progress(
         &restore.snapshot,
-        &progress.snapshot()?,
+        &progress.snapshot(),
         restore.output_frontier,
     )
 }
@@ -1045,7 +1045,7 @@ pub(super) fn validate_sql_restore_progress<'a>(
     ingresses: impl IntoIterator<Item = &'a String>,
     progress: &BTreeMap<String, OperatorIngressManifestEntry>,
 ) -> Result<()> {
-    OperatorInputProgress::restore(ingresses, progress, None)?.snapshot()?;
+    OperatorInputProgress::restore(ingresses, progress, None)?;
     Ok(())
 }
 
@@ -1061,7 +1061,7 @@ pub(super) async fn restore_terminal_asof<'a>(
     restore_asof_managed(
         operator,
         crate::state::PreloadedSnapshot::take_legacy(&mut restore.snapshot)?,
-        inputs.snapshot()?,
+        inputs.snapshot(),
         restore.output_frontier,
         job,
         None,
@@ -1087,7 +1087,7 @@ pub(super) async fn restore_terminal_owned_join<'a>(
 ) -> Result<OperatorProgress> {
     let inputs =
         OperatorInputProgress::restore(ingresses, &restore.progress, restore.output_frontier)?;
-    let restored_progress = inputs.snapshot()?;
+    let restored_progress = inputs.snapshot();
     if restored_progress
         .by_ingress()
         .values()
@@ -1262,7 +1262,7 @@ async fn finish_operator(
         inputs.context.job(),
         &inputs.node_id,
         input_watermark,
-        input_progress.snapshot()?,
+        input_progress.snapshot(),
         output_budget,
         late_metrics,
     )
@@ -1332,7 +1332,7 @@ async fn finish_sync_operator(
     let result = sync_adapter::end(
         inputs,
         input_progress.input_watermark(),
-        input_progress.snapshot()?,
+        input_progress.snapshot(),
         rolling,
     )
     .await;
@@ -1484,9 +1484,9 @@ async fn dispatch_or_cancel(
     };
     let result = if result.is_ok() && can_complete_barrier && !cancellation.is_cancelled() {
         let result = complete_barrier_if_ready(inputs, input_progress, barrier_alignment).await;
-        let observed = observe_join_status(inputs, input_progress);
+        observe_join_status(inputs, input_progress);
         observe_asof_status(inputs, input_progress.output_frontier);
-        observed.and(result)
+        result
     } else {
         result
     };
@@ -1568,21 +1568,17 @@ async fn dispatch_message(
             .dispatch_trace()
             .complete_watermark(&inputs.node_id, watermark.as_micros());
     }
-    observe_join_status(inputs, input_progress)?;
+    observe_join_status(inputs, input_progress);
     observe_asof_status(inputs, input_progress.output_frontier);
     result
 }
 
-fn observe_join_status(
-    inputs: &OperatorTaskInputs,
-    progress: &OperatorInputProgress,
-) -> Result<()> {
+fn observe_join_status(inputs: &OperatorTaskInputs, progress: &OperatorInputProgress) {
     if let Some(status) = inputs.operator.stream_join_status() {
         inputs
             .progress
-            .observe_stream_join(status.with_ingress_progress(&progress.snapshot()?));
+            .observe_stream_join(status.with_ingress_progress(&progress.cached_snapshot));
     }
-    Ok(())
 }
 
 fn observe_asof_status(inputs: &OperatorTaskInputs, output_frontier: Option<EventTime>) {
@@ -2033,7 +2029,7 @@ async fn prepare_operator_snapshot(
             inputs.context.job(),
             &inputs.node_id,
             input_progress.input_watermark(),
-            input_progress.snapshot()?,
+            input_progress.snapshot(),
             inputs.progress.output_budget(&inputs.outputs),
             Arc::new(inputs.progress.clone()),
         )
@@ -2462,7 +2458,19 @@ async fn forward_join_output_frontier(
     Ok(())
 }
 
-/// Builds the shared immutable per-ingress snapshot from aggregate activity.
+fn ingress_progress(activity: IngressActivity) -> IngressProgress {
+    match activity {
+        IngressActivity::Active { watermark } => {
+            IngressProgress::new(IngressState::Active, watermark)
+        }
+        IngressActivity::Idle { watermark } => IngressProgress::new(IngressState::Idle, watermark),
+        IngressActivity::Ended { final_watermark } => {
+            IngressProgress::new(IngressState::Ended, final_watermark)
+        }
+    }
+}
+
+/// Builds the initial progress snapshot from registered or restored activity.
 fn build_ingress_snapshot(
     ordinal_by_ingress: &BTreeMap<String, BindingOrdinal>,
     aggregate: &MultiInputProgress,
@@ -2475,18 +2483,7 @@ fn build_ingress_snapshot(
                 .ok_or_else(|| CalcFlowError::Internal {
                     message: format!("operator ingress {ingress:?} is missing aggregate progress"),
                 })?;
-            let progress = match activity {
-                IngressActivity::Active { watermark } => {
-                    IngressProgress::new(IngressState::Active, watermark)
-                }
-                IngressActivity::Idle { watermark } => {
-                    IngressProgress::new(IngressState::Idle, watermark)
-                }
-                IngressActivity::Ended { final_watermark } => {
-                    IngressProgress::new(IngressState::Ended, final_watermark)
-                }
-            };
-            Ok((ingress.clone(), progress))
+            Ok((ingress.clone(), ingress_progress(activity)))
         })
         .collect::<Result<BTreeMap<_, _>>>()
         .map(IngressProgressSnapshot::new)
@@ -2496,9 +2493,7 @@ struct OperatorInputProgress {
     ordinal_by_ingress: BTreeMap<String, BindingOrdinal>,
     aggregate: MultiInputProgress,
     output_frontier: Option<EventTime>,
-    // Shared immutable snapshot rebuilt only when an ingress transition
-    // changes activity, so per-Data-call reads stay O(1) Arc clones.
-    cached_snapshot: Option<IngressProgressSnapshot>,
+    cached_snapshot: IngressProgressSnapshot,
 }
 
 impl OperatorInputProgress {
@@ -2519,10 +2514,8 @@ impl OperatorInputProgress {
         Self {
             // Registration covers every ordinal, so the initial snapshot
             // always builds.
-            cached_snapshot: Some(
-                build_ingress_snapshot(&ordinal_by_ingress, &aggregate)
-                    .expect("registered ingresses always snapshot"),
-            ),
+            cached_snapshot: build_ingress_snapshot(&ordinal_by_ingress, &aggregate)
+                .expect("registered ingresses always snapshot"),
             aggregate,
             ordinal_by_ingress,
             output_frontier: None,
@@ -2568,7 +2561,7 @@ impl OperatorInputProgress {
         });
         let aggregate = MultiInputProgress::restore(activities);
         Ok(Self {
-            cached_snapshot: Some(build_ingress_snapshot(&ordinal_by_ingress, &aggregate)?),
+            cached_snapshot: build_ingress_snapshot(&ordinal_by_ingress, &aggregate)?,
             aggregate,
             ordinal_by_ingress,
             output_frontier,
@@ -2598,11 +2591,13 @@ impl OperatorInputProgress {
                     .collect::<Vec<_>>()
             })
             .map_err(super::progress::types::ProgressFailure::into_existing_error)?;
-        if activity_before != self.aggregate.activity(ordinal) {
-            self.cached_snapshot = Some(build_ingress_snapshot(
-                &self.ordinal_by_ingress,
-                &self.aggregate,
-            )?);
+        let activity = self
+            .aggregate
+            .activity(ordinal)
+            .expect("evaluated ingress is registered");
+        if Some(activity) != activity_before {
+            self.cached_snapshot
+                .update(ingress, ingress_progress(activity));
         }
         Ok(emissions)
     }
@@ -2611,12 +2606,8 @@ impl OperatorInputProgress {
         self.aggregate.last_emitted_watermark()
     }
 
-    fn snapshot(&self) -> Result<IngressProgressSnapshot> {
-        self.cached_snapshot
-            .clone()
-            .ok_or_else(|| CalcFlowError::Internal {
-                message: "operator ingress snapshot was never initialized".into(),
-            })
+    fn snapshot(&self) -> IngressProgressSnapshot {
+        self.cached_snapshot.clone()
     }
 
     fn manifest_entries(&self) -> Result<BTreeMap<String, OperatorIngressManifestEntry>> {
@@ -2884,6 +2875,41 @@ pub(super) mod tests {
             BatchMetadata::new(source, sequence, BTreeMap::new()).unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn test_watermark_updates_only_the_changed_ingress_snapshot() {
+        use super::{AggregateInput, IngressProgress, IngressState, OperatorInputProgress};
+
+        let names = (0..64).map(|n| format!("port-{n}")).collect::<Vec<_>>();
+        let mut progress = OperatorInputProgress::new(&names);
+        let at = EventTime::from_micros(1);
+        // The other live inputs are unprimed, so no aggregate watermark is emitted.
+        let allocated = allocation_counter::measure(|| {
+            assert!(
+                progress
+                    .evaluate(&names[31], AggregateInput::Watermark(at))
+                    .unwrap()
+                    .is_empty()
+            );
+        });
+        let retained = progress.snapshot();
+        let active = IngressProgress::new(IngressState::Active, Some(at));
+        assert_eq!(retained.get(&names[31]), Some(active));
+        assert_eq!(
+            retained.get(&names[32]),
+            Some(IngressProgress::new(IngressState::Active, None))
+        );
+        progress.evaluate(&names[31], AggregateInput::Idle).unwrap();
+        assert_eq!(retained.get(&names[31]), Some(active));
+        assert_eq!(
+            progress.snapshot().get(&names[31]),
+            Some(IngressProgress::new(IngressState::Idle, Some(at)))
+        );
+        assert_eq!(
+            allocated.count_total, 0,
+            "unique snapshot allocated {allocated:?}"
+        );
     }
 
     #[test]

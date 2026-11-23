@@ -336,6 +336,20 @@
       "candidate_sha256": "d9cd4cb41c666a00610980502339fc12e8141158fefd41c57f6bcadcf7decc35",
       "reason": "Exact composed migration from the retained dependency-upgrade core workload anchor through the weekly review cleanup: preserve all previously declared cases and add the real DataFusion SQL RANGE SUM single-expiration case. Existing fixtures, samples and timing boundaries are unchanged; new coverage has no historical timing equivalence.",
       "reference": "Retained dependency-migration core workload anchor and weekly review cleanup"
+    },
+    {
+      "target": "stream_asof_perf",
+      "baseline_sha256": "8b1b5502793b2746e46e71ec2bf61aa154fc7836aa4cbba8d26f764c48e607a8",
+      "candidate_sha256": "9db82b971f3a5c716b7896df8d4db11a8c8fb6f46ff4eaed3c9fa1264e8142f2",
+      "reason": "Pin the original 10,000-row and 64 MiB output limits. The scheduled ASOF command still runs the eight default settlement cases with the same fixtures and clock. The candidate selects its production latest-row lookup before the settlement clock. Its separate restore timer includes restoring the lookup setting. Its optional --paired-latest diagnostic has a separate report and sample identity.",
+      "reference": "Published dependency attestation at 61a81f20; #482 and #619."
+    },
+    {
+      "target": "stream_asof_perf",
+      "baseline_sha256": "681d0671855c9f2f9a12289c4dfa9bf090fc7d149911e33d8f60d2c9e79e0ac9",
+      "candidate_sha256": "9db82b971f3a5c716b7896df8d4db11a8c8fb6f46ff4eaed3c9fa1264e8142f2",
+      "reason": "The scheduled ASOF command still runs the eight default settlement cases with the same fixtures and clock. The candidate selects its production latest-row lookup before the settlement clock. Its separate restore timer includes restoring the lookup setting. Its optional --paired-latest diagnostic has a separate report and sample identity.",
+      "reference": "calc-flow-python-v2026.11.14; #619."
     }
   ]
 }

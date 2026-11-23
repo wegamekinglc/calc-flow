@@ -27,7 +27,7 @@ pub(super) fn evaluate_data(
     progress.evaluate(ingress, AggregateInput::Data)?;
     Ok(DataTransition {
         input_watermark,
-        ingress_progress: progress.snapshot()?,
+        ingress_progress: progress.snapshot(),
     })
 }
 
@@ -41,7 +41,7 @@ pub(super) fn evaluate_progress(
     Ok(ProgressTransition {
         emissions,
         previous_watermark,
-        ingress_progress: progress.snapshot()?,
+        ingress_progress: progress.snapshot(),
         aggregate_input_frontier: progress.input_watermark(),
     })
 }
