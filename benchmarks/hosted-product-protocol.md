@@ -1,47 +1,42 @@
-# Public single-row native Arrow export
+# Public single-row Program input mapping
 
-Compare the current direct parent release to the reviewed session record
-export change, with one immutable source tree per arm. Bind both Linux
-CPython 3.13 ABI3 release wheel builds to the same workflow recipe, image,
-wheel and native hash. Use the candidate CI checkout's actual first parent;
-a product-identical wheel requires a complete input/source comparison. The
-one timed workload is WarmSessionScenario with dual_sma_spread, 4,096 warm
-rows and a single new row, one entity, exact projection, checkpointing off,
-an already formed native Batch and explicit Watermark. Admit one worker
-and one affinity CPU. Warmup, forced-GC, phase instrumentation, known output
-and whole clock follow the maintained scenario and previous PR 645. Every
-worker must verify its warm history digest, start row 4096, output/finite
-values, zero pending rows on clean finish, plan fingerprint and phase probe.
-Input/validation/process startup and GC are outside the individual sample
-clock and inside the experiment budget. Each new process starts at row 4096.
+Compare the single-input ordinary-dict lookup with its reviewed wheel's actual
+first parent on the public Program.session().push path. The input is an ordinary
+dict keyed by the one logical source, containing the already formed native Batch.
+The stage removes two key sets and a second equality comparison on valid input.
+The fixture, worker and clock come from the paired session record export study.
+Cold release builds are separate.
 
-Run 2 independent rounds, one excluded prewarm per side then ten adjacent
-pairs per round in alternating order, maintaining the same comparison and
-exact 97.8516% per-round change intervals. Apply the maintained 5% rule;
-report medians, P95, total call and native phases, and whether previous
-80/120 microseconds interim p50/p95 targets are met. Freeze raw timings,
-host diagnostics, all first-parent and artifact proofs. Guard preflight
-and per-second machine conditions as in the maintained hosted sparse case
-and stop on first failure, no timing retries. No other timed workloads.
-Budget 600 seconds total, including local trace and paired artifact prechecks
-<=120s, host setup/Arrow fixtures/all processes and cleanup <=480s including
-45s cleanup reserve. Separately report builds. Public functional tests will
-also demonstrate each nonempty one-record push skips one former generic
-Arrow dispatch and the returned buffers outlive producer/capsule references.
+The single timed workload is WarmSessionScenario with dual_sma_spread, 4,096
+warm rows and one appended row, one entity, exact projection, checkpointing off,
+one native worker and one pinned CPU. Every fresh process prepares the input,
+requests forced GC, then times a public push with the explicit Watermark through
+the returned named Arrow table. Preserve the warm-history and new-row digests,
+numeric and ordering oracle, optimized physical plan, zero pending rows on clean
+finish, and the argument/native/result phase probe. Preparation and verification
+surround the individual timer and count toward the job budget.
 
-After review of the per-record dictionary order guard, the final product
-head is 83618b1f2450570173fc227afda62045e123c73c. Its tested merge is
-bc5b2374968c9f066bbf28bdae07e41633578b36 over first parent
-b8b897610342ba5a7bf375e181a9a5d041ede8bc. Exactly two files change
-from that first parent (the PyO3 exporter and the public session test);
-both changed blobs match the final reviewed PR verbatim. Prefer these
-two CI builds. The earlier b79bc5f9 release remains sealed as a
-reference. Should the first-parent artifact be cancelled, build the
-reviewed explicit commit over its actual declared parent or rebuild
-the missing exact parent independently with the original Linux recipe.
+Run two independently counterbalanced rounds with 10 AB/BA pairs in each and
+four excluded warmups in total. Use the existing exact per-round paired
+intervals, pooled medians, p95 and maintained 5% regression rule. The interim
+targets remain 80 µs p50 and 120 µs p95. Report all 40 raw timings and four
+warmups. Use a new hosted Ubuntu runner, the established three-second preflight,
+per-second CPU and SMT sibling, memory and paging guard, and single-threaded
+BLAS. Stop on the first resource, oracle, provenance or deadline failure.
 
-First-parent main package job 137507892691 was cancelled before upload.
-Its exact source is now built through dispatch 45120573404, workflow
-commit 35d4c124b9c9647b6a52b4f5b22989b5270d0a86 with fixed checkout
-b8b897610342ba5a7bf375e181a9a5d041ede8bc and the original tested Linux
-wheel steps. Candidate Linux run 45120320420 is the PR's official build.
+The stage budget is 600 seconds across this one workload. Allow 120 seconds
+for source, CI build and artifact selection/verification outside the runner and
+480 seconds from hosted job start through verified wheel downloads, matched
+ABI3 CPython 3.13 package installs, samples, cleanup and upload, reserving 45
+seconds for final cleanup. The prior hosted study took 58 seconds end to end.
+Record actual checkout/tree, exact release job and image, archive checksum,
+wheel and native hashes from each separately tested package. No second formal
+collection is allowed. The public time measures Python and native runtime together.
+
+The final reviewed adapter is 594009d7. The release smoke job checks out
+68a91699, whose first parent is 6a52ff2e. Their complete Git diff consists
+of session.py and its focused test module. Only session.py ships in the wheel.
+Verify its SHA-256 against the corresponding Git blob on each arm's installed
+package before collection. The main job for that first parent was superseded
+before its wheel upload. A dispatch pins the same parent and reuses each step
+of its official smoke job. Record separately built native module identities.

@@ -143,12 +143,21 @@ async def collect(sites: dict, cpu: int) -> list:
     return observations
 
 
+def verify_session_adapter(site: Path, expected: str) -> str:
+    digest = sha256_file(site / "calc_flow" / "session.py")
+    if digest != expected:
+        raise ValueError("installed session adapter differs from registered product")
+    return digest
+
+
 async def observe() -> None:
     releases = {side: load_release(OUT / side / "release.json") for side in SIDES}
     sites = {}
     for side, release in releases.items():
         site = await install(release, OUT / side)
         verify_package_files(Path(release["wheel_path"]), site)
+        digest = verify_session_adapter(site, release["session_adapter_sha256"])
+        write_json(OUT / f"{side}-adapter.json", {"sha256": digest})
         sites[side] = site
     cpu = await _resource(OUT / "resources.jsonl", None)
     os.sched_setaffinity(0, {cpu})

@@ -7,66 +7,68 @@
   "reserved_external_provenance_seconds": 120,
   "source_hashes": {
     "benchmarks/warm_stream.py": "56532fef6313ef8697dcdd8d30f09cf4de5c9ad1c9a646925063204373999b59",
-    "scripts/hosted_session_record.py": "2df19dae56ff08af56f4935ed47a3ac6bf0d7968a4608a807ef8e43bc09716af",
+    "scripts/hosted_session_record.py": "6c2064ed8533fe87637f6a7a6825d053b9f47b4ab7d6da4492ce28e714f33aa4",
     "scripts/hosted_session_record_worker.py": "3f3f33224a2041832e43a1e45847425755236f758ee2f2f5a7ec3ca57cd81dd9",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
     "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
     "scripts/benchmark_suite/release_pairs.py": "13393d24d5b98a8065f9c21d851454386bb4ba9f6cf14b2b88fcaeb5efbc102a",
     "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
     "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
-    "benchmarks/hosted-product-protocol.md": "c8f993be57d3839477065be33394b0dbc215c7726653bddf0d54c05bc265909f"
+    "benchmarks/hosted-product-protocol.md": "b64091abcfa322ebe77ff6856c7de68074b37a010de4321184f0a614c9be2331"
   },
-  "candidate_pr": 656,
-  "compiled_parent": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
-  "reviewed_product_sha": "83618b1f2450570173fc227afda62045e123c73c",
+  "candidate_pr": 673,
+  "compiled_parent": "6a52ff2ed425caff404d7c64e991fc5334c97a45",
+  "reviewed_product_sha": "594009d7b7bcece5f01ff1a23e7a41210329e478",
   "expected_candidate_checkout": {
     "parents": [
-      "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
-      "83618b1f2450570173fc227afda62045e123c73c"
+      "6a52ff2ed425caff404d7c64e991fc5334c97a45",
+      "594009d7b7bcece5f01ff1a23e7a41210329e478"
     ],
-    "sha": "bc5b2374968c9f066bbf28bdae07e41633578b36",
-    "tree": "8f1ad549d08a989ccb6a1eab33beaf22f1cbc51b"
+    "sha": "68a91699ec6fedbf29bc861ad6b86b6af8706ca7",
+    "tree": "957bdd1f2f2bfcfd275deeed0465b42ca703ae3e"
   },
   "changed_files": {
-    "crates/calc-flow-python/src/session.rs": "01483f293793b37dc3f2660a77e66f9be997c123",
-    "python/tests/test_stream_session.py": "72621f23137457c066a852173bf56b03b7acbc2a"
+    "python/calc_flow/session.py": "7f6ff8ed8e6512f89dd9150f9a527499c0dd1007",
+    "python/tests/test_stream_session.py": "8d9b52c81de085984fdd40480250fb54022fa615"
   },
   "baseline": {
-    "artifact": 14794681070,
-    "artifact_digest": "sha256:6be87771e4da11d870d2e2e65623a580bad6aff4d733760006cc332c2a375698",
+    "artifact": 14805478603,
+    "artifact_digest": "sha256:6b0f4046d5df0593cfc22533ae3363ce9c22318c9c47ed1ecf38b5daf18ba0b1",
     "build_profile": "release",
-    "checkout": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+    "checkout": "6a52ff2ed425caff404d7c64e991fc5334c97a45",
     "contract": "benchmark-release-v1",
     "git_clean": true,
-    "git_sha": "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
+    "git_sha": "6a52ff2ed425caff404d7c64e991fc5334c97a45",
     "image": "ubuntu-26.04",
     "image_version": "20261116.202.1",
-    "job": 137513145073,
+    "job": 137600302883,
     "parents": [
-      "b79bc5f9b894caafdc4a00e03f7730ab10d61274",
-      "a1a8424891c3c24f53ab762825b355a5fed3e10b"
+      "ad195d58c80296e896ac809276a588d3caa946ce",
+      "7dbc3956967c1e7c7940a1daf2e45fdb88d3f05c"
     ],
-    "requested_sha": "35d4c124b9c9647b6a52b4f5b22989b5270d0a86",
-    "tree": "44ef75f0b28a8070f90ff09a86f7d4910c914cd6",
-    "workflow_run": 45120573404
+    "requested_sha": "298a43a82809de14fc1a528239860237a7babd0a",
+    "tree": "8fe560ce6dd182971c5036073924e5bc31e5d5fc",
+    "workflow_run": 45147489648,
+    "session_adapter_sha256": "29e588f8b751c0857520ab27cc1c0abb5bce4ad88f2fb0863bb53978d0be0163"
   },
   "candidate": {
-    "artifact": 14794248127,
-    "artifact_digest": "sha256:87a5ca7d818ea95675c980f942881779adf22e78dfe9165f64ee5a5b8a521ff6",
+    "artifact": 14806295557,
+    "artifact_digest": "sha256:7f7b83cc66d277ce2dfb47bad53644ac259aa3359054136350200cb2fb726348",
     "build_profile": "release",
-    "checkout": "bc5b2374968c9f066bbf28bdae07e41633578b36",
+    "checkout": "68a91699ec6fedbf29bc861ad6b86b6af8706ca7",
     "contract": "benchmark-release-v1",
     "git_clean": true,
-    "git_sha": "bc5b2374968c9f066bbf28bdae07e41633578b36",
+    "git_sha": "68a91699ec6fedbf29bc861ad6b86b6af8706ca7",
     "image": "ubuntu-26.04",
     "image_version": "20261116.202.1",
-    "job": 137512856144,
+    "job": 137596147357,
     "parents": [
-      "b8b897610342ba5a7bf375e181a9a5d041ede8bc",
-      "83618b1f2450570173fc227afda62045e123c73c"
+      "6a52ff2ed425caff404d7c64e991fc5334c97a45",
+      "594009d7b7bcece5f01ff1a23e7a41210329e478"
     ],
-    "requested_sha": "83618b1f2450570173fc227afda62045e123c73c",
-    "tree": "8f1ad549d08a989ccb6a1eab33beaf22f1cbc51b",
-    "workflow_run": 45120320420
+    "requested_sha": "594009d7b7bcece5f01ff1a23e7a41210329e478",
+    "tree": "957bdd1f2f2bfcfd275deeed0465b42ca703ae3e",
+    "workflow_run": 45146222402,
+    "session_adapter_sha256": "d12b64c5abf963808a2ecfa33f09ddb01c9091c4219b1da510d973187304d163"
   }
 }
