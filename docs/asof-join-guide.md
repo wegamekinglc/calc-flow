@@ -247,7 +247,9 @@ For right time `r`, the conservative condition is
 `r + T < min(left_future_time_bound, earliest_pending_left_time)`.
 The equality case remains eligible. Right EOF alone does not discard useful
 history. An expired payload can leave a charged identity-only entry until its
-own side's watermark passes the identity time or that side ends.
+own side's watermark passes the identity time or that side ends. When the last
+live run retires, the operator releases its key dictionary and locator indexes.
+Later inputs establish fresh group IDs and continue the existing run sequence.
 
 Native accounting version `11` charges shared key storage, immutable run
 payload and identity columns, payload/identity liveness, locator capacities,

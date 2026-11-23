@@ -133,6 +133,11 @@ impl KeyStore {
         }
     }
 
+    /// Release all key storage once the owner has retired every group reference.
+    pub(crate) fn clear(&mut self) {
+        *self = Self::new(self.schema.clone(), self.reservation.new_empty());
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.canonical.len()
     }

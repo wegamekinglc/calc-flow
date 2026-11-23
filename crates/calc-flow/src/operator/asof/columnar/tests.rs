@@ -534,6 +534,16 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
         }
     );
     assert_eq!(state.state_rows(), 0);
+    assert_eq!(state.persistent_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
+    let run_frontier = state.next_run;
+    admit(&mut state, 0, &record(&[(2, 20, 1, Some("new"))])).unwrap();
+    assert!(state.next_run > run_frontier);
+    let selection = state.select(Some(21), false, 10).unwrap();
+    assert_eq!(selection.matched(), 0);
+    state.commit(&selection).unwrap();
+    assert_eq!(state.persistent_bytes(), 0);
+    assert_eq!(pool.reserved(), 0);
 }
 
 #[test]

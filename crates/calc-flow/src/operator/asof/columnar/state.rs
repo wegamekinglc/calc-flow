@@ -1178,7 +1178,7 @@ impl ColumnarState {
                 self.run_bytes -= run.charge();
             }
         }
-        self.sync_reservation();
+        self.finish_retirement();
         summary
     }
 
@@ -1221,8 +1221,20 @@ impl ColumnarState {
             let run = self.left_runs.remove(&id).expect("dead ASOF left run");
             self.run_bytes -= run.charge();
         }
-        self.sync_reservation();
+        self.finish_retirement();
         Ok(())
+    }
+
+    fn finish_retirement(&mut self) {
+        if self.left_runs.is_empty() && self.right_runs.is_empty() && !self.keys.is_empty() {
+            self.keys.clear();
+            self.pending = LocatorColumn::default();
+            self.left_by_key = Vec::new();
+            self.right_by_key = Vec::new();
+            self.key_ranks = Vec::new();
+            self.index_bytes = 0;
+        }
+        self.sync_reservation();
     }
 
     fn candidate(&self, bucket: &RightBucket, time: i64) -> Option<RowLocator> {
