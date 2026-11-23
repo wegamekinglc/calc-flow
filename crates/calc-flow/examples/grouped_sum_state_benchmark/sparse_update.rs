@@ -75,10 +75,20 @@ async fn measure(batches: &[Batch], changelog: bool) -> ExampleResult<Value> {
     }
     let (output, update_ns) = result??;
     super::support::completed(&job).await?;
-    let validated = validate_snapshots(batches, &output, "stream", changelog)?;
+    validated_observation(batches, &output, &update_ns, changelog, &job.status())
+}
+
+fn validated_observation(
+    batches: &[Batch],
+    output: &[Batch],
+    update_ns: &[u64],
+    changelog: bool,
+    status: &calc_flow::JobStatus,
+) -> ExampleResult<Value> {
+    let validated = validate_snapshots(batches, output, "stream", changelog)?;
     Ok(json!({
         "update_ns": update_ns,
-        "status": job.status(),
+        "status": status,
         "output_rows": output.iter().map(Batch::num_rows).collect::<Vec<_>>(),
         "snapshot_sha256": validated.sha256,
         "schema_sha256": validated.schema_sha256,
