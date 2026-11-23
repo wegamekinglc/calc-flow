@@ -400,9 +400,11 @@ fn test_dense_product_keeps_the_nullable_path_nan_bits_across_chunk_sizes() {
         let columns: [ArrayRef; 3] = [
             Arc::new(UInt64Array::from(vec![0; rows + 1])),
             Arc::new(Float64Array::from(vec![left_nan; rows + 1])),
-            Arc::new(Float64Array::from_iter(
-                std::iter::repeat_n(Some(right_nan), rows).chain([None]),
-            )),
+            Arc::new(
+                std::iter::repeat_n(Some(right_nan), rows)
+                    .chain([None])
+                    .collect::<Float64Array>(),
+            ),
         ];
         let products = |length| {
             let output = projection
