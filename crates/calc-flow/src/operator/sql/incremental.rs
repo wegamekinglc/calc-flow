@@ -1917,11 +1917,12 @@ impl IncrementalSql {
             checked_bytes(total, [(row_bytes, versions)], name)
         };
         let reserve = |bytes| {
+            let total = checked_bytes(reservation.size(), [(1, bytes)], name)?;
             #[cfg(test)]
             self.changelog_output_reservations
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             reservation
-                .try_grow(bytes)
+                .try_resize(total)
                 .map_err(|error| df_error(name, error))
         };
         if self.projects_sum_columns() {

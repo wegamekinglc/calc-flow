@@ -785,6 +785,24 @@ async fn test_direct_sum_output_preflight_refuses_before_export_and_retries_exac
         0,
         "denied output must not consume a partial reservation"
     );
+    let overflow_pool: Arc<dyn MemoryPool> =
+        Arc::new(crate::state_memory_pool::OwnedStatePool::new(
+            Arc::new(GreedyMemoryPool::new(usize::MAX)),
+            "change-quota",
+            "quota exceeded",
+        ));
+    let occupied = MemoryConsumer::new("change-quota").register(&overflow_pool);
+    let existing = usize::MAX - charge + 1;
+    occupied.try_grow(existing).unwrap();
+    let error = plan
+        .prepare_sum_changes(&mut candidate, &occupied, &context, "change-quota")
+        .unwrap_err();
+    assert!(
+        matches!(&error, CalcFlowError::DataFusion { node_id: Some(node), message }
+            if node == "change-quota" && message == "incremental memory charge overflowed"),
+        "{error:?}"
+    );
+    assert_eq!(occupied.size(), existing);
     drop(candidate);
     assert_eq!((keyed.canonical_bytes(), keyed.reserved_bytes()), before);
     let mut retry = prepare();
