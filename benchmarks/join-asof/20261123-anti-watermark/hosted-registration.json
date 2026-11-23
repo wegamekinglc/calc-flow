@@ -1,0 +1,24 @@
+{
+  "case": "public-program-active-right-watermark-left-anti-257",
+  "budget_seconds": 300,
+  "reserved_cleanup_seconds": 8,
+  "source_hashes": {
+    "benchmarks/join-asof/20261123-anti-watermark/protocol.md": "40352c41e31e6c270032a87b82ae3864c5dce24222650d749fbb4eba31cf6e8c",
+    "benchmarks/join-asof/20261123-anti-watermark/python_worker.py": "49010483d73b13cac0c803266c3f71220f62557fb20f32ef0105f53771b050c6",
+    "benchmarks/join-asof/20261123-anti-watermark/collect.py": "7a3f0ac3b6dd860332bc01b13c75edee939c78d281a081ba34ecc9e02aa8152d",
+    "scripts/hosted_anti_release.py": "513012bdfe78893663d48bb7325087691157de03d2f2dcdd797ae1db54e2e69d",
+    ".github/workflows/benchmarks.yml": "530b37fc7b75ae7ce227847a5742b7936f8b3e03d6a51359bc07dbe90356367e"
+  },
+  "release": {
+    "git_sha": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+    "tree": "d22e0c7693ad29181778653dff63d34a0ed86dac",
+    "wheel_sha256": "7f4b12183edf3abd2cae3066e159c4c3290ffa7761bdad2fecbd543921555366",
+    "native_sha256": "d7a1bb4dae897378ed410e1362565450f4372bf6b2ffdbc9211bd0fb7186ff11",
+    "workflow_run": 45182357543,
+    "job": 137719754356,
+    "artifact": 14822848922,
+    "artifact_digest": "sha256:dad62e3c28ace0dab4742d078f157dca905b67bf26e9edf4defebbbddb179a05",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1"
+  }
+}
