@@ -291,13 +291,6 @@ impl RunCharge {
         Ok(Self::Variable { rows })
     }
 
-    fn row(&self, row: usize) -> usize {
-        match self {
-            Self::Fixed { row: charge } => *charge,
-            Self::Variable { rows } => rows[row],
-        }
-    }
-
     fn total(&self, rows: usize) -> Result<usize> {
         let payload = match self {
             Self::Fixed { row } => row
@@ -320,13 +313,19 @@ impl RunCharge {
             .ok_or_else(|| run_error("run owner charge overflowed"))
     }
 
-    fn rows_charge(&self, mut rows: impl Iterator<Item = usize>) -> Result<usize> {
-        rows.try_fold(0usize, |total, row| {
-            total
-                .checked_add(self.row(row))
-                .and_then(|total| total.checked_add(ROW_COLUMN_BYTES))
-                .ok_or_else(|| run_error("run prefix charge overflowed"))
-        })
+    fn rows_charge(&self, mut ordinals: impl ExactSizeIterator<Item = usize>) -> Result<usize> {
+        let count = ordinals.len();
+        let overflow = || run_error("run prefix charge overflowed");
+        let identity = count.checked_mul(ROW_COLUMN_BYTES).ok_or_else(overflow)?;
+        match self {
+            Self::Fixed { row } => row
+                .checked_mul(count)
+                .and_then(|bytes| bytes.checked_add(identity)),
+            Self::Variable { rows } => {
+                ordinals.try_fold(identity, |total, row| total.checked_add(rows[row]))
+            }
+        }
+        .ok_or_else(overflow)
     }
 }
 
@@ -1955,4 +1954,33 @@ fn test_fanout_probe_stores_ranges_per_input_row() {
     assert_eq!(result.unwrap().len(), matches);
     println!("128 by 128 probe peak allocation {} bytes", cost.bytes_max);
     assert!(cost.bytes_max < 32 * 1024, "{cost:?}");
+}
+
+#[cfg(test)]
+#[test]
+fn test_fixed_prefix_charge_uses_only_the_number_of_expired_rows() {
+    let visits = std::cell::Cell::new(0);
+    let charge = RunCharge::Fixed { row: 17 };
+    let count = 1_024;
+    let order = (0..count).rev().inspect(|_| visits.set(visits.get() + 1));
+    assert_eq!(
+        charge.rows_charge(order).unwrap(),
+        count * (17 + ROW_COLUMN_BYTES)
+    );
+    assert_eq!(visits.get(), 0, "fixed prefix ordinal reads");
+
+    let variable = RunCharge::Variable {
+        rows: vec![31, 7, 13],
+    };
+    assert_eq!(
+        variable.rows_charge([2, 0].into_iter()).unwrap(),
+        44 + 2 * ROW_COLUMN_BYTES
+    );
+    let excessive = RunCharge::Fixed { row: usize::MAX };
+    assert_eq!(excessive.rows_charge(std::iter::empty()).unwrap(), 0);
+    assert!(excessive.rows_charge(std::iter::once(0)).is_err());
+    let large = RunCharge::Fixed {
+        row: usize::MAX / 2 + 1,
+    };
+    assert!(large.rows_charge([1, 0].into_iter()).is_err());
 }
