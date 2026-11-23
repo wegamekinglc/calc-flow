@@ -1658,6 +1658,52 @@ fn ordered_on(input: &str, column: &str) -> BTreeMap<String, SessionWatermark> {
 }
 
 #[test]
+fn test_ordered_push_reuses_the_validated_timestamp_maximum() {
+    let records = [
+        nanosecond_batch(&[Some(-2_100), Some(-1_900)]),
+        nanosecond_batch(&[]),
+        nanosecond_batch(&[Some(-1_900), Some(-101)]),
+    ]
+    .into_iter()
+    .flat_map(|batch| batch.table_payload().unwrap().batches().to_vec())
+    .collect();
+    let batch = Batch::table(records, BatchMetadata::default()).unwrap();
+    let mut scans = Vec::new();
+    for mode in [
+        SessionWatermark::Ordered {
+            event_time_column: "ts".into(),
+        },
+        SessionWatermark::BoundedOutOfOrderness {
+            event_time_column: "ts".into(),
+            max_out_of_orderness: std::time::Duration::from_micros(1),
+        },
+    ] {
+        let plan = pass_through_plan(&nanosecond_schema());
+        let input = source_id(&plan);
+        let output = plan.sink_binding_ids()[0].to_owned();
+        let mut session = open_session(plan, BTreeMap::from([(input.clone(), mode)]));
+        GeneratedWatermarkState::take_reduced_rows_for_test();
+        let result = session.push(&input, batch.clone(), None).unwrap();
+        scans.push(GeneratedWatermarkState::take_reduced_rows_for_test());
+        assert_eq!(
+            result
+                .batches(&output)
+                .iter()
+                .map(Batch::num_rows)
+                .sum::<usize>(),
+            4
+        );
+        assert_generated_max(&session, -101, ArrowTimestampUnit::Nanosecond);
+        assert_eq!(session.watermark_for_test(), Some(micros(-2)));
+    }
+    assert_eq!(
+        scans,
+        [0, 4],
+        "generated reduction rows for ordered and bounded sessions"
+    );
+}
+
+#[test]
 fn test_ordered_rejects_nanosecond_row_inside_closed_microsecond() {
     let plan = pass_through_plan(&nanosecond_schema());
     let input = source_id(&plan);
