@@ -786,6 +786,50 @@ fn test_staging_an_explicit_watermark_requires_no_allocation() {
 }
 
 #[test]
+fn test_staging_an_ordered_push_only_allocates_for_the_source_envelope() {
+    let (mut session, input, output) = ordered_session();
+    let first = input_batch(&[(10, "a", 0, 1.0)]);
+    assert!(session.push(&input, first, None).unwrap().is_empty());
+    let rows = [(11, "a", 1, 3.0)];
+    let control = input_batch(&rows);
+    let second = input_batch(&rows);
+    let source = &session.input;
+    let envelope = allocation_counter::measure(|| {
+        let (_, message, cost) = super::sequenced_source_message(
+            &source.binding_id,
+            source.progress.next_sequence,
+            &control,
+            None,
+        )
+        .unwrap();
+        source.sender.check_cost(&cost).unwrap();
+        std::hint::black_box(message);
+    });
+    let mut staged = None;
+    let measured = allocation_counter::measure(|| {
+        staged = Some(source.stage_push(&input, &second, None).unwrap());
+    });
+    eprintln!("single-row input staging {measured:?}; source envelope {envelope:?}");
+    let result = session.run(staged.unwrap()).unwrap();
+    assert_eq!(
+        rendered_rows(result.batches(&output)),
+        ["1970-01-01T00:00:00.000010Z|a|1.0"]
+    );
+    assert_eq!(session.watermark_for_test(), Some(micros(10)));
+    assert_eq!(session.input.progress.next_sequence, Some(2));
+    let finished = session.finish().unwrap();
+    assert_eq!(
+        rendered_rows(finished.batches(&output)),
+        ["1970-01-01T00:00:00.000011Z|a|2.0"]
+    );
+    assert_eq!(
+        (measured.count_total, measured.bytes_total),
+        (envelope.count_total, envelope.bytes_total),
+        "{measured:?} vs {envelope:?}"
+    );
+}
+
+#[test]
 fn test_collect_one_session_output_without_heap_allocation() {
     let (sender, receiver) = super::session_edge("result".into(), EdgeBudget::default()).unwrap();
     let mut outputs = [(
