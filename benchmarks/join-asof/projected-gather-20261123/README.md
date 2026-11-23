@@ -1,8 +1,10 @@
 # Fused Join projection
 
-The Rust Equi Join used three Arrow gather kernels per output batch for the
-left sequence, left price and right factor. Band Join used four kernels for
-the two sequences and prices. Each previously used eight. The counters in
+For one output batch that fit the byte budget on the first attempt, Rust
+Equi Join used three Arrow gather kernels for the left sequence, left price
+and right factor. Band Join used four kernels for the two sequences and
+prices. Each previously used eight in this control. When an estimated chunk
+exceeds the budget, each split requires another gather. The counters in
 `SideGather::column` record actual Arrow `take` and `interleave` calls.
 Run `cargo test --locked -p calc-flow --lib projected_gather::` to exercise
 both shapes, cancellation, retry and restoration.
@@ -31,7 +33,8 @@ process's median of the 976 full 1,024-row handler durations. The final
 output row, the physical projection, assembly and cleanup using
 `scripts.benchmark_suite.native_components.validate_small_batch`. Two rounds
 of ten alternating pairs and one excluded warmup per arm per round were
-registered. Both binaries used one worker on logical CPU 8.
+registered. Both arms were configured for one worker on logical CPU 8.
+Only the baseline worker started.
 
 The two builds used the same temporary integration of main at `3a63b112`,
 the bucket-range PR #639 and the deferred-left PR #636. The candidate adds
