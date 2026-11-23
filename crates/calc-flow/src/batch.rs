@@ -197,57 +197,61 @@ impl BatchMetadata {
     }
 }
 
+/// A nonempty collection of immutable record batches with one schema.
 #[derive(Clone)]
-pub struct TableBatch {
-    schema: SchemaRef,
-    batches: Arc<[RecordBatch]>,
+pub struct TableBatch(Arc<TableBatchData>);
+
+struct TableBatchData {
+    batches: Box<[RecordBatch]>,
     rows: usize,
     /// Immutable payloads are measured once; clones share the outcome.
-    estimated_bytes_cache: Arc<OnceLock<std::result::Result<usize, String>>>,
+    estimated_bytes_cache: OnceLock<std::result::Result<usize, String>>,
 }
 
 impl Debug for TableBatch {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TableBatch")
-            .field("schema", &self.schema)
-            .field("batches", &self.batches)
-            .field("rows", &self.rows)
+            .field("schema", self.schema())
+            .field("batches", &self.batches())
+            .field("rows", &self.0.rows)
             .finish_non_exhaustive()
     }
 }
 
 impl TableBatch {
     fn new(batches: Vec<RecordBatch>) -> Result<Self> {
-        let schema = batches.first().map(RecordBatch::schema).ok_or_else(|| {
+        let (first, rest) = batches.split_first().ok_or_else(|| {
             CalcFlowError::InvalidArgument {
                 field: "batches".into(),
                 message: "must contain at least one RecordBatch; represent an empty table with one zero-row batch".into(),
             }
         })?;
-        if batches.iter().any(|batch| batch.schema() != schema) {
+        if rest
+            .iter()
+            .any(|batch| batch.schema_ref() != first.schema_ref())
+        {
             return Err(CalcFlowError::InvalidArgument {
                 field: "batches".into(),
                 message: "schemas must match".into(),
             });
         }
-        let rows = batches.iter().try_fold(0_usize, |rows, batch| {
+        let rows = rest.iter().try_fold(first.num_rows(), |rows, batch| {
             checked_accumulate(rows, batch.num_rows(), "batches")
         })?;
-        Ok(Self {
-            schema,
-            batches: batches.into(),
+        Ok(Self(Arc::new(TableBatchData {
+            batches: batches.into_boxed_slice(),
             rows,
-            estimated_bytes_cache: Arc::new(OnceLock::new()),
-        })
+            estimated_bytes_cache: OnceLock::new(),
+        })))
     }
 
     pub fn schema(&self) -> &SchemaRef {
-        &self.schema
+        self.0.batches[0].schema_ref()
     }
 
     pub fn batches(&self) -> &[RecordBatch] {
-        &self.batches
+        &self.0.batches
     }
 
     /// Estimates the in-memory cost of the visible Arrow slices in bytes.
@@ -263,7 +267,8 @@ impl TableBatch {
     /// Returns [`CalcFlowError::InvalidArgument`] when Arrow cannot measure a
     /// column or the summed size overflows `usize`.
     pub fn estimated_bytes(&self) -> Result<usize> {
-        self.estimated_bytes_cache
+        self.0
+            .estimated_bytes_cache
             .get_or_init(|| self.measure_bytes())
             .clone()
             .map_err(|message| CalcFlowError::InvalidArgument {
@@ -273,7 +278,7 @@ impl TableBatch {
     }
 
     fn measure_bytes(&self) -> std::result::Result<usize, String> {
-        self.batches
+        self.batches()
             .iter()
             .filter(|batch| batch.num_rows() != 0)
             .try_fold(0_usize, |total, batch| {
@@ -316,8 +321,7 @@ fn column_slice_bytes(column: &dyn Array) -> std::result::Result<usize, String> 
 /// A uniquely owned table envelope whose Arrow values have been released.
 /// Record and column-vector allocations remain available to a later batch.
 pub(crate) struct TableBatchShell {
-    batches: Arc<[RecordBatch]>,
-    estimated_bytes_cache: Arc<OnceLock<std::result::Result<usize, String>>>,
+    table: TableBatch,
     empty_schema: SchemaRef,
 }
 
@@ -325,11 +329,11 @@ static EMPTY_TABLE_SCHEMA: OnceLock<SchemaRef> = OnceLock::new();
 
 impl TableBatchShell {
     fn new(mut table: TableBatch) -> Option<Self> {
-        Arc::get_mut(&mut table.estimated_bytes_cache)?.take();
-        let batches = Arc::get_mut(&mut table.batches)?;
+        let data = Arc::get_mut(&mut table.0)?;
+        data.estimated_bytes_cache.take();
         let empty_schema = Arc::clone(EMPTY_TABLE_SCHEMA.get_or_init(|| Arc::new(Schema::empty())));
         let options = RecordBatchOptions::new().with_row_count(Some(0));
-        for slot in batches {
+        for slot in &mut data.batches {
             let previous =
                 std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&empty_schema)));
             let (_, mut columns, _) = previous.into_parts();
@@ -337,9 +341,9 @@ impl TableBatchShell {
             *slot = RecordBatch::try_new_with_options(Arc::clone(&empty_schema), columns, &options)
                 .expect("an empty table shell is valid");
         }
+        data.rows = 0;
         Some(Self {
-            batches: Arc::clone(&table.batches),
-            estimated_bytes_cache: Arc::clone(&table.estimated_bytes_cache),
+            table,
             empty_schema,
         })
     }
@@ -347,7 +351,7 @@ impl TableBatchShell {
     pub(crate) fn matches(&self, input: &Batch) -> bool {
         input
             .table_payload()
-            .is_ok_and(|table| table.batches.len() == self.batches.len())
+            .is_ok_and(|table| table.batches().len() == self.table.batches().len())
     }
 
     /// Rebuilds a projected table without retaining or reusing Arrow buffers.
@@ -362,8 +366,8 @@ impl TableBatchShell {
         let input = input
             .table_payload()
             .expect("table shell input was validated");
-        let slots = Arc::get_mut(&mut self.batches).expect("recycled table shell is unique");
-        for (slot, input) in slots.iter_mut().zip(input.batches.iter()) {
+        let data = Arc::get_mut(&mut self.table.0).expect("recycled table shell is unique");
+        for (slot, input) in data.batches.iter_mut().zip(input.batches()) {
             let previous =
                 std::mem::replace(slot, RecordBatch::new_empty(Arc::clone(&self.empty_schema)));
             let (_, mut columns, _) = previous.into_parts();
@@ -371,13 +375,9 @@ impl TableBatchShell {
             columns.extend(indices.iter().map(|&index| input.column(index).clone()));
             *slot = RecordBatch::try_new(Arc::clone(&schema), columns)?;
         }
+        data.rows = input.0.rows;
         Ok(Batch {
-            payload: BatchPayload::Table(TableBatch {
-                schema,
-                batches: self.batches,
-                rows: input.rows,
-                estimated_bytes_cache: self.estimated_bytes_cache,
-            }),
+            payload: BatchPayload::Table(self.table),
             metadata,
             source_cursor,
         })
@@ -1012,7 +1012,7 @@ impl Batch {
 
     pub fn num_rows(&self) -> usize {
         match &self.payload {
-            BatchPayload::Table(table) => table.rows,
+            BatchPayload::Table(table) => table.0.rows,
             BatchPayload::External(payload) => payload.len(),
         }
     }
@@ -1302,6 +1302,20 @@ mod tests {
     }
 
     #[test]
+    fn table_envelope_adopts_exact_record_storage_in_one_allocation() {
+        let records = vec![RecordBatch::new_empty(Arc::new(Schema::empty()))];
+        let original = records.as_ptr();
+        let mut table = None;
+        let measured = allocation_counter::measure(|| {
+            table = Some(TableBatch::new(records).unwrap());
+        });
+        let table = table.unwrap();
+        eprintln!("table envelope allocations: {measured:?}");
+        assert_eq!(measured.count_total, 1);
+        assert_eq!(table.batches().as_ptr(), original);
+    }
+
+    #[test]
     fn table_shell_recycling_requires_unique_ownership_and_reuses_storage() {
         use datafusion::arrow::array::{ArrayRef, Int64Array};
 
@@ -1312,8 +1326,10 @@ mod tests {
         .unwrap();
         let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
         batch.estimated_bytes().unwrap();
-        let batches = Arc::as_ptr(&batch.table_payload().unwrap().batches);
-        let columns = batch.table_payload().unwrap().batches[0].columns().as_ptr();
+        let batches = batch.table_payload().unwrap().batches().as_ptr();
+        let columns = batch.table_payload().unwrap().batches()[0]
+            .columns()
+            .as_ptr();
         let unique = batch.clone();
         assert!(batch.recycle_table_shell().is_none());
         let shell = unique.recycle_table_shell().unwrap();
@@ -1330,9 +1346,9 @@ mod tests {
             )
             .unwrap();
         let table = projected.table_payload().unwrap();
-        assert_eq!(Arc::as_ptr(&table.batches), batches);
-        assert_eq!(table.batches[0].columns().as_ptr(), columns);
-        assert!(table.estimated_bytes_cache.get().is_none());
+        assert_eq!(table.batches().as_ptr(), batches);
+        assert_eq!(table.batches()[0].columns().as_ptr(), columns);
+        assert!(table.0.estimated_bytes_cache.get().is_none());
         assert_eq!(projected.metadata(), source.metadata());
         assert_eq!(table.batches(), source.table_payload().unwrap().batches());
     }
