@@ -1556,13 +1556,18 @@ class TableNamespace:
         right_event_time: str,
         bounds: JoinTimeBounds,
         limits: JoinStateLimits,
+        join_type: str = "inner",
         left_prefix: str = "left",
         right_prefix: str = "right",
         output_entity_by: Sequence[str] = (),
         output_event_time: str | None = None,
         output_sequence_by: Sequence[str] = (),
     ) -> TableExpr:
-        """Declare one bounded native inner join for finite or streaming execution.
+        """Declare a bounded native inner or left semi join in either lifecycle.
+
+        An inner join produces pairs. A left semi join emits an original left
+        row once when any right row satisfies the keys and inclusive bounds.
+        Identical left rows remain distinct. Witness arrival can reorder left rows.
 
         Finite limits cover each complete input Batch, including all RecordBatches.
         Each finite execution owns fresh state. Streaming state persists across batches.
@@ -1577,6 +1582,7 @@ class TableNamespace:
             require_event_time_columns,
             require_join_bounds,
             require_join_limits,
+            require_join_type,
             timedelta_micros,
         )
 
@@ -1628,6 +1634,8 @@ class TableNamespace:
             "left_prefix": CStr(left_prefix),
             "right_prefix": CStr(right_prefix),
         }
+        if require_join_type(join_type) != "inner":
+            attrs["join_type"] = CStr(join_type)
         if has_output_event_time:
             attrs.update(
                 {

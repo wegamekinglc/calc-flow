@@ -375,6 +375,7 @@ _PRIMITIVES: dict[str, PrimitiveSpec] = {
     "stream_join": PrimitiveSpec(
         frozenset(
             {
+                "join_type",
                 "left_keys",
                 "right_keys",
                 "left_event_time",

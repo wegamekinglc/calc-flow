@@ -134,6 +134,13 @@ def limits_wire(
     }
 
 
+def require_join_type(value: str) -> str:
+    """Validate the supported bounded interval join kinds."""
+    if value not in ("inner", "left_semi"):
+        raise ValueError("join_type must be inner or left_semi")
+    return value
+
+
 def join_wire_spec(
     left: JoinSideWire,
     right: JoinSideWire,
@@ -145,7 +152,7 @@ def join_wire_spec(
     """Build the canonical ``stream_join`` operator wire specification."""
 
     return {
-        "join_type": join_type,
+        "join_type": require_join_type(join_type),
         "left_keys": list(left.keys),
         "right_keys": list(right.keys),
         "left_event_time": left.event_time,

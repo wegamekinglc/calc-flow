@@ -4,7 +4,7 @@ use crate::{
     NodeSpec, OperatorSpec, PipelineBuilder, PipelineSpec, Port, PortEndpoint, PortSpec,
     ProjectSpec, QueryAnalysis, QueryOrderingFacts, QueryTemporalIdentity, Result, RuntimeSpec,
     SqlOperator, TableExpr,
-    dataframe::{RelationKind, digest, projection, quote},
+    dataframe::{RelationKind, digest, interval_join_name, projection, quote},
     pipeline::FrontendBindings,
     query_analysis::{
         Declaration, DeclarationEdge, DeclarationGraph, analyze_graph, schema_fields,
@@ -82,7 +82,9 @@ pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr,
                 )
             })
             .collect(),
-        RelationKind::InnerJoin { inputs, sql, .. } => inputs
+        RelationKind::IntervalJoin {
+            inputs, spec, sql, ..
+        } => inputs
             .iter()
             .enumerate()
             .map(|(i, input)| {
@@ -92,7 +94,7 @@ pub(super) fn children(table: &TableExpr, path: &str) -> Vec<(String, TableExpr,
                     input.clone(),
                     format!(
                         "{path}.{}.{side}",
-                        if *sql { "sql.inner_join" } else { "inner_join" }
+                        interval_join_name(spec.join_type(), *sql)
                     ),
                 )
             })
@@ -442,7 +444,7 @@ impl Lowered {
                     if *sql { "sql.asof_join" } else { "asof_join" }
                 ),
             ),
-            RelationKind::InnerJoin {
+            RelationKind::IntervalJoin {
                 inputs,
                 spec,
                 ordering,
@@ -452,10 +454,7 @@ impl Lowered {
                 inputs,
                 spec,
                 ordering.as_ref(),
-                &format!(
-                    "{path}.{}",
-                    if *sql { "sql.inner_join" } else { "inner_join" }
-                ),
+                &format!("{path}.{}", interval_join_name(spec.join_type(), *sql)),
             ),
             RelationKind::Window { input, spec, sql } => self.prepare_window(
                 table,
@@ -837,7 +836,7 @@ fn relation_kind(table: &TableExpr) -> (&'static str, Option<String>) {
         RelationKind::Order { .. } => ("bounded_order", None),
         RelationKind::Distinct { .. } => ("distinct", None),
         RelationKind::AsofJoin { .. } => ("stream_asof_join", None),
-        RelationKind::InnerJoin { .. } => ("stream_join", None),
+        RelationKind::IntervalJoin { .. } => ("stream_join", None),
         RelationKind::Window { .. } => ("window", None),
         RelationKind::Union { .. } => ("union", None),
         RelationKind::Input { .. } => ("table_input", None),

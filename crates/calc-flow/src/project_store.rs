@@ -562,15 +562,15 @@ fn validate_raw_join_scalars(
         None => issues.push(raw_issue(
             format!("{base}.join_type"),
             "unsupported_join_type",
-            "join_type must be the string inner",
+            "join_type must be inner or left_semi",
         )),
         Some(value) => {
             require_scalar(value, "join_type")?;
-            if value.as_str() != Some("inner") {
+            if !matches!(value.as_str(), Some("inner" | "left_semi")) {
                 issues.push(raw_issue(
                     format!("{base}.join_type"),
                     "unsupported_join_type",
-                    "join_type must be the string inner",
+                    "join_type must be inner or left_semi",
                 ));
             }
         }
@@ -716,7 +716,8 @@ fn validate_raw_join_prefixes(
         .right_prefix
         .as_deref()
         .unwrap_or(crate::operator::StreamJoinSpec::DEFAULT_RIGHT_PREFIX);
-    if left == right || raw_output_fields_collide(node, left, right) {
+    let left_only = raw.join_type.as_ref().and_then(Value::as_str) == Some("left_semi");
+    if left == right || (!left_only && raw_output_fields_collide(node, left, right)) {
         issues.push(raw_issue(
             format!("{base}.right_prefix"),
             "invalid_output_prefix",

@@ -1,8 +1,8 @@
 //! Immutable columnar Join runs and selection-driven probe/materialization.
 
 use super::{
-    HotProjection, JoinSide, JoinStateLimits, JoinTimeBounds, PayloadRef,
-    native_dictionary::{TimedEntry, WindowBounds, WindowCursor, ordered_window_bounds},
+    HotProjection, JoinSide, JoinStateLimits, JoinTimeBounds, PayloadRef, StreamJoinType,
+    native_dictionary::{TimedEntry, WindowCursor, ordered_window_bounds},
     operator_error, output_gather,
 };
 use crate::operator::keyed::{GroupId, KeyStore, MORSEL_ROWS};
@@ -67,8 +67,12 @@ pub(super) struct RunId(u64);
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct RowLocator {
     run: RunId,
-    row: u32,
+    row: u16,
+    witnessed: bool,
 }
+
+const _: () = assert!(MORSEL_ROWS <= u16::MAX as usize + 1);
+const _: () = assert!(size_of::<RowLocator>() == size_of::<(RunId, u32)>());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LocatorEntry {
@@ -85,6 +89,16 @@ impl TimedEntry for LocatorEntry {
 }
 
 impl LocatorEntry {
+    fn index_owner(&self) -> (GroupId, EventTime, u64, RunId, u16) {
+        (
+            self.group,
+            self.time,
+            self.row_id,
+            self.locator.run,
+            self.locator.row,
+        )
+    }
+
     fn identity(self) -> (EventTime, u64) {
         #[cfg(test)]
         IDENTITY_READS.set(IDENTITY_READS.get() + 1);
@@ -418,7 +432,8 @@ impl Run {
             row_id: self.row_ids[row],
             locator: RowLocator {
                 run: self.id,
-                row: u32::try_from(row).expect("run morsel fits u32"),
+                row: u16::try_from(row).expect("run morsel fits u16"),
+                witnessed: false,
             },
             group: self.groups[row],
         })
@@ -709,12 +724,27 @@ struct ProbeSpan {
     window: std::ops::Range<usize>,
 }
 
+#[derive(Default)]
 struct Probe {
     spans: Vec<ProbeSpan>,
     count: usize,
 }
 
 impl Probe {
+    fn push(&mut self, position: usize, window: std::ops::Range<usize>) -> Result<()> {
+        let first = self.count;
+        self.count = self
+            .count
+            .checked_add(window.len())
+            .ok_or_else(|| run_error("match count overflowed"))?;
+        self.spans.push(ProbeSpan {
+            first,
+            position,
+            window,
+        });
+        Ok(())
+    }
+
     fn len(&self) -> usize {
         self.count
     }
@@ -764,10 +794,7 @@ impl<'a> RunPayloads<'a> {
             self.last = Some((locator.run, record));
             record
         };
-        PayloadRef::Record(
-            record,
-            usize::try_from(locator.row).expect("u32 locator fits usize"),
-        )
+        PayloadRef::Record(record, usize::from(locator.row))
     }
 }
 
@@ -782,6 +809,7 @@ pub(super) struct RunOutputContext<'a> {
     schema: &'a SchemaRef,
     projection: Option<&'a [usize]>,
     pub(super) product: Option<HotProjection>,
+    pub(super) join_type: StreamJoinType,
     left_width: usize,
     budget: EdgeBudget,
     #[cfg(feature = "benchmark-internals")]
@@ -799,6 +827,7 @@ impl<'a> RunOutputContext<'a> {
             schema,
             projection,
             product: None,
+            join_type: StreamJoinType::Inner,
             left_width,
             budget,
             #[cfg(feature = "benchmark-internals")]
@@ -819,6 +848,7 @@ impl<'a> RunOutputContext<'a> {
 pub(super) struct PreparedRuns {
     incoming_side: JoinSide,
     matched_rows: usize,
+    witnesses: Witnesses,
     row_ids: std::ops::Range<u64>,
     output_sequences: std::ops::Range<u64>,
     outputs: Vec<Vec<Batch>>,
@@ -850,6 +880,7 @@ impl PreparedRuns {
             output_sequences,
             update,
             next_run,
+            witnesses,
             ..
         } = self;
         if outputs.is_empty() {
@@ -858,6 +889,7 @@ impl PreparedRuns {
         if state.next_output != output_sequences.start {
             return Err(run_error("prepared batch output sequence is stale"));
         }
+        witnesses.validate(state)?;
         let side = incoming_side.index();
         if state.sides[side].next_row_id != row_ids.start {
             return Err(run_error("prepared batch row-ID frontier is stale"));
@@ -885,6 +917,7 @@ impl PreparedRuns {
         }
         state.sides[side].next_row_id = row_ids.end;
         state.next_output = output_sequences.end;
+        witnesses.commit(state);
         Ok(outputs)
     }
 }
@@ -1059,7 +1092,7 @@ impl RunState {
                         entry.time.as_micros(),
                         entry.row_id,
                         entry.locator.run.0,
-                        entry.locator.row,
+                        u32::from(entry.locator.row),
                     )
                 })
             })
@@ -1216,7 +1249,7 @@ impl RunState {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PreparedRuns> {
         check()?;
-        let mut matches = 0usize;
+        let mut matches = InputMatches::default();
         let mut next_run = self.next_run;
         let mut next_row_id = self.next_row_id(incoming_side);
         let mut prepared = Vec::<Prepared>::new();
@@ -1273,9 +1306,11 @@ impl RunState {
             outputs.push(batches);
         }
         check()?;
+        matches.witnesses.seal(self);
         Ok(PreparedRuns {
             incoming_side,
-            matched_rows: matches,
+            matched_rows: matches.count,
+            witnesses: matches.witnesses,
             row_ids: self.next_row_id(incoming_side)..next_row_id,
             output_sequences: self.next_output..next_output,
             outputs,
@@ -1287,15 +1322,13 @@ impl RunState {
     fn prepare(
         &mut self,
         incoming_side: JoinSide,
-        incoming: Incoming,
+        mut incoming: Incoming,
         id: RunId,
         output: &RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
-        matches: &mut usize,
+        matches: &mut InputMatches,
     ) -> Result<(Prepared, Option<Arc<Run>>)> {
         check()?;
-        #[cfg(not(feature = "benchmark-internals"))]
-        let _ = output;
         if incoming.next_row_id < self.next_row_id(incoming_side) {
             return Err(run_error("Join run row-ID frontier regressed"));
         }
@@ -1303,7 +1336,17 @@ impl RunState {
         let probe_span = output
             .trace
             .map(|trace| trace.stage(&self.name, "run_probe", incoming.len()));
-        let probe = self.probe(incoming_side, &incoming, check, matches)?;
+        let probe = match output.join_type {
+            StreamJoinType::Inner => {
+                self.probe::<false>(incoming_side, &incoming, check, matches)?
+            }
+            StreamJoinType::LeftSemi => {
+                self.probe::<true>(incoming_side, &incoming, check, matches)?
+            }
+        };
+        if output.join_type == StreamJoinType::LeftSemi && incoming_side == JoinSide::Left {
+            witnesses::retain_unwitnessed(&mut incoming, &probe);
+        }
         #[cfg(feature = "benchmark-internals")]
         drop(probe_span);
         #[cfg(feature = "benchmark-internals")]
@@ -1323,20 +1366,22 @@ impl RunState {
         ))
     }
 
-    fn probe(
+    fn probe<const EXISTENCE: bool>(
         &mut self,
         incoming_side: JoinSide,
         incoming: &Incoming,
         check: &mut dyn FnMut() -> Result<()>,
-        matches: &mut usize,
+        matches: &mut InputMatches,
     ) -> Result<Probe> {
         check()?;
         let opposite_index = opposite(incoming_side).index();
         let opposite = &self.sides[opposite_index];
         let mut cursors = Vec::<Option<WindowCursor>>::new();
         let mut sparse_cursors = None;
-        let mut spans = Vec::new();
-        let mut count = 0usize;
+        let mut probe = Probe::default();
+        let room = usize::try_from(self.limits.max_matches_per_input_batch())
+            .unwrap_or(usize::MAX)
+            .saturating_sub(matches.count);
         for row in 0..incoming.len() {
             let group = incoming.groups[row];
             let range = super::native_lookup::time_range(
@@ -1344,7 +1389,10 @@ impl RunState {
                 incoming_side == JoinSide::Left,
                 incoming.times[row],
             );
-            let found = if let Some(bucket) = opposite.buckets.get(&group) {
+            let Some(bucket) = opposite.buckets.get(&group) else {
+                continue;
+            };
+            let found = {
                 let cursor = if group.index() < incoming.len() {
                     if group.index() >= cursors.len() {
                         cursors.resize(group.index() + 1, None);
@@ -1359,32 +1407,45 @@ impl RunState {
                 let found = ordered_window_bounds(bucket.active(), range, *cursor);
                 *cursor = Some(WindowCursor::new(range, found));
                 found
-            } else {
-                WindowBounds::EMPTY
             };
             if found.matches() != 0 {
-                spans.push(ProbeSpan {
-                    first: count,
-                    position: row,
-                    window: found.range(),
-                });
-                count = count
-                    .checked_add(found.matches())
-                    .ok_or_else(|| run_error("match count overflowed"))?;
+                if !EXISTENCE {
+                    probe.push(row, found.range())?;
+                } else if incoming_side == JoinSide::Left {
+                    let first = found.range().start;
+                    probe.push(row, first..first + 1)?;
+                } else {
+                    matches.witnesses.select(
+                        &mut probe,
+                        row,
+                        (group, bucket),
+                        found.range(),
+                        room,
+                        check,
+                    )?;
+                }
+                if EXISTENCE && probe.count > room {
+                    break;
+                }
             }
         }
-        *matches = matches
-            .checked_add(count)
+        matches.count = matches
+            .count
+            .checked_add(probe.count)
             .ok_or_else(|| run_error("input batch match count overflowed"))?;
         super::enforce_match_limit(
-            *matches,
+            matches.count,
             &mut self.match_limit_failures,
             self.limits.max_matches_per_input_batch(),
             &self.name,
         )?;
-        Ok(Probe { spans, count })
+        Ok(probe)
     }
 }
+
+#[path = "run_witnesses.rs"]
+mod witnesses;
+use witnesses::{InputMatches, Witnesses};
 
 fn next_output_sequence(start: u64, count: usize) -> Result<u64> {
     let count = u64::try_from(count).map_err(|_| run_error("output sequence overflowed"))?;
@@ -1686,7 +1747,7 @@ impl RunStateSnapshot {
                     digest.update(entry.time.as_micros().to_le_bytes());
                     digest.update(entry.row_id.to_le_bytes());
                     digest.update(entry.locator.run.0.to_le_bytes());
-                    digest.update(entry.locator.row.to_le_bytes());
+                    digest.update(u32::from(entry.locator.row).to_le_bytes());
                 }
             }
         }
@@ -1738,12 +1799,11 @@ impl RunState {
 
     pub(super) fn restore_native(
         name: &str,
-        limits: JoinStateLimits,
-        bounds: JoinTimeBounds,
+        spec: &super::StreamJoinSpec,
         segments: &BTreeMap<String, crate::StateSegment>,
         keys: &mut KeyStore,
     ) -> Result<Self> {
-        pages::restore(name, limits, bounds, segments, keys)
+        pages::restore(name, spec, segments, keys)
     }
 }
 
@@ -1812,12 +1872,13 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
                     .runs
                     .get(&entry.locator.run)
                     .ok_or_else(|| run_error("restored locator references a missing run"))?;
-                let row = usize::try_from(entry.locator.row).expect("u32 locator fits usize");
+                let row = usize::from(entry.locator.row);
                 if row >= live.run.len()
+                    || entry.group != group
                     || live.run.groups[row] != group
                     || live.run.identity(row) != entry.identity()
                     || entry.identity() < live.first_live_identity()
-                    || !indexed.insert((entry.time, entry.row_id, entry.locator))
+                    || !indexed.insert(entry.index_owner())
                 {
                     return Err(run_error("restored key locator differs from its run"));
                 }
@@ -1834,7 +1895,7 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
         }
         let expiration = side.expiration[side.expiration_head..]
             .iter()
-            .map(|entry| (entry.time, entry.row_id, entry.locator))
+            .map(LocatorEntry::index_owner)
             .collect::<BTreeSet<_>>();
         if live_rows != side.rows
             || indexed.len() != side.rows
@@ -1916,6 +1977,66 @@ fn run_error(message: impl Into<String>) -> CalcFlowError {
 
 #[cfg(test)]
 #[test]
+fn test_left_semi_repeated_right_windows_scan_eligibility_once_per_batch() {
+    use super::run_tests::fanout_input;
+    let mut state = RunState::new(
+        "witness",
+        JoinStateLimits::new(128, 4_000_000, 64).unwrap(),
+        JoinTimeBounds::from_micros(0, 0).unwrap(),
+    )
+    .unwrap();
+    let left = fanout_input(64, 0, true);
+    let schema = left.payload.schema();
+    state
+        .apply(
+            JoinSide::Left,
+            left,
+            &schema,
+            Some(&[0, 1]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let mut output = RunOutputContext::new(&schema, None, 2, EdgeBudget::default());
+    output.join_type = StreamJoinType::LeftSemi;
+    witnesses::ELIGIBILITY_READS.set(0);
+    let prepared = state
+        .prepare_batch(
+            JoinSide::Right,
+            vec![fanout_input(64, 99, true)],
+            output,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(prepared.matched_rows(), 64);
+    let emitted = prepared.commit(&mut state).unwrap();
+    let values: Vec<_> = emitted
+        .iter()
+        .flatten()
+        .flat_map(|batch| {
+            batch
+                .table_payload()
+                .unwrap()
+                .batches()
+                .iter()
+                .flat_map(|record| {
+                    record
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<datafusion::arrow::array::Int64Array>()
+                        .unwrap()
+                        .values()
+                        .iter()
+                        .copied()
+                })
+        })
+        .collect();
+    assert_eq!(values, (0..64).collect::<Vec<i64>>());
+    assert_eq!(witnesses::ELIGIBILITY_READS.get(), 64);
+}
+
+#[cfg(test)]
+#[test]
 fn test_fanout_probe_stores_ranges_per_input_row() {
     use super::run_tests::fanout_input;
     let mut state = RunState::new(
@@ -1937,17 +2058,17 @@ fn test_fanout_probe_stores_ranges_per_input_row() {
         )
         .unwrap();
     let input = fanout_input(128, 500, false);
-    let mut matches = 0;
+    let mut matches = InputMatches::default();
     let mut result = None;
     let cost = allocation_counter::measure(|| {
         result = Some(
             state
-                .probe(JoinSide::Right, &input, &mut || Ok(()), &mut matches)
+                .probe::<false>(JoinSide::Right, &input, &mut || Ok(()), &mut matches)
                 .unwrap(),
         );
     });
-    assert_eq!(matches, 16_384);
-    assert_eq!(result.unwrap().len(), matches);
+    assert_eq!(matches.count, 16_384);
+    assert_eq!(result.unwrap().len(), matches.count);
     println!("128 by 128 probe peak allocation {} bytes", cost.bytes_max);
     assert!(cost.bytes_max < 32 * 1024, "{cost:?}");
 }

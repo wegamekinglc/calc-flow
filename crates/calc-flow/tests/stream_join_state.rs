@@ -306,6 +306,148 @@ fn assert_native_history(snapshot: &OperatorStateSnapshot, retained_rows: [u64; 
     assert!(!snapshot.segments.is_empty());
 }
 
+fn left_semi_operator(max_matches: u64) -> StreamJoinOperator {
+    let spec = StreamJoinSpec::new(
+        calc_flow::StreamJoinType::LeftSemi,
+        ["account_id"],
+        ["account_id"],
+        "ts",
+        "ts",
+        JoinTimeBounds::new(Duration::ZERO, Duration::ZERO).unwrap(),
+        JoinStateLimits::new(100, 1_000_000, max_matches).unwrap(),
+    )
+    .unwrap();
+    StreamJoinOperator::new("match", plain_schema(None), plain_schema(None), spec).unwrap()
+}
+
+#[tokio::test]
+async fn test_left_semi_checkpoint_preserves_first_witness_and_output_frontier() {
+    let mut operator = left_semi_operator(4);
+    let job = StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data(
+            "left",
+            keyed_batch(&[("a", 10), ("b", 10)]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+    let before = operator.checkpoint(Epoch::INITIAL).unwrap();
+    operator
+        .process_data("right", keyed_batch(&[("a", 10)]), &context, &mut collector)
+        .await
+        .unwrap();
+    assert_eq!(
+        collector.drain("output")[0].as_data().unwrap().num_rows(),
+        1
+    );
+    let after = operator.checkpoint(Epoch::new(2).unwrap()).unwrap();
+    for (cut, sequence, expected) in [(&before, 0, vec!["a", "b"]), (&after, 1, vec!["b"])] {
+        let mut restored = left_semi_operator(4);
+        restored.restore(cut).unwrap();
+        restored
+            .process_data(
+                "right",
+                keyed_batch(&[("a", 10), ("b", 10), ("b", 10)]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let outputs = collector.drain("output");
+        assert_eq!(outputs.len(), 1);
+        let batch = outputs[0].as_data().unwrap();
+        assert_eq!(batch.metadata().sequence(), sequence);
+        let table = batch.table_payload().unwrap();
+        assert_eq!(table.schema(), &plain_schema(None));
+        let keys: Vec<_> = table
+            .batches()
+            .iter()
+            .flat_map(|record| {
+                record
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+            })
+            .collect();
+        assert_eq!(keys, expected);
+    }
+}
+
+#[tokio::test]
+async fn test_left_semi_complete_batch_limit_rejects_before_any_witness_commits() {
+    let mut op = left_semi_operator(1);
+    let job = StreamJobContext::new(
+        1,
+        "fingerprint",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "match", None);
+    let mut collector = EdgeCollector::new(op.output_ports().to_vec());
+    op.process_data(
+        "left",
+        keyed_batch(&[("a", 10), ("b", 10)]),
+        &context,
+        &mut collector,
+    )
+    .await
+    .unwrap();
+    let records = ["a", "b"]
+        .map(|key| keyed_batch(&[(key, 10)]).table_payload().unwrap().batches()[0].clone());
+    let rejected = Batch::table(records.to_vec(), BatchMetadata::default()).unwrap();
+    let error = op
+        .process_data("right", rejected, &context, &mut collector)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::JoinMatchLimitExceeded,
+            ..
+        }
+    ));
+    assert_eq!(op.status().match_limit_failures, 1);
+    assert_eq!(op.status().right.retained_rows, 0);
+    assert!(collector.drain("output").is_empty());
+    for (sequence, key) in ["b", "a"].into_iter().enumerate() {
+        op.process_data(
+            "right",
+            keyed_batch(&[(key, 10); 8]),
+            &context,
+            &mut collector,
+        )
+        .await
+        .unwrap();
+        let messages = collector.drain("output");
+        let batch = messages[0].as_data().unwrap();
+        assert_eq!(batch.metadata().sequence(), sequence as u64);
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(
+            batch.table_payload().unwrap().batches()[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            key
+        );
+    }
+}
+
 #[tokio::test]
 async fn checkpoints_capture_native_state_and_restore() {
     let (mut operator, job, mut collector) = state_operator(300);

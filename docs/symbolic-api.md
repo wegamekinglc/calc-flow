@@ -505,24 +505,29 @@ semantics are unsupported.
 ## Symbolic bounded stream joins
 
 `table.stream_join(left, right, /, *, left_keys, right_keys,
-left_event_time, right_event_time, bounds, limits, left_prefix="left",
+left_event_time, right_event_time, bounds, limits, join_type="inner", left_prefix="left",
 right_prefix="right", output_entity_by=(), output_event_time=None,
-output_sequence_by=())` declares the existing native bounded inner join.
+output_sequence_by=())` declares a bounded inner or left semi join.
 `bounds` is a public `JoinTimeBounds`; `limits` is a public `JoinStateLimits`.
 Both key sequences are non-empty and equal in length, and the corresponding
 resolved fields must have identical supported Arrow types. Each event-time
 name resolves to a non-null `timestamp[us, UTC]` field.
 
 Both inputs must declare `event_time`, non-empty `entity_by`, and non-empty
-`sequence_by` ordering facts for stream analysis. Batch analysis and
-compilation fail with `unsupported_mode`. The output schema is deterministic:
-all left fields named `{left_prefix}__{name}` in source order, followed by all
+`sequence_by` ordering facts. Both batch and stream programs can execute
+the declaration. An inner join returns all left fields named `{left_prefix}__{name}` in source order, followed by all
 right fields named `{right_prefix}__{name}` in source order, with exact type
 and nullability preserved.
 
+With `join_type="left_semi"`, each left row appears once when an eligible right
+witness exists. All output fields retain their declared left names and types.
+When explicit output identity is needed, supply the left join keys, left
+event-time column and complete left sequence in their original names. The
+identity describes rows without imposing a global arrival order.
+
 Omitting all three output-ordering arguments constructs the
 symbolic `stream_join@1` declaration. Supplying any one requires all
-three and builds symbolic `stream_join@2`: `output_entity_by` must be the
+three and builds symbolic `stream_join@2`. For inner joins, `output_entity_by` must be the
 prefixed left join keys, `output_event_time` must select one prefixed join
 event-time field, and `output_sequence_by` must concatenate every prefixed
 left and right input sequence key. The metadata is immutable and declarative;
@@ -539,7 +544,7 @@ cannot consume or feed a symbolic join.
 
 Lowering copies every declaration into the existing project-v3 join spec with
 no symbolic-only serialized fields. Native watermarks, inclusive time bounds,
-state limits, match order, metrics, checkpoint state v1, and recovery remain
+state limits, match order, metrics, native checkpoint state and recovery remain
 authoritative. A directly compiled single `stream_join@1` root exposes source
 binding IDs `left` and `right`; a relational DAG exposes
 `<physical-source-id>.input` bindings.

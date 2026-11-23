@@ -1476,11 +1476,10 @@ class _Analyzer:
         self._stream_join_keys(node, left, right, role)
         left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
         right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
-        output_schema = self._stream_join_schema(
-            left,
-            right,
-            left_prefix,
-            right_prefix,
+        output_schema = (
+            left.schema
+            if _cstr_or_none(node.attr("join_type")) == "left_semi"
+            else self._stream_join_schema(left, right, left_prefix, right_prefix)
         )
         output_event_time = _cstr_or_none(node.attr("output_event_time"))
         output_entity_by = _cstr_seq(node.attr("output_entity_by"))
@@ -1584,45 +1583,34 @@ class _Analyzer:
         fields = {field.name: field for field in schema}
         left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
         right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
-        self._check_join_output_event_time(
-            node,
-            fields,
-            event_time,
-            left_prefix,
-            right_prefix,
-            role,
-        )
-        self._check_join_output_entities(
-            node,
-            fields,
-            entity_by,
-            left_prefix,
-            role,
-        )
-        self._check_join_output_sequences(
-            left,
-            right,
-            fields,
-            sequence_by,
-            left_prefix,
-            right_prefix,
-            role,
-        )
+        if _cstr_or_none(node.attr("join_type")) == "left_semi":
+            entities = _cstr_seq(node.attr("left_keys"))
+            times = {_cstr_or_none(node.attr("left_event_time"))}
+            sequences = left.sequence_by
+        else:
+            entities = tuple(
+                f"{left_prefix}__{name}" for name in _cstr_seq(node.attr("left_keys"))
+            )
+            times = {
+                f"{left_prefix}__{_cstr_or_none(node.attr('left_event_time'))}",
+                f"{right_prefix}__{_cstr_or_none(node.attr('right_event_time'))}",
+            }
+            sequences = (
+                *(f"{left_prefix}__{name}" for name in left.sequence_by),
+                *(f"{right_prefix}__{name}" for name in right.sequence_by),
+            )
+        self._check_join_output_event_time(fields, event_time, times, role)
+        self._check_join_output_entities(fields, entity_by, entities, role)
+        self._check_join_output_sequences(fields, sequence_by, sequences, role)
 
     def _check_join_output_event_time(
         self,
-        node: Node,
         fields: dict[str, Field],
         event_time: str | None,
-        left_prefix: str,
-        right_prefix: str,
+        allowed_event_times: set[str | None],
         role: str,
         /,
     ) -> None:
-        allowed_event_times = {
-            f"{left_prefix}__{_cstr_or_none(node.attr('left_event_time'))}",
-            f"{right_prefix}__{_cstr_or_none(node.attr('right_event_time'))}",
-        }
         event_field = None if event_time is None else fields.get(event_time)
         if (
             event_field is None
@@ -1638,10 +1626,9 @@ class _Analyzer:
 
     def _check_join_output_entities(
         self,
-        node: Node,
         fields: dict[str, Field],
         entity_by: tuple[str, ...],
-        left_prefix: str,
+        expected_entities: tuple[str, ...],
         role: str,
         /,
     ) -> None:
@@ -1653,25 +1640,19 @@ class _Analyzer:
             _entity_field_is_valid,
             _entity_field_message,
         )
-        expected_entities = tuple(
-            f"{left_prefix}__{name}" for name in _cstr_seq(node.attr("left_keys"))
-        )
         if entity_by and entity_by != expected_entities:
             self.issue(
                 f"{role}.output_entity_by",
                 "ordering_required",
-                "post-join entity keys must be the prefixed left join keys"
+                "post-join entity keys must be the output left join keys"
                 f" {expected_entities!r}",
             )
 
     def _check_join_output_sequences(
         self,
-        left: TableFacts,
-        right: TableFacts,
         fields: dict[str, Field],
         sequence_by: tuple[str, ...],
-        left_prefix: str,
-        right_prefix: str,
+        expected_sequences: tuple[str, ...],
         role: str,
         /,
     ) -> None:
@@ -1683,16 +1664,11 @@ class _Analyzer:
             _sequence_field_is_valid,
             _sequence_field_message,
         )
-        expected_sequences = (
-            *(f"{left_prefix}__{name}" for name in left.sequence_by),
-            *(f"{right_prefix}__{name}" for name in right.sequence_by),
-        )
         if sequence_by and sequence_by != expected_sequences:
             self.issue(
                 f"{role}.output_sequence_by",
                 "ordering_required",
-                "post-join sequence keys must concatenate the prefixed left"
-                f" and right input sequence keys {expected_sequences!r}",
+                f"expected complete output sequence {expected_sequences!r}",
             )
 
     @staticmethod

@@ -802,6 +802,7 @@ pub(super) struct WindowBounds {
 }
 
 impl WindowBounds {
+    #[cfg(test)]
     pub(super) const EMPTY: Self = Self { lower: 0, upper: 0 };
 
     pub(super) fn matches(self) -> usize {

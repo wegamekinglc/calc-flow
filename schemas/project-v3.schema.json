@@ -4311,7 +4311,7 @@
     },
     "StreamJoinSpec": {
       "additionalProperties": false,
-      "description": "Immutable declaration for a two-input bounded inner stream Join.",
+      "description": "Immutable declaration for a two-input bounded event-time Join.",
       "properties": {
         "bounds": {
           "$ref": "#/$defs/JoinTimeBounds"
@@ -4366,6 +4366,11 @@
         {
           "const": "inner",
           "description": "Emit every pair with equal non-null keys and an event time inside the\nconfigured inclusive interval.",
+          "type": "string"
+        },
+        {
+          "const": "left_semi",
+          "description": "Emit each left row once, when its first eligible right match is observed.",
           "type": "string"
         }
       ]

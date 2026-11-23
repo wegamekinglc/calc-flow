@@ -329,7 +329,7 @@ impl LocatorColumns {
         self.times.push(entry.time.as_micros());
         self.row_ids.push(entry.row_id);
         self.runs.push(entry.locator.run.0);
-        self.rows.push(entry.locator.row);
+        self.rows.push(u32::from(entry.locator.row));
         self.heads
             .push(u64::try_from(head).expect("index head fits u64"));
         self.capacities
@@ -340,7 +340,13 @@ impl LocatorColumns {
 fn bucket_record(group: GroupId, bucket: &Bucket) -> Result<RecordBatch> {
     let mut columns = LocatorColumns::default();
     for entry in &bucket.entries {
-        columns.push(0, group, entry, bucket.head, bucket.entries.capacity());
+        columns.push(
+            if entry.locator.witnessed { 2 } else { 0 },
+            group,
+            entry,
+            bucket.head,
+            bucket.entries.capacity(),
+        );
     }
     locator_record(columns)
 }
@@ -386,8 +392,7 @@ fn locator_record(columns: LocatorColumns) -> Result<RecordBatch> {
 
 pub(super) fn restore(
     name: &str,
-    limits: super::JoinStateLimits,
-    bounds: super::JoinTimeBounds,
+    spec: &super::super::StreamJoinSpec,
     segments: &BTreeMap<String, StateSegment>,
     keys: &mut KeyStore,
 ) -> Result<RunState> {
@@ -416,7 +421,8 @@ pub(super) fn restore(
     let mut sides = [Side::empty(), Side::empty()];
     for (side, state) in sides.iter_mut().enumerate() {
         let prefix = if side == 0 { "left" } else { "right" };
-        restore_index_pages(state, side, segments, &mut expected)?;
+        let allow_witnesses = side == 0 && spec.join_type == super::StreamJoinType::LeftSemi;
+        restore_index_pages(state, prefix, segments, &mut expected, allow_witnesses)?;
         for (name, payload) in segments.iter().filter(|(name, _)| {
             name.starts_with(&format!("{prefix}/run-")) && name.ends_with("/payload")
         }) {
@@ -469,24 +475,28 @@ pub(super) fn restore(
     }
     RunState::restore(RunStateSnapshot {
         name: name.into(),
-        limits,
-        bounds,
+        limits: spec.limits,
+        bounds: spec.bounds,
         sides,
         next_run: control.next_run,
         next_output: control.next_output,
         match_limit_failures: control.match_limit_failures,
     })
+    .map_err(|error| match error {
+        CalcFlowError::InvalidArgument { .. } => page_error(error.to_string()),
+        other => other,
+    })
 }
 
 fn restore_index_pages(
     state: &mut Side,
-    side: usize,
+    prefix: &str,
     segments: &BTreeMap<String, StateSegment>,
     expected: &mut BTreeSet<String>,
+    allow_witnesses: bool,
 ) -> Result<()> {
-    let prefix = if side == 0 { "left" } else { "right" };
     let expiration_name = format!("{prefix}/expiration");
-    let expiration = decode_record(
+    let expiration = decode_index_record(
         segments
             .get(&expiration_name)
             .ok_or_else(|| page_error("missing expiration index"))?,
@@ -506,9 +516,14 @@ fn restore_index_pages(
             .ok()
             .and_then(|group| GroupId::new(group).ok())
             .ok_or_else(|| page_error("invalid bucket page group"))?;
-        let record = decode_record(segment)?;
-        if uint8s(&record, 0)?.iter().any(|kind| *kind != 0) {
-            return Err(page_error("bucket page contains an expiration entry"));
+        let record = decode_index_record(segment)?;
+        if uint8s(&record, 0)?
+            .iter()
+            .any(|kind| *kind != 0 && !(allow_witnesses && *kind == 2))
+        {
+            return Err(page_error(
+                "bucket page contains an incompatible entry kind",
+            ));
         }
         let groups = uint32s(&record, 1)?;
         let record_group_id = groups
@@ -534,7 +549,7 @@ fn restore_index_pages(
 fn restore_run(payload: &StateSegment, identity: &RecordBatch) -> Result<(RunId, LiveRun)> {
     let payload = decode_record(payload)?;
     let rows = payload.num_rows();
-    if rows == 0
+    if !(1..=super::MORSEL_ROWS).contains(&rows)
         || identity.num_rows() != rows
         || identity.num_columns() != 7
         || identity
@@ -611,14 +626,18 @@ pub(super) fn validate_run_order(run: &Run) -> Result<()> {
     Ok(())
 }
 
+fn decode_index_record(segment: &StateSegment) -> Result<RecordBatch> {
+    let record = decode_record(segment)?;
+    if record.num_columns() != 8 || record.columns().iter().any(|array| array.null_count() != 0) {
+        return Err(page_error("index schema differs"));
+    }
+    Ok(record)
+}
+
 fn restore_index(side: &mut Side, records: &[RecordBatch]) -> Result<()> {
     let mut buckets = BTreeMap::<GroupId, (usize, usize, Vec<LocatorEntry>)>::new();
     let mut expiration = (0usize, 0usize, Vec::new());
     for record in records {
-        if record.num_columns() != 8 || record.columns().iter().any(|array| array.null_count() != 0)
-        {
-            return Err(page_error("index schema differs"));
-        }
         let kinds = uint8s(record, 0)?;
         let groups = uint32s(record, 1)?;
         let times = int64s(record, 2)?;
@@ -635,7 +654,11 @@ fn restore_index(side: &mut Side, records: &[RecordBatch]) -> Result<()> {
                 row_id: row_ids[row],
                 locator: RowLocator {
                     run: RunId(runs[row]),
-                    row: rows[row],
+                    row: u16::try_from(rows[row])
+                        .ok()
+                        .filter(|row| usize::from(*row) < super::MORSEL_ROWS)
+                        .ok_or_else(|| page_error("run ordinal exceeds the native morsel"))?,
+                    witnessed: kinds[row] == 2,
                 },
                 group,
             };
@@ -644,7 +667,7 @@ fn restore_index(side: &mut Side, records: &[RecordBatch]) -> Result<()> {
             let capacity = usize::try_from(capacities[row])
                 .map_err(|_| page_error("index capacity exceeds usize"))?;
             match kinds[row] {
-                0 => {
+                0 | 2 => {
                     let bucket = buckets
                         .entry(group)
                         .or_insert_with(|| (head, capacity, Vec::with_capacity(capacity)));
@@ -744,4 +767,59 @@ fn page_error(message: impl Into<String>) -> CalcFlowError {
     CalcFlowError::CheckpointMismatch {
         message: format!("Join native pages: {}", message.into()),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn test_native_restore_rejects_a_run_exceeding_its_morsel() {
+    use datafusion::arrow::ipc::writer::FileWriter;
+    let rows = super::MORSEL_ROWS + 1;
+    let u64s = || Arc::new(UInt64Array::from_value(0, rows)) as ArrayRef;
+    let u32s = || Arc::new(UInt32Array::from_value(0, rows)) as ArrayRef;
+    let times = || Arc::new(Int64Array::from_value(0, rows)) as ArrayRef;
+    let payload = RecordBatch::try_from_iter([("value", times())]).unwrap();
+    let identity = RecordBatch::try_from_iter([
+        ("run", u64s()),
+        ("group", u32s()),
+        ("time", times()),
+        ("row_id", u64s()),
+        ("ordinal", u32s()),
+        ("head", u64s()),
+        ("released", u64s()),
+    ])
+    .unwrap();
+    let mut bytes = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut bytes, &payload.schema()).unwrap();
+        writer.write(&payload).unwrap();
+        writer.finish().unwrap();
+    }
+    let outcome = restore_run(&StateSegment::new(bytes), &identity);
+    assert!(
+        matches!(outcome, Err(CalcFlowError::CheckpointMismatch { .. })),
+        "managed runs have at most one morsel"
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_native_restore_rejects_out_of_morsel_ordinals_in_consumed_prefix() {
+    let group = GroupId::new(0).unwrap();
+    let entry = LocatorEntry {
+        time: EventTime::from_micros(5),
+        row_id: 0,
+        group,
+        locator: RowLocator {
+            run: RunId(0),
+            row: u16::try_from(super::MORSEL_ROWS).unwrap(),
+            witnessed: true,
+        },
+    };
+    let mut columns = LocatorColumns::default();
+    columns.push(2, group, &entry, 1, 1);
+    let page = locator_record(columns).unwrap();
+    assert!(matches!(
+        restore_index(&mut Side::empty(), &[page]),
+        Err(CalcFlowError::CheckpointMismatch { .. })
+    ));
 }

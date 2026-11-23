@@ -1227,10 +1227,11 @@ class PipelineBuilder:
         right_event_time: str,
         bounds: JoinTimeBounds,
         limits: JoinStateLimits,
+        join_type: str = "inner",
         left_prefix: str = "left",
         right_prefix: str = "right",
     ) -> PipelineBuilder:
-        """Return a new builder containing one bounded inner stream Join."""
+        """Add a bounded pair join or a left-only first-witness join."""
         if not isinstance(name, str) or not name:
             raise TypeError("name must be a non-empty string")
         copied_left_schema = _arrow_fields(left_schema, "left_schema")
@@ -1283,6 +1284,7 @@ class PipelineBuilder:
                                 limits.max_state_bytes_per_side,
                                 limits.max_matches_per_input_batch,
                             ),
+                            join_type=join_type,
                         ),
                     },
                     "output_ports": [],

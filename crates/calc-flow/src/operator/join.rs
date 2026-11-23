@@ -10,6 +10,7 @@ mod tests {
     mod expiration_heap_tests;
     mod ingress_pack_tests;
     mod lazy_delta_tests;
+    mod left_semi;
     mod morsel_tests;
 
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -3125,6 +3126,17 @@ pub enum StreamJoinType {
     /// Emit every pair with equal non-null keys and an event time inside the
     /// configured inclusive interval.
     Inner,
+    /// Emit each left row once, when its first eligible right match is observed.
+    LeftSemi,
+}
+
+impl StreamJoinType {
+    const fn native_layout(self) -> u32 {
+        match self {
+            Self::Inner => 12,
+            Self::LeftSemi => 13,
+        }
+    }
 }
 
 /// Inclusive event-time distance around one left row.
@@ -3299,7 +3311,7 @@ impl<'de> Deserialize<'de> for JoinStateLimits {
     }
 }
 
-/// Immutable declaration for a two-input bounded inner stream Join.
+/// Immutable declaration for a two-input bounded event-time Join.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StreamJoinSpec {
@@ -3341,13 +3353,59 @@ impl StreamJoinSpec {
         LI: Into<String>,
         RI: Into<String>,
     {
+        Self::new(
+            StreamJoinType::Inner,
+            left_keys,
+            right_keys,
+            left_event_time,
+            right_event_time,
+            bounds,
+            limits,
+        )
+    }
+
+    /// Creates a bounded event-time Join of the selected type.
+    ///
+    /// A left semi Join emits the unchanged left schema after its first witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CalcFlowError::InvalidArgument`] for invalid key or time column names.
+    ///
+    /// # Example
+    /// ```
+    /// # use calc_flow::{JoinStateLimits, JoinTimeBounds, Result, StreamJoinSpec, StreamJoinType};
+    /// # fn example(bounds: JoinTimeBounds, limits: JoinStateLimits) -> Result<()> {
+    /// let spec = StreamJoinSpec::new(
+    ///     StreamJoinType::LeftSemi, ["asset"], ["symbol"], "trade_time", "quote_time",
+    ///     bounds, limits,
+    /// )?;
+    /// assert_eq!(spec.join_type(), StreamJoinType::LeftSemi);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn new<L, R, LI, RI>(
+        join_type: StreamJoinType,
+        left_keys: L,
+        right_keys: R,
+        left_event_time: &str,
+        right_event_time: &str,
+        bounds: JoinTimeBounds,
+        limits: JoinStateLimits,
+    ) -> Result<Self>
+    where
+        L: IntoIterator<Item = LI>,
+        R: IntoIterator<Item = RI>,
+        LI: Into<String>,
+        RI: Into<String>,
+    {
         let left_keys = left_keys.into_iter().map(Into::into).collect::<Vec<_>>();
         let right_keys = right_keys.into_iter().map(Into::into).collect::<Vec<_>>();
         validate_key_names(&left_keys, &right_keys)?;
         validate_column_name(left_event_time, "stream_join.left_event_time")?;
         validate_column_name(right_event_time, "stream_join.right_event_time")?;
         Ok(Self {
-            join_type: StreamJoinType::Inner,
+            join_type,
             left_keys,
             right_keys,
             left_event_time: left_event_time.into(),
@@ -3431,10 +3489,8 @@ impl<'de> Deserialize<'de> for StreamJoinSpec {
         }
 
         let fields = Fields::deserialize(deserializer)?;
-        if fields.join_type != StreamJoinType::Inner {
-            return Err(D::Error::custom("only inner stream joins are supported"));
-        }
-        Self::inner(
+        Self::new(
+            fields.join_type,
             fields.left_keys,
             fields.right_keys,
             &fields.left_event_time,
@@ -6329,7 +6385,7 @@ impl StreamOperator for StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
-            == Some(12)
+            .is_some_and(|layout| matches!(layout, 12 | 13))
         {
             return self.restore_native(snapshot);
         }
@@ -6351,7 +6407,7 @@ impl StreamOperator for StreamJoinOperator {
         #[cfg(not(test))]
         Err(CalcFlowError::CheckpointMismatch {
             message: format!(
-                "stream Join {:?} requires native layout 12 checkpoint state",
+                "stream Join {:?} requires native Join checkpoint state",
                 self.name
             ),
         })
@@ -6403,7 +6459,7 @@ impl StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
-            == Some(12)
+            .is_some_and(|layout| matches!(layout, 12 | 13))
         {
             return self.restore_native(snapshot);
         }
@@ -6416,7 +6472,7 @@ impl StreamJoinOperator {
             let _ = (snapshot, job, task);
             Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
-                    "stream Join {:?} requires native layout 12 checkpoint state",
+                    "stream Join {:?} requires native Join checkpoint state",
                     self.name
                 ),
             })
@@ -6434,7 +6490,9 @@ impl StreamJoinOperator {
             segments: snapshot.segments.clone(),
         };
         let metadata = decode_join_metadata(&filtered, &self.name)?;
-        if metadata.layout_version != 12 || metadata.spec != self.spec {
+        if metadata.layout_version != self.spec.join_type.native_layout()
+            || metadata.spec != self.spec
+        {
             return Err(CalcFlowError::CheckpointMismatch {
                 message: format!(
                     "stream Join {:?} native metadata is incompatible",
@@ -7337,9 +7395,12 @@ fn compile_schemas(
     let left_event_time_index = event_time_index(left, &spec.left_event_time, "left_event_time")?;
     let right_event_time_index =
         event_time_index(right, &spec.right_event_time, "right_event_time")?;
-    let fields = prefixed_output_fields(left, right, spec);
+    let output = match spec.join_type {
+        StreamJoinType::Inner => Schema::new(prefixed_output_fields(left, right, spec)),
+        StreamJoinType::LeftSemi => left.clone(),
+    };
     Ok((
-        Arc::new(Schema::new(fields)),
+        Arc::new(output),
         CompiledJoin {
             left_key_indices,
             right_key_indices,

@@ -1425,8 +1425,8 @@ The [API reference](api-reference.md) lists the exported static-input types.
 
 ## Bounded event-time Join
 
-Stream plans support a two-input inner equi-Join. Each retained
-row must fall inside the inclusive interval
+Finite and streaming plans support an inner join and a left semi join. They
+compare equal keys and require the right event time to fall inside the inclusive interval
 `[left_time - before, left_time + after]`. The two source lineages must provide
 watermark progress so the operator can evict rows that cannot match again.
 Run [12_symbolic_stream_join.py](../examples/12_symbolic_stream_join.py) for
@@ -1481,8 +1481,33 @@ frontier. State and match admission failures surface one of the four stable
 `reason_code` values on terminal errors; callers should still retain a fallback
 for future reason strings.
 
-The Join has one required table output port named `output`, and its schema is
-derived rather than declared. Every left column is emitted as
+Set `join_type="left_semi"` for SQL EXISTS semantics on this interval. The first
+eligible right witness emits the original left row once. Two equal left rows
+each have their own identity. A right row can witness several left rows. For
+one left ingress, outputs follow admitted left row order. For one right ingress,
+outputs follow right row order and then retained left `(event_time, row_id)`.
+Different witnesses can arrive out of event-time order across input messages.
+
+A null time or any null equality key on either side cannot witness a match.
+Admission checks a null time, time conversion, null keys, then lateness in that
+order. A representable timestamp strictly earlier than its own watermark is
+late when its keys are present. An equal timestamp remains eligible. A right
+watermark strictly beyond `left_time + after` closes that left interval for
+future right witnesses. Right EOF closes all such intervals. Subsequent left
+rows still probe retained right rows. Idle keeps the last watermark. An
+unwitnessed left row produces zero output when its interval closes.
+
+For a left semi join, the match cap counts newly witnessed left identities in
+the complete input Batch. The output uses the declared left schema and column
+names. Rust operators preserve its Arrow metadata. Python projects use their
+normalized field declarations. The row and byte budgets apply to those actual
+output batches. The operator commits match state and output sequence only
+after all sends succeed. A collector can have received a prefix before a
+later send returns an error. Restart uses the cut and the sink's delivery
+contract. A dropped processing future requires job recovery.
+
+The Join has one required table output port named `output`. In an inner join,
+every left column is emitted as
 `left_prefix__name`, followed by every right column as `right_prefix__name`,
 each keeping its input nullability. With the prefixes above the output columns
 are `authorization__account_id`, `authorization__event_time`,
@@ -1554,7 +1579,10 @@ bounded morsels, probes through shared keys and commits runs only after output
 acceptance. Compiler output projection is applied during materialization; it
 does not select a separate retained-state implementation.
 
-Native layout 12 stores run payload and identity pages, per-key and expiration
+Native layout 12 stores inner join state. For left semi joins, layout 13 also
+records witnessed rows in the left key buckets. A witness-only update rewrites
+the affected bucket at the next checkpoint. Both layouts store payload and
+identity pages, per-key and expiration
 indexes, shared keys, control counters and operator metadata. The managed runner
 persists `NativeCapture` pages through manifest v4. Direct
 `checkpoint()`/`restore()` uses the same encoding and validates page inventory,
