@@ -608,3 +608,49 @@ requires an external monitor in addition to the timing command.
 The reference used the collector at commit `8438d481`; its complete file
 hash is in the reference JSON. A subsequent refactor extracted Arrow schema
 and change validation after the timer.
+
+### Compare two CI wheels on a fresh hosted runner
+
+The manual **Benchmarks** workflow accepts mode `sparse-changelog` and two
+pairs of full commit SHAs and Linux CI `python-distributions` artifact IDs.
+For the sparse grouped SUM change in PR 633, dispatch the registered comparison
+with these inputs while the two builds are retained.
+
+```bash
+gh workflow run benchmarks.yml -f mode=sparse-changelog \
+  -f baseline_sha=fced5062c1a6f05b6302674e8eda926182bb558a \
+  -f baseline_wheel_artifact=14773009244 \
+  -f candidate_sha=7e8f6658d7893840ccf2cf8ea30bc03a336560cb \
+  -f candidate_wheel_artifact=14784320573
+```
+
+For another comparison, supply current artifacts from the same Linux CI image,
+using the intended head SHAs for both runs. The job verifies the uploaded
+artifact digest, CPython 3.13 ABI3 release build and actual checkout's full
+Git tree, then checks the installed package and loaded native hashes. A
+fresh GitHub-hosted VM runs the same locked dependencies, one pinned core,
+and one Tokio, Rayon and BLAS thread per worker.
+
+Each sample covers the 21-batch public stream from declaration through retained
+Arrow output and cleanup. The fixture has 12,000 input rows, 10,000 distinct
+keys, and 13,200 emitted change rows. The untimed oracle checks ordered
+retractions, upserts and cumulative positions at every prefix. The gzip file
+in the baseline directory contains the exact Rust-generated Arrow IPC fixture
+that the original single-build run read.
+
+Two independent worker pairs each run one warmup per side and ten measured
+pairs, alternating AB and BA. The suite computes each round's exact paired
+median-change interval and applies its 5% regression rule. Three seconds of
+preflight require the chosen core and every SMT sibling at most 20% busy.
+During acquisition the runner samples once a second and requires every sibling
+below 50% busy. In both phases mean host CPU must stay below 50%, available
+memory at least 10 GiB, major faults below 256 per interval, and combined swap
+traffic below 1,024 pages per interval.
+
+The ten-minute job limit includes setup, download, acquisition, cleanup, and
+evidence upload. Wheel builds belong to their recorded Linux CI jobs. The
+three-minute acquisition reserves 45 seconds to close workers. The run artifact
+contains the registered inputs, release manifests, resource observations,
+per-request correctness and timings, partial pairs on interruption and the
+verdict for a complete comparison. The original WSL attempt stopped at the
+resource gate with zero pairs.

@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -16,13 +16,19 @@ on:
         type: number
         default: 1
       baseline_sha:
-        description: Full baseline commit SHA for recovery
+        description: Full baseline commit SHA for the selected comparison
         type: string
         default: ""
       candidate_sha:
-        description: Full candidate commit SHA for recovery
+        description: Full candidate commit SHA for the selected comparison
         type: string
         default: ""
+      baseline_wheel_artifact:
+        description: Linux CI python-distributions artifact ID for the sparse baseline
+        type: string
+      candidate_wheel_artifact:
+        description: Linux CI python-distributions artifact ID for the sparse candidate
+        type: string
       shard:
         description: Complete catalog shard to recover
         type: string
@@ -371,6 +377,49 @@ jobs:
             !target/issue406-evidence/sites/**/site/**
           if-no-files-found: error
           retention-days: 30
+  sparse-changelog:
+    name: Public sparse changelog paired release wheels
+    if: inputs.mode == 'sparse-changelog'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      RAYON_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Register comparison and verify tested CI wheels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          BASELINE_ARTIFACT: ${{ inputs.baseline_wheel_artifact }}
+          CANDIDATE_ARTIFACT: ${{ inputs.candidate_wheel_artifact }}
+        run: python -m scripts.sparse_changelog_ci seal --output target/sparse-changelog
+      - name: Install locked benchmark dependencies
+        run: |
+          uv venv target/benchmark-venv
+          uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock
+      - name: Measure fresh stream through retained Arrow and cleanup
+        timeout-minutes: 3
+        run: target/benchmark-venv/bin/python -m scripts.sparse_changelog_ci measure --output target/sparse-changelog
+      - name: Preserve provenance, resource checks, and complete or partial samples
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sparse-changelog-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/sparse-changelog/*.json
+            target/sparse-changelog/resources.jsonl
+            target/sparse-changelog/*/release.json
+            target/sparse-changelog/*/install.log
+            target/sparse-changelog/measurement/
+          if-no-files-found: error
+          retention-days: 90
   suite-recovery:
     name: Recover one complete benchmark shard
     if: inputs.mode == 'suite-recovery'
