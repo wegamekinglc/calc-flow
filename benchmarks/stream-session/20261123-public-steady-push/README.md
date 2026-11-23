@@ -43,6 +43,12 @@ The result archive includes all process clocks, host resource intervals,
 source and fixture hashes, wheel native hashes and the original artifact
 digest. [Raw worker records](workers.jsonl) · [Summary and provenance](result.json) · [Hosted acquisition](https://github.com/wegamekinglc/calc-flow/actions/runs/45179077556/job/137707864535)
 
+The measured worker converted each prepared Arrow UTC timestamp with
+`as_py()`. The portable worker reconstructs the same instant from its integer
+microseconds and a fixed UTC epoch. This preparation occurs before every push
+clock. All 65 watermarks match the observed worker on the original fixture.
+[Measured worker source](https://github.com/wegamekinglc/calc-flow/blob/1a00d83ca9ec42c8d777072c0f03a1f41a25cd8b/benchmarks/steady_session.py)
+
 ## Reproduce one worker
 
 Use a Python environment containing the selected release wheel and benchmark
