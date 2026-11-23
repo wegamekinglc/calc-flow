@@ -818,6 +818,35 @@ fn test_all_sync_expression_session_never_enters_async_drive() {
     assert_eq!(super::drive_counters_for_test(), (0, 0));
 }
 
+#[test]
+fn test_session_source_reuses_metadata_storage_for_large_and_empty_attributes() {
+    let plan = pass_through_plan(&input_schema());
+    let input = source_id(&plan);
+    let mut session = open_session(plan, BTreeMap::new());
+    let output = session.output_ids()[0].to_owned();
+    let previous = BatchMetadata::new(
+        "caller",
+        99,
+        BTreeMap::from([("large".into(), json!("x".repeat(64 * 1024)))]),
+    )
+    .unwrap();
+    let mut stamped = Vec::new();
+    for (sequence, original) in [previous, BatchMetadata::default()].into_iter().enumerate() {
+        let batch = input_batch(&[(10, "a", 0, 1.0)]).with_metadata(original.clone());
+        let result = session.push(&input, batch.clone(), None).unwrap();
+        let metadata = result.batches(&output)[0].metadata().clone();
+        assert_eq!(metadata.source(), input);
+        assert_eq!(metadata.sequence(), sequence as u64);
+        assert_eq!(batch.metadata(), &original);
+        assert!(std::ptr::eq(metadata.attributes(), original.attributes()));
+        let modified = metadata.clone().with_datafusion_active_entities(1).unwrap();
+        assert_ne!(modified.attributes(), original.attributes());
+        assert_eq!(metadata.attributes(), original.attributes());
+        stamped.push(metadata);
+    }
+    assert!(std::ptr::eq(stamped[0].source(), stamped[1].source()));
+}
+
 fn assert_same_batches(actual: &[Batch], expected: &[Batch]) {
     assert_eq!(actual.len(), expected.len());
     for (actual, expected) in actual.iter().zip(expected) {

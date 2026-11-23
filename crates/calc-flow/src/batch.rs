@@ -91,6 +91,16 @@ where
     JsonMap::deserialize(deserializer).map(Arc::new)
 }
 
+fn validate_metadata_source(source: &str) -> Result<()> {
+    if source.contains('\0') {
+        return Err(CalcFlowError::InvalidArgument {
+            field: "metadata.source".into(),
+            message: "must not contain NUL".into(),
+        });
+    }
+    Ok(())
+}
+
 impl BatchMetadata {
     /// Creates metadata for a batch.
     ///
@@ -104,16 +114,20 @@ impl BatchMetadata {
         attributes: BTreeMap<String, Value>,
     ) -> Result<Self> {
         let source = source.into();
-        if source.contains('\0') {
-            return Err(CalcFlowError::InvalidArgument {
-                field: "metadata.source".into(),
-                message: "must not contain NUL".into(),
-            });
-        }
+        validate_metadata_source(&source)?;
         Ok(Self {
             source: source.into(),
             sequence,
             attributes: Arc::new(attributes),
+        })
+    }
+
+    pub(crate) fn with_source_sequence(&self, source: &Arc<str>, sequence: u64) -> Result<Self> {
+        validate_metadata_source(source)?;
+        Ok(Self {
+            source: Arc::clone(source),
+            sequence,
+            attributes: Arc::clone(&self.attributes),
         })
     }
 
