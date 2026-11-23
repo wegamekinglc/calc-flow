@@ -385,3 +385,39 @@ fn test_dense_product_on_sliced_nullable_operands_preserves_ieee_values() {
         assert_eq!(actual.to_bits(), expected.to_bits());
     }
 }
+
+#[test]
+fn test_dense_product_keeps_the_nullable_path_nan_bits_across_chunk_sizes() {
+    let left_nan = f64::from_bits(std::hint::black_box(0x7ff8_0000_0000_0042));
+    let right_nan = f64::from_bits(std::hint::black_box(0x7ff8_0000_0000_0a11));
+    let projection = HotProjection {
+        sequence: 0,
+        right_sequence: None,
+        left_price: 1,
+        right_price: 2,
+    };
+    for rows in [1, 17, 4096] {
+        let columns: [ArrayRef; 3] = [
+            Arc::new(UInt64Array::from(vec![0; rows + 1])),
+            Arc::new(Float64Array::from(vec![left_nan; rows + 1])),
+            Arc::new(Float64Array::from_iter(
+                std::iter::repeat_n(Some(right_nan), rows).chain([None]),
+            )),
+        ];
+        let products = |length| {
+            let output = projection
+                .gather(|index, _| Ok(columns[index].slice(0, length)))
+                .unwrap();
+            output[1]
+                .as_primitive::<Float64Type>()
+                .iter()
+                .map(|value| value.map(f64::to_bits))
+                .collect::<Vec<_>>()
+        };
+        let nullable = products(rows + 1);
+        assert_eq!(nullable[rows], None);
+        let dense = products(rows);
+        let difference = dense.iter().zip(&nullable).position(|(a, b)| a != b);
+        assert_eq!(difference, None, "{rows} valid rows");
+    }
+}
