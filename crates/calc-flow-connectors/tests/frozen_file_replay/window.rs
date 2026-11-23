@@ -134,15 +134,9 @@ async fn recovery_case(rows: u64, cuts: u64, idle_right: bool, projection: Proje
         }
     }
     let checkpoints = root.path().join("checkpoints");
-    let manifest = find_manifest(
-        &checkpoints,
-        &format!("epoch-{}.json", last.unwrap().as_u64()),
-    )
-    .expect("final data checkpoint must be readable at its cut");
+    let manifest = checkpoint_manifest(&checkpoints, last.unwrap());
     let unchanged = first.trigger_checkpoint().await.unwrap();
-    let unchanged_manifest =
-        find_manifest(&checkpoints, &format!("epoch-{}.json", unchanged.as_u64()))
-            .expect("unchanged checkpoint must be readable at its cut");
+    let unchanged_manifest = checkpoint_manifest(&checkpoints, unchanged);
     assert_eq!(first.cancel().await.state, JobState::Cancelled);
     let replay = !matches!(
         projection,
