@@ -159,7 +159,7 @@ impl PyStreamSession {
         let released = guard.complete(session, completion);
         drop(released);
         let output = result.map_err(|error| session_py_err(error, failed))?;
-        outputs_to_python(py, output)
+        outputs_to_python(py, &output)
     }
 }
 
@@ -385,12 +385,12 @@ fn table_records(table: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
     Ok(records)
 }
 
-fn outputs_to_python(py: Python<'_>, output: calc_flow::SessionOutput) -> PyResult<Py<PyDict>> {
+fn outputs_to_python(py: Python<'_>, output: &calc_flow::SessionOutput) -> PyResult<Py<PyDict>> {
     let outputs = PyDict::new(py);
-    for (name, batches) in output.into_batches() {
+    for (name, batches) in output.iter_batches() {
         let records = PyList::empty(py);
         for batch in batches {
-            append_batch_to_python(py, &name, &batch, &records)?;
+            append_batch_to_python(py, name, batch, &records)?;
         }
         outputs.set_item(name, records)?;
     }

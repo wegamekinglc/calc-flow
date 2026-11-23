@@ -777,6 +777,30 @@ fn test_staging_an_explicit_watermark_requires_no_allocation() {
 }
 
 #[test]
+fn test_collect_one_session_output_without_heap_allocation() {
+    let (sender, receiver) = super::session_edge("result".into(), EdgeBudget::default()).unwrap();
+    let mut outputs = [(
+        "result".into(),
+        super::OperatorEdgeReceiver::Session(receiver),
+    )];
+    sender.enqueue(super::StreamMessage::data(input_batch(&[(1, "a", 1, 9.0)])));
+    sender.enqueue(super::StreamMessage::watermark(micros(1)));
+    let mut emitted = None;
+    let measured = allocation_counter::measure(|| {
+        emitted = Some(super::collect_outputs(&mut outputs).unwrap());
+    });
+    let emitted = emitted.unwrap();
+    assert_eq!(emitted.batches("result")[0].num_rows(), 1);
+    assert!(emitted.batches("other").is_empty());
+    assert_eq!(measured.count_total, 0, "{measured:?}");
+    let mut owned = BTreeMap::new();
+    let conversion = allocation_counter::measure(|| owned = emitted.into_batches());
+    assert!(conversion.count_total <= 3, "{conversion:?}");
+    assert_eq!(owned["result"].len(), 1);
+    assert!(super::collect_outputs(&mut outputs).unwrap().is_empty());
+}
+
+#[test]
 fn test_all_sync_expression_session_never_enters_async_drive() {
     let plan = pass_through_plan(&input_schema());
     let input = source_id(&plan);
@@ -1342,10 +1366,12 @@ fn test_fan_out_outputs_and_union_match_runner() {
     assert_eq!(session.output_ids().len(), 3);
     let mut rows = BTreeMap::<String, Vec<String>>::new();
     let mut record = |output: super::SessionOutput| {
-        for (output, batches) in output.into_batches() {
-            rows.entry(output)
+        assert!(output.iter_batches().map(|(name, _)| name).is_sorted());
+        for (name, batches) in output.iter_batches() {
+            assert!(std::ptr::eq(batches, output.batches(name)));
+            rows.entry(name.to_owned())
                 .or_default()
-                .extend(rendered_rows(&batches));
+                .extend(rendered_rows(batches));
         }
     };
     for (batch_rows, watermark) in &pushes {

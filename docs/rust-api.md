@@ -1513,7 +1513,8 @@ assert!(session.finish()?.is_empty());
 | `is_failed()`                                   | Whether an error after validation failed the session                        |
 | `SessionOutput::batches(output)`                | Batches emitted on one graph output, in emission order; empty when none     |
 | `SessionOutput::is_empty()`                     | Whether the call emitted no batch on any output                             |
-| `SessionOutput::into_batches()`                 | Consume into a `BTreeMap<String, Vec<Batch>>` by graph output ID            |
+| `SessionOutput::iter_batches()`                 | Borrow nonempty batch slices in graph output ID order                       |
+| `SessionOutput::into_batches()`                 | Materialize an owned `BTreeMap<String, Vec<Batch>>` by graph output ID      |
 
 `watermarks` is a `BTreeMap<String, SessionWatermark>` keyed by the input ID.
 `SessionWatermark` is `#[non_exhaustive]`:
