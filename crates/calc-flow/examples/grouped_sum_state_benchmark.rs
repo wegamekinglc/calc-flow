@@ -2,8 +2,6 @@
 //!
 //! See `benchmarks/sum-state/README.md` for the paired collection contract.
 
-#[path = "support/runner_channel.rs"]
-mod runner_channel;
 #[path = "grouped_sum_state_benchmark/sparse_update.rs"]
 mod sparse_update;
 #[path = "support/stock_account_data.rs"]
@@ -147,14 +145,19 @@ fn schema_hash(schema: &Schema) -> String {
     hex::encode(Sha256::digest(serde_json::to_vec(&fields).unwrap()))
 }
 
-struct Preloaded {
-    batches: Arc<[Batch]>,
+enum InputBatches {
+    Preloaded(Arc<[Batch]>),
+    Live(tokio::sync::mpsc::Receiver<Batch>),
+}
+
+struct InputSource {
+    batches: InputBatches,
     offset: usize,
     capabilities: SourceCapabilities,
 }
 
 #[async_trait]
-impl StreamSource for Preloaded {
+impl StreamSource for InputSource {
     fn capabilities(&self) -> SourceCapabilities {
         self.capabilities.clone()
     }
@@ -164,7 +167,11 @@ impl StreamSource for Preloaded {
         Ok(())
     }
     async fn next(&mut self) -> calc_flow::Result<Option<SourceEvent>> {
-        let Some(batch) = self.batches.get(self.offset).cloned() else {
+        let next = match &mut self.batches {
+            InputBatches::Preloaded(batches) => batches.get(self.offset).cloned(),
+            InputBatches::Live(receiver) => receiver.recv().await,
+        };
+        let Some(batch) = next else {
             return Ok(None);
         };
         self.offset += 1;
@@ -174,7 +181,10 @@ impl StreamSource for Preloaded {
         }))
     }
     async fn close(&mut self) -> calc_flow::Result<()> {
-        self.offset = self.batches.len();
+        match &mut self.batches {
+            InputBatches::Preloaded(batches) => self.offset = batches.len(),
+            InputBatches::Live(receiver) => receiver.close(),
+        }
         Ok(())
     }
 }
@@ -341,13 +351,8 @@ fn stream_runner(
     partitions: usize,
     changelog: bool,
 ) -> ExampleResult<StreamingRunner> {
-    let source = Preloaded {
-        batches: Arc::clone(batches),
-        offset: 0,
-        capabilities: DemoSource::trades(options(0, 100, 100_000)).capabilities(),
-    };
     configured_runner(
-        SourceBinding::new(source),
+        InputBatches::Preloaded(Arc::clone(batches)),
         SinkBinding::ordinary("snapshots", support::CollectSink(Arc::clone(state)))?,
         partitions,
         changelog,
@@ -355,11 +360,16 @@ fn stream_runner(
 }
 
 fn configured_runner(
-    source: SourceBinding,
+    batches: InputBatches,
     sink: SinkBinding,
     partitions: usize,
     changelog: bool,
 ) -> ExampleResult<StreamingRunner> {
+    let source = SourceBinding::new(InputSource {
+        batches,
+        offset: 0,
+        capabilities: DemoSource::trades(options(0, 100, 100_000)).capabilities(),
+    });
     let runner = StreamingRunner::without_checkpoints(
         support::best_effort_plan(graph(partitions, changelog)?)?,
         BTreeMap::from([(

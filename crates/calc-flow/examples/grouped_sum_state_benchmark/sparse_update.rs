@@ -1,11 +1,33 @@
 //! Measure one ready input through its sink on a warmed, live grouped SUM graph.
 
 use super::{
-    Batch, DemoSource, ExampleResult, Instant, SinkBinding, SourceBinding, StreamSource,
-    configured_runner, load_input, options, runner_channel, validate_snapshots,
+    Batch, ExampleResult, InputBatches, Instant, SinkBinding, configured_runner, load_input,
+    validate_snapshots,
 };
+use async_trait::async_trait;
+use calc_flow::StreamSink;
 use serde_json::{Value, json};
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender};
+
+struct OutputSender(Sender<Batch>);
+
+#[async_trait]
+impl StreamSink for OutputSender {
+    async fn open(&mut self) -> calc_flow::Result<()> {
+        Ok(())
+    }
+
+    async fn write(&mut self, batch: &Batch) -> calc_flow::Result<()> {
+        self.0
+            .send(batch.clone())
+            .await
+            .map_err(|_| super::support::invalid("sparse_update", "output receiver closed"))
+    }
+
+    async fn close(&mut self) -> calc_flow::Result<()> {
+        Ok(())
+    }
+}
 
 async fn round_trips(
     batches: &[Batch],
@@ -33,12 +55,11 @@ async fn round_trips(
 }
 
 async fn measure(batches: &[Batch], changelog: bool) -> ExampleResult<Value> {
-    let capabilities = DemoSource::trades(options(0, 100, 100_000)).capabilities();
-    let (sender, source) = runner_channel::RunnerBenchSource::channel(capabilities);
-    let (sink, receiver) = runner_channel::RunnerBenchSink::channel();
+    let (sender, input) = mpsc::channel(1);
+    let (output, receiver) = mpsc::channel(1);
     let job = configured_runner(
-        SourceBinding::new(source),
-        SinkBinding::ordinary("snapshots", sink)?,
+        InputBatches::Live(input),
+        SinkBinding::ordinary("snapshots", OutputSender(output))?,
         1,
         changelog,
     )?
@@ -116,7 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn warmed_updates_exclude_the_seed_and_reconstruct_each_result() {
-        let batches = crate::generated(options(10, 1, 100)).await.unwrap();
+        let batches = crate::generated(crate::options(10, 1, 100)).await.unwrap();
         let changes = measure(&batches, true).await.unwrap();
         let snapshots = measure(&batches, false).await.unwrap();
         assert_eq!(changes["update_ns"].as_array().unwrap().len(), 1);
