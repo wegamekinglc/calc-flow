@@ -1256,7 +1256,7 @@ macro_rules! output_primitive {
         let Self::$variant(values) = $self else {
             return Err(keyed_error("typed key output column differs"));
         };
-        Ok(primitive_output::<$kind>(values, $groups))
+        Ok(Arc::new(primitive_output::<$kind>(values, $groups)))
     }};
 }
 
@@ -1721,11 +1721,8 @@ impl KeyColumn {
 
     fn array(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
         match self {
-            Self::Boolean(values) => Ok(Arc::new(BooleanArray::from(
-                groups
-                    .iter()
-                    .map(|group| values[group.index()])
-                    .collect::<Vec<_>>(),
+            Self::Boolean(values) => Ok(Arc::new(BooleanArray::from_iter(
+                groups.iter().map(|group| values[group.index()]),
             ))),
             Self::Int8(_) | Self::Int16(_) | Self::Int32(_) | Self::Int64(_) => {
                 self.array_signed(groups)
@@ -1733,17 +1730,11 @@ impl KeyColumn {
             Self::UInt8(_) | Self::UInt16(_) | Self::UInt32(_) | Self::UInt64(_) => {
                 self.array_unsigned(groups)
             }
-            Self::Utf8(values) => Ok(Arc::new(StringArray::from(
-                groups
-                    .iter()
-                    .map(|group| values[group.index()].as_deref())
-                    .collect::<Vec<_>>(),
+            Self::Utf8(values) => Ok(Arc::new(StringArray::from_iter(
+                groups.iter().map(|group| values[group.index()].as_deref()),
             ))),
-            Self::LargeUtf8(values) => Ok(Arc::new(LargeStringArray::from(
-                groups
-                    .iter()
-                    .map(|group| values[group.index()].as_deref())
-                    .collect::<Vec<_>>(),
+            Self::LargeUtf8(values) => Ok(Arc::new(LargeStringArray::from_iter(
+                groups.iter().map(|group| values[group.index()].as_deref()),
             ))),
             Self::Date32(_)
             | Self::Date64(_)
@@ -1801,12 +1792,12 @@ impl KeyColumn {
 
     fn array_temporal(&self, groups: &[GroupId], data_type: &DataType) -> Result<ArrayRef> {
         match self {
-            Self::Date32(values) => {
-                Ok(primitive_output::<datafusion::arrow::datatypes::Date32Type>(values, groups))
-            }
-            Self::Date64(values) => {
-                Ok(primitive_output::<datafusion::arrow::datatypes::Date64Type>(values, groups))
-            }
+            Self::Date32(values) => Ok(Arc::new(primitive_output::<
+                datafusion::arrow::datatypes::Date32Type,
+            >(values, groups))),
+            Self::Date64(values) => Ok(Arc::new(primitive_output::<
+                datafusion::arrow::datatypes::Date64Type,
+            >(values, groups))),
             Self::TimestampSecond(values) => {
                 timestamp_output::<TimestampSecondType>(values, groups, data_type)
             }
@@ -1861,37 +1852,22 @@ fn string_value(array: &ArrayRef, row: usize) -> Result<&str> {
     }
 }
 
-fn primitive_output<T>(values: &[Option<T::Native>], groups: &[GroupId]) -> ArrayRef
-where
-    T: ArrowPrimitiveType,
-    PrimitiveArray<T>: From<Vec<Option<T::Native>>>,
-{
-    Arc::new(PrimitiveArray::<T>::from(
-        groups
-            .iter()
-            .map(|group| values[group.index()])
-            .collect::<Vec<_>>(),
-    ))
+fn primitive_output<T: ArrowPrimitiveType>(
+    values: &[Option<T::Native>],
+    groups: &[GroupId],
+) -> PrimitiveArray<T> {
+    groups.iter().map(|group| values[group.index()]).collect()
 }
 
-fn timestamp_output<T>(
+fn timestamp_output<T: ArrowTimestampType>(
     values: &[Option<i64>],
     groups: &[GroupId],
     data_type: &DataType,
-) -> Result<ArrayRef>
-where
-    T: ArrowTimestampType,
-    PrimitiveArray<T>: From<Vec<Option<i64>>>,
-{
+) -> Result<ArrayRef> {
     let DataType::Timestamp(_, timezone) = data_type else {
         return Err(keyed_error("timestamp output schema differs"));
     };
-    let values = PrimitiveArray::<T>::from(
-        groups
-            .iter()
-            .map(|group| values[group.index()])
-            .collect::<Vec<_>>(),
-    );
+    let values = primitive_output::<T>(values, groups);
     Ok(Arc::new(values.with_timezone_opt(timezone.clone())))
 }
 
