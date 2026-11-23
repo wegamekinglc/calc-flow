@@ -12,6 +12,11 @@ use super::{
     types::LogicalInstant,
 };
 
+#[cfg(test)]
+thread_local! {
+    static REDUCED_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GeneratedWatermarkState {
     event_time: ResolvedEventTimeColumn,
@@ -45,6 +50,11 @@ impl GeneratedWatermarkState {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn take_reduced_rows_for_test() -> usize {
+        REDUCED_ROWS.replace(0)
+    }
+
     pub(crate) fn observe_batch(&mut self, batch: &Batch, binding: &str) -> Result<()> {
         let table = batch
             .table_payload()
@@ -54,15 +64,28 @@ impl GeneratedWatermarkState {
             })?;
         for record in table.batches() {
             let column = record.column(self.event_time.index);
-            let maximum = maximum_timestamp_nanos(column.as_ref(), self.event_time.unit, binding)?;
-            if let Some(maximum) = maximum {
-                self.max_observed_nanos = Some(
-                    self.max_observed_nanos
-                        .map_or(maximum, |previous| previous.max(maximum)),
-                );
+            #[cfg(test)]
+            REDUCED_ROWS.set(REDUCED_ROWS.get() + column.len());
+            if let Some(maximum) =
+                maximum_timestamp(column.as_ref(), self.event_time.unit, binding)?
+            {
+                self.observe_maximum(maximum);
             }
         }
         Ok(())
+    }
+
+    /// Records a validated maximum expressed in this column's physical Arrow unit.
+    pub(crate) fn observe_maximum(&mut self, value: i64) {
+        // Positive unit scales preserve order and even i64 seconds fit in i128 nanos.
+        let scale = match self.event_time.unit {
+            ArrowTimestampUnit::Second => 1_000_000_000,
+            ArrowTimestampUnit::Millisecond => 1_000_000,
+            ArrowTimestampUnit::Microsecond => 1_000,
+            ArrowTimestampUnit::Nanosecond => 1,
+        };
+        let nanos = i128::from(value) * scale;
+        self.max_observed_nanos = Some(self.max_observed_nanos.map_or(nanos, |old| old.max(nanos)));
     }
 
     pub(crate) fn on_timer(&mut self, binding: &str) -> Result<Option<EventTime>> {
@@ -129,28 +152,27 @@ fn event_time_column_path(binding: &str) -> String {
     format!("sources.{binding}.watermark_policy.event_time_column")
 }
 
-fn maximum_timestamp_nanos(
+fn maximum_timestamp(
     column: &dyn Array,
     unit: ArrowTimestampUnit,
     binding: &str,
-) -> Result<Option<i128>> {
+) -> Result<Option<i64>> {
     macro_rules! maximum {
-        ($array:ty, $factor:expr) => {{
+        ($array:ty) => {{
             let array = column.as_any().downcast_ref::<$array>().ok_or_else(|| {
                 CalcFlowError::InvalidArgument {
                     field: event_time_column_path(binding),
                     message: "record batch column type differs from the prepared schema".into(),
                 }
             })?;
-            // The positive unit scale preserves order, and even i64 seconds fit in i128 nanos.
-            Ok(datafusion::arrow::compute::max(array).map(|value| i128::from(value) * $factor))
+            Ok(datafusion::arrow::compute::max(array))
         }};
     }
     match unit {
-        ArrowTimestampUnit::Second => maximum!(TimestampSecondArray, 1_000_000_000),
-        ArrowTimestampUnit::Millisecond => maximum!(TimestampMillisecondArray, 1_000_000),
-        ArrowTimestampUnit::Microsecond => maximum!(TimestampMicrosecondArray, 1_000),
-        ArrowTimestampUnit::Nanosecond => maximum!(TimestampNanosecondArray, 1),
+        ArrowTimestampUnit::Second => maximum!(TimestampSecondArray),
+        ArrowTimestampUnit::Millisecond => maximum!(TimestampMillisecondArray),
+        ArrowTimestampUnit::Microsecond => maximum!(TimestampMicrosecondArray),
+        ArrowTimestampUnit::Nanosecond => maximum!(TimestampNanosecondArray),
     }
 }
 

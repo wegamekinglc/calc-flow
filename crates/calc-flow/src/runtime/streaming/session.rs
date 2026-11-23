@@ -679,18 +679,26 @@ impl SessionInput {
         else {
             return Ok(None);
         };
-        if *ordered {
-            next.max_event_time = ordered_maximum(&self.binding_id, batch, event_time, next)?;
-        }
         let generator = next
             .generator
             .as_mut()
             .ok_or_else(|| CalcFlowError::Internal {
                 message: "generated session watermark has no generator".into(),
             })?;
+        if *ordered {
+            if let Some(maximum) =
+                ordered_maximum(&self.binding_id, batch, event_time, &self.progress)?
+            {
+                next.max_event_time = Some(maximum);
+                generator.observe_maximum(maximum);
+            }
+        } else {
+            generator
+                .observe_batch(batch, &self.binding_id)
+                .map_err(|error| session_watermark_error(&self.binding_id, error))?;
+        }
         generator
-            .observe_batch(batch, &self.binding_id)
-            .and_then(|()| generator.on_timer(&self.binding_id))
+            .on_timer(&self.binding_id)
             .map_err(|error| session_watermark_error(&self.binding_id, error))
     }
 
@@ -736,8 +744,8 @@ fn advance_watermark(next: &mut InputProgress, candidate: Option<EventTime>) -> 
     Some(candidate)
 }
 
-/// Checks `Ordered` event time across every record batch and returns the new
-/// maximum. Values compare in the declared unit; the first row is compared
+/// Checks `Ordered` event time across every record batch and returns the maximum
+/// observed in this batch, if any. Values compare in the declared unit; the first row is compared
 /// with the watermark after the runtime's import to microseconds.
 fn ordered_maximum(
     binding_id: &str,
@@ -756,7 +764,7 @@ fn ordered_maximum(
     if let (Some(first), Some(watermark)) = (first, progress.watermark) {
         check_after_watermark(first, watermark, event_time.unit, &field)?;
     }
-    Ok(maximum)
+    Ok(first.and(maximum))
 }
 
 fn invalid_event_time(field: &str, message: &str) -> CalcFlowError {
