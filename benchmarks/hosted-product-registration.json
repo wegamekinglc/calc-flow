@@ -1,11 +1,11 @@
 {
-  "candidate_pr": 660,
+  "candidate_pr": 668,
   "case": "one 60-second grouped rolling Float64 SUM through public TableExpr.stream",
-  "baseline_expected_checkout": "e7af54576aeaf94443560c87b7bb8c62fe1b22f5",
-  "candidate_expected_checkout": "5989dde968c27ca1ea300129dc6dceed6dd371dd",
-  "candidate_reviewed_head": "e2879d7267bfc2de3138e1223acd7ee0d80540c1",
+  "baseline_expected_checkout": "131aa898d1b7910c84248405399eefec4b8db776",
+  "candidate_expected_checkout": "9d08158a61198e45c82d2e6d41fda48d7c5be532",
+  "candidate_reviewed_head": "049ea181447305cef8b969fa3c110064fb6134d4",
   "job_seconds": 105,
-  "external_provenance_seconds": 15,
+  "external_provenance_seconds": 75,
   "reserved_cleanup_seconds": 45,
   "p50_goal_ms": 12,
   "fixture_sha256": "36847ac453bd58a3a0a918d993ec726d56bbddb8c3af6e8362ca940999286ab0",
@@ -13,7 +13,7 @@
   "pairs_per_round": 10,
   "warmups_per_arm_per_round": 1,
   "sources_sha256": {
-    "benchmarks/hosted-product-protocol.md": "464845a139314b0948d91ca0b76398c530d150d5258dde8d1e0b1adf08eb01a2",
+    "benchmarks/hosted-product-protocol.md": "b8199972055f84b1264611183dda922f2b7146b6347ee331ccedc9e11fe0082b",
     "benchmarks/public_duration_sum.py": "f17d62312ab7b2936651a0aa16659006e4705267900a40968d5bbe35c7a2c730",
     "scripts/hosted_duration_sum.py": "bed1c65bbe4129ba7135c69900a1d7fd344e8e8d43f7cbd18a1d5b3974652333",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
@@ -25,17 +25,17 @@
     "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd"
   },
   "baseline": {
-    "workflow_run": 45125508389,
-    "job": 137528817633,
-    "requested_sha": "379f1c779e825a2da055cc59bf9cbcb8614692d3",
-    "checkout": "e7af54576aeaf94443560c87b7bb8c62fe1b22f5",
-    "tree": "125ffe4ce44e58810bd289077aa8cedb72e42ce6"
+    "workflow_run": 45135841399,
+    "job": 137561789888,
+    "requested_sha": "8bd678c98a981d7c399cb09aa21d17e0ebebb8bb",
+    "checkout": "131aa898d1b7910c84248405399eefec4b8db776",
+    "tree": "55563f02211a3d79be106aed09f41b58fd1ac4f5"
   },
   "candidate": {
-    "workflow_run": 45125023526,
-    "job": 137527353486,
-    "requested_sha": "e2879d7267bfc2de3138e1223acd7ee0d80540c1",
-    "checkout": "5989dde968c27ca1ea300129dc6dceed6dd371dd",
-    "tree": "61c8acc4f005363c1ce44ba8ffb90ad84427bbd8"
+    "workflow_run": 45135454729,
+    "job": 137561115917,
+    "requested_sha": "049ea181447305cef8b969fa3c110064fb6134d4",
+    "checkout": "9d08158a61198e45c82d2e6d41fda48d7c5be532",
+    "tree": "514858645e5aa581297564dd28787a226a5fa977"
   }
 }
