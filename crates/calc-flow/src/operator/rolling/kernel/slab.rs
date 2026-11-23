@@ -13,7 +13,7 @@ use super::{
     RollingKernelMetrics, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
     RollingStage, RollingWork, StateCharge, Statistic, StreamKernelUpdate, TypedFrame,
     TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState,
-    internal_error, nanos, operator_error,
+    direct_entity_column, direct_entity_routing, internal_error, nanos, operator_error,
 };
 use crate::{
     accumulate::NumericAccumulator,
@@ -528,11 +528,15 @@ impl RollingKernelPlan {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<(EntityRouting, u64)> {
         let started = Instant::now();
-        let routing = self.encoded_entity_routing(
-            input,
-            state.slab.as_ref().map_or(0, StateTable::entity_count),
-            node_id,
-        )?;
+        let residents = state.slab.as_ref().map_or(0, StateTable::entity_count);
+        let routing = if residents == 1
+            && input.num_rows() > 1
+            && let Some(keys) = direct_entity_column(self, input)
+        {
+            direct_entity_routing(keys, residents, node_id)?
+        } else {
+            self.encoded_entity_routing(input, residents, node_id)?
+        };
         if let Some(recorder) = observer {
             recorder.add(RollingWork::ResolvedRows, routing.entity_ids.len());
             recorder.add(RollingWork::TouchedEntities, routing.keys.len());
@@ -1038,5 +1042,63 @@ mod tests {
         let wide = columns[1].as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(narrow.value(63).to_bits(), 63.5_f64.to_bits());
         assert_eq!(wide.value(63).to_bits(), 62.5_f64.to_bits());
+    }
+
+    #[test]
+    fn warm_slab_routes_uniform_utf8_without_encoding_every_row() {
+        const ROWS: usize = 64_000;
+        let plan = plan();
+        let mut state = RollingKernelState::default();
+        plan.prepare_slab_ordered_stream(&mut state, &input(&[0], &[Some(1.0)]), "r", None)
+            .unwrap()
+            .commit(&mut state);
+        let fixture = input(&vec![1; ROWS], &vec![Some(1.0); ROWS]);
+        let measure = |batch: &RecordBatch| {
+            let expected = plan.encoded_entity_routing(batch, 16, "r").unwrap();
+            let mut actual = None;
+            let usage = allocation_counter::measure(|| {
+                actual = Some(plan.route_slab(&state, batch, "r", None).unwrap().0);
+            });
+            let actual = actual.unwrap();
+            assert_eq!(actual.keys, expected.keys);
+            assert_eq!(actual.rows, expected.rows);
+            assert_eq!(actual.entity_ids, expected.entity_ids);
+            usage
+        };
+        let uniform = measure(&fixture);
+        let mut columns = fixture.columns().to_vec();
+        columns[1] = Arc::new(StringArray::from_iter_values(
+            (0..ROWS).map(|row| if row == ROWS / 2 { "é" } else { "a" }),
+        ));
+        let mixed = measure(&RecordBatch::try_new(fixture.schema(), columns).unwrap());
+        eprintln!("uniform {uniform:?}; mixed {mixed:?}");
+        assert!(uniform.bytes_total <= u64::try_from(ROWS * size_of::<usize>() + 4096).unwrap());
+    }
+
+    #[test]
+    fn restored_slab_resolves_a_new_uniform_key_before_continuing_the_original() {
+        let plan = plan();
+        let mut state = RollingKernelState::default();
+        plan.prepare_slab_ordered_stream(&mut state, &input(&[0], &[Some(3.0)]), "r", None)
+            .unwrap()
+            .commit(&mut state);
+        let encoded = RollingKernelPlan::encode_slab_state(&state).unwrap();
+        let mut restored = plan
+            .decode_slab_state(&encoded, RollingKernelPlan::slab_last_identity(&state))
+            .unwrap();
+        for (start, key, expected) in [(1, "é", 9.0_f64), (3, "a", 6.0_f64)] {
+            let fixture = input(&[start, start + 1], &[Some(9.0), Some(11.0)]);
+            let mut columns = fixture.columns().to_vec();
+            columns[1] = Arc::new(StringArray::from(vec![key, key]));
+            let batch = RecordBatch::try_new(fixture.schema(), columns).unwrap();
+            let mut update = plan
+                .prepare_slab_ordered_stream(&mut restored, &batch, "r", None)
+                .unwrap();
+            let output = update.take_columns();
+            let means = output[0].as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(means.value(0).to_bits(), expected.to_bits());
+            assert_eq!(means.value(1).to_bits(), 10.0_f64.to_bits());
+            update.commit(&mut restored);
+        }
     }
 }
