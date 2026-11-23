@@ -168,38 +168,6 @@ impl KeyedSum {
         self.lock().panic_group = None;
     }
 
-    pub(super) fn group_count(&self) -> usize {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys
-            .len()
-    }
-
-    pub(super) fn first_key(&self, slot: usize) -> Result<Arc<[u8]>> {
-        let group = GroupId::new(slot)?;
-        Ok(self
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .keys
-            .canonical(group))
-    }
-
-    pub(super) fn record(
-        &self,
-        start: usize,
-        end: usize,
-        schema: SchemaRef,
-        check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<RecordBatch> {
-        check()?;
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .record(start, end, None, schema)
-    }
-
     pub(super) fn begin(&self, budget: Option<StateBudget>) -> Result<Transaction> {
         let mut state = self.lock();
         if state.active {
@@ -614,6 +582,52 @@ impl Transaction {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .record(start, end, None, schema)
+    }
+
+    pub(super) fn visit_changes(
+        &mut self,
+        schema: &SchemaRef,
+        mut check: impl FnMut() -> Result<()>,
+        mut reserve: impl FnMut(usize, usize) -> Result<()>,
+        mut visit: impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        check()?;
+        self.undo.sort_unstable_by_key(|(group, _)| *group);
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let existing = self
+            .undo
+            .iter()
+            .map(|&(group, previous)| Result::Ok((group, Some(previous))));
+        // New groups occupy the suffix after every pre-existing group ID.
+        let added = (self.old_groups..state.keys.len()).map(|slot| Ok((GroupId::new(slot)?, None)));
+        for (index, item) in existing.chain(added).enumerate() {
+            if index % 128 == 0 {
+                check()?;
+            }
+            let (group, previous) = item?;
+            let current = state.sums.value(group);
+            if previous == Some(current) {
+                continue;
+            }
+            reserve(
+                state.keys.output_charge(&[group])?,
+                1 + usize::from(previous.is_some()),
+            )?;
+            let keys = state.keys.columns(&[group])?;
+            let record = |value: SumValue| {
+                let mut columns = keys.clone();
+                columns.push(value.scalar().to_array_of_size(1)?);
+                RecordBatch::try_new(schema.clone(), columns)
+                    .map_err(datafusion::error::DataFusionError::from)
+            };
+            let before = previous
+                .map(record)
+                .transpose()
+                .map_err(|error| super::df_error("keyed SUM", error))?;
+            let after = record(current).map_err(|error| super::df_error("keyed SUM", error))?;
+            visit(before, after)?;
+        }
+        Ok(())
     }
 
     pub(super) fn dirty_output_chunks(&self) -> std::collections::BTreeSet<usize> {

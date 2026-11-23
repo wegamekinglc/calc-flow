@@ -205,6 +205,92 @@ async fn test_changelog_orders_group_ids_and_retracts_complete_old_rows() {
 }
 
 #[tokio::test]
+async fn test_sparse_keyed_sum_projects_only_affected_group_versions() {
+    use std::sync::atomic::Ordering;
+
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "changes", None);
+    let mut operator = changelog(GROUPED);
+    let keys = (0..256).map(|i| i.to_string()).collect::<Vec<_>>();
+    let initial = keys
+        .iter()
+        .map(|key| Some(key.as_str()))
+        .collect::<Vec<_>>();
+    let first = process(
+        &mut operator,
+        input(&initial, &vec![Some(10); initial.len()]),
+        &context,
+    )
+    .await;
+    assert_eq!(first.len(), 256);
+    let projected = |operator: &SqlOperator| {
+        operator
+            .incremental
+            .as_ref()
+            .unwrap()
+            .keyed_output_rows
+            .load(Ordering::Relaxed)
+    };
+    let before = projected(&operator);
+    let changed = process(
+        &mut operator,
+        input(
+            &[Some("new"), Some("197"), Some("197")],
+            &[None, Some(2), Some(-1)],
+        ),
+        &context,
+    )
+    .await;
+    assert_eq!(
+        changed,
+        vec![
+            vec![text("197"), int(10), text("retract")],
+            vec![text("197"), int(11), text("upsert")],
+            vec![text("new"), ScalarValue::Int64(None), text("upsert")],
+        ]
+    );
+    assert_eq!(projected(&operator) - before, 3);
+}
+
+#[tokio::test]
+async fn test_changelog_failed_emit_retries_projected_changes_in_group_id_order() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "changes", None);
+    let mut operator = changelog(
+        "SELECT key, SUM(value) >= 3 AS large FROM events GROUP BY key HAVING SUM(value) >= 0",
+    );
+    let flag = |value| ScalarValue::Boolean(Some(value));
+    process(
+        &mut operator,
+        input(
+            &[Some("a"), Some("b"), Some("c"), Some("d")],
+            &[Some(1), Some(2), Some(-1), Some(4)],
+        ),
+        &context,
+    )
+    .await;
+    let incoming = input(
+        &[Some("new"), Some("d"), Some("c"), Some("b"), Some("a")],
+        &[Some(2), Some(1), Some(1), Some(-4), Some(2)],
+    );
+    let mut reject_output = EdgeCollector::new(Vec::new());
+    assert!(
+        matches!(operator.process_data("events", incoming.clone(), &context, &mut reject_output).await,
+                     Err(CalcFlowError::Compile { message }) if message.contains("unknown output port"))
+    );
+    assert_eq!(
+        process(&mut operator, incoming, &context).await,
+        vec![
+            vec![text("a"), flag(false), text("retract")],
+            vec![text("a"), flag(true), text("upsert")],
+            vec![text("b"), flag(false), text("retract")],
+            vec![text("c"), flag(false), text("upsert")],
+            vec![text("new"), flag(false), text("upsert")],
+        ]
+    );
+}
+
+#[tokio::test]
 async fn test_changelog_having_enter_exit_and_stay_hidden() {
     let job = job();
     let context = StreamOperatorContext::new(&job, "changes", None);
