@@ -44,7 +44,10 @@ fn test_restore_validates_live_membership_once_per_locator() {
 fn test_restore_rejects_reordered_equal_time_ordinals() {
     let mut saved = snapshot(3);
     let live = saved.sides[0].runs.values_mut().next().unwrap();
-    Arc::make_mut(&mut Arc::make_mut(&mut live.run).order).swap(1, 2);
+    Arc::get_mut(&mut live.run)
+        .expect("snapshot fixture owns the run")
+        .order
+        .swap(1, 2);
     assert!(RunState::restore(saved).is_err());
 }
 
@@ -53,7 +56,9 @@ fn test_restore_requires_a_complete_in_range_permutation() {
     for replacement in [0, 3] {
         let mut saved = snapshot(3);
         let live = saved.sides[0].runs.values_mut().next().unwrap();
-        Arc::make_mut(&mut Arc::make_mut(&mut live.run).order)[1] = replacement;
+        Arc::get_mut(&mut live.run)
+            .expect("snapshot fixture owns the run")
+            .order[1] = replacement;
         assert!(matches!(
             RunState::restore(saved),
             Err(crate::CalcFlowError::CheckpointMismatch { .. })
