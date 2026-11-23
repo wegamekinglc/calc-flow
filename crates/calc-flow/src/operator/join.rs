@@ -6407,8 +6407,9 @@ impl StreamOperator for StreamJoinOperator {
         #[cfg(not(test))]
         Err(CalcFlowError::CheckpointMismatch {
             message: format!(
-                "stream Join {:?} requires native Join checkpoint state",
-                self.name
+                "stream Join {:?} requires native layout {} checkpoint state",
+                self.name,
+                self.spec.join_type.native_layout()
             ),
         })
     }
@@ -6463,20 +6464,8 @@ impl StreamJoinOperator {
         {
             return self.restore_native(snapshot);
         }
-        #[cfg(test)]
-        return self
-            .restore_managed_snapshot_legacy(snapshot, job, task)
-            .await;
-        #[cfg(not(test))]
-        {
-            let _ = (snapshot, job, task);
-            Err(CalcFlowError::CheckpointMismatch {
-                message: format!(
-                    "stream Join {:?} requires native Join checkpoint state",
-                    self.name
-                ),
-            })
-        }
+        self.restore_managed_snapshot_legacy(snapshot, job, task)
+            .await
     }
 
     pub(crate) fn restore_native(&mut self, snapshot: &OperatorStateSnapshot) -> Result<()> {
