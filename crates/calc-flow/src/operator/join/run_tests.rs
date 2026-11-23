@@ -905,6 +905,63 @@ fn eviction_state() -> RunState {
 }
 
 #[test]
+fn test_tiny_ordered_append_merges_without_visiting_every_old_identity() {
+    const ROWS: i64 = 256;
+    let mut state = RunState::new(
+        "ordered-merge",
+        JoinStateLimits::new(1024, 1_000_000, 1024).unwrap(),
+        JoinTimeBounds::from_micros(1000, 1000).unwrap(),
+    )
+    .unwrap();
+    let group = GroupId::new(0).unwrap();
+    let apply = |state: &mut RunState, side, times: &[i64], ids: &[u64], values: &[i64]| {
+        let rows = times.len();
+        let batch = incoming(
+            &record(&vec![1; rows], values),
+            (0..rows).collect(),
+            vec![group; rows],
+            times,
+            ids,
+            vec![true; rows],
+            ids.last().unwrap() + 1,
+        );
+        state
+            .apply(
+                side,
+                batch,
+                &output_schema(),
+                Some(&[1, 3]),
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap()
+    };
+    let times = (0..ROWS).collect::<Vec<_>>();
+    let ids = (0..u64::try_from(ROWS).unwrap()).collect::<Vec<_>>();
+    apply(&mut state, JoinSide::Left, &times, &ids, &times);
+    super::runs::IDENTITY_READS.set(0);
+    apply(
+        &mut state,
+        JoinSide::Left,
+        &[ROWS - 1],
+        &[u64::try_from(ROWS).unwrap()],
+        &[ROWS],
+    );
+    let reads = super::runs::IDENTITY_READS.get();
+    let matched = apply(&mut state, JoinSide::Right, &[0], &[0], &[7]);
+    assert_eq!(
+        values(&matched.records[0], 0),
+        (0..=ROWS).collect::<Vec<_>>()
+    );
+    assert_eq!(values(&matched.records[0], 1), vec![7; times.len() + 1]);
+    assert!(
+        reads <= 32,
+        "{reads} locator identity reads on an ordered append"
+    );
+    eprintln!("ordered one-row append identity reads: {reads}");
+}
+
+#[test]
 fn test_prefix_eviction_and_snapshot_continue_bitwise() {
     let mut state = eviction_state();
     let none = state

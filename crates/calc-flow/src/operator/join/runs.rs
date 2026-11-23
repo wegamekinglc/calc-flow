@@ -32,6 +32,7 @@ const ROW_COLUMN_BYTES: usize =
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static IDENTITY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MERGE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -86,6 +87,8 @@ impl TimedEntry for LocatorEntry {
 
 impl LocatorEntry {
     fn identity(self) -> (EventTime, u64) {
+        #[cfg(test)]
+        IDENTITY_READS.set(IDENTITY_READS.get() + 1);
         (self.time, self.row_id)
     }
 }
@@ -1808,29 +1811,33 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
 fn merge(left: &[LocatorEntry], right: &[LocatorEntry]) -> Vec<LocatorEntry> {
     #[cfg(test)]
     MERGE_VISITS.with(|count| count.set(count.get() + left.len() + right.len()));
+    let Some((first, mut newer)) = right.split_first() else {
+        return left.to_vec();
+    };
+    let first_key = first.identity();
+    let split = if left.last().is_some_and(|last| last.identity() <= first_key) {
+        left.len()
+    } else {
+        left.partition_point(|old| old.identity() <= first_key)
+    };
+    let (prefix, mut older) = left.split_at(split);
     let mut merged = Vec::with_capacity(left.len() + right.len());
-    let (mut left, mut right) = (left.iter().peekable(), right.iter().peekable());
-    loop {
-        match (left.peek(), right.peek()) {
-            (Some(a), Some(b)) if a.identity() <= b.identity() => {
-                merged.push(**a);
-                left.next();
-            }
-            (Some(_), Some(_)) => {
-                merged.push(**right.peek().expect("right entry"));
-                right.next();
-            }
-            (Some(_), None) => {
-                merged.extend(left.copied());
-                break;
-            }
-            (None, Some(_)) => {
-                merged.extend(right.copied());
-                break;
-            }
-            (None, None) => break,
+    merged.extend_from_slice(prefix);
+    merged.push(*first);
+
+    while let (Some((old, old_tail)), Some((new, new_tail))) =
+        (older.split_first(), newer.split_first())
+    {
+        if old.identity() <= new.identity() {
+            merged.push(*old);
+            older = old_tail;
+        } else {
+            merged.push(*new);
+            newer = new_tail;
         }
     }
+    merged.extend_from_slice(older);
+    merged.extend_from_slice(newer);
     merged
 }
 
