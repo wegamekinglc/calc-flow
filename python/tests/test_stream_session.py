@@ -512,3 +512,19 @@ def test_operator_failure_raises_execution_error_then_fails_session() -> None:
             # The binding's failed state names the original failure.
             with pytest.raises(RuntimeError, match=r"failed earlier \(.*late"):
                 call()
+
+
+def test_session_returns_arrow_output_without_generic_record_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import Mock
+
+    data = cf.Batch.from_pyarrow(_rows((0, "a", 0, 1.0)))
+    factory = Mock(wraps=pa.record_batch)
+    with _explicit_session() as session:
+        monkeypatch.setattr(pa, "record_batch", factory)
+        emitted = session.push(data, watermark=_at(0))
+        assert emitted["avg"].to_pylist() == [1.0]
+        assert session.finish().num_rows == 0
+    assert emitted["avg"].to_pylist() == [1.0]
+    factory.assert_not_called()

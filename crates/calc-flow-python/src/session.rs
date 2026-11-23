@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::arrow::{array::StructArray, datatypes::Field, record_batch::RecordBatch};
 use parking_lot::Mutex;
 use pyo3::{
     PyTraverseError, PyVisit,
@@ -11,7 +11,7 @@ use pyo3::{
     prelude::*,
     types::{PyAny, PyDict, PyList, PyTuple},
 };
-use pyo3_arrow::{PyRecordBatch, PyTable};
+use pyo3_arrow::{PyRecordBatch, PyTable, ffi::to_array_pycapsules};
 
 use crate::{batch::PyBatch, pipeline::PyStreamExecutionPlan};
 
@@ -409,8 +409,17 @@ fn append_batch_to_python(
     let table = batch.table_payload().map_err(|_| {
         PyTypeError::new_err(format!("session output {name:?} has no table payload"))
     })?;
+    let importer = py
+        .import(intern!(py, "pyarrow"))?
+        .getattr(intern!(py, "RecordBatch"))?
+        .getattr(intern!(py, "_import_from_c_capsule"))?;
     for record in table.batches() {
-        records.append(PyRecordBatch::new(record.clone()).into_pyarrow(py)?)?;
+        let schema = record.schema_ref();
+        let field = Field::new_struct("", schema.fields().clone(), false)
+            .with_metadata(schema.metadata().clone());
+        let array = StructArray::from(record.clone());
+        let capsules = to_array_pycapsules(py, Arc::new(field), &array, None)?;
+        records.append(importer.call1(capsules)?)?;
     }
     Ok(())
 }
@@ -507,6 +516,78 @@ mod tests {
 
     fn idle() -> SessionState<&'static str> {
         SessionState::Idle("session")
+    }
+
+    #[test]
+    fn table_outputs_keep_dictionary_metadata_and_zero_column_row_counts() {
+        use pyo3::{
+            Python,
+            prelude::*,
+            types::{PyDict, PyList},
+        };
+
+        Python::initialize();
+        Python::attach(|py| {
+            let locals = PyDict::new(py);
+            let setup = cr#"import gc, weakref, pyarrow as pa
+indices = pa.array([0, None, 1], type=pa.int8())
+dictionary = pa.DictionaryArray.from_arrays(indices, ["a", "b"])
+field = pa.field("label", dictionary.type, nullable=True, metadata={b"unit": b"code"})
+sequence = pa.field("id", pa.int64(), nullable=False)
+schema = pa.schema([field, sequence], metadata={b"owner": b"session"})
+rich = pa.RecordBatch.from_arrays([dictionary, pa.array([0, 1, 2])], schema=schema)
+original = weakref.ref(rich)
+empty_schema = rich.select([]).schema
+ordered = pa.DictionaryArray.from_arrays(indices, dictionary.dictionary, ordered=True)
+ordered_schema = pa.schema([field.with_type(ordered.type), sequence], metadata=schema.metadata)
+pair = [rich, pa.RecordBatch.from_arrays([ordered, rich.column(1)], schema=ordered_schema)]
+inputs = [rich, rich.slice(1, 0), rich.select([]), rich.slice(0, 0).select([])]
+addresses = [buf.address for buf in dictionary.buffers() if buf is not None]
+value_buffers = [b.address for b in dictionary.dictionary.buffers() if b is not None]
+"#;
+            py.run(setup, Some(&locals), None).unwrap();
+            let records = PyList::empty(py);
+            let inputs = locals.get_item("inputs").unwrap().unwrap();
+            for value in inputs.try_iter().unwrap() {
+                let batch = super::input_batch(&value.unwrap()).unwrap();
+                super::append_batch_to_python(py, "out", &batch, &records).unwrap();
+            }
+            drop(inputs);
+            let pair = locals
+                .get_item("pair")
+                .unwrap()
+                .unwrap()
+                .try_iter()
+                .unwrap()
+                .map(|value| {
+                    value
+                        .unwrap()
+                        .extract::<pyo3_arrow::PyRecordBatch>()
+                        .unwrap()
+                        .into_inner()
+                })
+                .collect();
+            let batch = calc_flow::Batch::table(pair, calc_flow::BatchMetadata::default()).unwrap();
+            super::append_batch_to_python(py, "out", &batch, &records).unwrap();
+            drop(batch);
+            locals.set_item("outputs", records).unwrap();
+            let check = cr#"del inputs, pair, ordered, rich, dictionary, indices
+gc.collect()
+assert original() is None, "source RecordBatch still has an owner"
+normal, empty, zero_columns, zero_rows, first, second = outputs
+assert [row.schema.field(0).type.ordered for row in (first, second)] == [False, True]
+assert normal.schema.equals(schema, check_metadata=True)
+assert normal.column(0).to_pylist() == ["a", None, "b"]
+assert [b.address for b in normal.column(0).buffers() if b is not None] == addresses
+assert [b.address for b in normal.column(0).dictionary.buffers() if b is not None] == value_buffers
+assert empty.num_rows == 0 and empty.schema.equals(schema, check_metadata=True)
+assert zero_columns.num_columns == 0 and zero_columns.num_rows == 3
+assert zero_rows.num_columns == 0 and zero_rows.num_rows == 0
+assert zero_columns.schema.equals(empty_schema, check_metadata=True)
+assert zero_rows.schema.equals(empty_schema, check_metadata=True)
+"#;
+            py.run(check, Some(&locals), None).unwrap();
+        });
     }
 
     #[test]

@@ -143,7 +143,8 @@ fn hot_equi_projection(
         return None;
     }
     let schema = join.output_ports()[0].schema()?;
-    Some(HotProjection::Equi {
+    Some(HotProjection {
+        right_sequence: None,
         sequence: schema.index_of(&left_sequence).ok()?,
         left_price: schema.index_of(&left_price).ok()?,
         right_price: schema.index_of(&right_price).ok()?,
@@ -173,7 +174,13 @@ fn hot_band_projection(
     {
         return None;
     }
-    Some(HotProjection::Band)
+    let schema = join.output_ports()[0].schema()?;
+    Some(HotProjection {
+        sequence: schema.index_of(&left_sequence).ok()?,
+        right_sequence: Some(schema.index_of(&right_sequence).ok()?),
+        left_price: schema.index_of(&left_price).ok()?,
+        right_price: schema.index_of(&right_price).ok()?,
+    })
 }
 
 fn projected_value(left: &Field, right: &Field) -> Field {
@@ -193,35 +200,15 @@ fn hot_projection_schema(
     projection: HotProjection,
 ) -> Option<SchemaRef> {
     let schema = join.output_ports()[0].schema()?;
-    match projection {
-        HotProjection::Equi {
-            sequence,
-            left_price,
-            right_price,
-        } => Some(Arc::new(Schema::new(vec![
-            renamed(schema, sequence, "sequence")?,
-            projected_value(schema.field(left_price), schema.field(right_price)),
-        ]))),
-        HotProjection::Band => {
-            let left_sequence = schema
-                .index_of(&format!("{}__sequence", join.spec().left_prefix()))
-                .ok()?;
-            let right_sequence = schema
-                .index_of(&format!("{}__sequence", join.spec().right_prefix()))
-                .ok()?;
-            let left_price = schema
-                .index_of(&format!("{}__price", join.spec().left_prefix()))
-                .ok()?;
-            let right_price = schema
-                .index_of(&format!("{}__price", join.spec().right_prefix()))
-                .ok()?;
-            Some(Arc::new(Schema::new(vec![
-                renamed(schema, left_sequence, "sequence")?,
-                renamed(schema, right_sequence, "right_sequence")?,
-                projected_value(schema.field(left_price), schema.field(right_price)),
-            ])))
-        }
+    let mut fields = vec![renamed(schema, projection.sequence, "sequence")?];
+    if let Some(right_sequence) = projection.right_sequence {
+        fields.push(renamed(schema, right_sequence, "right_sequence")?);
     }
+    fields.push(projected_value(
+        schema.field(projection.left_price),
+        schema.field(projection.right_price),
+    ));
+    Some(Arc::new(Schema::new(fields)))
 }
 
 fn output_projection(

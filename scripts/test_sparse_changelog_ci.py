@@ -197,3 +197,26 @@ class SparseChangelogCiTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises(ValueError):
                     wheels._api(repository, path)
             subprocess_run.assert_not_called()
+
+    def test_captures_raw_job_logs_with_old_and_new_github_cli(self):
+        from unittest.mock import patch
+
+        flag = "--allow-escape-sequences"
+        log = b"build \x1b[32mpassed\x1b[0m"
+        for supported in (False, True):
+            help_text = flag.encode() if supported else b"--method"
+            with (
+                self.subTest(supported=supported),
+                patch.object(
+                    wheels.subprocess, "check_output", side_effect=(help_text, log)
+                ) as get,
+            ):
+                self.assertEqual(wheels._api("owner/repo", "actions/jobs/7/logs"), log)
+                help_call, log_call = get.call_args_list
+                self.assertIn("--help", help_call.args[0])
+                self.assertEqual(flag in log_call.args[0], supported)
+                self.assertFalse(log_call.kwargs["shell"])
+        with patch.object(wheels.subprocess, "check_output", return_value=b"{}") as get:
+            self.assertEqual(wheels._api("owner/repo", "actions/artifacts/7"), b"{}")
+            self.assertEqual(get.call_count, 1)
+            self.assertNotIn(flag, get.call_args.args[0])

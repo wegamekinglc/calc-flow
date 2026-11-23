@@ -379,9 +379,7 @@ fn update_shared_numeric(
         .accumulator
         .numeric
         .finish_rows(width, tape.window_history(width))
-        .map_err(|error| super::float_arithmetic_error(error, node))?;
-    state.accumulator.sync_float_sum();
-    Ok(())
+        .map_err(|error| super::float_arithmetic_error(error, node))
 }
 
 #[cfg(test)]
