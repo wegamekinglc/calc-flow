@@ -827,6 +827,16 @@ pub(super) struct PreparedRuns {
 }
 
 impl PreparedRuns {
+    pub(super) fn with_physical_row_frontier(mut self, next_row_id: u64) -> Result<Self> {
+        if next_row_id < self.row_ids.end {
+            return Err(run_error(
+                "physical row-ID frontier precedes an admitted row",
+            ));
+        }
+        self.row_ids.end = next_row_id;
+        Ok(self)
+    }
+
     pub(super) fn drain_outputs(&mut self) -> impl Iterator<Item = Batch> {
         self.outputs
             .iter_mut()
@@ -852,7 +862,7 @@ impl PreparedRuns {
             next_run,
             ..
         } = self;
-        if outputs.is_empty() {
+        if outputs.is_empty() && row_ids.is_empty() {
             return Ok(outputs);
         }
         if state.next_output != output_sequences.start {

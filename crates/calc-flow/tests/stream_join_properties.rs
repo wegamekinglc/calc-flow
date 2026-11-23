@@ -485,6 +485,77 @@ async fn restore_ordered_checkpoint(
     *operator = restored;
 }
 
+#[tokio::test]
+async fn test_physical_frontier_consumes_trailing_and_fully_dropped_rows() {
+    let job = ordered_job();
+    let context = StreamOperatorContext::with_ingress_progress(
+        &job,
+        "match",
+        None,
+        both_sides(Some(10), None),
+    );
+    let mut operator = ordered_operator((0, 0));
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    let row = |key, ts, physical_id| OrderedRow {
+        key,
+        ts,
+        physical_id,
+    };
+    let first = ordered_batch(&[row(Some('a'), Some(10), 0), row(None, Some(10), 1)]);
+    let trailing = ordered_batch(&[row(Some('a'), Some(9), 2)]);
+    let first = Batch::table(
+        [first, trailing]
+            .iter()
+            .flat_map(|batch| batch.table_payload().unwrap().batches().iter().cloned())
+            .collect(),
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let dropped = ordered_batch(&[row(None, None, 3), row(Some('b'), Some(9), 4)]);
+    let mut frontiers = Vec::new();
+    for (epoch, batch) in [first, dropped, ordered_batch(&[])].into_iter().enumerate() {
+        operator
+            .process_data("left", batch, &context, &mut output)
+            .await
+            .unwrap();
+        let snapshot = operator
+            .checkpoint(Epoch::new(epoch as u64 + 1).unwrap())
+            .unwrap();
+        frontiers.push(
+            snapshot.inline_metadata["next_left_row_id"]
+                .as_u64()
+                .unwrap(),
+        );
+        let mut recovered = ordered_operator((0, 0));
+        recovered.restore(&snapshot).unwrap();
+        operator = recovered;
+    }
+    assert_eq!(frontiers, [3, 5, 5]);
+    assert!(output.drain("output").is_empty());
+    operator
+        .process_data(
+            "left",
+            ordered_batch(&[row(Some('a'), Some(10), 5)]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    operator
+        .process_data(
+            "right",
+            ordered_batch(&[row(Some('a'), Some(10), 0)]),
+            &context,
+            &mut output,
+        )
+        .await
+        .unwrap();
+    assert_eq!(drain_ordered(&mut output), (vec![(0, 0), (5, 0)], vec![0]));
+    let final_cut = operator.checkpoint(Epoch::new(4).unwrap()).unwrap();
+    assert_eq!(final_cut.inline_metadata["next_left_row_id"], 6);
+    assert_eq!(final_cut.inline_metadata["next_right_row_id"], 1);
+}
+
 fn ordered_job() -> StreamJobContext {
     StreamJobContext::new(
         1,
