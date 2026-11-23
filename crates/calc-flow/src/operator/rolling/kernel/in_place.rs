@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 use datafusion::arrow::{
     array::{ArrayRef, StringArray, TimestampMicrosecondArray},
@@ -11,7 +11,7 @@ use super::{
     RollingKernelExecution, RollingKernelMetrics, RollingKernelPlan, RollingKernelState,
     RollingMetricsRecorder, RollingStage, RollingWork, StateCharge, StreamKernelUpdate,
     TimedSample, TypedEntityState, TypedFrame, TypedGroupInput, TypedRowInputs, TypedWindowState,
-    WindowAccumulator, add_float64, dense_entity_ids, encode_arrays, internal_error, nanos,
+    WindowAccumulator, add_float64, dense_entity_ids, encode_arrays, internal_error,
     operator_error, remove_float64, valid_float64,
 };
 use crate::Result;
@@ -475,14 +475,12 @@ impl RollingKernelPlan {
         let columns = self.typed_inputs(input, node_id)?;
         let event_times = self.ordered_event_times(input, node_id)?;
         let last_identity = self.last_ordered_identity(input, node_id)?;
-        let started = Instant::now();
         let routing = self.route_in_place(state, input, node_id, observer)?;
         let Some((mut in_place, entity_rows, entity_ids)) =
             InPlaceUpdate::resolve(self, state, routing, node_id, observer)?
         else {
             return Ok(None);
         };
-        let entity_encode_ns = nanos(started.elapsed());
         let inputs = TypedRowInputs {
             columns: &columns,
             event_times: &event_times,
@@ -493,7 +491,6 @@ impl RollingKernelPlan {
             .iter()
             .map(|output| DerivedBuilder::new_with_inputs(*output, input.num_rows(), &columns))
             .collect::<Result<Vec<_>>>()?;
-        let kernel_start = Instant::now();
         let numeric_result = {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
             fill_rows(
@@ -506,8 +503,6 @@ impl RollingKernelPlan {
                 observer,
             )
         };
-        let kernel_ns = nanos(kernel_start.elapsed());
-        let output_start = Instant::now();
         let result = numeric_result.and_then(|()| {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
             builders
@@ -515,25 +510,15 @@ impl RollingKernelPlan {
                 .map(DerivedBuilder::finish)
                 .collect::<Result<Vec<_>>>()
         });
-        let output_build_ns = nanos(output_start.elapsed());
-        let state_bytes = in_place
-            .residents
-            .iter()
-            .map(|&resident| state.states[resident].estimated_bytes())
-            .sum();
         let update = StreamKernelUpdate {
             execution: RollingKernelExecution {
                 columns: Vec::new(),
                 entity_ids,
                 entity_rows,
                 metrics: RollingKernelMetrics {
-                    entity_encode_ns,
-                    kernel_ns,
-                    output_build_ns,
                     entities: in_place.residents.len(),
                     input_rows: input.num_rows(),
                     output_rows: input.num_rows(),
-                    state_bytes,
                     ..RollingKernelMetrics::default()
                 },
                 state: RollingKernelState {

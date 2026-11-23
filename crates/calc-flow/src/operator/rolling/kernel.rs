@@ -78,6 +78,7 @@ const ENTITY_PARALLEL_MIN_ROWS: usize = 64_000;
 thread_local! {
     pub(super) static GENERIC_F64_BUILDER_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static INSTALLATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static ENTITY_SIZE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DIRECT_ENTITY_KEY_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
@@ -3198,6 +3199,8 @@ impl TypedEntityState {
     }
 
     fn estimated_bytes(&self) -> usize {
+        #[cfg(test)]
+        ENTITY_SIZE_VISITS.set(ENTITY_SIZE_VISITS.get() + 1);
         size_of::<Self>()
             + self
                 .groups
@@ -6053,9 +6056,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn test_duration_history_without_recurrences_needs_no_seed_allocations() {
-        let kernel = plan(
+    fn duration_sum_plan() -> RollingKernelPlan {
+        plan(
             vec![TypedGroupPlan::Numeric {
                 input_index: 3,
                 frame: TypedFrame::Duration(60),
@@ -6068,7 +6070,51 @@ mod tests {
                 min_periods: 1,
                 ddof: 0,
             }],
+        )
+    }
+
+    #[test]
+    fn in_place_duration_sizes_entities_only_for_budget_accounting() {
+        let kernel = duration_sum_plan();
+        let input = |start| {
+            batch(
+                vec![Some(start), Some(start + 1)],
+                vec![Some(1), Some(2)],
+                vec!["a", "b"],
+                vec![Some(1.0), Some(2.0)],
+            )
+        };
+        let mut state = RollingKernelState::default();
+        let seed = input(1);
+        assert!(kernel.supports_inplace_ordered_stream(&seed));
+        kernel
+            .prepare_ordered_stream_in_place(&mut state, &seed, "r", None)
+            .unwrap()
+            .unwrap()
+            .commit(&mut state);
+        let prior = state.total_charge_for_test("r").unwrap();
+        let before = state.canonical_state_for_test();
+        ENTITY_SIZE_VISITS.set(0);
+        let mut update = kernel
+            .prepare_ordered_stream_in_place(&mut state, &input(3), "r", None)
+            .unwrap()
+            .unwrap();
+        let (old, new) = update.charge_change(&state, "r").unwrap();
+        let visits = ENTITY_SIZE_VISITS.get();
+        assert_eq!(old, prior);
+        assert_eq!(new, state.total_charge_for_test("r").unwrap());
+        assert_eq!(new.rows, 4);
+        update.rollback(&mut state);
+        assert_eq!(state.canonical_state_for_test(), before);
+        assert_eq!(
+            visits, 4,
+            "two size estimates per touched entity for its before and after budget"
         );
+    }
+
+    #[test]
+    fn test_duration_history_without_recurrences_needs_no_seed_allocations() {
+        let kernel = duration_sum_plan();
         let names = (0..64)
             .map(|i| format!("entity-{i:02}"))
             .collect::<Vec<_>>();
