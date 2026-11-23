@@ -13,6 +13,7 @@ mod tests {
     mod left_anti;
     mod left_semi;
     mod morsel_tests;
+    mod native_terminal;
 
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -6093,7 +6094,74 @@ impl StreamJoinOperator {
         Ok(())
     }
 
-    async fn finalize_absent(
+    #[cfg(test)]
+    async fn end_legacy_state(&mut self, context: &StreamOperatorContext<'_>) -> Result<()> {
+        self.await_compaction_release(context).await?;
+        if context.job().checkpointing() {
+            self.record_terminal_tombstones()?;
+        } else {
+            self.v2_writer.invalidate_history()?;
+        }
+        self.state.left.clear();
+        self.state.right.clear();
+        self.key_dictionary = key_dictionary::Dictionary::default();
+        self.key_bindings = key_dictionary::Bindings::default();
+        self.key_dictionary_needs_rebuild = false;
+        self.state.left_expirations = ExpirationIndex::default();
+        self.state.right_expirations = ExpirationIndex::default();
+        self.retained_key_cache = RetainedKeyCache::default();
+        if self.run_core.is_none() {
+            self.state.metrics.left.retained_rows = 0;
+            self.state.metrics.left.retained_bytes = 0;
+            self.state.metrics.right.retained_rows = 0;
+            self.state.metrics.right.retained_bytes = 0;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn record_terminal_tombstones(&mut self) -> Result<()> {
+        self.v2_writer.changed(true)?;
+        // Reserve both sides before recording any terminal tombstones.
+        let left_origin = self.state.left_expirations.tombstone_origin();
+        let right_origin = self.state.right_expirations.tombstone_origin();
+        let left_watermark = self.state.deltas.watermark[0];
+        let right_watermark = self.state.deltas.watermark[1];
+        let left_captured = self
+            .state
+            .left
+            .indexed()
+            .filter(|(_, row)| row.row_id < left_watermark)
+            .count();
+        let right_captured = self
+            .state
+            .right
+            .indexed()
+            .filter(|(_, row)| row.row_id < right_watermark)
+            .count();
+        self.state.deltas.tombstones[0].reserve(left_origin, left_captured, &self.name)?;
+        self.state.deltas.tombstones[1].reserve(right_origin, right_captured, &self.name)?;
+        for (side, watermark) in [(0, left_watermark), (1, right_watermark)] {
+            let rows = if side == 0 {
+                &self.state.left
+            } else {
+                &self.state.right
+            };
+            for (_, row) in rows.indexed() {
+                if row.row_id < watermark {
+                    self.state.deltas.tombstones[side].push(
+                        row.row_id,
+                        row.event_time,
+                        Arc::clone(&row.encoded_key),
+                    );
+                }
+            }
+            self.state.deltas.dirty[side] = 0;
+        }
+        Ok(())
+    }
+
+    async fn finalize_runs(
         &mut self,
         right: Option<IngressProgress>,
         context: &StreamOperatorContext<'_>,
@@ -6104,7 +6172,7 @@ impl StreamJoinOperator {
             self.initialize_run_core()?;
         }
         let mut core = self.run_core.take().expect("initialized run core");
-        let result = core.release_absent(self, right, context, output).await;
+        let result = core.release_closed(self, right, context, output).await;
         self.run_core = Some(core);
         result
     }
@@ -6293,7 +6361,7 @@ impl StreamOperator for StreamJoinOperator {
         if self.spec.join_type != StreamJoinType::LeftAnti || ingress != "right" {
             return self.on_ingress_progress(ingress, context).await;
         }
-        self.finalize_absent(
+        self.finalize_runs(
             Some(self.required_progress(ingress, context)?),
             context,
             output,
@@ -6366,71 +6434,11 @@ impl StreamOperator for StreamJoinOperator {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
-        if self.spec.join_type == StreamJoinType::LeftAnti {
-            self.finalize_absent(None, context, output).await?;
+        if self.run_core.is_some() || self.spec.join_type == StreamJoinType::LeftAnti {
+            self.finalize_runs(None, context, output).await?;
         }
         #[cfg(test)]
-        self.await_compaction_release(context).await?;
-        #[cfg(test)]
-        if context.job().checkpointing() {
-            self.v2_writer.changed(true)?;
-            // Live rows below the watermark leave terminal tombstones in
-            // bulk; rows at or above it coalesce away (spec FR2). Both sides
-            // reserve before either records, so a funding refusal fails the
-            // job with the state and lists untouched (spec FR8).
-            let left_origin = self.state.left_expirations.tombstone_origin();
-            let right_origin = self.state.right_expirations.tombstone_origin();
-            let left_watermark = self.state.deltas.watermark[0];
-            let right_watermark = self.state.deltas.watermark[1];
-            let left_captured = self
-                .state
-                .left
-                .indexed()
-                .filter(|(_, row)| row.row_id < left_watermark)
-                .count();
-            let right_captured = self
-                .state
-                .right
-                .indexed()
-                .filter(|(_, row)| row.row_id < right_watermark)
-                .count();
-            self.state.deltas.tombstones[0].reserve(left_origin, left_captured, &self.name)?;
-            self.state.deltas.tombstones[1].reserve(right_origin, right_captured, &self.name)?;
-            for (side, watermark) in [(0, left_watermark), (1, right_watermark)] {
-                let rows = if side == 0 {
-                    &self.state.left
-                } else {
-                    &self.state.right
-                };
-                for (_, row) in rows.indexed() {
-                    if row.row_id < watermark {
-                        self.state.deltas.tombstones[side].push(
-                            row.row_id,
-                            row.event_time,
-                            Arc::clone(&row.encoded_key),
-                        );
-                    }
-                }
-                self.state.deltas.dirty[side] = 0;
-            }
-        } else {
-            self.v2_writer.invalidate_history()?;
-        }
-        #[cfg(test)]
-        {
-            self.state.left.clear();
-            self.state.right.clear();
-            self.key_dictionary = key_dictionary::Dictionary::default();
-            self.key_bindings = key_dictionary::Bindings::default();
-            self.key_dictionary_needs_rebuild = false;
-            self.state.left_expirations = ExpirationIndex::default();
-            self.state.right_expirations = ExpirationIndex::default();
-            self.retained_key_cache = RetainedKeyCache::default();
-        }
-        self.state.metrics.left.retained_rows = 0;
-        self.state.metrics.left.retained_bytes = 0;
-        self.state.metrics.right.retained_rows = 0;
-        self.state.metrics.right.retained_bytes = 0;
+        self.end_legacy_state(context).await?;
         self.state.ended = true;
         Ok(())
     }

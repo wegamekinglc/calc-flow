@@ -529,6 +529,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_direct_end_preserves_deferred_left_frontier_without_materializing() {
+        let mut op = static_operator(true);
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+        .with_checkpointing(false);
+        let ctx = hot_context(&job);
+        let mut out = EdgeCollector::new(op.output_ports().to_vec());
+        let batch = Batch::table(vec![static_left_history()], BatchMetadata::default()).unwrap();
+        op.process_data("left", batch, &ctx, &mut out)
+            .await
+            .unwrap();
+        assert!(op.run_core.as_ref().unwrap().hot_enabled());
+        assert_eq!(op.run_core.as_ref().unwrap().rows(JoinSide::Left), 0);
+        assert_eq!(op.status().left.retained_rows, 2);
+        (&mut op as &mut dyn StreamOperator)
+            .on_end(&ctx, &mut out)
+            .await
+            .unwrap();
+        assert!(out.drain("output").is_empty());
+        let cut = native_snapshot(&mut op).await;
+        assert_eq!(cut.inline_metadata["next_left_row_id"], 2);
+        let control: serde_json::Value =
+            serde_json::from_slice(cut.segments["control"].bytes()).unwrap();
+        assert_eq!(control["next_run"], 0);
+        let mut restored = static_operator(true);
+        restored.restore(&cut).unwrap();
+        restored.validate_terminal_recovery_state().unwrap();
+        assert_eq!(restored.status().left.evicted_rows, 2);
+    }
+
+    #[tokio::test]
     async fn hot_multi_native_checkpoint_preserves_a_pending_side() {
         for fused in [false, true] {
             let mut original = static_operator(fused);

@@ -303,7 +303,7 @@ where
 }
 
 impl RunState {
-    pub(in crate::operator::join) async fn release_absent(
+    pub(in crate::operator::join) async fn release_closed(
         &mut self,
         cuts: [usize; 2],
         output: &RunOutputContext<'_>,
@@ -340,6 +340,9 @@ impl RunState {
         context: &StreamOperatorContext<'_>,
         collector: &mut dyn StreamCollector,
     ) -> Result<(u64, u64)> {
+        if output.join_type != super::StreamJoinType::LeftAnti {
+            return Ok((previous, self.next_output));
+        }
         let (rows, sequence) = self.visit_closed(cut, output, context, None).await?;
         let emitted = checked_metric(previous, rows, &self.name, "emitted_match_rows")?;
         if rows != 0 {

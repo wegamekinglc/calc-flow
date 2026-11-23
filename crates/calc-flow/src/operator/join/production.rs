@@ -71,14 +71,8 @@ impl RunCore {
         })
     }
 
-    fn migrate_deferred_left(&mut self, operator: &mut StreamJoinOperator) -> Result<()> {
-        let DeferredLeft::Buffered(batch) = &self.deferred_left else {
-            return Ok(());
-        };
-        let mut migrated = Self::new(operator)?;
-        migrated.deferred_left = DeferredLeft::Disabled;
-        migrated.seed_left(operator, batch)?;
-        migrated.state.restore_counters(
+    fn restore_operator_counters(&mut self, operator: &StreamJoinOperator) {
+        self.state.restore_counters(
             [
                 operator.state.next_left_row_id,
                 operator.state.next_right_row_id,
@@ -86,6 +80,16 @@ impl RunCore {
             operator.state.next_output_sequence,
             operator.state.metrics.match_limit_failures,
         );
+    }
+
+    fn migrate_deferred_left(&mut self, operator: &mut StreamJoinOperator) -> Result<()> {
+        let DeferredLeft::Buffered(batch) = &self.deferred_left else {
+            return Ok(());
+        };
+        let mut migrated = Self::new(operator)?;
+        migrated.deferred_left = DeferredLeft::Disabled;
+        migrated.seed_left(operator, batch)?;
+        migrated.restore_operator_counters(operator);
         for side in [JoinSide::Left, JoinSide::Right] {
             let metrics = if side == JoinSide::Left {
                 operator.state.metrics.left.clone()
@@ -102,6 +106,23 @@ impl RunCore {
         for (ingress, progress) in progress.by_ingress() {
             self.evict(operator, ingress, *progress)?;
         }
+        Ok(())
+    }
+
+    fn discard_terminal_left(&mut self, operator: &mut StreamJoinOperator) -> Result<()> {
+        if matches!(self.deferred_left, DeferredLeft::Buffered(_)) {
+            let left = &mut operator.state.metrics.left;
+            left.evicted_rows = checked_metric(
+                left.evicted_rows,
+                left.retained_rows,
+                &operator.name,
+                "evicted_rows",
+            )?;
+            left.retained_rows = 0;
+            left.retained_bytes = 0;
+            self.restore_operator_counters(operator);
+        }
+        self.deferred_left = DeferredLeft::Disabled;
         Ok(())
     }
 
@@ -190,7 +211,7 @@ impl RunCore {
                     .is_some_and(|progress| progress.state() == crate::IngressState::Ended)
             });
         if terminal {
-            self.deferred_left = DeferredLeft::Disabled;
+            self.discard_terminal_left(operator)?;
         } else {
             self.migrate_deferred_left(operator)?;
         }
@@ -374,14 +395,7 @@ impl RunCore {
                 );
             }
         }
-        core.state.restore_counters(
-            [
-                operator.state.next_left_row_id,
-                operator.state.next_right_row_id,
-            ],
-            operator.state.next_output_sequence,
-            operator.state.metrics.match_limit_failures,
-        );
+        core.restore_operator_counters(operator);
         if core.state.rows(JoinSide::Left) + core.state.rows(JoinSide::Right) > 0 {
             core.deferred_left = DeferredLeft::Disabled;
         }
@@ -659,13 +673,16 @@ impl RunCore {
             .prepare_batch(side, incoming, output, &mut || context.check_cancelled())
     }
 
-    pub(super) async fn release_absent(
+    pub(super) async fn release_closed(
         &mut self,
         operator: &mut StreamJoinOperator,
         right: Option<crate::IngressProgress>,
         context: &StreamOperatorContext<'_>,
         collector: &mut dyn StreamCollector,
     ) -> Result<()> {
+        if right.is_none() {
+            self.discard_terminal_left(operator)?;
+        }
         let left_cut = match right {
             Some(progress) if progress.state() != crate::IngressState::Ended => {
                 progress.watermark().map_or(0, |time| {
@@ -686,7 +703,7 @@ impl RunCore {
         let output = run_output_context(operator, context.output_budget());
         let metrics = self
             .state
-            .release_absent(
+            .release_closed(
                 [left_cut, right_cut],
                 &output,
                 operator.state.metrics.clone(),
