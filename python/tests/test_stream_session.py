@@ -408,6 +408,43 @@ def test_close_is_idempotent_and_context_manager_does_not_flush() -> None:
         session.finish()
 
 
+def test_exact_session_input_uses_arrow_schema_comparison() -> None:
+    from unittest.mock import MagicMock
+
+    from calc_flow import session as session_module
+
+    batch = pa.record_batch({"value": [7]})
+    schema = MagicMock(wraps=batch.schema)
+    schema.metadata = None
+    arrow_input = MagicMock(spec=pa.RecordBatch)
+    arrow_input.schema = schema
+    schema.__iter__.side_effect = AssertionError("exact schema iterated Python fields")
+    result = session_module._session_batch(
+        arrow_input, batch.schema, "session.inputs.events"
+    )
+    assert result is arrow_input
+    schema.equals.assert_called_once_with(batch.schema, check_metadata=True)
+
+
+@pytest.mark.parametrize(
+    ("as_table", "schema_metadata"), [(False, None), (True, {b"origin": b"caller"})]
+)
+def test_session_normalizes_input_and_preserves_caller_metadata(
+    as_table: bool, schema_metadata: dict[bytes, bytes] | None
+) -> None:
+    source = _rows((0, "a", 0, 1.0))
+    fields = [field.with_metadata({b"unit": b"sample"}) for field in source.schema]
+    schema = pa.schema(fields, metadata=schema_metadata)
+    record = pa.RecordBatch.from_arrays(
+        [col.combine_chunks() for col in source.columns], schema=schema
+    )
+    data = pa.Table.from_batches([record]) if as_table else record
+    with _explicit_session() as session:
+        output = session.push(data, watermark=_at(0))
+    assert output.column("avg").to_pylist() == [1.0]
+    assert data.schema.equals(schema, check_metadata=True)
+
+
 def test_schema_mismatch_raises_value_error_and_session_stays_usable() -> None:
     wrong = pa.table({"x": pa.array([1.0], type=pa.float64())})
     with _explicit_session() as session:
