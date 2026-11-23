@@ -2232,13 +2232,13 @@ fn entity_parallel_readout_compatibility_short_zip_and_extra_state_keep_sites() 
         let (_, [mut request, _]) = pair(&plan, &state, &input);
         if groups < 2 {
             edit_groups(&mut request.entities[0].state, |state| {
-                state.truncate(groups)
+                state.truncate(groups);
             });
         } else {
             let mut extra = TypedEwmaState::new(0.5, false);
             extra.update(Some(73.0), "r").unwrap();
             edit_groups(&mut request.entities[0].state, |groups| {
-                groups.push(TypedWindowState::Ewma(extra))
+                groups.push(TypedWindowState::Ewma(extra));
             });
         }
         let prior_extra =
@@ -2440,7 +2440,7 @@ fn private_readout_input(
             let mut extra = Float64NumericState::new(TypedFrame::Rows(5), 20);
             extra.update(-1, Some(73.0), "r").unwrap();
             edit_groups(&mut entity.state, |groups| {
-                groups.push(TypedWindowState::Numeric(extra))
+                groups.push(TypedWindowState::Numeric(extra));
             });
         }
         output.group = 1;

@@ -3183,7 +3183,7 @@ impl TypedEntityState {
 
     fn with_duration_storage(groups: &[TypedGroupPlan], entity_rows: usize, shared: bool) -> Self {
         Self {
-            shared_duration: shared.then(|| duration::DurationSamples::new(groups.len())),
+            shared_duration: shared.then(|| Box::new(duration::DurationSamples::new(groups.len()))),
             groups: groups
                 .iter()
                 .map(|group| TypedWindowState::new(*group, entity_rows))

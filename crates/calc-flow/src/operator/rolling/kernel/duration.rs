@@ -38,11 +38,11 @@ pub(super) fn eligible(groups: &[TypedGroupPlan]) -> bool {
 }
 
 impl DurationSamples {
-    pub(super) fn new(groups: usize) -> Box<Self> {
-        Box::new(Self {
+    pub(super) fn new(groups: usize) -> Self {
+        Self {
             values: VecDeque::new(),
             heads: vec![0; groups].into_boxed_slice(),
-        })
+        }
     }
 
     pub(super) fn len(&self) -> usize {
