@@ -1,0 +1,953 @@
+{
+  "artifact": {
+    "created_at": "2026-11-23T14:28:24Z",
+    "digest": "sha256:1eada996473cf827a94d5bd0be8d3783307b39268ddc314b221c9fb98d02fae9",
+    "expired": false,
+    "id": 14826594133,
+    "name": "public-steady-session-45194346131-1",
+    "workflow_run": {
+      "head_branch": "feature/measure-borrowed-kind-push",
+      "head_repository_id": 1222490326,
+      "head_sha": "e93d5f5398f243acc6522b02b10ce650e77b2a44",
+      "id": 45194346131,
+      "repository_id": 1222490326
+    }
+  },
+  "case": "python/public-session/steady-one-row-dual-sma/batch-kind",
+  "checked_rows": 183040,
+  "date": "2026-11-23",
+  "elf_toolchains": {
+    "baseline": [
+      "Linker: LLD 21.1.8 (/checkout/src/llvm-project/llvm 00d23d10dc48c6bb9d57ba96d4a748d85d77d0c7)",
+      "GCC: (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "rustc version 1.94.0 (4a4ef493e 2026-03-02)"
+    ],
+    "candidate": [
+      "Linker: LLD 21.1.8 (/checkout/src/llvm-project/llvm 00d23d10dc48c6bb9d57ba96d4a748d85d77d0c7)",
+      "GCC: (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "rustc version 1.94.0 (4a4ef493e 2026-03-02)"
+    ]
+  },
+  "hosted_job": {
+    "completed_at": "2026-11-23T14:28:27Z",
+    "conclusion": "success",
+    "html_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45194346131/job/137760691293",
+    "id": 137760691293,
+    "name": "Public steady session",
+    "started_at": "2026-11-23T14:27:13Z"
+  },
+  "outcome": {
+    "elapsed_since_job_start_seconds": 70.06563806533813,
+    "state": "completed"
+  },
+  "qualified_workers": 44,
+  "registration": {
+    "budget_seconds": 240,
+    "case": "python/public-session/steady-one-row-dual-sma/batch-kind",
+    "cpu_model": "AMD EPYC 7763 64-Core Processor",
+    "elf_toolchain": [
+      "Linker: LLD 21.1.8 (/checkout/src/llvm-project/llvm 00d23d10dc48c6bb9d57ba96d4a748d85d77d0c7)",
+      "GCC: (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "rustc version 1.94.0 (4a4ef493e 2026-03-02)"
+    ],
+    "fixture_sha256": {
+      "expected.arrow": "c86c9e5c2141776e9881d7467da417f7fe4f19ebdd594df2e5339172cb2fe738",
+      "inputs.arrow": "90da6c27244354bacbc53983ca2d1f71be2654ee3b7943779843648197ebe253",
+      "project.json": "57e36971d02b987132f4b6ab8f8fae4c9aa0f74de2c53660b2f3ead67eb6a5b6"
+    },
+    "fresh_workers": 44,
+    "history": 4096,
+    "job": 137760691293,
+    "p50_goal_us": 20,
+    "p95_goal_us": 40,
+    "pairs_per_round": 10,
+    "registered_utc": "2026-11-23T14:26:24.891787+00:00",
+    "releases": {
+      "baseline": {
+        "artifact": 14822848922,
+        "artifact_digest": "sha256:dad62e3c28ace0dab4742d078f157dca905b67bf26e9edf4defebbbddb179a05",
+        "build_job_finished": "2026-11-23T13:36:29Z",
+        "build_job_started": "2026-11-23T13:18:15Z",
+        "checkout": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+        "image": "ubuntu-26.04",
+        "image_version": "20261116.202.1",
+        "job": 137719754356,
+        "requested_sha": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+        "tree": "d22e0c7693ad29181778653dff63d34a0ed86dac",
+        "workflow_run": 45182357543
+      },
+      "candidate": {
+        "artifact": 14827416112,
+        "artifact_digest": "sha256:f2dc34eaecc5dbeda76b6248496ae078bfaf4aa836a8084a2ed8f47782eed1ec",
+        "build_job_finished": "2026-11-23T14:25:15Z",
+        "build_job_started": "2026-11-23T14:01:52Z",
+        "checkout": "8d4f913f8be74a2a9b31529ef4814c13d5dadf80",
+        "image": "ubuntu-26.04",
+        "image_version": "20261116.202.1",
+        "job": 137744913093,
+        "requested_sha": "f06761ae1e9e8d02a8395b1b5c3a19d742b7b40f",
+        "tree": "134daa6275d4456e2de3510f168929dbed1b86cd",
+        "workflow_run": 45189825472
+      }
+    },
+    "reserved_cleanup_seconds": 45,
+    "rounds": 2,
+    "run": "45194346131",
+    "runner_image": [
+      "ubuntu26",
+      "20261116.202.1"
+    ],
+    "source_hashes": {
+      ".github/workflows/benchmarks.yml": "9728e8679b1c39554023dd43854f685b5dc5625c69c91ec880c3b00b2917dbc6",
+      "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
+      "benchmarks/registered-borrowed-kind.md": "1594c062da6384fad0a9dc4e5458f20492d525bb322081d0b047b04a2ba1c094",
+      "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+      "benchmarks/steady-session-fixture/expected.arrow.gz": "f1e6c5683aa7fcc1033be0fc3eb0f8cbd3d4570edbe25abc4bcc634c2a46cc06",
+      "benchmarks/steady-session-fixture/inputs.arrow.gz": "f0c1bb0137526fcdf5c310d06d8a521e221cb5ad0a6e59badcbe924db09fcf81",
+      "benchmarks/steady-session-fixture/project.json.gz": "15825fc96916ee6c1420fd3836ff05913b122f6354c9384ca2304824041a3422",
+      "benchmarks/steady-wheel-pair.json": "be08f7bd7e6f1ad60b73e9adf7930b3c655df3342761165adb1b75d96daecc57",
+      "benchmarks/steady_session.py": "17222d535a0005828e3b5265ab687a278ad005fe467d94268049490b4faaba24",
+      "benchmarks/stream-session/20261123-public-steady-push/protocol.md": "74b832b4cffaa5f524eeb7941ad4b99911cdcb5c1211bab382608b842f124ddd",
+      "benchmarks/warm_stream.py": "56532fef6313ef8697dcdd8d30f09cf4de5c9ad1c9a646925063204373999b59",
+      "python/tests/test_steady_session_benchmark.py": "11fd8de9f71ca2f95df37463e5482135e95bdc27a6e4d5023607874bf56affc5",
+      "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",
+      "scripts/benchmark_suite/release.py": "f5523d3fc3436449aae9d697457c462c383cdbfd55f7144d9997478f96a44307",
+      "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+      "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+      "scripts/hosted_steady_session.py": "8a6c25c6217a670f20cca740e31b0ed5a3ca85606a28334305ffedf75477142e",
+      "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+      "scripts/sparse_changelog_wheels.py": "7859857dbd59842f7571b08052812741b7383891720e6908c8ff0c21e2cd87f3",
+      "scripts/test_hosted_steady_session.py": "1f85480b7382debe4845405d02d27c3b1ab8daf53a9d887c1da517df26254270",
+      "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+    },
+    "start_epoch": 1795444033.0,
+    "timed_one_row_pushes": 64,
+    "total_python_budget_seconds": 300,
+    "warmups_per_side_per_round": 1,
+    "workflow": "e93d5f5398f243acc6522b02b10ce650e77b2a44"
+  },
+  "resources": [
+    {
+      "available_bytes": 15699451904,
+      "cpu": 0,
+      "cpu_busy": 0.3,
+      "host_busy": 0.4,
+      "interval_seconds": 3.004535041000004,
+      "major_faults": 0,
+      "preflight": true,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444061.9884822
+    },
+    {
+      "available_bytes": 15664586752,
+      "cpu": 0,
+      "cpu_busy": 80.0,
+      "host_busy": 31.1,
+      "interval_seconds": 1.0012868410000024,
+      "major_faults": 4,
+      "preflight": false,
+      "sibling_busy": 5.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444062.9899232
+    },
+    {
+      "available_bytes": 15664750592,
+      "cpu": 0,
+      "cpu_busy": 95.9,
+      "host_busy": 34.075,
+      "interval_seconds": 1.0018753080000025,
+      "major_faults": 1,
+      "preflight": false,
+      "sibling_busy": 14.3,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444063.9918685
+    },
+    {
+      "available_bytes": 15682498560,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 26.25,
+      "interval_seconds": 1.0019773580000049,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444064.9939024
+    },
+    {
+      "available_bytes": 15706660864,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0023821690000005,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444065.9963546
+    },
+    {
+      "available_bytes": 15728402432,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0016872300000017,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444066.9980843
+    },
+    {
+      "available_bytes": 15735738368,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 28.0,
+      "interval_seconds": 1.001318615999999,
+      "major_faults": 1,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444067.9994633
+    },
+    {
+      "available_bytes": 15742590976,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0013271030000013,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444069.0008502
+    },
+    {
+      "available_bytes": 15760879616,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0019654029999998,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444070.0028737
+    },
+    {
+      "available_bytes": 15755976704,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0019684790000056,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444071.0049026
+    },
+    {
+      "available_bytes": 15765094400,
+      "cpu": 0,
+      "cpu_busy": 99.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0019099899999944,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444072.0068743
+    },
+    {
+      "available_bytes": 15757062144,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0009447649999998,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444073.007878
+    },
+    {
+      "available_bytes": 15757500416,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0018869109999997,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444074.0098243
+    },
+    {
+      "available_bytes": 15757766656,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0020352169999995,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444075.0119147
+    },
+    {
+      "available_bytes": 15766069248,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.001421151999999,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444076.013408
+    },
+    {
+      "available_bytes": 15758254080,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001859760000002,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444077.0153258
+    },
+    {
+      "available_bytes": 15766355968,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0014981969999965,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444078.0168836
+    },
+    {
+      "available_bytes": 15766626304,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0019416519999993,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444079.0188859
+    },
+    {
+      "available_bytes": 15761666048,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0017551560000015,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444080.0207014
+    },
+    {
+      "available_bytes": 15762219008,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.002117754000011,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444081.0228834
+    },
+    {
+      "available_bytes": 15769567232,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0018735690000113,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444082.0248199
+    },
+    {
+      "available_bytes": 15761952768,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001681621000003,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444083.0265622
+    },
+    {
+      "available_bytes": 15762132992,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0012480729999993,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444084.0278707
+    },
+    {
+      "available_bytes": 15762227200,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0019417869999927,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444085.0298727
+    },
+    {
+      "available_bytes": 15762194432,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 26.25,
+      "interval_seconds": 1.0017060169999894,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444086.0316443
+    },
+    {
+      "available_bytes": 15770439680,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0014328869999929,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444087.0331352
+    },
+    {
+      "available_bytes": 15770308608,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0016176400000063,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444088.0348096
+    },
+    {
+      "available_bytes": 15769862144,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0017257669999964,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444089.0366032
+    },
+    {
+      "available_bytes": 15762149376,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0031909569999868,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444090.0398526
+    },
+    {
+      "available_bytes": 15766618112,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0029478240000032,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444091.0428605
+    },
+    {
+      "available_bytes": 15762194432,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001946658999998,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444092.0448668
+    },
+    {
+      "available_bytes": 15762001920,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0009015320000003,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444093.045825
+    },
+    {
+      "available_bytes": 15761485824,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 27.5,
+      "interval_seconds": 1.002103481000006,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444094.0479856
+    },
+    {
+      "available_bytes": 15769686016,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 46.2,
+      "interval_seconds": 1.0017260580000027,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444095.0497696
+    },
+    {
+      "available_bytes": 15769047040,
+      "cpu": 0,
+      "cpu_busy": 91.9,
+      "host_busy": 26.75,
+      "interval_seconds": 1.0017354090000055,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444096.0515594
+    },
+    {
+      "available_bytes": 15769333760,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.001240752000001,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444097.0528533
+    },
+    {
+      "available_bytes": 15761149952,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0026348999999897,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444098.0555472
+    },
+    {
+      "available_bytes": 15769214976,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0012549589999935,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444099.056864
+    },
+    {
+      "available_bytes": 15768375296,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0019956480000047,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444100.05892
+    },
+    {
+      "available_bytes": 15760789504,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0018331960000069,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444101.0608153
+    },
+    {
+      "available_bytes": 15765184512,
+      "cpu": 0,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0009835440000074,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444102.0618732
+    },
+    {
+      "available_bytes": 15768997888,
+      "cpu": 0,
+      "cpu_busy": 28.0,
+      "host_busy": 7.0,
+      "interval_seconds": 1.0021028390000026,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        1
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795444103.0640364
+    }
+  ],
+  "statistics": {
+    "paired_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 1.9508185721953897,
+        "low": -2.003733665214691,
+        "median": -0.38611688583365944
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 0.27517427704213393,
+        "low": -2.1336360472631433,
+        "median": -0.6163105794158741
+      }
+    ],
+    "pooled": {
+      "baseline": {
+        "p50_us": 60.243,
+        "p95_us": 79.9105
+      },
+      "candidate": {
+        "p50_us": 60.032,
+        "p95_us": 79.6515
+      }
+    },
+    "verdict": "no-confirmed-regression"
+  },
+  "wheels": {
+    "baseline": {
+      "artifact": 14822848922,
+      "artifact_digest": "sha256:dad62e3c28ace0dab4742d078f157dca905b67bf26e9edf4defebbbddb179a05",
+      "build_profile": "release",
+      "checkout": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 137719754356,
+      "native_sha256": "d7a1bb4dae897378ed410e1362565450f4372bf6b2ffdbc9211bd0fb7186ff11",
+      "requested_sha": "37dd0ab7a61087f0bd799fc555e639ba55442fca",
+      "tree": "d22e0c7693ad29181778653dff63d34a0ed86dac",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "7f4b12183edf3abd2cae3066e159c4c3290ffa7761bdad2fecbd543921555366",
+      "workflow_run": 45182357543
+    },
+    "candidate": {
+      "artifact": 14827416112,
+      "artifact_digest": "sha256:f2dc34eaecc5dbeda76b6248496ae078bfaf4aa836a8084a2ed8f47782eed1ec",
+      "build_profile": "release",
+      "checkout": "8d4f913f8be74a2a9b31529ef4814c13d5dadf80",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "8d4f913f8be74a2a9b31529ef4814c13d5dadf80",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 137744913093,
+      "native_sha256": "401c230c63b49fff7f655b16f5c202f9901602eac9b0add3a6154ac5d8ff80a6",
+      "requested_sha": "f06761ae1e9e8d02a8395b1b5c3a19d742b7b40f",
+      "tree": "134daa6275d4456e2de3510f168929dbed1b86cd",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "c75fd232cfd372e75cd7a7430f81b705b243cce19712aa65d181ea0d5a67a8ef",
+      "workflow_run": 45189825472
+    }
+  },
+  "worker_records_sha256": "a742abd640dbd5d50d69d1c1e2c7b01c9b49b890c42e063c0b8faf882f9b3d91"
+}

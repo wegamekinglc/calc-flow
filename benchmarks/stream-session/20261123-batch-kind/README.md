@@ -43,3 +43,32 @@ A binding test reads the actual Python property 64 times on a live table
 Batch. Its thread-local test counter recorded 64 requests for an owning
 clone before the change and zero afterward. The subsequent owning clone for
 each native push remains necessary. [Uninstrumented public comparison protocol](protocol.md)
+
+## Complete push without instrumentation
+
+| Pooled single-row latency | Baseline | Borrowed kind | Target |
+| ------------------------- | -------- | ------------- | ------ |
+| p50, µs                   | 60.243   | 60.032        | ≤20    |
+| p95, µs                   | 79.9105  | 79.6515       | ≤40    |
+
+The worker-level paired medians changed by −0.39% [−2.00%, +1.95%] and
+−0.62% [−2.13%, +0.28%]. The intervals include zero and the maintained
+rule returned `no-confirmed-regression`. The structural reduction did not
+establish a public latency improvement. The candidate exceeded the p50
+and p95 targets by 40.032 µs and 39.6515 µs. [All 44 worker records](workers.jsonl) · [Paired intervals and complete resource samples](result.json)
+
+The baseline used the official main `37dd0ab7` release. The candidate used
+`8d4f913f` on top of `79ff363f`. The intervening commits changed the grouped
+SUM benchmark example and repository reports. Both wheels used the same
+runtime sources and package build inputs apart from the binding getter and
+its test. Their verified build image, Rust 1.94.0, linker and GCC
+identities matched. The candidate wheel job took 23 minutes 23 seconds.
+[Baseline wheel](https://github.com/wegamekinglc/calc-flow/actions/runs/45182357543/job/137719754356) · [Candidate wheel](https://github.com/wegamekinglc/calc-flow/actions/runs/45189825472/job/137744913093)
+
+Each arm contributed 1,280 formal public push clocks. All 44 processes,
+including four warmups, validated the complete 4,096-row history and 64
+additional rows for a total of 183,040 checked rows. All 42 resource
+intervals qualified. The full hosted job took 74 seconds within the
+240-second job and 300-second total budgets. The two same-wheel observation
+modes above and this uninstrumented product comparison used separate hosted
+VMs. [Registered source](https://github.com/wegamekinglc/calc-flow/commit/e93d5f5398f243acc6522b02b10ce650e77b2a44) · [Hosted job](https://github.com/wegamekinglc/calc-flow/actions/runs/45194346131/job/137760691293)
