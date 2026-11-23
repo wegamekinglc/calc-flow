@@ -135,3 +135,72 @@ fn test_sliced_string_keys_keep_their_canonical_encoding() {
         assert_eq!(actual, expected);
     }
 }
+
+#[test]
+fn test_routing_distinct_fixed_keys_avoids_per_hash_allocations() {
+    use datafusion::arrow::array::UInt32Array;
+
+    const ROWS: u32 = 1024;
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut keys = KeyStore::new(
+        KeySchema::groupable(vec![Arc::new(Field::new("key", DataType::UInt32, false))]).unwrap(),
+        runtime.incremental_reservation("key-route-allocation-test"),
+    );
+    let arrays: [ArrayRef; 1] = [Arc::new(UInt32Array::from_iter_values(0..ROWS))];
+    let rows = usize::try_from(ROWS).unwrap();
+    let mut ids = Vec::new();
+    let allocated = allocation_counter::measure(|| {
+        ids = keys
+            .route_with_limit(&arrays, rows, &mut || Ok(()))
+            .unwrap();
+    });
+    assert_eq!(
+        ids.iter().map(|id| id.index()).collect::<Vec<_>>(),
+        (0..rows).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        keys.probe(&arrays, &mut || Ok(())).unwrap(),
+        ids.into_iter().map(Some).collect::<Vec<_>>()
+    );
+    eprintln!("routing {rows} fixed keys: {allocated:?}");
+    assert!(
+        allocated.count_total < u64::from(ROWS) * 5 / 2,
+        "{allocated:?}"
+    );
+}
+
+#[test]
+fn test_equal_hashes_remain_distinct_across_growth_and_rollback() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut keys = store(&runtime);
+    let values = (0..48).map(|row| format!("key-{row}")).collect::<Vec<_>>();
+    let input: ArrayRef = Arc::new(StringArray::from_iter_values(values.iter()));
+    let route = |keys: &mut KeyStore, start, length, limit| {
+        keys.route_rows(
+            &[input.slice(start, length)],
+            None,
+            limit,
+            false,
+            vec![7; length],
+            &mut || Ok(()),
+        )
+    };
+    let empty = keys.cut();
+    let prefix = route(&mut keys, 0, 16, 48).unwrap();
+    let cut = keys.cut();
+    let added = route(&mut keys, 16, 32, 48).unwrap();
+    assert_eq!(
+        prefix.iter().map(|id| id.index()).collect::<Vec<_>>(),
+        (0..16).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        added.iter().map(|id| id.index()).collect::<Vec<_>>(),
+        (16..48).collect::<Vec<_>>()
+    );
+    keys.rollback(cut);
+    assert_eq!(route(&mut keys, 0, 16, 16).unwrap(), prefix);
+    assert!(route(&mut keys, 16, 1, 16).is_err());
+    assert_eq!(route(&mut keys, 16, 32, 48).unwrap(), added);
+    keys.rollback(empty);
+    assert_eq!(route(&mut keys, 0, 16, 16).unwrap(), prefix);
+}
