@@ -951,10 +951,7 @@ fn test_tiny_ordered_append_merges_without_visiting_every_old_identity() {
     );
     let reads = super::runs::IDENTITY_READS.get();
     let matched = apply(&mut state, JoinSide::Right, &[0], &[0], &[7]);
-    assert_eq!(
-        values(&matched[0], 0),
-        (0..=ROWS).collect::<Vec<_>>()
-    );
+    assert_eq!(values(&matched[0], 0), (0..=ROWS).collect::<Vec<_>>());
     assert_eq!(values(&matched[0], 1), vec![7; times.len() + 1]);
     assert!(
         reads <= 32,
