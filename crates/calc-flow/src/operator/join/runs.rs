@@ -818,25 +818,25 @@ impl<'a> RunOutputContext<'a> {
     }
 }
 
-/// Complete immutable output for one prepared input morsel.
-#[derive(Debug)]
-pub(super) struct RunOutput {
-    pub(super) records: Vec<RecordBatch>,
-    pub(super) sequences: Vec<u64>,
-}
-
 pub(super) struct PreparedRuns {
     incoming_side: JoinSide,
     matched_rows: usize,
     row_ids: std::ops::Range<u64>,
     output_sequences: std::ops::Range<u64>,
-    outputs: Vec<RunOutput>,
+    outputs: Vec<Vec<Batch>>,
     update: Option<SideUpdate>,
     next_run: u64,
 }
 
 impl PreparedRuns {
-    pub(super) fn outputs(&self) -> &[RunOutput] {
+    pub(super) fn drain_outputs(&mut self) -> impl Iterator<Item = Batch> {
+        self.outputs
+            .iter_mut()
+            .flat_map(|batches| batches.drain(..))
+    }
+
+    #[cfg(test)]
+    pub(super) fn outputs(&self) -> &[Vec<Batch>] {
         &self.outputs
     }
 
@@ -844,7 +844,7 @@ impl PreparedRuns {
         self.matched_rows
     }
 
-    pub(super) fn commit(self, state: &mut RunState) -> Result<Vec<RunOutput>> {
+    pub(super) fn commit(self, state: &mut RunState) -> Result<Vec<Vec<Batch>>> {
         let Self {
             incoming_side,
             outputs,
@@ -1188,7 +1188,7 @@ impl RunState {
         projection: Option<&[usize]>,
         left_width: usize,
         budget: EdgeBudget,
-    ) -> Result<RunOutput> {
+    ) -> Result<Vec<Batch>> {
         self.apply_checked(
             incoming_side,
             incoming,
@@ -1204,7 +1204,7 @@ impl RunState {
         incoming: Incoming,
         output: RunOutputContext<'_>,
         check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<RunOutput> {
+    ) -> Result<Vec<Batch>> {
         let prepared = self.prepare_batch(incoming_side, vec![incoming], output, check)?;
         let mut outputs = prepared.commit(self)?;
         Ok(outputs.remove(0))
@@ -1261,19 +1261,18 @@ impl RunState {
         #[cfg(feature = "benchmark-internals")]
         drop(merge_span);
         let mut next_output = self.next_output;
+        let mut metadata = None;
         let mut outputs = Vec::with_capacity(prepared.len());
         for prepared in prepared {
             #[cfg(feature = "benchmark-internals")]
             let materialize_span = output
                 .trace
                 .map(|trace| trace.stage(&self.name, "run_materialize", prepared.probe.len()));
-            let records = prepared.materialize(self, &output, next_output, check)?;
+            let batches = prepared.materialize(self, &output, next_output, &mut metadata, check)?;
             #[cfg(feature = "benchmark-internals")]
             drop(materialize_span);
-            let sequences = output_sequence_range(next_output, records.len())?;
-            next_output = sequences.end;
-            let sequences = sequences.collect();
-            outputs.push(RunOutput { records, sequences });
+            next_output = next_output_sequence(next_output, batches.len())?;
+            outputs.push(batches);
         }
         check()?;
         Ok(PreparedRuns {
@@ -1389,12 +1388,11 @@ impl RunState {
     }
 }
 
-fn output_sequence_range(start: u64, count: usize) -> Result<std::ops::Range<u64>> {
+fn next_output_sequence(start: u64, count: usize) -> Result<u64> {
     let count = u64::try_from(count).map_err(|_| run_error("output sequence overflowed"))?;
-    let end = start
+    start
         .checked_add(count)
-        .ok_or_else(|| run_error("output sequence overflowed"))?;
-    Ok(start..end)
+        .ok_or_else(|| run_error("output sequence overflowed"))
 }
 
 impl Prepared {
@@ -1403,8 +1401,9 @@ impl Prepared {
         state: &RunState,
         output: &RunOutputContext<'_>,
         first_sequence: u64,
+        metadata: &mut Option<BatchMetadata>,
         check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<Vec<RecordBatch>> {
+    ) -> Result<Vec<Batch>> {
         check()?;
         if self.probe.len() == 0 {
             return Ok(Vec::new());
@@ -1421,20 +1420,28 @@ impl Prepared {
         };
         let ranges = self.ranges(output, &mut payloads, check)?;
         // Check planned ranges here; byte-budget splits are counted after materialization.
-        let sequences = output_sequence_range(first_sequence, ranges.len())?;
-        let mut records = Vec::with_capacity(ranges.len());
-        for (sequence, range) in sequences.zip(ranges) {
+        next_output_sequence(first_sequence, ranges.len())?;
+        let metadata = match metadata {
+            Some(template) => template,
+            slot @ None => slot.insert(BatchMetadata::new(
+                &state.name,
+                first_sequence,
+                BTreeMap::new(),
+            )?),
+        };
+        let mut batches = Vec::with_capacity(ranges.len());
+        for range in ranges {
             check()?;
             self.materialize_range(
-                &state.name,
+                metadata,
                 output,
                 &mut payloads,
                 range,
-                sequence,
-                &mut records,
+                first_sequence,
+                &mut batches,
             )?;
         }
-        Ok(records)
+        Ok(batches)
     }
 
     fn ranges(
@@ -1544,20 +1551,22 @@ impl Prepared {
 
     fn materialize_range(
         &self,
-        name: &str,
+        template: &BatchMetadata,
         output: &RunOutputContext<'_>,
         payloads: &mut RunPayloads<'_>,
         range: std::ops::Range<usize>,
-        sequence: u64,
-        records: &mut Vec<RecordBatch>,
+        first_sequence: u64,
+        batches: &mut Vec<Batch>,
     ) -> Result<()> {
-        let record = self.record_range(name, output, payloads, range.clone())?;
-        let metadata = BatchMetadata::new(name, sequence, BTreeMap::new())?;
-        let bytes = Batch::table(vec![record.clone()], metadata)?.estimated_bytes()?;
+        let record = self.record_range(template.source(), output, payloads, range.clone())?;
+        let sequence = next_output_sequence(first_sequence, batches.len())?;
+        let batch = Batch::table(vec![record], template.with_sequence(sequence))?;
+        let bytes = batch.estimated_bytes()?;
         if range.len() <= output.budget.max_rows && bytes <= output.budget.max_bytes {
-            records.push(record);
+            batches.push(batch);
             return Ok(());
         }
+        drop(batch);
         if range.len() == 1 {
             return Err(
                 OutputChunkErrors::STREAM_JOIN.over_budget_row(bytes, output.budget.max_bytes)
@@ -1565,14 +1574,21 @@ impl Prepared {
         }
         let middle = range.start + range.len() / 2;
         self.materialize_range(
-            name,
+            template,
             output,
             payloads,
             range.start..middle,
-            sequence,
-            records,
+            first_sequence,
+            batches,
         )?;
-        self.materialize_range(name, output, payloads, middle..range.end, sequence, records)
+        self.materialize_range(
+            template,
+            output,
+            payloads,
+            middle..range.end,
+            first_sequence,
+            batches,
+        )
     }
 
     fn record_range(

@@ -11,7 +11,7 @@ use super::{
 };
 use crate::operator::keyed::{KeySchema, KeyStore, MORSEL_ROWS};
 use crate::state::v4::native::{NativeCapture, NativePage, NativePageChange, NativePartition};
-use crate::{Batch, BatchMetadata, EventTime, Result, StreamCollector, StreamOperatorContext};
+use crate::{Batch, EventTime, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
     array::{BooleanArray, TimestampMicrosecondArray},
     record_batch::{RecordBatch, RecordBatchOptions},
@@ -528,7 +528,7 @@ impl RunCore {
         let cut = self.keys.cut();
         let prepared = self.prepare(operator, &plan, &admitted, context);
         drop(admitted);
-        let prepared = match prepared {
+        let mut prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.keys.rollback(cut);
@@ -563,7 +563,16 @@ impl RunCore {
                 return Err(error);
             }
         };
-        if let Err(error) = emit_prepared(operator, &prepared, context, output).await {
+        let delivery = {
+            #[cfg(feature = "benchmark-internals")]
+            let _emit = context.job().join_cpu_trace().stage(
+                &operator.name,
+                "run_emit",
+                prepared.matched_rows(),
+            );
+            emit_prepared(&mut prepared, context, output).await
+        };
+        if let Err(error) = delivery {
             self.keys.rollback(cut);
             return Err(error);
         }
@@ -778,28 +787,14 @@ fn retained_left_record(
 }
 
 async fn emit_prepared(
-    operator: &StreamJoinOperator,
-    prepared: &PreparedRuns,
+    prepared: &mut PreparedRuns,
     context: &StreamOperatorContext<'_>,
     output: &mut dyn StreamCollector,
 ) -> Result<()> {
-    #[cfg(feature = "benchmark-internals")]
-    let emit_span =
-        context
-            .job()
-            .join_cpu_trace()
-            .stage(&operator.name, "run_emit", prepared.matched_rows());
-    for item in prepared.outputs() {
-        for (record, sequence) in item.records.iter().zip(&item.sequences) {
-            context.check_cancelled()?;
-            let metadata = BatchMetadata::new(&operator.name, *sequence, BTreeMap::new())?;
-            output
-                .emit("output", Batch::table(vec![record.clone()], metadata)?)
-                .await?;
-        }
+    for batch in prepared.drain_outputs() {
+        context.check_cancelled()?;
+        output.emit("output", batch).await?;
     }
-    #[cfg(feature = "benchmark-internals")]
-    drop(emit_span);
     Ok(())
 }
 
@@ -917,8 +912,8 @@ mod tests {
     #[tokio::test]
     async fn run_route_trace_counts_admitted_row_visits_across_morsels() {
         use crate::{
-            CancellationToken, EdgeCollector, JoinStateLimits, JoinTimeBounds, OperatorMetadata,
-            StreamJobContext, StreamJoinSpec, StreamOperator,
+            BatchMetadata, CancellationToken, EdgeCollector, JoinStateLimits, JoinTimeBounds,
+            OperatorMetadata, StreamJobContext, StreamJoinSpec, StreamOperator,
         };
         use std::time::Duration;
 

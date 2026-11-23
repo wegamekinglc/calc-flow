@@ -56,6 +56,48 @@ async fn test_band_gathers_only_its_four_operands() {
 }
 
 #[tokio::test]
+async fn test_queue_admission_reuses_measured_join_envelopes() {
+    let job = job();
+    let context = hot_progress_context(&job, -1, EdgeBudget::new(1, 1024).unwrap());
+    let input = input(band_history([2.0, 3.0]));
+    let mut allocations = Vec::new();
+    for fused in [false, true] {
+        let mut operator = band_operator(fused);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        for ingress in ["left", "right"] {
+            operator
+                .process_data(ingress, input.clone(), &context, &mut collector)
+                .await
+                .unwrap();
+        }
+        let messages = collector.drain("output");
+        assert_eq!(messages.len(), 2);
+        let mut costs = [crate::EnvelopeCost::ZERO; 2];
+        let measured = allocation_counter::measure(|| {
+            for (cost, message) in costs.iter_mut().zip(&messages) {
+                *cost = crate::EnvelopeCost::of_message(message).unwrap();
+            }
+        });
+        allocations.push(measured.count_total);
+        for (sequence, (message, cost)) in messages.iter().zip(costs).enumerate() {
+            let batch = message.as_data().unwrap();
+            let record = &batch.table_payload().unwrap().batches()[0];
+            let bytes = record
+                .columns()
+                .iter()
+                .map(|column| column.to_data().get_slice_memory_size().unwrap())
+                .sum();
+            assert_eq!(cost, crate::EnvelopeCost::new(1, 1, bytes));
+            assert_eq!(
+                batch.metadata().sequence(),
+                u64::try_from(sequence).unwrap()
+            );
+        }
+    }
+    assert_eq!(allocations, [0, 0]);
+}
+
+#[tokio::test]
 async fn test_band_budget_charges_emitted_fields_and_retries_the_whole_input() {
     let mut operator = band_operator(true);
     let job = job();
@@ -194,19 +236,7 @@ fn nullable_quote(prices: Vec<Option<f64>>) -> RecordBatch {
     .unwrap()
 }
 
-#[tokio::test]
-async fn test_nullable_products_preserve_bits_and_pair_order_under_the_final_byte_budget() {
-    let left_values = [
-        Some(-0.0),
-        Some(f64::from_bits(0x7ff8_0000_0000_0042)),
-        None,
-        Some(f64::INFINITY),
-    ];
-    let right_values = [Some(-2.0), None];
-    let left = nullable_quote(left_values.to_vec());
-    let right = nullable_quote(right_values.to_vec())
-        .project(&[3, 2, 0, 1])
-        .unwrap();
+fn nullable_band_operator(left: &RecordBatch, right: &RecordBatch) -> StreamJoinOperator {
     let mut operator =
         StreamJoinOperator::new("hot-band", left.schema(), right.schema(), band_spec()).unwrap();
     operator
@@ -225,8 +255,31 @@ async fn test_nullable_products_preserve_bits_and_pair_order_under_the_final_byt
         )
         .unwrap();
     operator.enable_native_checkpoint().unwrap();
+    operator
+}
+
+#[tokio::test]
+async fn test_nullable_products_preserve_bits_and_pair_order_under_the_final_byte_budget() {
+    for (rows, bytes) in [(4, 97), (8, 192)] {
+        assert_nullable_products(EdgeBudget::new(rows, bytes).unwrap()).await;
+    }
+}
+
+async fn assert_nullable_products(budget: EdgeBudget) {
+    let left_values = [
+        Some(-0.0),
+        Some(f64::from_bits(0x7ff8_0000_0000_0042)),
+        None,
+        Some(f64::INFINITY),
+    ];
+    let right_values = [Some(-2.0), None];
+    let left = nullable_quote(left_values.to_vec());
+    let right = nullable_quote(right_values.to_vec())
+        .project(&[3, 2, 0, 1])
+        .unwrap();
+    let mut operator = nullable_band_operator(&left, &right);
     let job = job();
-    let context = hot_progress_context(&job, -1, EdgeBudget::new(4, 97).unwrap());
+    let context = hot_progress_context(&job, -1, budget);
     let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
     for offset in [0, 2] {
         operator
@@ -260,6 +313,10 @@ async fn test_nullable_products_preserve_bits_and_pair_order_under_the_final_byt
     for (right_row, message) in messages.iter().enumerate() {
         let batch = message.as_data().unwrap();
         assert_eq!(batch.estimated_bytes().unwrap(), 97);
+        assert_eq!(
+            batch.metadata().sequence(),
+            u64::try_from(right_row).unwrap()
+        );
         let record = &batch.table_payload().unwrap().batches()[0];
         let sequence = |column: usize| {
             record
