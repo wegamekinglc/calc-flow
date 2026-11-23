@@ -1,0 +1,276 @@
+{
+  "case": "native dual-SMA single-row push",
+  "date": "2026-11-23",
+  "environment": {
+    "cpu": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "kernel": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "memory_bytes": 33453572096,
+    "omp_threads": 1,
+    "openblas_threads": 1,
+    "resources": [
+      {
+        "available_bytes": 30993489920,
+        "cpu": 4,
+        "cpu_busy": 0.0,
+        "host_busy": 3.609375,
+        "interval_seconds": 3.0086853730026633,
+        "major_faults": 4,
+        "preflight": true,
+        "sibling_busy": 0.0,
+        "siblings": [
+          5
+        ],
+        "suitable": true,
+        "swap_in_pages": 10,
+        "swap_out_pages": 0,
+        "swap_pages": 10,
+        "utc_seconds": 1795431441.0947928
+      },
+      {
+        "available_bytes": 30995394560,
+        "cpu": 4,
+        "cpu_busy": 24.2,
+        "host_busy": 4.584375,
+        "interval_seconds": 1.002814725972712,
+        "major_faults": 1,
+        "preflight": false,
+        "sibling_busy": 0.0,
+        "siblings": [
+          5
+        ],
+        "suitable": true,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "swap_pages": 0,
+        "utc_seconds": 1795431442.0977633
+      }
+    ],
+    "tokio_threads": 1,
+    "worker_affinity": "single CPU selected by resource preflight"
+  },
+  "experiment_wall_seconds": 7.390583375981078,
+  "fixture_generator": {
+    "numpy": "2.5.1",
+    "offline_only": true,
+    "psutil": "7.2.2",
+    "pyarrow": "24.0.0",
+    "python": "3.13.9",
+    "python_package_source": "453ed531756c18fc8c499f1eac268bd068cbe9b0"
+  },
+  "fixture_sha256": {
+    "expected.arrow": "c86c9e5c2141776e9881d7467da417f7fe4f19ebdd594df2e5339172cb2fe738",
+    "inputs.arrow": "90da6c27244354bacbc53983ca2d1f71be2654ee3b7943779843648197ebe253",
+    "project.json": "57e36971d02b987132f4b6ab8f8fae4c9aa0f74de2c53660b2f3ead67eb6a5b6"
+  },
+  "no_clock_verification": {
+    "baseline": {
+      "corrupted_final_null_rejected": true,
+      "functional_checks_seconds": 0.07977795705664903,
+      "happy_path": true,
+      "no_timed_pushes": true,
+      "process_wall_seconds": 0.21,
+      "side": "baseline"
+    },
+    "candidate": {
+      "corrupted_final_null_rejected": null,
+      "functional_checks_seconds": 0.0207303169881925,
+      "happy_path": true,
+      "no_timed_pushes": true,
+      "process_wall_seconds": 0.74,
+      "side": "candidate"
+    }
+  },
+  "official_outcome": {
+    "binary_sha256": {
+      "baseline": "301cff110bb5ce26ac787a87fda350853481280e1e8618cbf655d211f69d0479",
+      "candidate": "4e378e797b23fc884986d5050fc6a4938bb571d9335853f2af3aba20a0fc6d4b"
+    },
+    "controller_elapsed_seconds": 5.346366044017486,
+    "kernel": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]",
+    "state": "completed"
+  },
+  "process_snapshots": {
+    "after": {
+      "competing_processes": [],
+      "utc": "2026-11-23T10:57:22.155884+00:00"
+    },
+    "before": {
+      "competing_processes": [],
+      "utc": "2026-11-23T10:57:15.776472+00:00"
+    }
+  },
+  "registered_formal_seconds": 300,
+  "registration_sha256": "72734e80b572f04dd6076fc7f3e15595f975335c3fc224b49393b08c52ed7b5d",
+  "release_codegen": {
+    "baseline": {
+      "declared_build_environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_INCREMENTAL": "0"
+      },
+      "rustc_codegen_arguments": [
+        "opt-level=3",
+        "lto=thin",
+        "codegen-units=1"
+      ]
+    },
+    "candidate": {
+      "declared_build_environment": {
+        "CARGO_BUILD_JOBS": "2",
+        "CARGO_INCREMENTAL": "0"
+      },
+      "rustc_codegen_arguments": [
+        "opt-level=3",
+        "lto=thin",
+        "codegen-units=1"
+      ]
+    }
+  },
+  "source_sha256": {
+    "collect.py": "54659c5f1bb330248c2e48ef85b9dd4dc6abe00b5e1c47c9c95c5f9b2d9fc9da",
+    "fixture.py": "21cc10f865c38186ee3e8281a0e1bea17d69a41d04e0873693a355f588b9ef46",
+    "worker.rs": "c53357745b70165b66be89d3a89f12acd630491b013e56d0ac64f39f9f452946"
+  },
+  "sources": {
+    "baseline": {
+      "CARGO_BUILD_JOBS": "2",
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "CARGO_INCREMENTAL": "0",
+      "RUSTFLAGS": null,
+      "arrow_ipc_source_identical_to_baseline": true,
+      "arrow_ipc_source_tree": "b2d83d4af04596502daa62f6ce8e9f9c81f24f12",
+      "binary_sha256": "301cff110bb5ce26ac787a87fda350853481280e1e8618cbf655d211f69d0479",
+      "build_command": "cargo build --locked --release -p calc-flow --example native_session_sample --message-format=json-render-diagnostics",
+      "build_seconds": 995.9488117694855,
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "lockfile_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+      "overlay_path": "crates/calc-flow/examples/native_session_sample.rs",
+      "revision": "4c3cc98e2ebaa8834b8f12931c33da64856daaae",
+      "target_compiled": {
+        "calc_flow": {
+          "features": [],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "source": "crates/calc-flow/src/lib.rs",
+          "target": "calc_flow"
+        },
+        "native_session_sample": {
+          "features": [],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "source": "crates/calc-flow/examples/native_session_sample.rs",
+          "target": "native_session_sample"
+        }
+      },
+      "tree": "ee9804feb9a57a50268a3dbbed38c2c524466942",
+      "vendor_tree": "54d9ca07618dde0b3060b7f36f7984638e8fc618",
+      "worker_source_sha256": "c53357745b70165b66be89d3a89f12acd630491b013e56d0ac64f39f9f452946"
+    },
+    "candidate": {
+      "CARGO_BUILD_JOBS": "2",
+      "CARGO_ENCODED_RUSTFLAGS": null,
+      "CARGO_INCREMENTAL": "0",
+      "RUSTFLAGS": null,
+      "arrow_ipc_source_identical_to_baseline": true,
+      "arrow_ipc_source_tree": "b2d83d4af04596502daa62f6ce8e9f9c81f24f12",
+      "binary_sha256": "4e378e797b23fc884986d5050fc6a4938bb571d9335853f2af3aba20a0fc6d4b",
+      "build_command": "cargo build --locked --release -p calc-flow --example native_session_sample --message-format=json-render-diagnostics (all three patch.crates-io paths resolve to the baseline vendor tree)",
+      "build_seconds": 1046.309182882309,
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "lockfile_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+      "overlay_path": "crates/calc-flow/examples/native_session_sample.rs",
+      "revision": "ceee4494b85ee49363bac405ff58029159c89f8d",
+      "target_compiled": {
+        "calc_flow": {
+          "features": [],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "source": "crates/calc-flow/src/lib.rs",
+          "target": "calc_flow"
+        },
+        "native_session_sample": {
+          "features": [],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "source": "crates/calc-flow/examples/native_session_sample.rs",
+          "target": "native_session_sample"
+        }
+      },
+      "tree": "487172223b97746bcbd8a97fc0159cc5fabf3971",
+      "vendor_tree": "54d9ca07618dde0b3060b7f36f7984638e8fc618",
+      "worker_source_sha256": "c53357745b70165b66be89d3a89f12acd630491b013e56d0ac64f39f9f452946"
+    }
+  },
+  "statistics": {
+    "block_median_seconds": {
+      "base_p50": 5.6905e-06,
+      "change_percent": -8.527370178367455,
+      "head_max": 5.532e-06,
+      "head_min": 4.8605e-06,
+      "head_p50": 5.20525e-06,
+      "head_p95": 5.496375e-06,
+      "round_changes": [
+        -9.78291064490801,
+        -7.9089721766258165
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": -2.123142250530796,
+          "low": -11.948925890777318,
+          "median": -9.78291064490801
+        },
+        {
+          "coverage": 0.978515625,
+          "high": -4.723544489198106,
+          "low": -11.427343078245922,
+          "median": -7.9089721766258165
+        }
+      ],
+      "round_min_changes": [
+        -12.470736538807847,
+        -6.765676567656764
+      ],
+      "rows_per_second": null,
+      "samples": 20,
+      "verdict": "no-confirmed-regression"
+    },
+    "pooled_nanoseconds": {
+      "baseline": {
+        "count": 1280,
+        "p50": 5691.5,
+        "p95": 12370.199999999999
+      },
+      "candidate": {
+        "count": 1280,
+        "p50": 5184.5,
+        "p95": 11914.3
+      }
+    }
+  },
+  "worker_log_complete": true
+}
