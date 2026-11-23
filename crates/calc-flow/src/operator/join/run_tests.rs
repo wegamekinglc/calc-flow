@@ -55,7 +55,7 @@ fn state(match_limit: u64) -> RunState {
     .unwrap()
 }
 
-fn output_schema() -> Arc<Schema> {
+pub(super) fn output_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new("left_value", DataType::Int64, false),
         Field::new("right_value", DataType::Int64, false),
@@ -872,7 +872,7 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
     assert_eq!(values(&output.records[0], 2), [100, 100]);
 }
 
-fn eviction_state() -> RunState {
+pub(super) fn eviction_state() -> RunState {
     let mut state = RunState::new(
         "run-test",
         JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
