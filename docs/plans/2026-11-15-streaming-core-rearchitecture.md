@@ -13,6 +13,9 @@ review 基线为 `main` 的 `39cab2fb`，文中的 `路径:行号` 均对应该�
 
 ## 执行记录
 
+重构合入后的小阶段、各自的 Rust 与 Python 实测以及后续目标见
+[增量计算性能实施记录](2026-11-23-incremental-performance.md)。
+
 - 交付方式（2026-11-16 用户决定）：整个方案只保留一个[集成 PR #619](https://github.com/wegamekinglc/calc-flow/pull/619)，
   所有阶段在同一分支上累积，最终按整体重构效果评估。原 #617、#618 已作为被集成 PR 取代而关闭。
 - P1 `StreamSession`：原 PR #618 的提交已并入 #619，交付公开的同步 push API，
