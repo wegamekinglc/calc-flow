@@ -23,7 +23,7 @@ use datafusion::{
 };
 use futures::stream;
 
-use super::{AsofSpec, BandColumn, BandOutput, BandSpec, JoinSpec, NativeInput};
+use super::{AsofSpec, BandSpec, JoinSpec, NativeInput};
 
 pub(super) fn execute(
     spec: &JoinSpec,
@@ -285,7 +285,6 @@ struct BandEntry {
     time: i64,
     sequence: Option<u64>,
     price: Option<f64>,
-    row: usize,
 }
 
 #[derive(Debug)]
@@ -383,7 +382,6 @@ fn band_entry(time: i64, row: usize, sequences: &UInt64Array, prices: &Float64Ar
         time,
         sequence: (!sequences.is_null(row)).then(|| sequences.value(row)),
         price: (!prices.is_null(row)).then(|| prices.value(row)),
-        row,
     }
 }
 
@@ -469,8 +467,6 @@ pub(super) struct BandShared {
 #[derive(Debug)]
 pub(super) struct BandPrepared {
     bands: Arc<BandMap>,
-    left: RecordBatch,
-    right: RecordBatch,
     left_keys: StringArray,
     left_times: Arc<[Option<i64>]>,
     left_sequences: UInt64Array,
@@ -546,8 +542,6 @@ impl BandPrepared {
             band_left_inputs(&left, spec)?;
         Ok(Self {
             bands,
-            left,
-            right,
             left_keys,
             left_times,
             left_sequences,
@@ -558,34 +552,17 @@ impl BandPrepared {
 }
 
 struct BandRows {
-    len: usize,
     sequences: Vec<Option<u64>>,
     right_sequences: Vec<Option<u64>>,
     values: Vec<Option<f64>>,
-    left_indices: Vec<u64>,
-    right_indices: Vec<u64>,
 }
 
 impl BandRows {
-    fn new(output: &BandOutput, capacity: usize) -> Self {
-        if matches!(output, BandOutput::Values) {
-            Self {
-                len: 0,
-                sequences: Vec::with_capacity(capacity),
-                right_sequences: Vec::with_capacity(capacity),
-                values: Vec::with_capacity(capacity),
-                left_indices: Vec::new(),
-                right_indices: Vec::new(),
-            }
-        } else {
-            Self {
-                len: 0,
-                sequences: Vec::new(),
-                right_sequences: Vec::new(),
-                values: Vec::new(),
-                left_indices: Vec::with_capacity(capacity),
-                right_indices: Vec::with_capacity(capacity),
-            }
+    fn new(capacity: usize) -> Self {
+        Self {
+            sequences: Vec::with_capacity(capacity),
+            right_sequences: Vec::with_capacity(capacity),
+            values: Vec::with_capacity(capacity),
         }
     }
 }
@@ -593,9 +570,6 @@ impl BandRows {
 struct BandState {
     schema: SchemaRef,
     bands: Arc<BandMap>,
-    left: RecordBatch,
-    right: RecordBatch,
-    output: BandOutput,
     cursors: Vec<Vec<usize>>,
     left_keys: StringArray,
     left_times: Arc<[Option<i64>]>,
@@ -641,9 +615,6 @@ impl BandState {
         Ok(Self {
             schema,
             bands: Arc::clone(&prepared.bands),
-            left: prepared.left.clone(),
-            right: prepared.right.clone(),
-            output: spec.output.clone(),
             cursors,
             left_keys: prepared.left_keys.clone(),
             left_times: Arc::clone(&prepared.left_times),
@@ -736,29 +707,21 @@ impl BandState {
     ) {
         let entries = &self.bands.entries[band_index].entries;
         let mut next = first;
-        while rows.len < self.batch_size
+        while rows.values.len() < self.batch_size
             && entries.get(next).is_some_and(|entry| entry.time == target)
         {
             let entry = entries[next];
-            if matches!(self.output, BandOutput::Values) {
-                rows.sequences.push(
-                    (!self.left_sequences.is_null(self.row))
-                        .then(|| self.left_sequences.value(self.row)),
-                );
-                rows.right_sequences.push(entry.sequence);
-                let left_price =
-                    (!self.left_prices.is_null(self.row)).then(|| self.left_prices.value(self.row));
-                rows.values.push(match (left_price, entry.price) {
-                    (Some(left), Some(right)) => Some(left * right),
-                    _ => None,
-                });
-            } else {
-                rows.left_indices
-                    .push(u64::try_from(self.row).expect("row fits u64"));
-                rows.right_indices
-                    .push(u64::try_from(entry.row).expect("row fits u64"));
-            }
-            rows.len += 1;
+            rows.sequences.push(
+                (!self.left_sequences.is_null(self.row))
+                    .then(|| self.left_sequences.value(self.row)),
+            );
+            rows.right_sequences.push(entry.sequence);
+            let left_price =
+                (!self.left_prices.is_null(self.row)).then(|| self.left_prices.value(self.row));
+            rows.values.push(match (left_price, entry.price) {
+                (Some(left), Some(right)) => Some(left * right),
+                _ => None,
+            });
             next += 1;
         }
         self.next_match = Some(next);
@@ -768,9 +731,8 @@ impl BandState {
     }
 
     fn next_batch(&mut self) -> DataFusionResult<Option<RecordBatch>> {
-        let output = self.output.clone();
-        let mut rows = BandRows::new(&output, self.batch_size);
-        while rows.len < self.batch_size {
+        let mut rows = BandRows::new(self.batch_size);
+        while rows.values.len() < self.batch_size {
             let Some((band_index, time, target)) = self.next_target()? else {
                 break;
             };
@@ -786,31 +748,14 @@ impl BandState {
             );
             self.append_matches(band_index, first, target, &mut rows);
         }
-        if rows.len == 0 {
+        if rows.values.is_empty() {
             return Ok(None);
         }
-        let columns: Vec<ArrayRef> = match output {
-            BandOutput::Values => vec![
-                Arc::new(UInt64Array::from_iter(rows.sequences)),
-                Arc::new(UInt64Array::from_iter(rows.right_sequences)),
-                Arc::new(Float64Array::from_iter(rows.values)),
-            ],
-            BandOutput::Columns(projection) => {
-                let left_indices = UInt64Array::from_iter_values(rows.left_indices);
-                let right_indices = UInt64Array::from_iter_values(rows.right_indices);
-                projection
-                    .iter()
-                    .map(|column| match column {
-                        BandColumn::Left(index) => {
-                            take(self.left.column(*index), &left_indices, None).map_err(arrow)
-                        }
-                        BandColumn::Right(index) => {
-                            take(self.right.column(*index), &right_indices, None).map_err(arrow)
-                        }
-                    })
-                    .collect::<DataFusionResult<Vec<_>>>()?
-            }
-        };
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(UInt64Array::from_iter(rows.sequences)),
+            Arc::new(UInt64Array::from_iter(rows.right_sequences)),
+            Arc::new(Float64Array::from_iter(rows.values)),
+        ];
         RecordBatch::try_new(Arc::clone(&self.schema), columns)
             .map(Some)
             .map_err(arrow)

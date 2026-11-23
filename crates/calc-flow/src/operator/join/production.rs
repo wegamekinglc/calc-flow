@@ -19,9 +19,15 @@ use datafusion::arrow::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+enum DeferredLeft {
+    Disabled,
+    Ready,
+    Buffered(Batch),
+}
+
 pub(super) struct RunCore {
     state: RunState,
-    hot: Option<super::hot::HotJoinCore>,
+    deferred_left: DeferredLeft,
     keys: KeyStore,
     pages: NativePageCache,
     key_page: Option<(usize, NativePage)>,
@@ -49,7 +55,13 @@ impl RunCore {
         );
         Ok(Self {
             state: RunState::new(&operator.name, operator.spec.limits, operator.spec.bounds)?,
-            hot: super::hot::HotJoinCore::new(operator),
+            deferred_left: if super::hot::projection_kind(operator)
+                == Some(super::hot::HotKind::Equi)
+            {
+                DeferredLeft::Ready
+            } else {
+                DeferredLeft::Disabled
+            },
             keys,
             pages: NativePageCache::default(),
             key_page: None,
@@ -60,22 +72,13 @@ impl RunCore {
         })
     }
 
-    fn migrate_hot(&mut self, operator: &mut StreamJoinOperator) -> Result<()> {
-        let Some([left, right]) = self
-            .hot
-            .as_ref()
-            .filter(|hot| hot.has_history())
-            .map(super::hot::HotJoinCore::history)
-        else {
+    fn migrate_deferred_left(&mut self, operator: &mut StreamJoinOperator) -> Result<()> {
+        let DeferredLeft::Buffered(batch) = &self.deferred_left else {
             return Ok(());
         };
         let mut migrated = Self::new(operator)?;
-        migrated.hot = None;
-        for (side, batch) in [(JoinSide::Left, left), (JoinSide::Right, right)] {
-            if let Some(batch) = batch {
-                migrated.seed_hot(operator, side, &batch)?;
-            }
-        }
+        migrated.deferred_left = DeferredLeft::Disabled;
+        migrated.seed_left(operator, batch)?;
         migrated.state.restore_counters(
             [
                 operator.state.next_left_row_id,
@@ -103,30 +106,14 @@ impl RunCore {
         Ok(())
     }
 
-    fn seed_hot(
-        &mut self,
-        operator: &StreamJoinOperator,
-        side: JoinSide,
-        batch: &Batch,
-    ) -> Result<()> {
+    fn seed_left(&mut self, operator: &StreamJoinOperator, batch: &Batch) -> Result<()> {
         let compiled = operator.retained_compiled();
-        let (event_time, keys) = if side == JoinSide::Left {
-            (
-                compiled.left_event_time_index,
-                compiled.left_key_indices.as_slice(),
-            )
-        } else {
-            (
-                compiled.right_event_time_index,
-                compiled.right_key_indices.as_slice(),
-            )
-        };
-        let mut next_row_id = self.state.next_row_id(side);
+        let mut next_row_id = self.state.next_row_id(JoinSide::Left);
         let mut incoming = Vec::new();
         for record in batch.table_payload()?.batches() {
-            let record = retained_hot_record(operator, side, record)?;
+            let record = retained_left_record(operator, record)?;
             let times = record
-                .column(event_time)
+                .column(compiled.left_event_time_index)
                 .as_any()
                 .downcast_ref::<TimestampMicrosecondArray>()
                 .expect("hot Join time is microseconds");
@@ -161,7 +148,7 @@ impl RunCore {
                 let chunk = Incoming::route(
                     RouteInput::new(
                         &record.slice(start, rows),
-                        keys,
+                        &compiled.left_key_indices,
                         (0..rows).collect(),
                         times,
                         row_ids,
@@ -190,9 +177,9 @@ impl RunCore {
             operator.retained_schema(0).fields().len(),
             crate::EdgeBudget::default(),
         );
-        let prepared = self
-            .state
-            .prepare_batch(side, incoming, output, &mut || Ok(()))?;
+        let prepared =
+            self.state
+                .prepare_batch(JoinSide::Left, incoming, output, &mut || Ok(()))?;
         drop(prepared.commit(&mut self.state)?);
         Ok(())
     }
@@ -210,9 +197,9 @@ impl RunCore {
                     .is_some_and(|progress| progress.state() == crate::IngressState::Ended)
             });
         if terminal {
-            self.hot = None;
+            self.deferred_left = DeferredLeft::Disabled;
         } else {
-            self.migrate_hot(operator)?;
+            self.migrate_deferred_left(operator)?;
         }
         let mut metrics = operator.state.metrics.clone();
         for side in [JoinSide::Left, JoinSide::Right] {
@@ -312,7 +299,7 @@ impl RunCore {
             segments,
             &mut core.keys,
         )?;
-        core.hot = None;
+        core.deferred_left = DeferredLeft::Disabled;
         Ok(core)
     }
 
@@ -408,7 +395,7 @@ impl RunCore {
             operator.state.metrics.match_limit_failures,
         );
         if core.state.rows(JoinSide::Left) + core.state.rows(JoinSide::Right) > 0 {
-            core.hot = None;
+            core.deferred_left = DeferredLeft::Disabled;
         }
         Ok(core)
     }
@@ -478,7 +465,7 @@ impl RunCore {
 
     #[cfg(test)]
     pub(super) fn hot_enabled(&self) -> bool {
-        self.hot.is_some()
+        !matches!(self.deferred_left, DeferredLeft::Disabled)
     }
 
     #[cfg(test)]
@@ -494,20 +481,12 @@ impl RunCore {
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let requires_generic = self
-            .hot
-            .as_ref()
-            .is_some_and(|hot| hot.requires_generic(ingress));
-        if requires_generic
-            || self
-                .hot
-                .as_ref()
-                .is_some_and(|hot| hot.needs_migration(ingress))
-        {
-            self.migrate_hot(operator)?;
-            if requires_generic {
-                self.hot = None;
-            }
+        if matches!(
+            (&self.deferred_left, ingress),
+            (DeferredLeft::Buffered(_), "left" | "right") | (DeferredLeft::Ready, "right")
+        ) {
+            self.migrate_deferred_left(operator)?;
+            self.deferred_left = DeferredLeft::Disabled;
         }
         #[cfg(feature = "benchmark-internals")]
         let admit_span =
@@ -528,23 +507,15 @@ impl RunCore {
             .await?;
         #[cfg(feature = "benchmark-internals")]
         drop(admit_span);
-        if let Some(input) = prepare_hot_input(
-            operator,
-            &plan,
-            batch,
-            &bundle,
-            self.hot.is_some(),
-            &mut self.keys,
-        )? {
-            let hot = self
-                .hot
-                .as_mut()
-                .expect("hot admission requires a hot core");
-            return hot.process(operator, input, context, output).await;
-        }
-        if self.hot.is_some() {
-            self.migrate_hot(operator)?;
-            self.hot = None;
+        if matches!(self.deferred_left, DeferredLeft::Ready) {
+            if let Some(metrics) = deferred_left_metrics(operator, batch, &bundle, &mut self.keys)?
+            {
+                self.deferred_left = DeferredLeft::Buffered(batch.clone());
+                operator.state.next_left_row_id = bundle.next_row_id;
+                operator.state.metrics.left = metrics;
+                return Ok(());
+            }
+            self.deferred_left = DeferredLeft::Disabled;
         }
         self.process_admitted(operator, plan, bundle, context, output)
             .await
@@ -674,12 +645,8 @@ impl RunCore {
         ingress: &str,
         progress: crate::IngressProgress,
     ) -> Result<()> {
-        if self
-            .hot
-            .as_ref()
-            .is_some_and(super::hot::HotJoinCore::has_history)
-        {
-            self.migrate_hot(operator)?;
+        if matches!(self.deferred_left, DeferredLeft::Buffered(_)) {
+            self.migrate_deferred_left(operator)?;
         }
         let (side, extension) = match ingress {
             "left" => (JoinSide::Right, operator.spec.bounds.before_micros),
@@ -744,46 +711,33 @@ impl RunCore {
     }
 }
 
-fn prepare_hot_input<'a>(
+fn deferred_left_metrics(
     operator: &StreamJoinOperator,
-    plan: &super::SidePlan,
-    batch: &'a Batch,
-    bundle: &'a super::AdmissionBundle,
-    enabled: bool,
+    batch: &Batch,
+    bundle: &super::AdmissionBundle,
     key_store: &mut KeyStore,
-) -> Result<Option<super::hot::HotInput<'a>>> {
-    if !enabled
-        || bundle.admitted.len() != batch.num_rows()
-        || !bundle.admitted.iter().all(|row| row.retain)
+) -> Result<Option<SideMetrics>> {
+    if bundle.admitted.len() != batch.num_rows() || !bundle.admitted.iter().all(|row| row.retain) {
+        return Ok(None);
+    }
+    let (rows, bytes) = super::runs::hot_batch_charge(
+        batch,
+        &operator.retained_compiled().left_key_indices,
+        key_store,
+    )?;
+    let rows =
+        u64::try_from(rows).map_err(|_| counter_overflow(&operator.name, "hot retained rows"))?;
+    let bytes =
+        u64::try_from(bytes).map_err(|_| counter_overflow(&operator.name, "hot retained bytes"))?;
+    if rows > operator.spec.limits.max_state_rows_per_side()
+        || bytes > operator.spec.limits.max_state_bytes_per_side()
     {
         return Ok(None);
     }
-    let compiled = operator.retained_compiled();
-    let keys = if plan.incoming_is_left {
-        &compiled.left_key_indices
-    } else {
-        &compiled.right_key_indices
-    };
-    let charge = super::runs::hot_batch_charge(batch, keys, key_store)?;
-    let within_rows = u64::try_from(charge.0).unwrap_or(u64::MAX)
-        <= operator.spec.limits.max_state_rows_per_side();
-    let within_bytes = u64::try_from(charge.1).unwrap_or(u64::MAX)
-        <= operator.spec.limits.max_state_bytes_per_side();
-    if !(within_rows && within_bytes) {
-        return Ok(None);
-    }
-    let side = if plan.incoming_is_left {
-        JoinSide::Left
-    } else {
-        JoinSide::Right
-    };
-    Ok(Some(super::hot::HotInput {
-        side,
-        batch,
-        next_row_id: bundle.next_row_id,
-        metrics: bundle.metrics.clone(),
-        charge,
-    }))
+    let mut metrics = bundle.metrics.clone();
+    metrics.retained_rows = rows;
+    metrics.retained_bytes = bytes;
+    Ok(Some(metrics))
 }
 
 fn run_output_schema(operator: &StreamJoinOperator) -> &SchemaRef {
@@ -796,12 +750,11 @@ fn run_output_schema(operator: &StreamJoinOperator) -> &SchemaRef {
     }
 }
 
-fn retained_hot_record(
+fn retained_left_record(
     operator: &StreamJoinOperator,
-    side: JoinSide,
     record: &RecordBatch,
 ) -> Result<RecordBatch> {
-    let schema = operator.retained_schema(side.index());
+    let schema = operator.retained_schema(0);
     let columns = schema
         .fields()
         .iter()
