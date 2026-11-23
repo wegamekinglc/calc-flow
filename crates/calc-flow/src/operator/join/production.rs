@@ -554,13 +554,16 @@ impl RunCore {
         &mut self,
         operator: &mut StreamJoinOperator,
         plan: super::SidePlan,
-        mut bundle: super::AdmissionBundle,
+        bundle: super::AdmissionBundle,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let metrics = std::mem::take(&mut bundle.metrics);
+        let super::AdmissionBundle {
+            metrics, admitted, ..
+        } = bundle;
         let cut = self.keys.cut();
-        let prepared = self.prepare(operator, &plan, &bundle.admitted, context);
+        let prepared = self.prepare(operator, &plan, &admitted, context);
+        drop(admitted);
         let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {

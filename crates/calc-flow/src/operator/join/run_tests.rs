@@ -126,6 +126,106 @@ fn test_run_probe_orders_locators_by_time_then_physical_row_id() {
 }
 
 #[test]
+fn test_prepared_outputs_release_unretained_input_before_commit() {
+    let (mut state, _) = fanout_state(2);
+    let right = record(&[1], &[100]);
+    let key = Arc::downgrade(right.column(0));
+    let input = incoming(
+        &right,
+        vec![0],
+        vec![GroupId::new(0).unwrap()],
+        &[10],
+        &[0],
+        vec![false],
+        1,
+    );
+    drop(right);
+    let prepared = state
+        .prepare_batch(
+            JoinSide::Right,
+            vec![input],
+            RunOutputContext::new(&output_schema(), Some(&[1, 3]), 2, EdgeBudget::default()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(key.strong_count(), 0);
+    assert_eq!(prepared.matched_rows(), 2);
+    assert_eq!(state.next_row_id(JoinSide::Right), 0);
+    let output = prepared.commit(&mut state).unwrap();
+    assert_eq!(values(&output[0].records[0], 0), [0, 1]);
+    assert_eq!(values(&output[0].records[0], 1), [100, 100]);
+    assert_eq!(output[0].sequences, [0]);
+    assert_eq!(state.next_row_id(JoinSide::Right), 1);
+}
+
+#[test]
+fn test_later_morsel_sequence_overflow_fails_before_emission() {
+    let (mut state, first) = fanout_state(3);
+    state.restore_counters([3, 0], u64::MAX - 3, 0);
+    let second = incoming(
+        &record(&[1], &[200]),
+        vec![0],
+        vec![GroupId::new(0).unwrap()],
+        &[10],
+        &[1],
+        vec![false],
+        2,
+    );
+    let error = state
+        .prepare_batch(
+            JoinSide::Right,
+            vec![first, second],
+            RunOutputContext::new(
+                &output_schema(),
+                Some(&[1, 3]),
+                2,
+                EdgeBudget::new(1, 4096).unwrap(),
+            ),
+            &mut || Ok(()),
+        )
+        .err()
+        .expect("second morsel exceeds the output sequence range");
+    assert!(
+        error.to_string().contains("output sequence overflowed"),
+        "{error}"
+    );
+    assert_eq!(state.next_output_sequence(), u64::MAX - 3);
+    assert_eq!(state.next_row_id(JoinSide::Right), 0);
+}
+
+#[test]
+fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
+    let mut state = state(10);
+    let row = record(&[1], &[100]);
+    let schema = output_schema();
+    let prepare = |state: &mut RunState, row_id| {
+        let input = incoming(
+            &row,
+            vec![0],
+            vec![GroupId::new(0).unwrap()],
+            &[10],
+            &[row_id],
+            vec![false],
+            row_id + 1,
+        );
+        state
+            .prepare_batch(
+                JoinSide::Right,
+                vec![input],
+                RunOutputContext::new(&schema, Some(&[1, 3]), 2, EdgeBudget::default()),
+                &mut || Ok(()),
+            )
+            .unwrap()
+    };
+    let stale = prepare(&mut state, 0);
+    let newer = prepare(&mut state, 1);
+    newer.commit(&mut state).unwrap();
+    assert!(stale.commit(&mut state).is_err());
+    assert_eq!(state.next_row_id(JoinSide::Right), 2);
+    assert_eq!(state.next_output_sequence(), 0);
+}
+
+#[test]
 fn test_retained_run_shares_dense_input_buffers() {
     let record = record(&[1, 1], &[10, 11]);
     let expected = record
