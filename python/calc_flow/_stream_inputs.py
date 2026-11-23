@@ -7,10 +7,9 @@ from datetime import timedelta
 from typing import NoReturn, Union
 
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from calc_flow._compat import TypeAliasType, dataclass
-from calc_flow._native import Batch, NativeArray
+from calc_flow._native import Batch, NativeArray, _ordered_event_time
 from calc_flow.compute import TableData, _arrow_table, _table_batch
 from calc_flow.runtime import (
     BoundedOutOfOrderness,
@@ -170,8 +169,19 @@ class _IterableSource:
             return None
         if isinstance(data, Watermark):
             return self._watermark(data)
-        self._validate_batch(self._arrow_input(data))
-        batch = _table_batch(data, self._path)
+        table = self._arrow_input(data)
+        self._validate_structure(table)
+        column = self._config.ordered_column
+        try:
+            batch = _table_batch(data, self._path)
+        except Exception:
+            if column is not None:
+                # An invalid event time precedes an unrelated table-import failure.
+                times = pa.Table.from_arrays([table[column]], names=[column])
+                self._validate_time(Batch.from_pyarrow(times), column)
+            raise
+        if column is not None:
+            self._validate_time(batch, column)
         self._position += 1
         return Data(batch, Cursor(self._position.to_bytes(16, "big"), {}))
 
@@ -186,11 +196,6 @@ class _IterableSource:
             self._reject(": Watermark requires SourceProvidedWatermarks")
         return value
 
-    def _validate_batch(self, table: pa.Table | pa.RecordBatch) -> None:
-        self._validate_structure(table)
-        if self._config.ordered_column is not None:
-            self._validate_time(table[self._config.ordered_column])
-
     def _validate_structure(self, table: pa.Table | pa.RecordBatch) -> None:
         if not table.schema.equals(self._config.schema):
             self._reject(".schema: expected declared Arrow schema")
@@ -199,35 +204,11 @@ class _IterableSource:
         if table.nbytes > self._config.budget.max_bytes:
             self._reject(": batch exceeds edge_budget.max_bytes")
 
-    def _validate_time(self, column: pa.ChunkedArray | pa.Array) -> None:
-        if column.null_count:
-            self._reject(".event_time: expected non-null event time")
-        # Compare in the declared unit without datetime/range conversion. Native
-        # generation retains its checked conversion and minimum-minus-delay error.
-        values = column.cast(pa.int64())
-        if not len(values):
-            return
-        if self._is_ordered(values):
-            self._last_time = values[len(values) - 1].as_py()
-            return
-        self._reject_out_of_order(values)
-
-    def _is_ordered(self, values: pa.ChunkedArray | pa.Array) -> bool:
-        if self._last_time is not None and values[0].as_py() < self._last_time:
-            return False
-        decreases = pc.less(values.slice(1), values.slice(0, len(values) - 1))
-        return not pc.any(decreases).as_py()
-
-    def _reject_out_of_order(self, values: pa.ChunkedArray | pa.Array) -> NoReturn:
-        previous = self._last_time
-        for current in values.to_pylist():
-            if previous is not None and current < previous:
-                self._reject(
-                    ".event_time: expected nondecreasing event time; select an "
-                    "explicit watermark policy for out-of-order input"
-                )
-            previous = current
-        raise RuntimeError(f"{self._path}.event_time: ordering violation not found")
+    def _validate_time(self, batch: Batch, column: str) -> None:
+        try:
+            self._last_time = _ordered_event_time(batch, column, self._last_time)
+        except ValueError as error:
+            self._reject(f".event_time: {error}")
 
     def _reject(self, message: str) -> NoReturn:
         self.failure = self._path + message

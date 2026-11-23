@@ -6,12 +6,12 @@ use calc_flow::{
     SourceSchema, StreamSource,
 };
 use datafusion::arrow::{
-    array::{Array, ArrayRef, Int64Array},
+    array::AsArray,
     compute::cast,
-    datatypes::{DataType, SchemaRef},
+    datatypes::{DataType, Int64Type, SchemaRef},
     record_batch::RecordBatch,
 };
-use pyo3::prelude::*;
+use pyo3::{exceptions::PyValueError, prelude::*};
 
 use crate::batch::PyBatch;
 
@@ -78,19 +78,45 @@ fn invalid(field: &str, message: &str) -> CalcFlowError {
     }
 }
 
-fn event_times(batch: &Batch, column: &str) -> Result<ArrayRef> {
-    let record = &batch.table_payload()?.batches()[0];
-    let column = record
-        .column_by_name(column)
-        .ok_or_else(|| invalid("source.arrow.event_time", "missing event time column"))?;
-    if column.null_count() != 0 {
-        return Err(invalid(
-            "source.arrow.event_time",
-            "expected non-null event time",
-        ));
+fn last_ordered_time(
+    batch: &Batch,
+    column: &str,
+    mut previous: Option<i64>,
+) -> std::result::Result<Option<i64>, &'static str> {
+    let table = batch.table_payload().map_err(|_| "expected table batch")?;
+    let index = table
+        .schema()
+        .index_of(column)
+        .map_err(|_| "missing event time column")?;
+    let columns = table.batches().iter().map(|record| record.column(index));
+    if columns.clone().any(|column| column.null_count() != 0) {
+        return Err("expected non-null event time");
     }
-    cast(column, &DataType::Int64)
-        .map_err(|_| invalid("source.arrow.event_time", "expected timestamp column"))
+    for column in columns {
+        let integers = cast(column, &DataType::Int64).map_err(|_| "expected timestamp column")?;
+        let values = integers.as_primitive::<Int64Type>().values();
+        if previous
+            .zip(values.first().copied())
+            .is_some_and(|(last, first)| last > first)
+            || !values.is_sorted()
+        {
+            return Err(
+                "expected nondecreasing event time; select an explicit watermark policy for out-of-order input",
+            );
+        }
+        previous = values.last().copied().or(previous);
+    }
+    Ok(previous)
+}
+
+#[pyfunction]
+#[pyo3(signature = (batch, column, previous))]
+pub(crate) fn _ordered_event_time(
+    batch: &PyBatch,
+    column: &str,
+    previous: Option<i64>,
+) -> PyResult<Option<i64>> {
+    last_ordered_time(&batch.clone_inner()?, column, previous).map_err(PyValueError::new_err)
 }
 
 impl ArrowSource {
@@ -132,22 +158,8 @@ impl ArrowSource {
         let Some(column) = &self.ordered_column else {
             return Ok(());
         };
-        let values = event_times(batch, column)?;
-        let values = values
-            .as_any()
-            .downcast_ref::<Int64Array>()
-            .ok_or_else(|| invalid("source.arrow.event_time", "expected timestamp column"))?;
-        let mut previous = self.last_time;
-        for &current in values.values() {
-            if previous.is_some_and(|previous| current < previous) {
-                return Err(invalid(
-                    "source.arrow.event_time",
-                    "expected nondecreasing event time; select an explicit watermark policy for out-of-order input",
-                ));
-            }
-            previous = Some(current);
-        }
-        self.last_time = previous;
+        self.last_time = last_ordered_time(batch, column, self.last_time)
+            .map_err(|message| invalid("source.arrow.event_time", message))?;
         Ok(())
     }
 }
@@ -207,7 +219,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::{
-        array::ArrayRef,
+        array::{ArrayRef, Int64Array},
         datatypes::{Field, Schema},
     };
 
