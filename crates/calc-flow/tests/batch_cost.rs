@@ -101,7 +101,9 @@ fn table_batch_estimates_zero_rows_as_zero_bytes() {
 
 #[test]
 fn primitive_slice_cost_only_allocates_for_an_ambiguous_validity_bitmap() {
-    let quantities = UInt16Array::from_iter((0..20_u16).map(|i| (i != 9).then_some(i)));
+    let quantities = (0..20_u16)
+        .map(|i| (i != 9).then_some(i))
+        .collect::<UInt16Array>();
     let times = TimestampNanosecondArray::from_iter_values(0..20).with_timezone("UTC");
     let prices = Decimal128Array::from_iter_values(0..20)
         .with_precision_and_scale(12, 2)
