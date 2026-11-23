@@ -14,7 +14,7 @@ use datafusion::{
 
 use crate::{Batch, expression::ValidatedQuery};
 
-use super::{AsofSpec, BandOutput, BandSpec, JoinSpec, NativeInput, execution};
+use super::{AsofSpec, BandSpec, JoinSpec, NativeInput, execution};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ColumnRef<'a> {
@@ -816,7 +816,6 @@ fn build_band_spec(tables: &BTreeMap<String, Batch>, shape: BandShape<'_>) -> Op
         right_price,
         offsets,
         shared: Arc::new(execution::BandShared::default()),
-        output: BandOutput::Values,
         left,
         right,
     })

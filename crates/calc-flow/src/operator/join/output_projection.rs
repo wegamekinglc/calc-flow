@@ -21,7 +21,7 @@ pub(super) mod tests;
 
 impl StreamJoinOperator {
     pub(crate) fn hot_projection_supported(&self) -> bool {
-        super::hot::HotJoinCore::new(self).is_some()
+        super::hot::projection_kind(self).is_some()
     }
 
     pub(crate) fn set_hot_projection(
