@@ -105,13 +105,8 @@ impl Witnesses {
             #[cfg(test)]
             ELIGIBILITY_READS.set(ELIGIBILITY_READS.get() + 1);
             let index = window.start + offset;
-            let selected = !entry.locator.witnessed
-                && self
-                    .groups
-                    .entry(group)
-                    .or_default()
-                    .positions
-                    .insert(bucket.head + index);
+            let selected =
+                self.select_position(group, bucket.head + index, entry.locator.witnessed);
             if EMIT && probe.witness_row(position, index, selected, room, &mut start)? {
                 return Ok(());
             }
@@ -120,6 +115,16 @@ impl Witnesses {
             return probe.push(position, first..window.end);
         }
         Ok(())
+    }
+
+    fn select_position(&mut self, group: GroupId, position: usize, witnessed: bool) -> bool {
+        !witnessed
+            && self
+                .groups
+                .entry(group)
+                .or_default()
+                .positions
+                .insert(position)
     }
 
     pub(super) fn seal(&mut self, state: &RunState) {

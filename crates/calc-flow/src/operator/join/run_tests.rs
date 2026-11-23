@@ -249,11 +249,8 @@ fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
 fn test_anti_empty_physical_message_can_commit_after_frontier_moves() {
     let mut state = state(10);
     let schema = record(&[], &[]).schema();
-    let empty_batch = Batch::table(
-        vec![record(&[], &[])],
-        crate::BatchMetadata::new("empty", 0, Default::default()).unwrap(),
-    )
-    .unwrap();
+    let empty_batch =
+        Batch::table(vec![record(&[], &[])], crate::BatchMetadata::default()).unwrap();
     let mut output = RunOutputContext::new(&schema, None, 2, EdgeBudget::default());
     output.join_type = super::StreamJoinType::LeftAnti;
     output.anti_left = Some(super::runs::AntiInput {

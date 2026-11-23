@@ -1003,51 +1003,20 @@ impl EvictionPlan {
     }
 
     fn finish(mut self, side: &Side, check: &mut impl FnMut() -> Result<()>) -> Result<Self> {
-        let mut bytes = 0usize;
-        for (index, (&id, &count)) in self.run_cuts.iter().enumerate() {
-            if index.is_multiple_of(MORSEL_ROWS) {
-                check()?;
-            }
-            let live = side
-                .runs
-                .get(&id)
-                .ok_or_else(|| run_error("eviction references a missing run"))?;
-            let new_head = live
-                .head
-                .checked_add(count)
-                .filter(|head| *head <= live.run.len())
-                .ok_or_else(|| run_error("eviction run prefix exceeds live rows"))?;
-            let charge = if new_head == live.run.len() {
-                live.run
-                    .bytes
-                    .checked_sub(live.released_bytes)
-                    .ok_or_else(|| run_error("released run charge exceeds its owner"))?
-            } else {
-                live.run
-                    .charge
-                    .rows_charge(live.run.order[live.head..new_head].iter().copied())?
-            };
-            bytes = bytes
-                .checked_add(charge)
-                .ok_or_else(|| run_error("eviction byte charge overflowed"))?;
-        }
-        for (index, (&group, &count)) in self.group_cuts.iter().enumerate() {
-            if index.is_multiple_of(MORSEL_ROWS) {
-                check()?;
-            }
-            let bucket = side
-                .buckets
-                .get(&group)
-                .ok_or_else(|| run_error("eviction references a missing key"))?;
-            if count > bucket.active().len() {
-                return Err(run_error("eviction key prefix exceeds live locators"));
-            }
-            if count == bucket.active().len() {
-                bytes = bytes
-                    .checked_add(bucket.charge())
-                    .ok_or_else(|| run_error("evicted bucket charge overflowed"))?;
-            }
-        }
+        let bytes = cut_charges(
+            0,
+            &self.run_cuts,
+            check,
+            "eviction byte charge overflowed",
+            |id, count| side.evicted_run_charge(*id, count),
+        )?;
+        let mut bytes = cut_charges(
+            bytes,
+            &self.group_cuts,
+            check,
+            "evicted bucket charge overflowed",
+            |group, count| side.evicted_bucket_charge(*group, count),
+        )?;
         if self.cut == side.rows {
             bytes = bytes
                 .checked_add(side.expiration_charge())
@@ -1055,6 +1024,62 @@ impl EvictionPlan {
         }
         self.bytes = bytes;
         Ok(self)
+    }
+}
+
+fn cut_charges<K>(
+    mut bytes: usize,
+    cuts: &BTreeMap<K, usize>,
+    check: &mut impl FnMut() -> Result<()>,
+    overflow: &'static str,
+    charge: impl Fn(&K, usize) -> Result<usize>,
+) -> Result<usize> {
+    for (index, (owner, &count)) in cuts.iter().enumerate() {
+        if index.is_multiple_of(MORSEL_ROWS) {
+            check()?;
+        }
+        bytes = bytes
+            .checked_add(charge(owner, count)?)
+            .ok_or_else(|| run_error(overflow))?;
+    }
+    Ok(bytes)
+}
+
+impl Side {
+    fn evicted_run_charge(&self, id: RunId, count: usize) -> Result<usize> {
+        let live = self
+            .runs
+            .get(&id)
+            .ok_or_else(|| run_error("eviction references a missing run"))?;
+        let new_head = live
+            .head
+            .checked_add(count)
+            .filter(|head| *head <= live.run.len())
+            .ok_or_else(|| run_error("eviction run prefix exceeds live rows"))?;
+        if new_head == live.run.len() {
+            live.run
+                .bytes
+                .checked_sub(live.released_bytes)
+                .ok_or_else(|| run_error("released run charge exceeds its owner"))
+        } else {
+            live.run
+                .charge
+                .rows_charge(live.run.order[live.head..new_head].iter().copied())
+        }
+    }
+
+    fn evicted_bucket_charge(&self, group: GroupId, count: usize) -> Result<usize> {
+        let bucket = self
+            .buckets
+            .get(&group)
+            .ok_or_else(|| run_error("eviction references a missing key"))?;
+        match count.cmp(&bucket.active().len()) {
+            std::cmp::Ordering::Greater => {
+                Err(run_error("eviction key prefix exceeds live locators"))
+            }
+            std::cmp::Ordering::Equal => Ok(bucket.charge()),
+            std::cmp::Ordering::Less => Ok(0),
+        }
     }
 }
 

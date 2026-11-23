@@ -234,11 +234,7 @@ impl AdmissionMasks {
     ) -> Result<RowAdmission> {
         let bit = 1_u64 << offset;
         if self.null_time & bit != 0 {
-            return Ok(if anti_left {
-                RowAdmission::Unmatchable
-            } else {
-                RowAdmission::Dropped(DropKind::NullEventTime)
-            });
+            return Ok(null_admission(anti_left, DropKind::NullEventTime));
         }
         if self.conversion_error & bit != 0 {
             return Err(operator_reason(
@@ -248,11 +244,7 @@ impl AdmissionMasks {
             ));
         }
         if self.null_key & bit != 0 && (!anti_left || self.late & bit == 0) {
-            return Ok(if anti_left {
-                RowAdmission::Unmatchable
-            } else {
-                RowAdmission::Dropped(DropKind::NullKey)
-            });
+            return Ok(null_admission(anti_left, DropKind::NullKey));
         }
         if self.late & bit != 0 {
             let lateness = u64::try_from(self.watermark - i128::from(self.times[offset]))
@@ -269,6 +261,14 @@ impl AdmissionMasks {
     }
     pub(super) fn retain(&self, offset: usize) -> bool {
         self.retain & (1_u64 << offset) != 0
+    }
+}
+
+fn null_admission(anti_left: bool, kind: DropKind) -> RowAdmission {
+    if anti_left {
+        RowAdmission::Unmatchable
+    } else {
+        RowAdmission::Dropped(kind)
     }
 }
 

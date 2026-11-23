@@ -310,13 +310,10 @@ async fn test_anti_immediate_rows_merge_in_physical_order_after_admission() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(
-        invalid,
-        CalcFlowError::OperatorReason {
-            reason_code: crate::StreamingFailureReason::JoinTimeConversionFailed,
-            ..
-        }
-    ));
+    assert_eq!(
+        reason_of(&invalid),
+        Some(crate::StreamingFailureReason::JoinTimeConversionFailed)
+    );
     assert_eq!(op.status(), before);
     let rejected = op
         .process_data(
@@ -337,13 +334,10 @@ async fn test_anti_immediate_rows_merge_in_physical_order_after_admission() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(
-        rejected,
-        CalcFlowError::OperatorReason {
-            reason_code: crate::StreamingFailureReason::JoinMatchLimitExceeded,
-            ..
-        }
-    ));
+    assert_eq!(
+        reason_of(&rejected),
+        Some(crate::StreamingFailureReason::JoinMatchLimitExceeded)
+    );
     assert!(output.drain("output").is_empty());
     op.process_data(
         "left",
