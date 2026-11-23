@@ -1,4 +1,4 @@
-"""Single-core public interval join comparison for the bucket-range candidate."""
+"""Single-core public interval join after watermark eviction."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from benchmarks.native_release_identity import verify_package_files
 from scripts.benchmark_suite.catalog import engine_cases
 from scripts.benchmark_suite.process import ROOT, install
 from scripts.benchmark_suite.release import load_release
+from scripts.hosted_join_state import all_retained_states
 from scripts.sparse_changelog_ci import _resource, guarded_measure
 from scripts.sparse_changelog_wheels import _api, _wheel
 from scripts.toolkit import (
@@ -31,8 +32,7 @@ def case():
     return chosen
 
 
-BUDGET = 250
-ROW_COUNT = 10998080
+BUDGET = 350
 SIDES = ("baseline", "candidate")
 CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
 OUT = ROOT / "target/hosted-evidence"
@@ -114,11 +114,8 @@ async def observe() -> None:
     write_json(OUT / "samples.json", row)
     if row["status"] != "ok":
         raise ValueError(f"paired measurement failed: {row.get('error')}")
-    samples = [s for r in row["evidence"] for arm in SIDES for s in r["samples"][arm]]
-    if len(samples) != 40 or any(
-        s["correctness"]["rows"] != ROW_COUNT for s in samples
-    ):
-        raise ValueError("complete output proof missing from measured pairs")
+    proofs = all_retained_states(row["evidence"], OUT / "measurement")
+    write_json(OUT / "retained-state.json", proofs)
     base = [s for r in row["baseline"] for s in r]
     write_json(
         OUT / "result.json",

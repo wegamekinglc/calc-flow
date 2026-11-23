@@ -1,43 +1,4 @@
 {
-  "candidate_pr": 639,
-  "baseline": {
-    "artifact": 14786819620,
-    "artifact_digest": "sha256:32cf6d8afa2d342c7284625c76caaf73f972d636cae4baae17a7e0aaa6ddae02",
-    "build_profile": "release",
-    "checkout": "e7db38a848d3efc0e36fd641e05066be429956cf",
-    "contract": "benchmark-release-v1",
-    "git_clean": true,
-    "git_sha": "e7db38a848d3efc0e36fd641e05066be429956cf",
-    "image": "ubuntu-26.04",
-    "image_version": "20261116.202.1",
-    "job": 137461256130,
-    "parents": [
-      "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-      "3c364d7d0c25072102b55cb6040a76afba6d50a9"
-    ],
-    "requested_sha": "3c364d7d0c25072102b55cb6040a76afba6d50a9",
-    "tree": "81676c984010ed3ab39dd0033ebdbfaecbcbf88f",
-    "workflow_run": 45103223384
-  },
-  "candidate": {
-    "artifact": 14787860773,
-    "artifact_digest": "sha256:4c1510d66649e3172dd14d62f0c5e5a69e3b9c84e9db6af46e128d2d800dc644",
-    "build_profile": "release",
-    "checkout": "7f997b25aa110f1f7acc61e248ad889844498100",
-    "contract": "benchmark-release-v1",
-    "git_clean": true,
-    "git_sha": "7f997b25aa110f1f7acc61e248ad889844498100",
-    "image": "ubuntu-26.04",
-    "image_version": "20261116.202.1",
-    "job": 137460424772,
-    "parents": [
-      "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-      "dd252fdebcaeff068b87be9072527d1d8781962f"
-    ],
-    "requested_sha": "dd252fdebcaeff068b87be9072527d1d8781962f",
-    "tree": "f05add4a3babc17d50203e778d6de3d7fcb7b3da",
-    "workflow_run": 45103382462
-  },
   "catalog_case": {
     "id": "engines/1000000/calc-flow-stream-1t/interval_join",
     "family": "engines",
@@ -60,52 +21,91 @@
   "timing": "ready enqueue through expected Arrow output and final table concatenate; check all source-sequence pairs and values against the independent oracle; validate EOF and replay outside clock",
   "comparison": "Two independent worker pairs, one excluded warmup per arm per round, ten adjacent AB/BA pairs per round; exact paired median intervals and 5 percent rule.",
   "resources": "One logical CPU and one Tokio/Rayon/BLAS thread. A 3 s preflight requires target CPU and all SMT siblings <=20% busy. In every interval require host average <50%, >=10 GiB available, <256 major faults and <1024 total swap pages. Steady-state check every second includes final interval; sibling <50%. Stop on failed oracle, resource gate or deadline. No retries.",
-  "budget": "300s Python total; metadata, source comparison and setup checks reserve 50s; hosted job capped at 250s including download, fixtures, startup, oracle, cleanup and upload. 45s reserved for settling workers and releasing evidence.",
-  "excluded_image_mismatch": {
-    "baseline_artifact": 14787565886,
-    "image_version": "20261116.88.1",
-    "sampled": false
+  "selection": "Watermark eviction prefix compaction; all samples retain 320 rows per side following 999,680 evictions.",
+  "budget": "600s across this stage, including native accounting <=60s, provenance/preparation <=150s and hosted <=350s; last 45s of hosted job reserved for settlement/upload, 40s unallocated.",
+  "preregistered_protocol_sha256": "781f273fb85ba3423e611d682b341c764dea5514604ee601b3dd89d0008d1798",
+  "source_hashes": {
+    "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
+    "benchmarks/engine_stream.py": "1f37cfa730c111793ca0ce698e5722074592ac1e3a5b97206bd9e71fd84ee70f",
+    "scripts/hosted_interval_join.py": "31367f738db6aa173991a9f34dc187bd48c0ac900bbe35fe10bdd1e663ec906c",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/benchmark_suite/measure.py": "197c25f14e7aa19398d6dbfc094bc769e2a5a66731e5ad6d1428498c5d757b11",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+    "scripts/hosted_join_state.py": "22875018af4a135b54b3fa2a38fdc7ab2763540e44dc3b432fbfdf38a1dc3242"
   },
-  "actual_common_parent": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-  "baseline_nonproduct_files": {
-    "base": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-    "files": [
-      ".github/workflows/benchmark-suite.yml",
-      ".github/workflows/benchmarks.yml",
-      ".github/workflows/ci-linux.yml",
-      "benchmarks/README.md",
-      "benchmarks/native_release_identity.py",
-      "benchmarks/sparse_changelog.py",
-      "benchmarks/sum-state/public-sparse-changelog-20261123/sparse.arrow.gz",
-      "python/tests/test_sparse_changelog_benchmark.py",
-      "scripts/benchmark_suite/catalog.py",
-      "scripts/benchmark_suite/worker.py",
-      "scripts/sparse_changelog_ci.py",
-      "scripts/sparse_changelog_wheels.py",
-      "scripts/test_benchmark_workflow.py",
-      "scripts/test_sparse_changelog_ci.py"
-    ]
+  "candidate_pr": 650,
+  "reference_before_rebase": {
+    "artifact": 14790641255,
+    "artifact_digest": "sha256:9c69ba58603ff6e594e382305a5e81f49b5add075ecb4685ad9da7713b89371e",
+    "build_profile": "release",
+    "checkout": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137485177741,
+    "native_sha256": "6dd8954fa7192407ec7a6a3b1b757be3c5aa5d0813c481867bf3f882bebfa1bb",
+    "parents": [
+      "fdde1528efcf1424c3a9a19db10495c1032aac19",
+      "2d305594a169a4d96f34d1cd566762afd4d09aa5"
+    ],
+    "requested_sha": "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+    "tree": "d44c5afab211c2b6a66520de160a37d300868397",
+    "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+    "wheel_sha256": "2b724aecbdb8d4ec6e3b331784db04b2e996d681ae3a738ae1f4ada821d95e48",
+    "workflow_run": 45111620503
   },
+  "actual_common_parent": "39963785925fe8d161c2c2c4fccba2cc16cbf46a",
   "candidate_files": {
-    "base": "3a63b11275577a3824e48df94fbc5fc15c6a2e07",
-    "files": [
-      "benchmarks/join-asof/p5-bucket-ranges-20261123/README.md",
-      "benchmarks/join-asof/p5-bucket-ranges-20261123/range-sample.patch",
-      "benchmarks/join-asof/p5-bucket-ranges-20261123/result.json",
-      "crates/calc-flow/src/operator/join.rs",
-      "crates/calc-flow/src/operator/join/matches.rs",
-      "crates/calc-flow/src/operator/join/output_gather.rs",
+    "base": "39963785925fe8d161c2c2c4fccba2cc16cbf46a",
+    "diff": [
+      "crates/calc-flow/src/operator/join/hot.rs",
       "crates/calc-flow/src/operator/join/run_tests.rs",
       "crates/calc-flow/src/operator/join/runs.rs"
     ]
   },
-  "source_hashes": {
-    "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
-    "benchmarks/engine_stream.py": "1f37cfa730c111793ca0ce698e5722074592ac1e3a5b97206bd9e71fd84ee70f",
-    "scripts/hosted_interval_join.py": "eafa8f35efbd3488b2fdb33650a1b182b8e0f60cca2d8eee42042800d6f808a2",
-    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
-    "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
-    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
-    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3"
-  }
+  "baseline": {
+    "artifact": 14790969179,
+    "artifact_digest": "sha256:c91329319c1548464ba3b1c37387428fd662ef362f20ace79704de1d83c0cd4a",
+    "build_profile": "release",
+    "checkout": "39963785925fe8d161c2c2c4fccba2cc16cbf46a",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "39963785925fe8d161c2c2c4fccba2cc16cbf46a",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137494260751,
+    "parents": [
+      "a0e0da58f015cd19066241ecde8f3d1924e57e8c",
+      "b0205121632d4a72740fde89c0fc521ac5bd5ced"
+    ],
+    "requested_sha": "4dc64db05abfd309b5f72ebeea3a6a9632025ec3",
+    "tree": "c5919f3684d931e42d00915372730569f7a31518",
+    "workflow_run": 45114543591
+  },
+  "candidate": {
+    "artifact": 14791538197,
+    "artifact_digest": "sha256:52bce997b043a19c2ef0b0ab82654b3b774e1240520a8ac5231c0b66a200679a",
+    "build_profile": "release",
+    "checkout": "f495918864b09349494091523bc50c49db30ac44",
+    "contract": "benchmark-release-v1",
+    "git_clean": true,
+    "git_sha": "f495918864b09349494091523bc50c49db30ac44",
+    "image": "ubuntu-26.04",
+    "image_version": "20261116.202.1",
+    "job": 137492624388,
+    "parents": [
+      "39963785925fe8d161c2c2c4fccba2cc16cbf46a",
+      "a1a8424891c3c24f53ab762825b355a5fed3e10b"
+    ],
+    "requested_sha": "a1a8424891c3c24f53ab762825b355a5fed3e10b",
+    "tree": "71ec3b8f9a3aa1b563a149749a064870c945bb8f",
+    "workflow_run": 45113902229
+  },
+  "expected_output_rows": 10998080,
+  "evicted_rows_per_side": 999680,
+  "retained_rows_per_side": 320,
+  "registered_case_count": 1
 }

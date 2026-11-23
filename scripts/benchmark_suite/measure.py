@@ -70,6 +70,10 @@ def validate_stream_sample(case: dict, sample: dict) -> None:
         return
     evidence = sample.get("stream_evidence")
     _validate_stream_dimensions(case, evidence)
+    if case.get("id") == "engines/1000000/calc-flow-stream-1t/interval_join":
+        from scripts.hosted_join_state import retained_state
+
+        retained_state(sample)
     if case["checkpoint_interval_millis"] is not None:
         _validate_checkpoint_proof(case, sample, evidence)
 
