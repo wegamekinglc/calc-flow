@@ -15,6 +15,8 @@ use calc_flow::{
 };
 use serde_json::{Value, json};
 
+mod support;
+
 fn table(rows: &[(Option<i64>, i64, u64)]) -> RecordBatch {
     let fields = [
         Field::new("key", DataType::Int64, true),
@@ -155,8 +157,13 @@ async fn observe(measure: bool) -> Value {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() {
-    let verify = std::env::args().nth(1);
-    assert!(matches!(verify.as_deref(), Some("--verify-only") | None));
-    println!("{}", observe(verify.is_none()).await);
+async fn main() -> support::ExampleResult {
+    let arguments = support::arguments()?;
+    let measure = match arguments.as_slice() {
+        [] => true,
+        [option] if option == "--verify-only" => false,
+        _ => return Err("expected no arguments or --verify-only".into()),
+    };
+    println!("{}", observe(measure).await);
+    Ok(())
 }

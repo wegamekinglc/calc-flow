@@ -41,6 +41,12 @@ artifact upload. All 17 resource intervals passed. [Native build and
 observations](rust-native.json) · [Python wheel and observations](python-public.json)
 · [Hosted job and raw artifact](https://github.com/wegamekinglc/calc-flow/actions/runs/45187528715)
 
+The published observations used the exact workers in the [sampling
+revision](https://github.com/wegamekinglc/calc-flow/tree/242972d76c0857e5f0f036d161617da5685d9fa4/benchmarks/join-asof/20261123-anti-watermark).
+The maintained Python worker verifies outputs even under optimized Python
+and the Rust example validates its command arguments through shared example
+support. Each raw report preserves the identities used for timing.
+
 ## Reproduce
 
 Use the [protocol](protocol.md) and the maintained resource gate from

@@ -64,9 +64,20 @@ async def feed(queue):
         yield event
 
 
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
 def verify(tables, expected):
-    assert all(t.schema.equals(SCHEMA, check_metadata=True) for t in tables)
-    assert pa.concat_tables(tables).equals(expected, check_metadata=True)
+    require(
+        all(t.schema.equals(SCHEMA, check_metadata=True) for t in tables),
+        "public output schema differs from the declared left schema",
+    )
+    require(
+        pa.concat_tables(tables).equals(expected, check_metadata=True),
+        "public output differs from the expected left rows",
+    )
 
 
 async def receive(outputs, count):
@@ -74,7 +85,7 @@ async def receive(outputs, count):
     received = 0
     while received < count:
         event = await outputs.__anext__()
-        assert event.name == "absent"
+        require(event.name == "absent", "unexpected public output name")
         tables.append(event.table)
         received += event.table.num_rows
     return tables
@@ -110,13 +121,13 @@ async def observe(measure):
         elapsed = time.perf_counter_ns() - started if started is not None else None
 
         chunks = [item.num_rows for item in released]
-        assert chunks == [32] * 8 + [1], chunks
+        require(chunks == [32] * 8 + [1], f"unexpected chunk sizes {chunks}")
         verify(released, left.slice(1, 257))
         right_queue.put_nowait(cuts[2])
         verify(await receive(outputs, 1), left.slice(259, 1))
         right_queue.put_nowait(None)
         left_queue.put_nowait(None)
-        assert [event async for event in outputs] == []
+        require([event async for event in outputs] == [], "unexpected EOF output")
 
     return {
         "setup": [260, 0, 261],
