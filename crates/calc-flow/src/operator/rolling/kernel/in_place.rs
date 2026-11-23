@@ -20,7 +20,7 @@ type DirectRouting<'a> = (EntityRouting, Vec<Option<(usize, usize)>>, Vec<&'a st
 pub(super) struct InPlaceUpdate {
     residents: Vec<usize>,
     key_bytes: Vec<usize>,
-    new_keys: Vec<(usize, Vec<u8>)>,
+    new_local_keys: Vec<(usize, Vec<u8>)>,
     new_direct_keys: Vec<(usize, String)>,
     undo: Vec<EntityUndo>,
     previous_charge: StateCharge,
@@ -167,6 +167,7 @@ struct ResidentInspection {
     residents: Vec<usize>,
     key_bytes: Vec<usize>,
     undo: Vec<EntityUndo>,
+    new_local_keys: Vec<(usize, Vec<u8>)>,
     previous_charge: StateCharge,
 }
 
@@ -222,7 +223,7 @@ fn inspect_resident(
 
 fn inspect_residents(
     state: &mut RollingKernelState,
-    keys: &[Vec<u8>],
+    keys: Vec<Vec<u8>>,
     known_residents: &[Option<(usize, usize)>],
     direct_names: &[&str],
     node_id: &str,
@@ -231,9 +232,16 @@ fn inspect_residents(
     let mut residents = Vec::with_capacity(keys.len());
     let mut key_bytes = Vec::with_capacity(keys.len());
     let mut undo = Vec::with_capacity(keys.len());
-    for (local, key) in keys.iter().enumerate() {
+    let mut new_local_keys = Vec::new();
+    for (local, key) in keys.into_iter().enumerate() {
         let known = known_residents.get(local).copied().flatten();
-        match inspect_resident(state, key, known, direct_names.get(local).copied(), node_id)? {
+        match inspect_resident(
+            state,
+            &key,
+            known,
+            direct_names.get(local).copied(),
+            node_id,
+        )? {
             Some(ResidentMatch::Existing {
                 resident,
                 key_bytes: encoded_bytes,
@@ -251,6 +259,7 @@ fn inspect_residents(
             Some(ResidentMatch::New) => {
                 residents.push(usize::MAX);
                 key_bytes.push(key.len());
+                new_local_keys.push((local, key));
                 undo.push(EntityUndo {
                     previous: None,
                     is_new: true,
@@ -262,6 +271,7 @@ fn inspect_residents(
     Ok(Some(ResidentInspection {
         residents,
         key_bytes,
+        new_local_keys,
         undo,
         previous_charge,
     }))
@@ -291,17 +301,17 @@ impl InPlaceUpdate {
             mut residents,
             key_bytes,
             mut undo,
+            new_local_keys,
             previous_charge,
-        }) = inspect_residents(state, &keys, known_residents, direct_names, node_id)?
+        }) = inspect_residents(state, keys, known_residents, direct_names, node_id)?
         else {
             return Ok(None);
         };
-        let mut new_keys = Vec::new();
         let mut new_direct_keys = Vec::new();
-        for (local, key) in keys.into_iter().enumerate() {
-            if !undo[local].is_new {
-                continue;
-            }
+        for (local, key) in &new_local_keys {
+            #[cfg(test)]
+            super::INSTALLATION_VISITS.with(|count| count.set(count.get() + 1));
+            let local = *local;
             let resident = state.states.len();
             state.entities.insert(key.clone(), resident);
             state
@@ -323,13 +333,12 @@ impl InPlaceUpdate {
                     .insert(name.clone(), (resident, key_bytes[local]));
                 new_direct_keys.push((resident, name));
             }
-            new_keys.push((resident, key));
         }
         Ok(Some((
             Self {
                 residents,
                 key_bytes,
-                new_keys,
+                new_local_keys,
                 new_direct_keys,
                 undo,
                 previous_charge,
@@ -366,11 +375,11 @@ impl InPlaceUpdate {
                     );
                 continue;
             }
-            let (key_resident, key) = self
-                .new_keys
+            let (key_local, key) = self
+                .new_local_keys
                 .pop()
                 .expect("in-place rolling new entity has a resident key");
-            debug_assert_eq!(key_resident, resident);
+            debug_assert_eq!(key_local, local_index);
             base.entities.remove(key.as_slice());
             if let Some((direct_resident, name)) = self.new_direct_keys.pop() {
                 debug_assert_eq!(direct_resident, resident);

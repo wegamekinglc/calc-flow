@@ -658,24 +658,30 @@ async fn test_warm_direct_entities_skip_canonical_key_encoding() {
     let spec = kernel_spec(json!([duration_output("sum", "price", "sum", 6)]));
     let first = float64_fast_record(&[(1, "a", 1, Some(1.0)), (2, "b", 2, Some(2.0))]);
     let second = float64_fast_record(&[(3, "a", 3, Some(3.0)), (4, "b", 4, Some(4.0))]);
-    let input = concat_batches(&first.schema(), [&first, &second]).unwrap();
+    let mixed = float64_fast_record(&[
+        (5, "b", 5, Some(5.0)),
+        (6, "c", 6, Some(6.0)),
+        (7, "a", 7, Some(7.0)),
+    ]);
+    let input = concat_batches(&first.schema(), [&first, &second, &mixed]).unwrap();
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let (expected, _) = reference_output(&operator, &input);
     let (job, store, mut output) = fixture(&operator);
     let job = job.with_checkpointing(false);
     let mut emitted = Vec::new();
-    for (record, watermark) in [(first, 2), (second, 4)] {
+    let mut visits = Vec::new();
+    kernel::INSTALLATION_VISITS.with(|count| count.set(0));
+    for (record, watermark, births) in [(first, 2, 2), (second, 4, 0), (mixed, 7, 1)] {
         assert!(observe_data(&mut operator, &job, &store, &mut output, record).await);
         emitted.extend(close(&mut operator, &job, &store, &mut output, watermark).await);
-        if watermark == 2 {
-            assert_eq!(kernel::take_direct_entity_key_encodings(), 2);
-        }
+        visits.push(kernel::INSTALLATION_VISITS.with(|count| count.replace(0)));
+        assert_eq!(kernel::take_direct_entity_key_encodings(), births);
     }
-    assert_eq!(kernel::take_direct_entity_key_encodings(), 0);
     assert_eq!(
         concat_batches(&expected.schema(), &emitted).unwrap(),
         expected
     );
+    assert_eq!(visits, [2, 0, 1]);
 }
 
 #[tokio::test]
