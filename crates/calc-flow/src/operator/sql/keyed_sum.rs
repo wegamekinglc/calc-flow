@@ -1208,14 +1208,22 @@ impl PartitionedSums {
 
     fn values_array(&self, values: impl Iterator<Item = SumValue>) -> ArrayRef {
         match self.kind {
-            SumKind::Int64 => Arc::new(Int64Array::from_iter(values.map(|value| match value {
-                SumValue::Int64(value) => value,
-                SumValue::UInt64(_) => unreachable!(),
-            }))),
-            SumKind::UInt64 => Arc::new(UInt64Array::from_iter(values.map(|value| match value {
-                SumValue::UInt64(value) => value,
-                SumValue::Int64(_) => unreachable!(),
-            }))),
+            SumKind::Int64 => Arc::new(
+                values
+                    .map(|value| match value {
+                        SumValue::Int64(value) => value,
+                        SumValue::UInt64(_) => unreachable!(),
+                    })
+                    .collect::<Int64Array>(),
+            ),
+            SumKind::UInt64 => Arc::new(
+                values
+                    .map(|value| match value {
+                        SumValue::UInt64(value) => value,
+                        SumValue::Int64(_) => unreachable!(),
+                    })
+                    .collect::<UInt64Array>(),
+            ),
         }
     }
 
