@@ -410,6 +410,10 @@ impl Run {
         self.row_ids.len()
     }
 
+    fn identity(&self, row: usize) -> (EventTime, u64) {
+        (EventTime::from_micros(self.times[row]), self.row_ids[row])
+    }
+
     fn entries(&self) -> impl Iterator<Item = LocatorEntry> + '_ {
         self.order.iter().map(|&row| LocatorEntry {
             time: EventTime::from_micros(self.times[row]),
@@ -428,6 +432,14 @@ struct LiveRun {
     run: Arc<Run>,
     head: usize,
     released_bytes: usize,
+}
+
+impl LiveRun {
+    fn first_live_identity(&self) -> (EventTime, u64) {
+        #[cfg(test)]
+        RESTORE_MEMBERSHIP_READS.set(RESTORE_MEMBERSHIP_READS.get() + 1);
+        self.run.identity(self.run.order[self.head])
+    }
 }
 
 pub(super) fn route_hot_keys(
@@ -1712,19 +1724,24 @@ impl RunState {
     }
 }
 
+#[cfg(test)]
+#[path = "run_restore_tests.rs"]
+mod restore_tests;
+
+#[cfg(test)]
+thread_local! {
+    static RESTORE_MEMBERSHIP_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
     for side in &snapshot.sides {
         let mut identities = BTreeSet::new();
         let mut live_rows = 0usize;
         let mut bytes = side.expiration_charge();
         for (&id, live) in &side.runs {
-            let released = live
-                .run
-                .charge
-                .rows_charge(live.run.order[..live.head].iter().copied())?;
+            pages::validate_run_order(&live.run)?;
             if id != live.run.id
                 || live.head >= live.run.len()
-                || live.released_bytes != released
                 || live
                     .run
                     .row_ids
@@ -1733,6 +1750,15 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
             {
                 return Err(run_error(
                     "restored run identity, prefix, or frontier is invalid",
+                ));
+            }
+            let released = live
+                .run
+                .charge
+                .rows_charge(live.run.order[..live.head].iter().copied())?;
+            if live.released_bytes != released {
+                return Err(run_error(
+                    "restored released charge differs from its run prefix",
                 ));
             }
             live_rows += live.run.len() - live.head;
@@ -1766,9 +1792,8 @@ fn validate_snapshot(snapshot: &RunStateSnapshot) -> Result<()> {
                 let row = usize::try_from(entry.locator.row).expect("u32 locator fits usize");
                 if row >= live.run.len()
                     || live.run.groups[row] != group
-                    || live.run.row_ids[row] != entry.row_id
-                    || live.run.times[row] != entry.time.as_micros()
-                    || !live.run.order[live.head..].contains(&row)
+                    || live.run.identity(row) != entry.identity()
+                    || entry.identity() < live.first_live_identity()
                     || !indexed.insert((entry.time, entry.row_id, entry.locator))
                 {
                     return Err(run_error("restored key locator differs from its run"));
