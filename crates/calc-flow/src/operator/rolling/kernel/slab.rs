@@ -545,7 +545,7 @@ impl RollingKernelPlan {
         routing: &EntityRouting,
         node_id: &str,
         track_positions: bool,
-    ) -> Result<(Vec<EntityId>, Vec<EntityId>, Vec<u64>)> {
+    ) -> Result<(Vec<EntityId>, Vec<u64>)> {
         let resolved = routing
             .keys
             .iter()
@@ -569,7 +569,7 @@ impl RollingKernelPlan {
             })?;
             table.set_u64(0, entity, transitions)?;
         }
-        Ok((resolved, ids, positions))
+        Ok((ids, positions))
     }
 
     fn append_slab_outputs(
@@ -641,7 +641,7 @@ impl RollingKernelPlan {
                 TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. }
             )
         });
-        let (_, ids, mut positions) =
+        let (ids, mut positions) =
             Self::prepare_slab_entities(table, routing, node_id, track_positions)?;
         let mut builders = self
             .outputs
@@ -717,8 +717,6 @@ impl RollingKernelPlan {
         let previous_charge = charge(state.slab.as_ref().expect("slab initialized"), node_id)?;
         state.slab.as_mut().expect("slab initialized").begin()?;
         let entities = routing.keys.len();
-        let entity_rows = routing.rows.clone();
-        let local_ids = routing.entity_ids.clone();
         let result = self.fill_slab_rows(
             state.slab.as_mut().expect("slab initialized"),
             &batch.inputs,
@@ -736,8 +734,8 @@ impl RollingKernelPlan {
         Ok(StreamKernelUpdate {
             execution: RollingKernelExecution {
                 columns,
-                entity_ids: local_ids,
-                entity_rows,
+                entity_ids: routing.entity_ids,
+                entity_rows: routing.rows,
                 metrics: RollingKernelMetrics {
                     entity_encode_ns,
                     entities,
