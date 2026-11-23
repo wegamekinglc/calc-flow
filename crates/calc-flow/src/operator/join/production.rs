@@ -523,10 +523,15 @@ impl RunCore {
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
         let super::AdmissionBundle {
-            metrics, admitted, ..
+            metrics,
+            admitted,
+            next_row_id,
+            ..
         } = bundle;
         let cut = self.keys.cut();
-        let prepared = self.prepare(operator, &plan, &admitted, context);
+        let prepared = self
+            .prepare(operator, &plan, &admitted, context)
+            .and_then(|prepared| prepared.with_physical_row_frontier(next_row_id));
         drop(admitted);
         let mut prepared = match prepared {
             Ok(prepared) => prepared,

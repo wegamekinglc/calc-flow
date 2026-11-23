@@ -10,6 +10,18 @@ when the caller receives its output from the sink. The worker retains all 21
 outputs through natural end and checks the complete positions after every batch.
 The JSON includes the 20 warm update durations in nanoseconds.
 
+In the 2026-11-23 single-CPU comparison the pooled update p50/p95 was
+251.889/335.532 µs for snapshots and 28.426/101.138 µs for changelogs.
+Each mode had 400 measured updates, grouped into 20 fresh processes. Using
+the median of each process as one paired observation, the two rounds gave
+97.85% sign intervals of −88.85% to −87.88% and −89.28% to −88.56%.
+The changelog emitted 13,200 rows per job and the snapshot emitted 210,000.
+Both reconstructed the same 10,000 positions at every boundary. This compares
+the two output modes on one binary built from the product at `644f8f15`,
+before the later grouped SUM undo-storage change. The raw data include worker
+and source fingerprints, all 44 processes, and clock and resource settings.
+[Native observations](20261123-warm-update/rust-native.json)
+
 [Complete 2026-11-06 sign CASE retest](sum-case-retest-20261106.md) records
 five fixed cases, 200 formal observations, both CPU profiles and 4,872 full
 snapshot checks in a quiet environment. All five maintained verdicts are
