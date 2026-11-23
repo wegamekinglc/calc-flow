@@ -1,0 +1,981 @@
+{
+  "artifact": {
+    "created_at": "2026-11-23T12:57:59Z",
+    "digest": "sha256:43dc7035a7635977a2c70b696cf11670522346b063b2d98a4450e7ab6dfea039",
+    "id": 14819279599,
+    "name": "public-steady-session-45179077556-1",
+    "size_in_bytes": 69610
+  },
+  "case": "python/public-session/steady-one-row-dual-sma",
+  "checked_rows": 183040,
+  "date": "2026-11-23",
+  "elf_toolchains": {
+    "baseline": [
+      "Linker: LLD 21.1.8 (/checkout/src/llvm-project/llvm 00d23d10dc48c6bb9d57ba96d4a748d85d77d0c7)",
+      "GCC: (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "rustc version 1.94.0 (4a4ef493e 2026-03-02)"
+    ],
+    "candidate": [
+      "Linker: LLD 21.1.8 (/checkout/src/llvm-project/llvm 00d23d10dc48c6bb9d57ba96d4a748d85d77d0c7)",
+      "GCC: (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "rustc version 1.94.0 (4a4ef493e 2026-03-02)"
+    ]
+  },
+  "hosted_job": {
+    "completed_at": "2026-11-23T12:58:02Z",
+    "conclusion": "success",
+    "html_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45179077556/job/137707864535",
+    "id": 137707864535,
+    "name": "Public steady session",
+    "run_id": 45179077556,
+    "runner_name": "GitHub Actions 1000173913",
+    "started_at": "2026-11-23T12:56:49Z",
+    "status": "completed"
+  },
+  "outcome": {
+    "elapsed_since_job_start_seconds": 69.97822833061218,
+    "state": "completed"
+  },
+  "qualified_workers": 44,
+  "registration": {
+    "budget_seconds": 240,
+    "case": "python/public-session/steady-one-row-dual-sma",
+    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+    "elf_toolchain": [
+      "Linker: LLD 21.1.8 (/checkout/src/llvm-project/llvm 00d23d10dc48c6bb9d57ba96d4a748d85d77d0c7)",
+      "GCC: (Ubuntu 15.2.0-16ubuntu1) 15.2.0",
+      "rustc version 1.94.0 (4a4ef493e 2026-03-02)"
+    ],
+    "fixture_sha256": {
+      "expected.arrow": "c86c9e5c2141776e9881d7467da417f7fe4f19ebdd594df2e5339172cb2fe738",
+      "inputs.arrow": "90da6c27244354bacbc53983ca2d1f71be2654ee3b7943779843648197ebe253",
+      "project.json": "57e36971d02b987132f4b6ab8f8fae4c9aa0f74de2c53660b2f3ead67eb6a5b6"
+    },
+    "fresh_workers": 44,
+    "history": 4096,
+    "job": 137707864535,
+    "p50_goal_us": 20,
+    "p95_goal_us": 40,
+    "pairs_per_round": 10,
+    "registered_utc": "2026-11-23T12:55:34.877320+00:00",
+    "releases": {
+      "baseline": {
+        "artifact": 14807027286,
+        "artifact_digest": "sha256:9447e20b40475b1d2199740c829b4149adda6e016ba43a26c3be7b20cbef0242",
+        "build_job_finished": "2026-11-23T10:07:28Z",
+        "build_job_started": "2026-11-23T09:52:08Z",
+        "checkout": "4c3cc98e2ebaa8834b8f12931c33da64856daaae",
+        "image": "ubuntu-26.04",
+        "image_version": "20261116.202.1",
+        "job": 137611646674,
+        "requested_sha": "4c3cc98e2ebaa8834b8f12931c33da64856daaae",
+        "tree": "ee9804feb9a57a50268a3dbbed38c2c524466942",
+        "workflow_run": 45150768447
+      },
+      "candidate": {
+        "artifact": 14820495536,
+        "artifact_digest": "sha256:dc79335036ab47f381274498f0d5fb7a19aad8955aa016a82c49dd12ff8c1817",
+        "build_job_finished": "2026-11-23T12:53:57Z",
+        "build_job_started": "2026-11-23T12:35:49Z",
+        "checkout": "8618aeb8146a41778e0373a5cc62013a37e2199f",
+        "image": "ubuntu-26.04",
+        "image_version": "20261116.202.1",
+        "job": 137696585919,
+        "requested_sha": "39479f767f2e4e647ccd608ffc3f7055507cf925",
+        "tree": "487172223b97746bcbd8a97fc0159cc5fabf3971",
+        "workflow_run": 45175796563
+      }
+    },
+    "reserved_cleanup_seconds": 45,
+    "rounds": 2,
+    "run": "45179077556",
+    "runner_image": [
+      "ubuntu26",
+      "20261116.202.1"
+    ],
+    "source_hashes": {
+      ".github/workflows/benchmarks.yml": "9728e8679b1c39554023dd43854f685b5dc5625c69c91ec880c3b00b2917dbc6",
+      "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+      "benchmarks/steady-session-fixture/expected.arrow.gz": "f1e6c5683aa7fcc1033be0fc3eb0f8cbd3d4570edbe25abc4bcc634c2a46cc06",
+      "benchmarks/steady-session-fixture/inputs.arrow.gz": "f0c1bb0137526fcdf5c310d06d8a521e221cb5ad0a6e59badcbe924db09fcf81",
+      "benchmarks/steady-session-fixture/project.json.gz": "15825fc96916ee6c1420fd3836ff05913b122f6354c9384ca2304824041a3422",
+      "benchmarks/steady-wheel-pair.json": "823665da137e6b556545166da48f5c7298221cda12fe336bd4e5688542a171b3",
+      "benchmarks/steady_session.py": "d048d0ba0fbe9237c616ce10fafa39d3b0aa9155d711f0aec3f79b1ab39d1246",
+      "benchmarks/stream-session/20261123-public-steady-push/protocol.md": "74b832b4cffaa5f524eeb7941ad4b99911cdcb5c1211bab382608b842f124ddd",
+      "benchmarks/warm_stream.py": "56532fef6313ef8697dcdd8d30f09cf4de5c9ad1c9a646925063204373999b59",
+      "python/tests/test_steady_session_benchmark.py": "ccaef5c7479d909f467d1911ed86cf02a96c4988f0b49acdbafaa5acfc7524ad",
+      "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",
+      "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+      "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+      "scripts/hosted_steady_session.py": "8a6c25c6217a670f20cca740e31b0ed5a3ca85606a28334305ffedf75477142e",
+      "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+      "scripts/sparse_changelog_wheels.py": "7859857dbd59842f7571b08052812741b7383891720e6908c8ff0c21e2cd87f3",
+      "scripts/test_hosted_steady_session.py": "1f85480b7382debe4845405d02d27c3b1ab8daf53a9d887c1da517df26254270"
+    },
+    "start_epoch": 1795438609.0,
+    "timed_one_row_pushes": 64,
+    "total_python_budget_seconds": 300,
+    "warmups_per_side_per_round": 1,
+    "workflow": "1a00d83ca9ec42c8d777072c0f03a1f41a25cd8b"
+  },
+  "resources": [
+    {
+      "available_bytes": 15626850304,
+      "cpu": 2,
+      "cpu_busy": 0.3,
+      "host_busy": 0.5,
+      "interval_seconds": 3.0042335010000016,
+      "major_faults": 0,
+      "preflight": true,
+      "sibling_busy": 0.3,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438635.8680503
+    },
+    {
+      "available_bytes": 15640993792,
+      "cpu": 2,
+      "cpu_busy": 79.0,
+      "host_busy": 20.0,
+      "interval_seconds": 1.0016032300000006,
+      "major_faults": 6,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438636.8698196
+    },
+    {
+      "available_bytes": 15677689856,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 28.0,
+      "interval_seconds": 1.002680612000006,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438637.8725786
+    },
+    {
+      "available_bytes": 15699193856,
+      "cpu": 2,
+      "cpu_busy": 98.0,
+      "host_busy": 26.0,
+      "interval_seconds": 1.0030690039999968,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438638.8757079
+    },
+    {
+      "available_bytes": 15706714112,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0018926400000083,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438639.8776646
+    },
+    {
+      "available_bytes": 15724208128,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.725,
+      "interval_seconds": 1.0019754439999957,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438640.8797033
+    },
+    {
+      "available_bytes": 15731290112,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0019642170000083,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438641.8817325
+    },
+    {
+      "available_bytes": 15736111104,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0019261099999994,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438642.883724
+    },
+    {
+      "available_bytes": 15747764224,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0016454490000086,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438643.8854382
+    },
+    {
+      "available_bytes": 15747805184,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0026221070000076,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438644.888128
+    },
+    {
+      "available_bytes": 15749545984,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0026867699999968,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438645.8908756
+    },
+    {
+      "available_bytes": 15749611520,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0013253870000085,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438646.8922613
+    },
+    {
+      "available_bytes": 15741546496,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0013632550000011,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438647.893689
+    },
+    {
+      "available_bytes": 15749775360,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0028982869999936,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438648.8966517
+    },
+    {
+      "available_bytes": 15749816320,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 29.25,
+      "interval_seconds": 1.0019381769999995,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438649.898669
+    },
+    {
+      "available_bytes": 15749836800,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 26.0,
+      "interval_seconds": 1.0026678220000065,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438650.9014008
+    },
+    {
+      "available_bytes": 15749435392,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001204135000009,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438651.9026685
+    },
+    {
+      "available_bytes": 15741378560,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0019332290000023,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438652.9046633
+    },
+    {
+      "available_bytes": 15749591040,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001956941000003,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438653.9066815
+    },
+    {
+      "available_bytes": 15749373952,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0019530739999993,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438654.908712
+    },
+    {
+      "available_bytes": 15750189056,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0028987940000036,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438655.911676
+    },
+    {
+      "available_bytes": 15742205952,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0019452429999944,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438656.9136844
+    },
+    {
+      "available_bytes": 15750070272,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0018641909999957,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438657.9156144
+    },
+    {
+      "available_bytes": 15750053888,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0010011859999963,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438658.9166808
+    },
+    {
+      "available_bytes": 15749681152,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0019440409999731,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438659.91869
+    },
+    {
+      "available_bytes": 15749070848,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0019182639999826,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438660.9206717
+    },
+    {
+      "available_bytes": 15741456384,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001934207000005,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438661.9226701
+    },
+    {
+      "available_bytes": 15747977216,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001908788999998,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438662.924655
+    },
+    {
+      "available_bytes": 15743844352,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0029941269999938,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438663.9277103
+    },
+    {
+      "available_bytes": 15746035712,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.0019122449999998,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 2.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438664.9296892
+    },
+    {
+      "available_bytes": 15745835008,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0018410880000204,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438665.9315932
+    },
+    {
+      "available_bytes": 15745814528,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.75,
+      "interval_seconds": 1.002062178999978,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438666.9337149
+    },
+    {
+      "available_bytes": 15747112960,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0009293819999812,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438667.9347107
+    },
+    {
+      "available_bytes": 15755378688,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0015721939999764,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438668.9363425
+    },
+    {
+      "available_bytes": 15751053312,
+      "cpu": 2,
+      "cpu_busy": 94.1,
+      "host_busy": 25.474999999999998,
+      "interval_seconds": 1.0242321679999975,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.9,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438669.9606175
+    },
+    {
+      "available_bytes": 15759101952,
+      "cpu": 2,
+      "cpu_busy": 98.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0017623270000229,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438670.9624245
+    },
+    {
+      "available_bytes": 15747272704,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0010095179999894,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438671.9634786
+    },
+    {
+      "available_bytes": 15755014144,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.001678711999972,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438672.965221
+    },
+    {
+      "available_bytes": 15755493376,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0013753970000039,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438673.9666593
+    },
+    {
+      "available_bytes": 15755694080,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.001134095999987,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438674.9678543
+    },
+    {
+      "available_bytes": 15747555328,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.0,
+      "interval_seconds": 1.0025896190000196,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438675.970517
+    },
+    {
+      "available_bytes": 15755808768,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.5,
+      "interval_seconds": 1.0023484829999916,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438676.9729278
+    },
+    {
+      "available_bytes": 15755808768,
+      "cpu": 2,
+      "cpu_busy": 100.0,
+      "host_busy": 25.25,
+      "interval_seconds": 1.0016913209999814,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 1.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438677.974682
+    },
+    {
+      "available_bytes": 15756861440,
+      "cpu": 2,
+      "cpu_busy": 72.0,
+      "host_busy": 18.0,
+      "interval_seconds": 1.0020126329999925,
+      "major_faults": 0,
+      "preflight": false,
+      "sibling_busy": 0.0,
+      "siblings": [
+        3
+      ],
+      "suitable": true,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0,
+      "utc_seconds": 1795438678.9767573
+    }
+  ],
+  "statistics": {
+    "paired_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": -0.6204370864083764,
+        "low": -2.540150770239269,
+        "median": -1.2563262276756304
+      },
+      {
+        "coverage": 0.978515625,
+        "high": -0.14959452011652496,
+        "low": -3.487645643957138,
+        "median": -1.7618677800259996
+      }
+    ],
+    "pooled": {
+      "baseline": {
+        "p50_us": 63.285,
+        "p95_us": 84.38444999999999
+      },
+      "candidate": {
+        "p50_us": 62.334,
+        "p95_us": 82.31500000000001
+      }
+    },
+    "verdict": "no-confirmed-regression"
+  },
+  "wheels": {
+    "baseline": {
+      "artifact": 14807027286,
+      "artifact_digest": "sha256:9447e20b40475b1d2199740c829b4149adda6e016ba43a26c3be7b20cbef0242",
+      "build_profile": "release",
+      "checkout": "4c3cc98e2ebaa8834b8f12931c33da64856daaae",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "4c3cc98e2ebaa8834b8f12931c33da64856daaae",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 137611646674,
+      "native_sha256": "4e5a9d4cb6a81e02936116b5e380d26afe9732bcf528bb79a9ed28c6159d8101",
+      "requested_sha": "4c3cc98e2ebaa8834b8f12931c33da64856daaae",
+      "tree": "ee9804feb9a57a50268a3dbbed38c2c524466942",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "1b81b0a382d6390bdcb00177241d5c01a0291fc3cfd8ecf72e233fa8ad80a50e",
+      "workflow_run": 45150768447
+    },
+    "candidate": {
+      "artifact": 14820495536,
+      "artifact_digest": "sha256:dc79335036ab47f381274498f0d5fb7a19aad8955aa016a82c49dd12ff8c1817",
+      "build_profile": "release",
+      "checkout": "8618aeb8146a41778e0373a5cc62013a37e2199f",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "8618aeb8146a41778e0373a5cc62013a37e2199f",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 137696585919,
+      "native_sha256": "ce0b9606580007471d29722ce29a2c9f580b1c2d8e7b655ed42df0ea1b4ad853",
+      "requested_sha": "39479f767f2e4e647ccd608ffc3f7055507cf925",
+      "tree": "487172223b97746bcbd8a97fc0159cc5fabf3971",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "558d42b0ee09bad8a0f31529d213e88872f1081e96d29406441165d7d42d31de",
+      "workflow_run": 45175796563
+    }
+  },
+  "worker_records_sha256": "8630c7f598d4b18309491e0ac95791bcdd6d90b440fbd9af2122d081c31cfb21"
+}
