@@ -51,6 +51,7 @@ use crate::{
 
 mod cumulative;
 mod decay;
+mod duration;
 mod in_place;
 mod mean;
 mod numeric_rows;
@@ -743,6 +744,7 @@ impl TypedStreamTransition {
 /// Opaque, cloneable transition state for one typed kernel plan.
 #[derive(Clone, Debug, Default)]
 pub(super) struct RollingKernelState {
+    share_durations: bool,
     kernel_fingerprint: Option<String>,
     entities: HashMap<Vec<u8>, usize>,
     direct_entities: HashMap<String, (usize, usize)>,
@@ -1147,7 +1149,7 @@ impl RollingKernelPlan {
                     Ok(TypedWindowState::new(*group, 0))
                 }
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Box<[_]>>>()?;
         Ok(())
     }
 
@@ -1947,6 +1949,38 @@ impl RollingKernelState {
             .collect()
     }
 
+    pub(super) const fn shares_durations(&self) -> bool {
+        self.share_durations
+    }
+
+    pub(super) fn unused_shared_durations(&self) -> bool {
+        self.share_durations && self.states.is_empty()
+    }
+
+    pub(super) fn configure_deferred_durations(&mut self, plan: &RollingKernelPlan, enabled: bool) {
+        if self.states.is_empty() {
+            self.share_durations = enabled && duration::eligible(&plan.groups);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn physical_duration_samples(&self) -> usize {
+        self.states
+            .iter()
+            .map(|state| {
+                state.shared_duration.as_ref().map_or(0, |s| s.len())
+                    + state
+                        .groups
+                        .iter()
+                        .filter_map(|group| match group {
+                            TypedWindowState::Numeric(state) => Some(state.samples.len()),
+                            _ => None,
+                        })
+                        .sum::<usize>()
+            })
+            .sum()
+    }
+
     fn prepare_stream_entities(
         &self,
         routing: EntityRouting,
@@ -1970,7 +2004,13 @@ impl RollingKernelState {
             .zip(&rows.counts)
             .map(|(key, &count)| {
                 self.entities.get(key.as_slice()).map_or_else(
-                    || Arc::new(TypedEntityState::new(groups, count)),
+                    || {
+                        Arc::new(TypedEntityState::with_duration_storage(
+                            groups,
+                            count,
+                            self.share_durations,
+                        ))
+                    },
                     |&index| {
                         copied += 1;
                         // The prepared stream update owns each touched state
@@ -1991,6 +2031,7 @@ impl RollingKernelState {
             .collect();
         (
             Self {
+                share_durations: self.share_durations,
                 kernel_fingerprint: Some(fingerprint.into()),
                 entities,
                 direct_entities: HashMap::new(),
@@ -2038,7 +2079,11 @@ impl RollingKernelState {
             let row_count = counts[key];
             self.entities.insert(key.to_vec(), entity_id);
             self.states
-                .push(Arc::new(TypedEntityState::new(groups, row_count)));
+                .push(Arc::new(TypedEntityState::with_duration_storage(
+                    groups,
+                    row_count,
+                    self.share_durations,
+                )));
             entity_id
         })
         .collect()
@@ -2130,6 +2175,18 @@ fn update_typed_groups(
     nan_as_value: bool,
     node_id: &str,
 ) -> Result<()> {
+    if let Some(samples) = &mut entity.shared_duration {
+        let sample = samples.update(
+            &mut entity.groups,
+            &inputs[0],
+            row_index,
+            event_time,
+            nan_as_value,
+            node_id,
+        )?;
+        samples.commit(sample, |_| {});
+        return Ok(());
+    }
     if entity.shared_rows.is_some() {
         return numeric_rows::update_shared_groups(
             entity,
@@ -3113,14 +3170,20 @@ fn encoded_keys(
 
 #[derive(Clone, Debug)]
 struct TypedEntityState {
-    groups: Vec<TypedWindowState>,
+    groups: Box<[TypedWindowState]>,
+    shared_duration: Option<Box<duration::DurationSamples>>,
     shared_rows: Option<Arc<numeric_rows::RowsTape>>,
     transition_count: u64,
 }
 
 impl TypedEntityState {
     fn new(groups: &[TypedGroupPlan], entity_rows: usize) -> Self {
+        Self::with_duration_storage(groups, entity_rows, false)
+    }
+
+    fn with_duration_storage(groups: &[TypedGroupPlan], entity_rows: usize, shared: bool) -> Self {
         Self {
+            shared_duration: shared.then(|| duration::DurationSamples::new(groups.len())),
             groups: groups
                 .iter()
                 .map(|group| TypedWindowState::new(*group, entity_rows))
@@ -3138,6 +3201,7 @@ impl TypedEntityState {
                 .map(TypedWindowState::estimated_bytes)
                 .sum::<usize>()
             + self.shared_rows.as_ref().map_or(0, |tape| tape.bytes())
+            + self.shared_duration.as_ref().map_or(0, |tape| tape.bytes())
     }
 
     fn charge(&self, key_bytes: usize, node_id: &str) -> Result<StateCharge> {
@@ -3150,6 +3214,11 @@ impl TypedEntityState {
             },
             |tape| tape.len(),
         );
+        let rows = rows
+            + self
+                .shared_duration
+                .as_ref()
+                .map_or(0, |samples| samples.len());
         let bytes = self
             .estimated_bytes()
             .saturating_add(key_bytes)

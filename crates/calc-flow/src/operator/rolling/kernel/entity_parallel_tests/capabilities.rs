@@ -127,6 +127,56 @@ fn test_capability_parallel_accounts_for_many_output_descriptors() {
 }
 
 #[test]
+fn test_shared_duration_lanes_match_serial_state_and_all_output_bits() {
+    let mut plan = two_output_plan();
+    for (group, width) in plan.groups.iter_mut().zip([65, 257]) {
+        *group = TypedGroupPlan::Numeric {
+            input_index: 3,
+            frame: TypedFrame::Duration(width),
+            dispersion: true,
+        };
+    }
+    plan.shared_rows = None;
+    plan.nan_as_value = true;
+    for output in &mut plan.outputs {
+        output.min_periods = 1;
+    }
+    let mut state = RollingKernelState::default();
+    state.configure_deferred_durations(&plan, true);
+    let batch = input(64_000, 64, true);
+    assert_parity_from(&plan, &batch, &state);
+}
+
+#[test]
+fn test_equal_batch_counts_include_each_logical_duration_in_lane_work() {
+    let mut plan = two_output_plan();
+    for (group, span) in plan.groups.iter_mut().zip([10, 170]) {
+        *group = TypedGroupPlan::Numeric {
+            input_index: 3,
+            frame: TypedFrame::Duration(span),
+            dispersion: true,
+        };
+    }
+    plan.shared_rows = None;
+    let mut state = RollingKernelState::default();
+    state.configure_deferred_durations(&plan, true);
+    let prior = input(120, 1, false);
+    plan.prepare_ordered_stream(&state, &prior, "r", None)
+        .unwrap()
+        .commit(&mut state);
+    assert_eq!(state.physical_duration_samples(), 120);
+    let batch = input(122, 2, false).slice(120, 2);
+    let prepared = plan
+        .prepare_ordered_stream_inputs(&state, &batch, "r", None)
+        .unwrap();
+    assert_eq!(prepared.fill.stream.entity_rows.counts, [1, 1]);
+    assert_eq!(
+        entity_work_weights(&prepared.fill, 2),
+        Some((vec![4 + 10 + 120, 4], 138))
+    );
+}
+
+#[test]
 fn test_capability_parallel_skew_uses_existing_duration_work() {
     let batch = input(64_000, 64, false);
     let mut plan = lane_plan(false);
@@ -276,13 +326,20 @@ fn exact_fixture(signed: bool) -> (RollingKernelPlan, RecordBatch) {
 }
 
 fn assert_parity(plan: &RollingKernelPlan, batch: &RecordBatch) -> (usize, usize, usize) {
-    let state = warm(plan, batch);
+    assert_parity_from(plan, batch, &warm(plan, batch))
+}
+
+fn assert_parity_from(
+    plan: &RollingKernelPlan,
+    batch: &RecordBatch,
+    state: &RollingKernelState,
+) -> (usize, usize, usize) {
     let before = format!("{:?}", state.states);
     let expected = plan
-        .prepare_ordered_stream(&state, batch, "r", None)
+        .prepare_ordered_stream(state, batch, "r", None)
         .unwrap();
     let prepared = plan
-        .prepare_ordered_stream_inputs(&state, batch, "r", None)
+        .prepare_ordered_stream_inputs(state, batch, "r", None)
         .unwrap();
     let (seed, requests) = prepared
         .split_two()

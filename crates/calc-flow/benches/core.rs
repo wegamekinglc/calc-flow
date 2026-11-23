@@ -708,6 +708,7 @@ mod rolling_history {
     #[derive(Clone, Copy)]
     enum Case {
         DurationSum,
+        SharedDurationSum,
         MixedExtrema,
         RowsSum,
         ColdRowsMean,
@@ -722,6 +723,7 @@ mod rolling_history {
         fn name(self) -> &'static str {
             match self {
                 Self::DurationSum => "duration_sum_100k_keys1000_batch1000",
+                Self::SharedDurationSum => "duration_sum_30s_60s_90s_100k_keys1000_batch1000",
                 Self::MixedExtrema => "duration_min_rows_max_10k_keys64_batch1000",
                 Self::RowsSum => "rows_sum20_10k_keys64_batch1000",
                 Self::ColdRowsMean => "cold_rows37_mean_131074_keys1000",
@@ -735,7 +737,10 @@ mod rolling_history {
 
         fn rows(self) -> usize {
             match self {
-                Self::DurationSum | Self::SmallMultiGroup | Self::DenseDurationSum => 100_000,
+                Self::SharedDurationSum
+                | Self::DurationSum
+                | Self::SmallMultiGroup
+                | Self::DenseDurationSum => 100_000,
                 Self::MixedExtrema | Self::RowsSum => 10_000,
                 Self::ColdRowsMean | Self::ColdMultiGroup => 131_074,
                 Self::WarmDurationSum | Self::WarmRowsMean => 132_075,
@@ -777,7 +782,10 @@ mod rolling_history {
 
         fn rows_window(self) -> Option<usize> {
             match self {
-                Self::DurationSum | Self::WarmDurationSum | Self::DenseDurationSum => None,
+                Self::SharedDurationSum
+                | Self::DurationSum
+                | Self::WarmDurationSum
+                | Self::DenseDurationSum => None,
                 Self::MixedExtrema | Self::ColdRowsMean | Self::ColdMultiGroup => Some(37),
                 Self::SmallMultiGroup | Self::RowsSum | Self::WarmRowsMean => Some(20),
             }
@@ -816,6 +824,11 @@ mod rolling_history {
                 Self::DurationSum | Self::WarmDurationSum | Self::DenseDurationSum => {
                     vec![sum(duration, "sum_60s")]
                 }
+                Self::SharedDurationSum => [30_000_000, 60_000_000, 90_000_000]
+                    .into_iter()
+                    .zip(self.names())
+                    .map(|(micros, name)| sum(RollingFrameSpec::Duration { micros }, name))
+                    .collect(),
                 Self::SmallMultiGroup => vec![
                     sum(duration, "sum_60s"),
                     sum(RollingFrameSpec::Rows { size: 20 }, "sum_20_rows"),
@@ -853,6 +866,7 @@ mod rolling_history {
         fn names(self) -> &'static [&'static str] {
             match self {
                 Self::DurationSum | Self::WarmDurationSum | Self::DenseDurationSum => &["sum_60s"],
+                Self::SharedDurationSum => &["sum_30s", "sum_60s", "sum_90s"],
                 Self::SmallMultiGroup => &["sum_60s", "sum_20_rows"],
                 Self::RowsSum => &["sum_20"],
                 Self::MixedExtrema => &["min_60s", "max_37"],
@@ -1035,6 +1049,20 @@ mod rolling_history {
             match case {
                 Case::DurationSum | Case::WarmDurationSum | Case::DenseDurationSum => {
                     expected[0].push(scaled(totals[key]));
+                }
+                Case::SharedDurationSum => {
+                    for (output, width) in expected
+                        .iter_mut()
+                        .zip([30_000_000, 60_000_000, 90_000_000])
+                    {
+                        let sum = (0..=row)
+                            .rev()
+                            .step_by(case.groups())
+                            .take_while(|&prior| case.time(prior) > at - width)
+                            .map(|prior| case.numerator(prior))
+                            .sum();
+                        output.push(scaled(sum));
+                    }
                 }
                 Case::SmallMultiGroup => {
                     expected[0].push(scaled(totals[key]));
@@ -1452,6 +1480,11 @@ mod rolling_history {
             "output_columns":fixture.case.names(), "tokio_workers":4,
             "checkpointing":false, "validated_all_columns":true, "validated_input_immutable":true,
             "result_sha256":fixture.expected_sha256, "validated_iterations":iterations});
+        if matches!(fixture.case, Case::SharedDurationSum) {
+            report["duration_windows_micros"] = json!([30_000_000, 60_000_000, 90_000_000]);
+            report["last_primary_elapsed"] =
+                serde_json::to_value(last_primary_elapsed.unwrap()).unwrap();
+        }
         if matches!(fixture.case, Case::ColdMultiGroup) {
             report["input_columns"] = json!(["target_id", "event_time", "seq", "a", "b"]);
             report["declared_state_groups"] = json!([
@@ -1579,6 +1612,7 @@ mod rolling_history {
                 Case::RowsSum,
                 Case::SmallMultiGroup,
                 Case::DenseDurationSum,
+                Case::SharedDurationSum,
             ],
         );
         register_group(

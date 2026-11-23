@@ -1827,9 +1827,7 @@ fn entity_parallel_readout_compatibility_difference_reads_right_after_left_null(
             left.min_periods = 1;
         }
         let (_, [mut request, _]) = pair(&plan, &RollingKernelState::default(), &input);
-        Arc::make_mut(&mut request.entities[0].state)
-            .groups
-            .truncate(1);
+        edit_groups(&mut request.entities[0].state, |groups| groups.truncate(1));
         if left_error {
             Arc::make_mut(&mut request.entities[0].state).groups[0] =
                 TypedWindowState::Extrema(TypedExtremaState::new(TypedFrame::Rows(5), false, 20));
@@ -2233,15 +2231,15 @@ fn entity_parallel_readout_compatibility_short_zip_and_extra_state_keep_sites() 
     for groups in [0, 1, 3] {
         let (_, [mut request, _]) = pair(&plan, &state, &input);
         if groups < 2 {
-            Arc::make_mut(&mut request.entities[0].state)
-                .groups
-                .truncate(groups);
+            edit_groups(&mut request.entities[0].state, |state| {
+                state.truncate(groups)
+            });
         } else {
             let mut extra = TypedEwmaState::new(0.5, false);
             extra.update(Some(73.0), "r").unwrap();
-            Arc::make_mut(&mut request.entities[0].state)
-                .groups
-                .push(TypedWindowState::Ewma(extra));
+            edit_groups(&mut request.entities[0].state, |groups| {
+                groups.push(TypedWindowState::Ewma(extra))
+            });
         }
         let prior_extra =
             (groups == 3).then(|| format!("{:?}", request.entities[0].state.groups[2]));
@@ -2441,9 +2439,9 @@ fn private_readout_input(
         for entity in &mut request.entities {
             let mut extra = Float64NumericState::new(TypedFrame::Rows(5), 20);
             extra.update(-1, Some(73.0), "r").unwrap();
-            Arc::make_mut(&mut entity.state)
-                .groups
-                .push(TypedWindowState::Numeric(extra));
+            edit_groups(&mut entity.state, |groups| {
+                groups.push(TypedWindowState::Numeric(extra))
+            });
         }
         output.group = 1;
         TypedGroupInput::Single(
@@ -2537,4 +2535,11 @@ fn entity_parallel_compiled_readout_fixed_metadata_keeps_checked_capacity_bounda
     eprintln!(
         "readout metadata descriptor={descriptor} capture={readout_capture} counters={counters} fixed_views={fixed_views} pair_extra={required} total_zero_dimension={fixed}"
     );
+}
+
+fn edit_groups(entity: &mut Arc<TypedEntityState>, edit: impl FnOnce(&mut Vec<TypedWindowState>)) {
+    let entity = Arc::make_mut(entity);
+    let mut groups = std::mem::take(&mut entity.groups).into_vec();
+    edit(&mut groups);
+    entity.groups = groups.into_boxed_slice();
 }

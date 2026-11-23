@@ -1128,7 +1128,7 @@ type TypedStreamOutput = (
 // failure-atomic stream update; none of them may escape independently.
 pub(super) fn build_typed_stream_output(
     rows: &[BufferedRow],
-    histories: &RollingHistories,
+    retained: Option<&RollingHistories>,
     state: Option<&RollingKernelState>,
     compiled: &CompiledRollingSpec,
     output_schema: &SchemaRef,
@@ -1141,6 +1141,8 @@ pub(super) fn build_typed_stream_output(
     let input_schema = Arc::new(Schema::new(
         output_schema.fields()[..output_schema.fields().len() - compiled.outputs.len()].to_vec(),
     ));
+    let empty = RollingHistories::default();
+    let histories = retained.unwrap_or(&empty);
     let prior = typed_stream_prior(state, histories, compiled, &input_schema, node_id, observer)?;
     let input = {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
@@ -1152,9 +1154,11 @@ pub(super) fn build_typed_stream_output(
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::ArrowOutput));
         build_output_record(rows, columns, output_schema, node_id)?
     };
-    let touched = {
+    let touched = if let Some(histories) = retained {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::HistoryMaintenance));
         prepare_scalar_appends(rows, histories, compiled, &update, node_id, observer)?
+    } else {
+        PreparedHistoryUpdate::Append(Vec::new())
     };
     Ok(Some((
         record,

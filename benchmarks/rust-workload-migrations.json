@@ -2,6 +2,27 @@
   "schema": "calc-flow.rust-workload-migrations.v1",
   "migrations": [
     {
+      "target": "core",
+      "baseline_sha256": "232884032f87b6f3de844aab8e531c171908e39a13a090ad1c4a13b92dcb090f",
+      "candidate_sha256": "c1d3eede2a9976de0215e144dfcc4a75efd724a38aae336e1b5a4c117dc71c13",
+      "reason": "Apply the same native benchmark source to both exact products. The new same-column 30/60/90-second SUM has an independent per-row, per-window oracle and its own case ID. Existing case IDs keep their clocks and historical measurements.",
+      "reference": "2026-11-23 shared rolling Duration storage, main 1c58e537"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "5886be98a0ecc09f7812b3175ba9896f9e5845c748b8e9eb8a7927cc3bff4897",
+      "candidate_sha256": "c1d3eede2a9976de0215e144dfcc4a75efd724a38aae336e1b5a4c117dc71c13",
+      "reason": "Apply the same native benchmark source to both exact products. The new same-column 30/60/90-second SUM has an independent per-row, per-window oracle and its own case ID. Existing case IDs keep their clocks and historical measurements.",
+      "reference": "2026-11-23 shared rolling Duration storage, calc-flow-python-v2026.11.14"
+    },
+    {
+      "target": "core",
+      "baseline_sha256": "1977e38423122a9a4be36d56317cd905d64dd2fb95e37005e05669f436d47c98",
+      "candidate_sha256": "c1d3eede2a9976de0215e144dfcc4a75efd724a38aae336e1b5a4c117dc71c13",
+      "reason": "Apply the same native benchmark source to both exact products. The new same-column 30/60/90-second SUM has an independent per-row, per-window oracle and its own case ID. Existing case IDs keep their clocks and historical measurements.",
+      "reference": "2026-11-23 shared rolling Duration storage, published benchmark anchor 61a81f20"
+    },
+    {
       "target": "stream_join_perf",
       "baseline_sha256": "2533de442d20cc252c0fbef406777d6d080ae901fb1a5e247078d807a771213b",
       "candidate_sha256": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",

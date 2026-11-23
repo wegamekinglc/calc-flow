@@ -3,6 +3,370 @@ use crate::operator::rolling_metrics::{RollingCallback, RollingMetricsStore};
 use super::*;
 
 #[tokio::test]
+async fn test_deferred_duration_windows_retain_one_timed_sample_per_row() {
+    const SECOND: i64 = 1_000_000;
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "sum30", 30_000_000),
+        duration_output("mean", "price", "mean60", 60_000_000),
+        duration_output("sum", "price", "sum90", 90_000_000),
+    ]));
+    let rows = (0..100u32)
+        .map(|i| {
+            (
+                i64::from(i) * SECOND,
+                "a",
+                u64::from(i),
+                (i % 7 != 0).then_some(f64::from(i)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let input = float64_fast_record(&rows);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    operator
+        .set_state_budget(StateBudget::new(90 + 54, 1 << 24).unwrap())
+        .unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    let mut emitted = Vec::new();
+    for (offset, len) in [(0, 46), (46, 54)] {
+        assert!(
+            observe_data(
+                &mut operator,
+                &job,
+                &store,
+                &mut output,
+                input.slice(offset, len)
+            )
+            .await
+        );
+        emitted.extend(
+            close(
+                &mut operator,
+                &job,
+                &store,
+                &mut output,
+                rows[offset + len - 1].0,
+            )
+            .await,
+        );
+    }
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+    assert!(operator.state.histories.by_entity.is_empty());
+    assert_deferred_charge(&operator);
+    assert_eq!(
+        operator
+            .state
+            .typed_kernel_state
+            .as_deref()
+            .unwrap()
+            .physical_duration_samples(),
+        90
+    );
+    assert_eq!(operator.state.charge.rows, 90);
+}
+
+#[tokio::test]
+async fn test_shared_duration_sum_and_mean_match_independent_ieee_results() {
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "sum5", 5),
+        duration_output("mean", "price", "mean80", 80),
+    ]));
+    let special = [
+        None,
+        Some(-0.0),
+        Some(0.0),
+        Some(1e155),
+        Some(-1e155),
+        Some(f64::INFINITY),
+        Some(f64::NEG_INFINITY),
+        Some(f64::from_bits(0x7ff8_0000_0000_1234)),
+        Some(1e-300),
+    ];
+    let rows = (0..300_u32)
+        .map(|i| {
+            let value = if i % 150 < 30 {
+                special[i as usize % special.len()]
+            } else {
+                Some([1e16, 1.0, -1e16][i as usize % 3])
+            };
+            (i64::from(i), "a", u64::from(i), value)
+        })
+        .collect::<Vec<_>>();
+    let input = float64_fast_record(&rows);
+    let mut results = Vec::new();
+    for checkpointing in [true, false] {
+        let mut operator = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+        let (job, store, mut output) = fixture(&operator);
+        let job = job.with_checkpointing(checkpointing);
+        let mut emitted = Vec::new();
+        for offset in [0, 100, 200] {
+            assert!(
+                observe_data(
+                    &mut operator,
+                    &job,
+                    &store,
+                    &mut output,
+                    input.slice(offset, 100)
+                )
+                .await
+            );
+            emitted.extend(
+                close(
+                    &mut operator,
+                    &job,
+                    &store,
+                    &mut output,
+                    rows[offset + 99].0,
+                )
+                .await,
+            );
+        }
+        assert_eq!(operator.state.deferred_history, !checkpointing);
+        results.push(concat_batches(&emitted[0].schema(), &emitted).unwrap());
+    }
+    capability_profiles::assert_complete_bits(&results[0], &results[1]);
+}
+
+#[tokio::test]
+async fn test_shared_duration_eviction_retries_and_closes_out_of_order_rows() {
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "short", 3),
+        duration_output("mean", "price", "long", 8),
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, None),
+        (3, "a", 3, Some(3.0)),
+        (6, "a", 4, Some(4.0)),
+        (6, "a", 5, Some(5.0)),
+        (20, "a", 6, Some(6.0)),
+        (21, "a", 7, None),
+        (25, "a", 9, Some(9.0)),
+        (23, "a", 8, Some(8.0)),
+    ]);
+    for alias in [false, true] {
+        let mut operator = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+        let (expected, _) = reference_output(&operator, &input);
+        let (job, store, mut output) = fixture(&operator);
+        let job = job.with_checkpointing(false);
+        assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 5)).await);
+        let mut emitted = close(&mut operator, &job, &store, &mut output, 6).await;
+        let prior = format!("{:?}", operator.state.typed_kernel_state);
+        let _alias = alias.then(|| operator.state.typed_kernel_state.clone());
+        assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(5, 2)).await);
+        let charge = operator.state.charge;
+        let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(6)));
+        let error = operator
+            .on_watermark(
+                EventTime::from_micros(21),
+                &context,
+                &mut crate::EdgeCollector::new(Vec::new()),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown output port"), "{error}");
+        assert_eq!(format!("{:?}", operator.state.typed_kernel_state), prior);
+        assert_eq!(operator.state.charge, charge);
+        emitted.extend(close(&mut operator, &job, &store, &mut output, 21).await);
+        assert!(!observe_data(&mut operator, &job, &store, &mut output, input.slice(7, 2)).await);
+        emitted.extend(close(&mut operator, &job, &store, &mut output, 25).await);
+        assert_eq!(
+            concat_batches(&expected.schema(), &emitted).unwrap(),
+            expected
+        );
+        assert_eq!(operator.state.charge.rows, 4);
+        assert_deferred_charge(&operator);
+        let error = operator.checkpoint(Epoch::new(1).unwrap()).unwrap_err();
+        assert!(
+            error.to_string().contains("checkpointing is disabled"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_full_duration_tape_expires_before_growing_under_a_byte_budget() {
+    let spec = kernel_spec(json!([
+        duration_output("sum", "price", "short", 1),
+        duration_output("sum", "price", "long", 64),
+    ]));
+    let rows = (0..65_u32)
+        .map(|row| (i64::from(row), "a", u64::from(row), Some(f64::from(row))))
+        .collect::<Vec<_>>();
+    let input = float64_fast_record(&rows);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    let job = job.with_checkpointing(false);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 64)).await);
+    let mut emitted = close(&mut operator, &job, &store, &mut output, 63).await;
+    let initial = operator.state.charge;
+    assert_eq!(initial.rows, 64);
+    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(64, 1)).await);
+    operator
+        .set_state_budget(StateBudget::new(128, operator.state.charge.bytes).unwrap())
+        .unwrap();
+    emitted.extend(close(&mut operator, &job, &store, &mut output, 64).await);
+    assert_eq!(operator.state.charge, initial);
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn test_aborted_first_duration_delivery_keeps_durable_unordered_history() {
+    struct Pending;
+    #[async_trait::async_trait]
+    impl StreamCollector for Pending {
+        async fn emit(&mut self, _port: &str, _batch: Batch) -> Result<()> {
+            std::future::pending().await
+        }
+    }
+    let spec = kernel_spec(json!([
+        duration_output("mean", "price", "short", 3),
+        duration_output("sum", "price", "long", 8),
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(100.0)),
+        (6, "a", 3, Some(6.0)),
+        (5, "a", 2, Some(5.0)),
+        (7, "a", 4, Some(7.0)),
+    ]);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+    let (expected, _) = reference_output(&operator, &input.slice(1, 3));
+    let (durable, store, mut output) = fixture(&operator);
+    let ephemeral = durable.clone().with_checkpointing(false);
+    assert!(
+        observe_data(
+            &mut operator,
+            &ephemeral,
+            &store,
+            &mut output,
+            input.slice(0, 1)
+        )
+        .await
+    );
+    let context = StreamOperatorContext::new(&ephemeral, "rolling", None);
+    let mut collector = Pending;
+    {
+        let mut callback =
+            Box::pin(operator.on_watermark(EventTime::from_micros(1), &context, &mut collector));
+        assert!(futures::poll!(callback.as_mut()).is_pending());
+    }
+    assert!(!operator.state.deferred_history);
+    assert!(
+        !observe_data(
+            &mut operator,
+            &durable,
+            &store,
+            &mut output,
+            input.slice(1, 2)
+        )
+        .await
+    );
+    let mut emitted = close(&mut operator, &durable, &store, &mut output, 6).await;
+    let checkpoint = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+    let mut restored = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    StreamOperator::restore(&mut restored, &checkpoint).unwrap();
+    assert!(
+        observe_data(
+            &mut restored,
+            &durable,
+            &store,
+            &mut output,
+            input.slice(3, 1)
+        )
+        .await
+    );
+    emitted.extend(close(&mut restored, &durable, &store, &mut output, 7).await);
+    assert_eq!(
+        concat_batches(&expected.schema(), &emitted).unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn test_failed_first_deferred_duration_output_allows_durable_retry_and_restore() {
+    let spec = kernel_spec(json!([
+        duration_output("mean", "price", "short", 3),
+        duration_output("sum", "price", "long", 8),
+    ]));
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, None),
+        (3, "a", 3, Some(3.0)),
+        (9, "a", 4, Some(9.0)),
+    ]);
+    for checkpointing in [false, true] {
+        let mut operator = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+        let (expected, _) = reference_output(&operator, &input);
+        let (durable, store, mut output) = fixture(&operator);
+        let (ephemeral, _, _) = fixture(&operator);
+        let ephemeral = ephemeral.with_checkpointing(false);
+        assert!(
+            observe_data(
+                &mut operator,
+                &ephemeral,
+                &store,
+                &mut output,
+                input.slice(0, 3)
+            )
+            .await
+        );
+        let context = StreamOperatorContext::new(&ephemeral, "rolling", None);
+        assert!(
+            operator
+                .on_watermark(
+                    EventTime::from_micros(3),
+                    &context,
+                    &mut crate::EdgeCollector::new(vec![])
+                )
+                .await
+                .is_err()
+        );
+        let retry = if checkpointing { &durable } else { &ephemeral };
+        let mut emitted = close(&mut operator, retry, &store, &mut output, 3).await;
+        assert_eq!(
+            operator
+                .state
+                .typed_kernel_state
+                .as_deref()
+                .unwrap()
+                .physical_duration_samples(),
+            if checkpointing { 6 } else { 3 }
+        );
+        if !checkpointing {
+            assert_deferred_charge(&operator);
+            assert!(operator.state.deferred_history);
+            continue;
+        }
+        let snapshot = operator.checkpoint(Epoch::new(1).unwrap()).unwrap();
+        let mut restored = RollingOperator::new("rolling", input.schema(), spec.clone()).unwrap();
+        StreamOperator::restore(&mut restored, &snapshot).unwrap();
+        assert!(
+            observe_data(
+                &mut restored,
+                &durable,
+                &store,
+                &mut output,
+                input.slice(3, 1)
+            )
+            .await
+        );
+        emitted.extend(close(&mut restored, &durable, &store, &mut output, 9).await);
+        assert_eq!(
+            concat_batches(&expected.schema(), &emitted).unwrap(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_ordered_duration_mixed_input_stays_arrow_across_checkpoint() {
     let spec = kernel_spec(json!([
         duration_output("mean", "price", "time_mean", 6),

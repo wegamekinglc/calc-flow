@@ -314,16 +314,18 @@ impl RollingOperator {
         input: &RecordBatch,
         node_id: &str,
         observer: Option<&RollingMetricsRecorder>,
+        can_defer: bool,
     ) -> Result<()> {
-        if self.state.typed_kernel_state.is_none() {
+        if self.state.committed_kernel().is_none() {
             let _stage = observer.map(|recorder| recorder.stage(RollingStage::StatePreparation));
             self.materialize_histories_with_charge(node_id, observer)?;
-            let restored = reconstruct_typed_state(
+            let mut restored = reconstruct_typed_state(
                 &self.state.histories,
                 &self.compiled,
                 &input.schema(),
                 node_id,
             )?;
+            restored.configure_deferred_durations(&self.compiled.kernel_plan, can_defer);
             self.state.owned_mut()?.typed_kernel_state = Some(Box::new(restored));
         }
         Ok(())
@@ -375,7 +377,7 @@ impl RollingOperator {
         if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
             return true;
         }
-        self.state.typed_kernel_state.is_none()
+        self.state.committed_kernel().is_none()
             && self.state.histories.by_entity.is_empty()
             && !context.job().checkpointing()
             && self.compiled.kernel_plan.supports_deferred_history()
@@ -388,7 +390,7 @@ impl RollingOperator {
     ) -> Result<PreparedOrderedOutput<'a>> {
         let observer = context.rolling_metrics();
         let can_defer = self.can_defer_ordered_history(context);
-        self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
+        self.ensure_ordered_kernel_state(input, context.operator_id(), observer, can_defer)?;
         let defer_history = self.state.deferred_history || can_defer;
         let update = self
             .prepare_ordered_update(input, context, defer_history)
@@ -699,7 +701,7 @@ impl RollingOperator {
         if self.compiled.kernel_plan.supports_slab() && self.state.histories.by_entity.is_empty() {
             return true;
         }
-        self.state.typed_kernel_state.is_none()
+        self.state.committed_kernel().is_none()
             && self.state.histories.by_entity.is_empty()
             && !context.checkpointing()
             && self.compiled.kernel_plan.supports_deferred_history()
@@ -712,7 +714,7 @@ impl RollingOperator {
     ) -> Result<PreparedOrderedOutput<'a>> {
         let observer = context.rolling_metrics();
         let can_defer = self.can_defer_ordered_history_sync(context);
-        self.ensure_ordered_kernel_state(input, context.operator_id(), observer)?;
+        self.ensure_ordered_kernel_state(input, context.operator_id(), observer, can_defer)?;
         let defer_history = self.state.deferred_history || can_defer;
         let update = self.prepare_ordered_update_sync(input, context, defer_history)?;
         let mut prepared =
@@ -1530,6 +1532,9 @@ impl Drop for PreparedOrderedOutput<'_> {
             && let Some(kernel) = self.state.typed_kernel_state.as_deref_mut()
         {
             update.rollback(kernel);
+            if !self.state.deferred_history && kernel.unused_shared_durations() {
+                self.state.typed_kernel_state = None;
+            }
         }
     }
 }

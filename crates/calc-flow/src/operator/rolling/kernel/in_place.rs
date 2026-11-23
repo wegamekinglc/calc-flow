@@ -43,6 +43,7 @@ struct TypedEntityUndo {
 enum NumericGroupsUndo {
     One(Float64NumericUndo),
     Many(Vec<Float64NumericUndo>),
+    Durations(super::duration::DurationUndo),
 }
 
 impl NumericGroupsUndo {
@@ -50,6 +51,7 @@ impl NumericGroupsUndo {
         match self {
             Self::One(_) => 1,
             Self::Many(groups) => groups.len(),
+            Self::Durations(undo) => undo.len(),
         }
     }
 
@@ -57,6 +59,7 @@ impl NumericGroupsUndo {
         match self {
             Self::One(group) => std::slice::from_mut(group),
             Self::Many(groups) => groups.as_mut_slice(),
+            Self::Durations(_) => unreachable!("shared Duration uses its combined undo"),
         }
     }
 }
@@ -68,14 +71,14 @@ struct Float64NumericUndo {
     evicted: EvictedSamples,
 }
 
-enum EvictedSamples {
+pub(super) enum EvictedSamples {
     None,
     One(TimedSample<f64>),
     Many(Vec<TimedSample<f64>>),
 }
 
 impl EvictedSamples {
-    fn push(&mut self, sample: TimedSample<f64>) {
+    pub(super) fn push(&mut self, sample: TimedSample<f64>) {
         match self {
             Self::None => *self = Self::One(sample),
             Self::One(first) => {
@@ -85,7 +88,7 @@ impl EvictedSamples {
         }
     }
 
-    fn restore(self, values: &mut std::collections::VecDeque<TimedSample<f64>>) {
+    pub(super) fn restore(self, values: &mut std::collections::VecDeque<TimedSample<f64>>) {
         match self {
             Self::None => {}
             Self::One(sample) => values.push_front(sample),
@@ -127,9 +130,12 @@ impl TypedEntityUndo {
             }
         }
 
-        let groups = match entity.groups.as_slice() {
-            [group] => NumericGroupsUndo::One(snapshot(group)?),
-            groups => {
+        let groups = match (entity.shared_duration.as_deref(), entity.groups.as_ref()) {
+            (Some(tape), groups) => {
+                NumericGroupsUndo::Durations(super::duration::DurationUndo::new(tape, groups)?)
+            }
+            (None, [group]) => NumericGroupsUndo::One(snapshot(group)?),
+            (None, groups) => {
                 NumericGroupsUndo::Many(groups.iter().map(snapshot).collect::<Result<Vec<_>>>()?)
             }
         };
@@ -142,6 +148,13 @@ impl TypedEntityUndo {
     fn rollback(self, entity: &mut TypedEntityState) {
         entity.transition_count = self.transition_count;
         match self.groups {
+            NumericGroupsUndo::Durations(undo) => {
+                let tape = entity
+                    .shared_duration
+                    .as_deref_mut()
+                    .expect("shared Duration undo has its tape");
+                undo.rollback(tape, &mut entity.groups);
+            }
             NumericGroupsUndo::One(undo) => {
                 if let TypedWindowState::Numeric(state) = &mut entity.groups[0] {
                     undo.rollback(state);
@@ -299,10 +312,13 @@ impl InPlaceUpdate {
             }
             let resident = state.states.len();
             state.entities.insert(key.clone(), resident);
-            state.states.push(Arc::new(TypedEntityState::new(
-                &plan.groups,
-                rows.counts[local],
-            )));
+            state
+                .states
+                .push(Arc::new(TypedEntityState::with_duration_storage(
+                    &plan.groups,
+                    rows.counts[local],
+                    state.share_durations,
+                )));
             residents[local] = resident;
             undo[local].previous = Some(
                 TypedEntityUndo::new(&state.states[resident])
@@ -587,6 +603,22 @@ fn update_entity_groups_reversible(
     previous: &mut TypedEntityUndo,
     node_id: &str,
 ) -> Result<()> {
+    if let NumericGroupsUndo::Durations(undo) = &mut previous.groups {
+        let samples = entity
+            .shared_duration
+            .as_deref_mut()
+            .expect("shared Duration undo has its tape");
+        let sample = samples.update(
+            &mut entity.groups,
+            &inputs.columns[0],
+            row_index,
+            inputs.event_times.value(row_index),
+            plan.nan_as_value,
+            node_id,
+        )?;
+        samples.commit(sample, |removed| undo.removed(removed));
+        return Ok(());
+    }
     for ((group, input), undo) in entity
         .groups
         .iter_mut()
@@ -806,9 +838,24 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_duration_undo_funds_all_accumulators_and_cursors_once() {
+        let plans = [3, 8, 15].map(|width| super::super::TypedGroupPlan::Numeric {
+            input_index: 0,
+            frame: TypedFrame::Duration(width),
+            dispersion: true,
+        });
+        let entity = TypedEntityState::with_duration_storage(&plans, 1, true);
+        let measured = allocation_counter::measure(|| {
+            std::hint::black_box(TypedEntityUndo::new(&entity).unwrap());
+        });
+        assert_eq!(measured.count_total, 1, "{measured:?}");
+    }
+
+    #[test]
     fn single_group_undo_snapshot_does_not_allocate() {
         let entity = TypedEntityState {
-            groups: vec![TypedWindowState::Numeric(warm_state())],
+            groups: vec![TypedWindowState::Numeric(warm_state())].into_boxed_slice(),
+            shared_duration: None,
             shared_rows: None,
             transition_count: 1,
         };
