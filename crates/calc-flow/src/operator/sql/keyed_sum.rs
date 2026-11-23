@@ -637,12 +637,7 @@ impl Transaction {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .flush_versions(schema, &mut versions, &mut records)?;
-        let record = match records.as_slice() {
-            [] => RecordBatch::new_empty(schema.clone()),
-            [only] => only.clone(),
-            _ => datafusion::arrow::compute::concat_batches(schema, &records)
-                .map_err(|error| super::df_error("keyed SUM", error))?,
-        };
+        let record = combine_change_records(schema, &records)?;
         Ok((record, Arc::new(operations.finish())))
     }
 
@@ -966,6 +961,15 @@ fn null_value(kind: SumKind) -> SumValue {
 impl Drop for Transaction {
     fn drop(&mut self) {
         self.settle(false);
+    }
+}
+
+fn combine_change_records(schema: &SchemaRef, records: &[RecordBatch]) -> Result<RecordBatch> {
+    match records {
+        [] => Ok(RecordBatch::new_empty(schema.clone())),
+        [only] => Ok(only.clone()),
+        _ => datafusion::arrow::compute::concat_batches(schema, records)
+            .map_err(|error| super::df_error("keyed SUM", error)),
     }
 }
 
