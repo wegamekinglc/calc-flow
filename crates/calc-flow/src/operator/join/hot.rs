@@ -1,9 +1,8 @@
-use super::{HotProjection, JoinTimeBounds, StreamJoinOperator, operator_error};
+use super::{HotProjection, JoinTimeBounds, StreamJoinOperator};
 use crate::Result;
 use datafusion::arrow::{
-    array::Float64Array,
-    datatypes::{DataType, Schema, SchemaRef, TimeUnit},
-    record_batch::RecordBatch,
+    array::{ArrayRef, AsArray, Float64Array},
+    datatypes::{DataType, Float64Type, Schema, TimeUnit},
 };
 use std::sync::Arc;
 
@@ -15,7 +14,10 @@ pub(super) enum HotKind {
 
 pub(super) fn projection_kind(operator: &StreamJoinOperator) -> Option<HotKind> {
     let kind = HotKind::from_bounds(operator.spec.bounds)?;
-    if output_schema(operator).fields().is_empty() || !kind.accepts(operator.hot_projection) {
+    let schema = operator.output_ports[0]
+        .schema()
+        .expect("compiled Join output schema");
+    if schema.fields().is_empty() || !kind.accepts(operator.hot_projection) {
         return None;
     }
     if operator.spec.left_keys() != ["symbol"]
@@ -46,12 +48,8 @@ impl HotKind {
     }
 
     fn accepts(self, projection: Option<HotProjection>) -> bool {
-        matches!(
-            (self, projection),
-            (_, None)
-                | (Self::Equi, Some(HotProjection::Equi { .. }))
-                | (Self::Band, Some(HotProjection::Band))
-        )
+        projection
+            .is_none_or(|projection| projection.right_sequence.is_some() == (self == Self::Band))
     }
 
     fn accepts_schema(self, schema: &Schema) -> bool {
@@ -79,80 +77,33 @@ impl HotKind {
     }
 }
 
-pub(super) fn project_run_record(
-    operator: &StreamJoinOperator,
-    record: &RecordBatch,
-) -> Result<RecordBatch> {
-    let Some(projection) = operator.hot_projection else {
-        return Ok(record.clone());
-    };
-    let (mut columns, left_price, right_price) = match projection {
-        HotProjection::Equi {
-            sequence,
-            left_price,
-            right_price,
-        } => (
-            vec![record.column(sequence).clone()],
-            record.column(left_price).clone(),
-            record.column(right_price).clone(),
-        ),
-        HotProjection::Band => {
-            let left = operator.input_schema(0);
-            let right = operator.input_schema(1);
-            let left_width = left.fields().len();
-            let sequence = left.index_of("sequence").map_err(|error| {
-                operator_error(&operator.name, &format!("hot sequence: {error}"))
-            })?;
-            let right_sequence = right.index_of("sequence").map_err(|error| {
-                operator_error(&operator.name, &format!("hot right sequence: {error}"))
-            })?;
-            let left_price = left
-                .index_of("price")
-                .map_err(|error| operator_error(&operator.name, &format!("hot price: {error}")))?;
-            let right_price = right.index_of("price").map_err(|error| {
-                operator_error(&operator.name, &format!("hot right price: {error}"))
-            })?;
-            (
-                vec![
-                    record.column(sequence).clone(),
-                    record.column(left_width + right_sequence).clone(),
-                ],
-                record.column(left_price).clone(),
-                record.column(left_width + right_price).clone(),
-            )
+impl HotProjection {
+    pub(super) fn gather(
+        self,
+        column: impl Fn(usize, &DataType) -> Result<ArrayRef>,
+    ) -> Result<Vec<ArrayRef>> {
+        let mut columns = Vec::with_capacity(2 + usize::from(self.right_sequence.is_some()));
+        columns.push(column(self.sequence, &DataType::UInt64)?);
+        if let Some(sequence) = self.right_sequence {
+            columns.push(column(sequence, &DataType::UInt64)?);
         }
-    };
-    let left_price = left_price
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("hot Join price is Float64");
-    let right_price = right_price
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("hot Join right price is Float64");
-    let values = left_price
-        .iter()
-        .zip(right_price.iter())
-        .map(|(left, right)| match (left, right) {
-            (Some(left), Some(right)) => Some(left * right),
-            _ => None,
-        })
-        .collect::<Float64Array>();
-    columns.push(Arc::new(values));
-    RecordBatch::try_new(output_schema(operator), columns)
-        .map_err(|error| operator_error(&operator.name, &error.to_string()))
-}
-
-fn output_schema(operator: &StreamJoinOperator) -> SchemaRef {
-    Arc::clone(
-        operator.output_ports[0]
-            .schema()
-            .expect("compiled Join output schema"),
-    )
+        let left = column(self.left_price, &DataType::Float64)?;
+        let right = column(self.right_price, &DataType::Float64)?;
+        let values = left
+            .as_primitive::<Float64Type>()
+            .iter()
+            .zip(right.as_primitive::<Float64Type>().iter())
+            .map(|(left, right)| left.zip(right).map(|(a, b)| a * b))
+            .collect::<Float64Array>();
+        columns.push(Arc::new(values));
+        Ok(columns)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    mod projected_gather;
+
     use super::*;
     use crate::operator::join::JoinSide;
     use crate::{
@@ -163,6 +114,7 @@ mod tests {
     use datafusion::arrow::{
         array::{Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
         datatypes::{Field, Schema},
+        record_batch::RecordBatch,
     };
     use std::{collections::BTreeMap, time::Duration};
 
@@ -265,7 +217,8 @@ mod tests {
         if fused {
             operator
                 .set_hot_projection(
-                    HotProjection::Equi {
+                    HotProjection {
+                        right_sequence: None,
                         sequence: 1,
                         left_price: 3,
                         right_price: 5,
@@ -715,7 +668,8 @@ mod tests {
             StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec).unwrap();
         operator
             .set_hot_projection(
-                HotProjection::Equi {
+                HotProjection {
+                    right_sequence: None,
                     sequence: 1,
                     left_price: 3,
                     right_price: 5,
@@ -778,7 +732,8 @@ mod tests {
             if fused {
                 operator
                     .set_hot_projection(
-                        HotProjection::Equi {
+                        HotProjection {
+                            right_sequence: None,
                             sequence: 1,
                             left_price: 3,
                             right_price: 5,
@@ -941,6 +896,15 @@ mod tests {
         .unwrap()
     }
 
+    fn band_projection() -> HotProjection {
+        HotProjection {
+            sequence: 1,
+            right_sequence: Some(5),
+            left_price: 3,
+            right_price: 7,
+        }
+    }
+
     fn band_operator(fused: bool) -> StreamJoinOperator {
         let mut operator =
             StreamJoinOperator::new("hot-band", quote_schema(), quote_schema(), band_spec())
@@ -948,7 +912,7 @@ mod tests {
         if fused {
             operator
                 .set_hot_projection(
-                    HotProjection::Band,
+                    band_projection(),
                     Arc::new(Schema::new(vec![
                         Field::new("sequence", DataType::UInt64, false),
                         Field::new("right_sequence", DataType::UInt64, false),
@@ -1094,7 +1058,7 @@ mod tests {
             if fused {
                 operator
                     .set_hot_projection(
-                        HotProjection::Band,
+                        band_projection(),
                         Arc::new(Schema::new(vec![
                             Field::new("sequence", DataType::UInt64, false),
                             Field::new("right_sequence", DataType::UInt64, false),
@@ -1223,7 +1187,7 @@ mod tests {
         operator.spec.limits.max_matches_per_input_batch = 140_000;
         operator
             .set_hot_projection(
-                HotProjection::Band,
+                band_projection(),
                 Arc::new(Schema::new(vec![
                     Field::new("sequence", DataType::UInt64, false),
                     Field::new("right_sequence", DataType::UInt64, false),
