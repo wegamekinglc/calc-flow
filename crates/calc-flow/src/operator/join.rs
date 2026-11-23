@@ -587,6 +587,68 @@ mod tests {
         manifest
     }
 
+    #[tokio::test]
+    async fn test_dropped_row_frontier_commits_only_after_a_successful_retry_and_v4_cut() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_run_core();
+        let job = job().with_checkpointing(false);
+        let progress = || {
+            progress_context(
+                &job,
+                (IngressState::Active, None),
+                (IngressState::Active, Some(100)),
+            )
+        };
+        let mut out = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data("left", left_batch(vec![200]), &progress(), &mut out)
+            .await
+            .unwrap();
+        let rows = right_batch(vec![200, 99]);
+        let tight = progress().with_output_budget(EdgeBudget::new(1, 1).unwrap());
+        let err = operator
+            .process_data("right", rows.clone(), &tight, &mut out)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("edge byte budget"), "{err}");
+        assert!(out.drain("output").is_empty());
+        assert_eq!(operator.state.next_right_row_id, 0);
+        assert_eq!(operator.status().right.late_rows, 0);
+        operator
+            .process_data("right", rows, &progress(), &mut out)
+            .await
+            .unwrap();
+        let messages = out.drain("output");
+        assert_eq!(messages.len(), 1);
+        let batch = messages[0].as_data().unwrap();
+        assert_eq!(batch.metadata().sequence(), 0);
+        assert_eq!(batch.num_rows(), 1);
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(tmp.path().join("lineage"));
+        let cut = persist_native_epoch(&mut operator, &mut store, 1).await;
+        let snapshot = crate::state::v4::native::load_native(&mut store, &cut, "match").unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.state.next_right_row_id, 2);
+        assert_eq!(restored.status().right.late_rows, 1);
+        assert_eq!(restored.state.next_output_sequence, 1);
+        restored
+            .process_data("right", right_batch(vec![199]), &progress(), &mut out)
+            .await
+            .unwrap();
+        assert_eq!(
+            out.drain("output")[0]
+                .as_data()
+                .unwrap()
+                .metadata()
+                .sequence(),
+            1
+        );
+        assert_eq!(restored.state.next_right_row_id, 3);
+    }
+
     fn assert_native_counts(operator: &StreamJoinOperator, reuse: [usize; 3], changes: usize) {
         assert_eq!(
             operator
