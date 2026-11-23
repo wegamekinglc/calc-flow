@@ -14,7 +14,7 @@
     "tree": "9ac046cb2dd416a396be7332d39d898ad44e88ae",
     "workflow_run": 45161312235
   },
-  "budget_seconds": 300,
+  "budget_seconds": 240,
   "candidate": {
     "artifact": 14816313513,
     "artifact_digest": "sha256:5f91dab3d56561e65ca63f4f686b409efd91a59deac50d8a4a7182e1dacdbb8d",
@@ -35,17 +35,28 @@
   "dimension_rows": 64,
   "fact_rows": 1000000,
   "output_rows": 1000000,
+  "overall_budget_seconds": 300,
+  "previous_registration": {
+    "artifact": 14818126205,
+    "artifact_sha256": "a790b8f25a87cee8bc4b73cffe6c7f6f72967f32879bd1fa8caa1f3cdc1fc7d4",
+    "formal_pairs": 0,
+    "job_seconds": 37,
+    "run": 45171625875,
+    "validated_warmups": 0,
+    "workflow_sha": "de547eebb6b8a90a970065b104d39d6e3a621d54"
+  },
   "processing_goal_ms": 30,
-  "registered_utc": "2026-11-23T12:08:48.336933+00:00",
+  "registered_utc": "2026-11-23T12:15:52.332496+00:00",
   "source_hashes": {
-    ".github/workflows/benchmarks.yml": "4e6ce33effa981b9b3877e328326b01a24f59d00f6c5139faa83f6584192c155",
+    ".github/workflows/benchmarks.yml": "7091293a735e06a3c666d436a1b91b6da959b6103b821b310af67b636e639abc",
     "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
-    "benchmarks/engine_stream.py": "ed63d8036abeab341682a00ff92238842c8d380487cb4cc04f42afa7e285f0b0",
-    "benchmarks/hosted-product-protocol.md": "628f0f3936b9bcaf7264dc743104e410ba1a792ba649b3b7da02a3717f2d4f9b",
+    "benchmarks/engine_stream.py": "4bfcbc72f2d71d3ea224a062af63fc9831e68b791f3c5643d0df33cda9912a29",
+    "benchmarks/hosted-product-protocol.md": "fb69054a71ac592b0227c0bd1043ac528d2d4ce0993338196f12806674fac791",
     "scripts/benchmark_suite/measure.py": "b9bfc765b8b6088fa3b971cf02ddf08bd54598c40c2f9533d41cc5f9e631099c",
-    "scripts/hosted_static_product.py": "eeeee95eb9c0c274d5cbdaaa01143f26cb01e37421247329dd56189c2d09249f",
+    "scripts/hosted_static_product.py": "160c1acacb1297b9994bb8c1f134293257d132e80606175d302cdd11d9425014",
     "scripts/hosted_static_product_state.py": "83a6f02d80374e9e5ef74187c4d262ad9a3d38f513d22539e0e764f40000f19b",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
-    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd"
+    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd",
+    "scripts/test_hosted_static_product.py": "8a49d02362bf803d28e8e4451f9b73e95c93c68335a656b8365266b7f19d8f29"
   }
 }

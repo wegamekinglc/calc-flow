@@ -60,3 +60,42 @@ class StaticProductTest(unittest.TestCase):
         proof["stream_evidence"]["join_operator"]["fanned_out_bytes"] = 24 * ROWS
         with self.assertRaises(ValueError):
             validate_static_sample(proof)
+
+    def test_static_public_entry_observes_normalized_watermark(self):
+        from datetime import timedelta
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+
+        from benchmarks.engine_comparison import EngineCase
+        from benchmarks.engine_stream import BASE, BASE_MICROS, _validated_timed_streams
+
+        with TemporaryDirectory() as root:
+            case = EngineCase(
+                {"backend": "calc-flow-stream-1t", "scenario": "join", "rows": 128},
+                Path(root),
+            )
+            try:
+                self.assertIsNone(case.streams["right"][-1])
+                plan = SimpleNamespace(source_binding_ids=("left", "right"))
+                timed = _validated_timed_streams(plan, case.streams)
+                timestamp = timed["right"][-1].at
+                with self.assertRaisesRegex(ValueError, "EOF marker"):
+                    _validated_timed_streams(plan, timed)
+                row = case.sample()
+                self.assertEqual(row["correctness"]["max_abs_error"], 0)
+                self.assertEqual(row["correctness"]["rows"], 128)
+                evidence = row["stream_evidence"]
+                self.assertEqual(evidence["join_operator"]["fanned_out_rows"], 128)
+                self.assertEqual(
+                    evidence["sealed_dimension_watermark_micros"],
+                    BASE_MICROS + (timestamp - BASE) // timedelta(microseconds=1),
+                )
+            finally:
+                case.close()
+
+    def test_empty_public_output_cannot_satisfy_static_workload(self):
+        proof = complete()
+        proof["correctness"].update(rows=0, finite_rows=0)
+        with self.assertRaisesRegex(ValueError, "one million exact"):
+            validate_static_sample(proof)
