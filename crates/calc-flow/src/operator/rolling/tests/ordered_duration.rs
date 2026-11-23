@@ -1350,7 +1350,8 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
     );
     let state = operator.state.typed_kernel_state.as_deref().unwrap();
     assert_eq!(state.shares_durations(), shared_duration);
-    let before = format!("{state:?}");
+    let before = state.canonical_state_for_test();
+    let direct = state.direct_entities_for_test().clone();
     let charge = operator.state.charge;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(9)));
     let error = operator
@@ -1364,7 +1365,9 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
     assert!(error.to_string().contains("unknown output port"), "{error}");
     assert_eq!(operator.state.charge, charge);
     let state = operator.state.typed_kernel_state.as_deref().unwrap();
-    assert_eq!(format!("{state:?}"), before);
+    assert_eq!(state.canonical_state_for_test(), before);
+    assert_eq!(state.direct_entities_for_test(), &direct);
+    assert_eq!(state.shares_durations(), shared_duration);
     emitted.extend(close(&mut operator, &job, &store, &mut output, 21).await);
     assert_eq!(
         concat_batches(&expected.schema(), &emitted).unwrap(),
