@@ -76,6 +76,7 @@ jobs:
         run: >-
           python -m unittest -v
           scripts.test_analyze_sql_datafusion_attribution
+          scripts.test_anti_watermark_measurement
           scripts.test_benchmark_asof
           scripts.test_benchmark_asof_eviction
           scripts.test_benchmark_engine_lifecycle
@@ -90,7 +91,6 @@ jobs:
           scripts.test_groupby_diagnostic_imports
           scripts.test_groupby_diagnostic_rustc
           scripts.test_checkpoint_benchmark
-          scripts.test_profile_checkpoint_v4
           scripts.test_join_p5_measurement scripts.test_join_stage_profile
           scripts.test_checkpoint_cycles
           scripts.test_issue406_acceptance
@@ -281,6 +281,7 @@ jobs:
             --target target/adapter-site target/releases/candidate/*.whl
           PYTHONPATH=target/adapter-site:. JAX_PLATFORMS=cpu \
             target/benchmark-venv/bin/python -m unittest \
+            scripts.test_profile_checkpoint_v4 \
             scripts.test_profile_warm_stream scripts.test_performance_plan \
             scripts.test_entity_parallel_inventory scripts.test_join_asof_acceptance \
             scripts.test_issue406_fresh_runner scripts.test_issue406_fresh_v3 \
