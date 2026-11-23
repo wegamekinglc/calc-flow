@@ -132,7 +132,7 @@ impl Lowered {
         output: &SchemaRef,
         path: &str,
     ) -> Result<QueryTemporalIdentity> {
-        let left_only = spec.join_type() == crate::StreamJoinType::LeftSemi;
+        let left_only = spec.join_type() != crate::StreamJoinType::Inner;
         let output_name = |prefix: &str, name: &str| {
             if left_only {
                 name.to_owned()

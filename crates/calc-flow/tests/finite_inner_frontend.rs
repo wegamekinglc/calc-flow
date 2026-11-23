@@ -21,11 +21,11 @@ async fn typed_and_sql_inner_join_export_and_compile_both_modes() -> Result<()> 
     stream::verify(stream_plan(&p).await?, inputs).await
 }
 
-fn left_semi_program(entity: &str) -> Result<Program> {
+fn existence_program(kind: calc_flow::StreamJoinType, entity: &str) -> Result<Program> {
     let left = table_input("a", schema(), options())?;
     let right = table_input("b", schema(), options())?;
     let spec = StreamJoinSpec::new(
-        calc_flow::StreamJoinType::LeftSemi,
+        kind,
         ["k"],
         ["k"],
         "ts",
@@ -50,7 +50,7 @@ fn left_semi_program(entity: &str) -> Result<Program> {
 #[tokio::test]
 async fn test_typed_left_semi_rejects_prefixed_identity() -> Result<()> {
     let registry = calc_flow::UdfRegistry::new().snapshot();
-    let error = left_semi_program("left__k")?
+    let error = existence_program(calc_flow::StreamJoinType::LeftSemi, "left__k")?
         .collect_schema(&registry)
         .await
         .unwrap_err()
@@ -65,7 +65,7 @@ async fn test_typed_left_semi_rejects_prefixed_identity() -> Result<()> {
 #[tokio::test]
 async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()> {
     let registry = calc_flow::UdfRegistry::new().snapshot();
-    let program = left_semi_program("k")?;
+    let program = existence_program(calc_flow::StreamJoinType::LeftSemi, "k")?;
     let plan = program
         .compile_batch(&registry, &calc_flow::CompileOptions::default())
         .await?;
@@ -75,6 +75,30 @@ async fn test_typed_left_semi_accepts_left_identity_and_executes() -> Result<()>
     let output = &result.outputs["exists"];
     assert_eq!(output.num_rows(), 2);
     assert_eq!(output.table_payload()?.schema(), &schema());
+    assert!(stream_plan(&program).await.is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_typed_left_anti_executes_with_original_left_identity() -> Result<()> {
+    let registry = calc_flow::UdfRegistry::new().snapshot();
+    let program = existence_program(calc_flow::StreamJoinType::LeftAnti, "k")?;
+    let plan = program
+        .compile_batch(&registry, &calc_flow::CompileOptions::default())
+        .await?;
+    let mut inputs = fixture_inputs()?;
+    inputs.insert("a".into(), data(schema(), &[10, 40])?);
+    let result = plan
+        .execute(inputs, calc_flow::ExecutionOptions::default())
+        .await?;
+    let output = result.outputs["exists"].table_payload()?;
+    assert_eq!(output.schema(), &schema());
+    let times = output.batches()[0]
+        .column(1)
+        .as_any()
+        .downcast_ref::<calc_flow::arrow::array::TimestampMicrosecondArray>()
+        .unwrap();
+    assert_eq!(times.values().as_ref(), &[40]);
     assert!(stream_plan(&program).await.is_ok());
     Ok(())
 }

@@ -4372,6 +4372,11 @@
           "const": "left_semi",
           "description": "Emit each left row once, when its first eligible right match is observed.",
           "type": "string"
+        },
+        {
+          "const": "left_anti",
+          "description": "Emit each left row once absence of an eligible right witness is established.",
+          "type": "string"
         }
       ]
     },

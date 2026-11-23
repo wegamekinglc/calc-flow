@@ -401,14 +401,14 @@ async fn test_columnar_watermark_equality_remains_pending() {
             .unwrap();
     }
     let equal = progress_context(&job, 100, 10);
-    operator
+    (&mut operator as &mut dyn StreamOperator)
         .on_ingress_progress_with_output("left", &equal, &mut output)
         .await
         .unwrap();
     assert!(output.drain("output").is_empty());
     assert_eq!(operator.status.pending_left_rows, 1);
     let closed = progress_context(&job, 101, 10);
-    operator
+    (&mut operator as &mut dyn StreamOperator)
         .on_ingress_progress_with_output("left", &closed, &mut output)
         .await
         .unwrap();

@@ -93,16 +93,29 @@ fn test_left_semi_spec_keeps_the_complete_left_schema() {
 }
 
 #[test]
-fn test_cf_inner_join_rejects_left_semi_spec() {
+fn test_left_anti_spec_keeps_left_names_and_durable_wire_identity() {
     let mut wire = serde_json::to_value(spec()).unwrap();
-    wire["join_type"] = "left_semi".into();
-    let config = serde_json::json!({ "spec": wire });
-    let sql = format!("SELECT * FROM CF_INNER_JOIN('lhs','rhs','{config}')");
-    let error = calc_flow::sql::inner_join_query(&sql, &["lhs".into(), "rhs".into()]).unwrap_err();
-    assert!(
-        error.to_string().contains("requires join_type inner"),
-        "{error}"
-    );
+    wire["join_type"] = "left_anti".into();
+    let decoded: StreamJoinSpec = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&decoded).unwrap(), wire);
+    let op = StreamJoinOperator::new("absence", left_schema(), right_schema(), decoded).unwrap();
+    assert_eq!(op.output_ports()[0].schema().unwrap(), &left_schema());
+}
+
+#[test]
+fn test_cf_inner_join_rejects_existence_specs() {
+    for kind in ["left_semi", "left_anti"] {
+        let mut wire = serde_json::to_value(spec()).unwrap();
+        wire["join_type"] = kind.into();
+        let config = serde_json::json!({ "spec": wire });
+        let sql = format!("SELECT * FROM CF_INNER_JOIN('lhs','rhs','{config}')");
+        let error =
+            calc_flow::sql::inner_join_query(&sql, &["lhs".into(), "rhs".into()]).unwrap_err();
+        assert!(
+            error.to_string().contains("requires join_type inner"),
+            "{error}"
+        );
+    }
 }
 
 #[test]

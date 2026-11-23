@@ -1111,7 +1111,9 @@ pub(crate) fn interval_join_name(kind: crate::StreamJoinType, sql: bool) -> &'st
     match (sql, kind) {
         (true, _) => "sql.inner_join",
         (false, crate::StreamJoinType::Inner) => "inner_join",
-        (false, crate::StreamJoinType::LeftSemi) => "interval_join",
+        (false, crate::StreamJoinType::LeftSemi | crate::StreamJoinType::LeftAnti) => {
+            "interval_join"
+        }
     }
 }
 
@@ -1139,7 +1141,8 @@ impl TableExpr {
     }
 
     /// Declares a bounded interval join in either lifecycle. A left semi join
-    /// emits an original left row when its first eligible right witness arrives.
+    /// emits an original left row when its first eligible right witness arrives. A left anti
+    /// join emits an unmatched left row when right progress or EOF establishes absence.
     ///
     /// # Errors
     /// Incomplete explicit output identities fail immediately. Compilation checks

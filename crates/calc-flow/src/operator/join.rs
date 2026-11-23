@@ -10,6 +10,7 @@ mod tests {
     mod expiration_heap_tests;
     mod ingress_pack_tests;
     mod lazy_delta_tests;
+    mod left_anti;
     mod left_semi;
     mod morsel_tests;
 
@@ -3190,6 +3191,8 @@ pub enum StreamJoinType {
     Inner,
     /// Emit each left row once, when its first eligible right match is observed.
     LeftSemi,
+    /// Emit each left row once absence of an eligible right witness is established.
+    LeftAnti,
 }
 
 impl StreamJoinType {
@@ -3197,6 +3200,7 @@ impl StreamJoinType {
         match self {
             Self::Inner => 12,
             Self::LeftSemi => 13,
+            Self::LeftAnti => 14,
         }
     }
 }
@@ -3428,7 +3432,8 @@ impl StreamJoinSpec {
 
     /// Creates a bounded event-time Join of the selected type.
     ///
-    /// A left semi Join emits the unchanged left schema after its first witness.
+    /// A left semi Join emits the left row after its first witness. A left anti
+    /// Join returns an unwitnessed row once its interval has closed. Both use the left schema.
     ///
     /// # Errors
     ///
@@ -3803,6 +3808,7 @@ struct AdmissionBundle {
     next_row_id: u64,
     metrics: SideMetrics,
     admitted: AdmittedBatch,
+    absent_null_ids: Vec<u64>,
     had_late: bool,
 }
 
@@ -3817,6 +3823,7 @@ enum DropKind {
 /// Classified disposition of one incoming physical row.
 enum RowAdmission {
     Dropped(DropKind),
+    Unmatchable,
     Admitted(EventTime),
 }
 
@@ -5030,6 +5037,7 @@ impl StreamJoinOperator {
             next_row_id,
             metrics,
             admitted: AdmittedBatch::reserve(self, batch)?,
+            absent_null_ids: Vec::new(),
             had_late: false,
         })
     }
@@ -5123,7 +5131,9 @@ impl StreamJoinOperator {
         #[cfg(test)]
         note_join_work(|work| work.scalar_admissions += 1);
         let row_id = bundle.reserve_row_id(&self.name)?;
-        Ok((row_id, masks.at(offset, &self.name, ingress)?))
+        let anti_left = self.spec.join_type == StreamJoinType::LeftAnti && ingress == "left";
+        let admission = masks.at(offset, &self.name, ingress, anti_left)?;
+        Ok((row_id, admission))
     }
 
     async fn admit_legacy_record(
@@ -5180,7 +5190,7 @@ impl StreamJoinOperator {
         }
         for offset in 0..length {
             quantum.step(context, 4, 16).await?;
-            let (_, admission) = self.masked_row(masks, offset, ingress, bundle)?;
+            let admission = self.masked_row(masks, offset, ingress, bundle)?;
             self.append_classified_row(
                 (
                     record_index,
@@ -5199,14 +5209,21 @@ impl StreamJoinOperator {
 
     async fn append_classified_row(
         &self,
-        row: (usize, usize, RowAdmission, bool),
+        row: (usize, usize, (u64, RowAdmission), bool),
         context: &StreamOperatorContext<'_>,
         bundle: &mut AdmissionBundle,
         quantum: &mut columnar_quantum::Quantum,
     ) -> Result<()> {
-        let (record_index, physical, admission, retain) = row;
+        let (record_index, physical, (row_id, admission), retain) = row;
         match admission {
             RowAdmission::Dropped(kind) => bundle.note_dropped(kind, &self.name)?,
+            RowAdmission::Unmatchable => {
+                if bundle.absent_null_ids.len() as u64
+                    <= self.spec.limits.max_matches_per_input_batch()
+                {
+                    bundle.absent_null_ids.push(row_id);
+                }
+            }
             RowAdmission::Admitted(event_time) => {
                 bundle
                     .admitted
@@ -6076,6 +6093,22 @@ impl StreamJoinOperator {
         Ok(())
     }
 
+    async fn finalize_absent(
+        &mut self,
+        right: Option<IngressProgress>,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        context.check_cancelled()?;
+        if self.run_core.is_none() {
+            self.initialize_run_core()?;
+        }
+        let mut core = self.run_core.take().expect("initialized run core");
+        let result = core.release_absent(self, right, context, output).await;
+        self.run_core = Some(core);
+        result
+    }
+
     async fn process_runs(
         &mut self,
         ingress: &str,
@@ -6251,11 +6284,36 @@ impl StreamOperator for StreamJoinOperator {
         self.process_runs(ingress, &batch, context, output).await
     }
 
+    async fn on_ingress_progress_with_output(
+        &mut self,
+        ingress: &str,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        if self.spec.join_type != StreamJoinType::LeftAnti || ingress != "right" {
+            return self.on_ingress_progress(ingress, context).await;
+        }
+        self.finalize_absent(
+            Some(self.required_progress(ingress, context)?),
+            context,
+            output,
+        )
+        .await?;
+        self.ingress_progress = context.ingress_progress().clone();
+        Ok(())
+    }
+
     async fn on_ingress_progress(
         &mut self,
         ingress: &str,
         context: &StreamOperatorContext<'_>,
     ) -> Result<()> {
+        if self.spec.join_type == StreamJoinType::LeftAnti && ingress == "right" {
+            return Err(operator_error(
+                &self.name,
+                "left anti join right progress requires an output collector",
+            ));
+        }
         let progress = self.required_progress(ingress, context)?;
         #[cfg(test)]
         if self.compaction_release.is_some() || self.compaction_cleanup.is_some() {
@@ -6305,9 +6363,12 @@ impl StreamOperator for StreamJoinOperator {
     async fn on_end(
         &mut self,
         context: &StreamOperatorContext<'_>,
-        _output: &mut dyn StreamCollector,
+        output: &mut dyn StreamCollector,
     ) -> Result<()> {
         context.check_cancelled()?;
+        if self.spec.join_type == StreamJoinType::LeftAnti {
+            self.finalize_absent(None, context, output).await?;
+        }
         #[cfg(test)]
         self.await_compaction_release(context).await?;
         #[cfg(test)]
@@ -6447,7 +6508,7 @@ impl StreamOperator for StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
-            .is_some_and(|layout| matches!(layout, 12 | 13))
+            .is_some_and(|layout| matches!(layout, 12..=14))
         {
             return self.restore_native(snapshot);
         }
@@ -6522,7 +6583,7 @@ impl StreamJoinOperator {
             .inline_metadata
             .get("layout_version")
             .and_then(Value::as_u64)
-            .is_some_and(|layout| matches!(layout, 12 | 13))
+            .is_some_and(|layout| matches!(layout, 12..=14))
         {
             return self.restore_native(snapshot);
         }
@@ -7448,7 +7509,7 @@ fn compile_schemas(
         event_time_index(right, &spec.right_event_time, "right_event_time")?;
     let output = match spec.join_type {
         StreamJoinType::Inner => Schema::new(prefixed_output_fields(left, right, spec)),
-        StreamJoinType::LeftSemi => left.clone(),
+        StreamJoinType::LeftSemi | StreamJoinType::LeftAnti => left.clone(),
     };
     Ok((
         Arc::new(output),

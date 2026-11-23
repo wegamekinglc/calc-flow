@@ -841,6 +841,7 @@ pub(super) struct RunOutputContext<'a> {
     projection: Option<&'a [usize]>,
     pub(super) product: Option<HotProjection>,
     pub(super) join_type: StreamJoinType,
+    pub(super) anti_left: Option<AntiInput<'a>>,
     left_width: usize,
     budget: EdgeBudget,
     #[cfg(feature = "benchmark-internals")]
@@ -859,6 +860,7 @@ impl<'a> RunOutputContext<'a> {
             projection,
             product: None,
             join_type: StreamJoinType::Inner,
+            anti_left: None,
             left_width,
             budget,
             #[cfg(feature = "benchmark-internals")]
@@ -979,62 +981,105 @@ struct EvictionPlan {
 impl EvictionPlan {
     fn new(side: &Side, cut: usize) -> Result<Self> {
         let expired = &side.expiration[side.expiration_head..side.expiration_head + cut];
-        let mut run_cuts = BTreeMap::<RunId, usize>::new();
-        let mut group_cuts = BTreeMap::<GroupId, usize>::new();
+        let mut plan = Self::empty(cut);
+        plan.count(expired);
+        plan.finish(side, &mut || Ok(()))
+    }
+
+    fn empty(cut: usize) -> Self {
+        Self {
+            cut,
+            run_cuts: BTreeMap::new(),
+            group_cuts: BTreeMap::new(),
+            bytes: 0,
+        }
+    }
+
+    fn count(&mut self, expired: &[LocatorEntry]) {
         for entry in expired {
-            *run_cuts.entry(entry.locator.run).or_default() += 1;
-            *group_cuts.entry(entry.group).or_default() += 1;
+            *self.run_cuts.entry(entry.locator.run).or_default() += 1;
+            *self.group_cuts.entry(entry.group).or_default() += 1;
         }
-        let mut bytes = 0usize;
-        for (&id, &count) in &run_cuts {
-            let live = side
-                .runs
-                .get(&id)
-                .ok_or_else(|| run_error("eviction references a missing run"))?;
-            let new_head = live
-                .head
-                .checked_add(count)
-                .filter(|head| *head <= live.run.len())
-                .ok_or_else(|| run_error("eviction run prefix exceeds live rows"))?;
-            let charge = if new_head == live.run.len() {
-                live.run
-                    .bytes
-                    .checked_sub(live.released_bytes)
-                    .ok_or_else(|| run_error("released run charge exceeds its owner"))?
-            } else {
-                live.run
-                    .charge
-                    .rows_charge(live.run.order[live.head..new_head].iter().copied())?
-            };
-            bytes = bytes
-                .checked_add(charge)
-                .ok_or_else(|| run_error("eviction byte charge overflowed"))?;
-        }
-        for (&group, &count) in &group_cuts {
-            let bucket = side
-                .buckets
-                .get(&group)
-                .ok_or_else(|| run_error("eviction references a missing key"))?;
-            if count > bucket.active().len() {
-                return Err(run_error("eviction key prefix exceeds live locators"));
-            }
-            if count == bucket.active().len() {
-                bytes = bytes
-                    .checked_add(bucket.charge())
-                    .ok_or_else(|| run_error("evicted bucket charge overflowed"))?;
-            }
-        }
-        if cut == side.rows {
+    }
+
+    fn finish(mut self, side: &Side, check: &mut impl FnMut() -> Result<()>) -> Result<Self> {
+        let bytes = cut_charges(
+            0,
+            &self.run_cuts,
+            check,
+            "eviction byte charge overflowed",
+            |id, count| side.evicted_run_charge(*id, count),
+        )?;
+        let mut bytes = cut_charges(
+            bytes,
+            &self.group_cuts,
+            check,
+            "evicted bucket charge overflowed",
+            |group, count| side.evicted_bucket_charge(*group, count),
+        )?;
+        if self.cut == side.rows {
             bytes = bytes
                 .checked_add(side.expiration_charge())
                 .ok_or_else(|| run_error("evicted expiration charge overflowed"))?;
         }
-        Ok(Self {
-            cut,
-            run_cuts,
-            group_cuts,
-            bytes,
-        })
+        self.bytes = bytes;
+        Ok(self)
+    }
+}
+
+fn cut_charges<K>(
+    mut bytes: usize,
+    cuts: &BTreeMap<K, usize>,
+    check: &mut impl FnMut() -> Result<()>,
+    overflow: &'static str,
+    charge: impl Fn(&K, usize) -> Result<usize>,
+) -> Result<usize> {
+    for (index, (owner, &count)) in cuts.iter().enumerate() {
+        if index.is_multiple_of(MORSEL_ROWS) {
+            check()?;
+        }
+        bytes = bytes
+            .checked_add(charge(owner, count)?)
+            .ok_or_else(|| run_error(overflow))?;
+    }
+    Ok(bytes)
+}
+
+impl Side {
+    fn evicted_run_charge(&self, id: RunId, count: usize) -> Result<usize> {
+        let live = self
+            .runs
+            .get(&id)
+            .ok_or_else(|| run_error("eviction references a missing run"))?;
+        let new_head = live
+            .head
+            .checked_add(count)
+            .filter(|head| *head <= live.run.len())
+            .ok_or_else(|| run_error("eviction run prefix exceeds live rows"))?;
+        if new_head == live.run.len() {
+            live.run
+                .bytes
+                .checked_sub(live.released_bytes)
+                .ok_or_else(|| run_error("released run charge exceeds its owner"))
+        } else {
+            live.run
+                .charge
+                .rows_charge(live.run.order[live.head..new_head].iter().copied())
+        }
+    }
+
+    fn evicted_bucket_charge(&self, group: GroupId, count: usize) -> Result<usize> {
+        let bucket = self
+            .buckets
+            .get(&group)
+            .ok_or_else(|| run_error("eviction references a missing key"))?;
+        match count.cmp(&bucket.active().len()) {
+            std::cmp::Ordering::Greater => {
+                Err(run_error("eviction key prefix exceeds live locators"))
+            }
+            std::cmp::Ordering::Equal => Ok(bucket.charge()),
+            std::cmp::Ordering::Less => Ok(0),
+        }
     }
 }
 
@@ -1291,6 +1336,10 @@ impl RunState {
     ) -> Result<PreparedRuns> {
         check()?;
         let mut matches = InputMatches::default();
+        if let Some(input) = output.anti_left {
+            matches.count = input.null_ids.len();
+            self.check_match_limit(matches.count)?;
+        }
         let mut next_run = self.next_run;
         let mut next_row_id = self.next_row_id(incoming_side);
         let mut prepared = Vec::<Prepared>::new();
@@ -1346,6 +1395,13 @@ impl RunState {
             next_output = next_output_sequence(next_output, batches.len())?;
             outputs.push(batches);
         }
+        if let Some(input) = output.anti_left {
+            let batches = input.materialize(self, &matches.absent_ids, &output, check)?;
+            if !batches.is_empty() {
+                next_output = next_output_sequence(next_output, batches.len())?;
+                outputs.push(batches);
+            }
+        }
         check()?;
         matches.witnesses.seal(self);
         Ok(PreparedRuns {
@@ -1383,6 +1439,10 @@ impl RunState {
             }
             StreamJoinType::LeftSemi => {
                 self.probe::<true>(incoming_side, &incoming, check, matches)?
+            }
+            StreamJoinType::LeftAnti => {
+                self.probe_anti(incoming_side, &mut incoming, matches, check)?;
+                Probe::default()
             }
         };
         if output.join_type == StreamJoinType::LeftSemi && incoming_side == JoinSide::Left {
@@ -1448,15 +1508,24 @@ impl RunState {
             .count
             .checked_add(probe.count)
             .ok_or_else(|| run_error("input batch match count overflowed"))?;
+        self.check_match_limit(matches.count).map(|()| probe)
+    }
+
+    fn check_match_limit(&mut self, count: usize) -> Result<()> {
         super::enforce_match_limit(
-            matches.count,
+            count,
             &mut self.match_limit_failures,
             self.limits.max_matches_per_input_batch(),
             &self.name,
         )
-        .map(|()| probe)
     }
 }
+
+#[path = "run_anti.rs"]
+mod anti;
+pub(super) use anti::AntiInput;
+#[cfg(test)]
+pub(super) use anti::CLOSED_READS;
 
 #[path = "run_witnesses.rs"]
 mod witnesses;
@@ -1991,6 +2060,11 @@ fn run_error(message: impl Into<String>) -> CalcFlowError {
 }
 
 #[cfg(test)]
+thread_local! {
+    pub(super) static ELIGIBILITY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
 #[test]
 fn test_left_semi_repeated_right_windows_scan_eligibility_once_per_batch() {
     use super::run_tests::fanout_input;
@@ -2014,7 +2088,7 @@ fn test_left_semi_repeated_right_windows_scan_eligibility_once_per_batch() {
         .unwrap();
     let mut output = RunOutputContext::new(&schema, None, 2, EdgeBudget::default());
     output.join_type = StreamJoinType::LeftSemi;
-    witnesses::ELIGIBILITY_READS.set(0);
+    ELIGIBILITY_READS.set(0);
     let prepared = state
         .prepare_batch(
             JoinSide::Right,
@@ -2047,7 +2121,7 @@ fn test_left_semi_repeated_right_windows_scan_eligibility_once_per_batch() {
         })
         .collect();
     assert_eq!(values, (0..64).collect::<Vec<i64>>());
-    assert_eq!(witnesses::ELIGIBILITY_READS.get(), 64);
+    assert_eq!(ELIGIBILITY_READS.get(), 64);
 }
 
 #[cfg(test)]

@@ -421,7 +421,7 @@ pub(super) fn restore(
     let mut sides = [Side::empty(), Side::empty()];
     for (side, state) in sides.iter_mut().enumerate() {
         let prefix = if side == 0 { "left" } else { "right" };
-        let allow_witnesses = side == 0 && spec.join_type == super::StreamJoinType::LeftSemi;
+        let allow_witnesses = side == 0 && spec.join_type != super::StreamJoinType::Inner;
         restore_index_pages(state, prefix, segments, &mut expected, allow_witnesses)?;
         for (name, payload) in segments.iter().filter(|(name, _)| {
             name.starts_with(&format!("{prefix}/run-")) && name.ends_with("/payload")

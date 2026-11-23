@@ -100,7 +100,7 @@ def test_project_document_maps_raw_join_issues_to_typed_errors() -> None:
     entries = info.value.errors(include_input=False, include_url=False)
     assert entries[0]["type"] == "unsupported_join_type"
     assert entries[0]["loc"] == ("graph", "nodes", 0, "operator", "spec", "join_type")
-    assert entries[0]["msg"] == "join_type must be inner or left_semi"
+    assert entries[0]["msg"] == "join_type must be inner, left_semi, or left_anti"
 
 
 def test_project_document_accepts_the_clean_raw_ceiling() -> None:

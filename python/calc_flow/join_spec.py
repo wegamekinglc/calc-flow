@@ -136,8 +136,8 @@ def limits_wire(
 
 def require_join_type(value: str) -> str:
     """Validate the supported bounded interval join kinds."""
-    if value not in ("inner", "left_semi"):
-        raise ValueError("join_type must be inner or left_semi")
+    if value not in ("inner", "left_semi", "left_anti"):
+        raise ValueError("join_type must be inner, left_semi, or left_anti")
     return value
 
 

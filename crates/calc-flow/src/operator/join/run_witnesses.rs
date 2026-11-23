@@ -7,14 +7,13 @@ use std::{
 };
 
 #[cfg(test)]
-thread_local! {
-    pub(super) static ELIGIBILITY_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
+use super::ELIGIBILITY_READS;
 
 #[derive(Default)]
 pub(super) struct InputMatches {
     pub(super) count: usize,
     pub(super) witnesses: Witnesses,
+    pub(super) absent_ids: Vec<u64>,
 }
 
 impl InputMatches {
@@ -36,7 +35,7 @@ impl InputMatches {
             (true, JoinSide::Left) => probe.push(position, window.start..window.start + 1),
             (true, JoinSide::Right) => self
                 .witnesses
-                .select(probe, position, opposite, window, room, check),
+                .select::<true>(probe, position, opposite, window, room, check),
         }?;
         Ok(EXISTENCE && probe.count > room)
     }
@@ -45,6 +44,7 @@ impl InputMatches {
 #[derive(Default)]
 pub(super) struct Witnesses {
     groups: BTreeMap<GroupId, BucketWitnesses>,
+    last_marked_window: Option<(GroupId, Range<usize>)>,
     left_cut: Option<(usize, u64)>,
 }
 
@@ -55,7 +55,7 @@ struct BucketWitnesses {
 }
 
 impl Witnesses {
-    pub(super) fn select(
+    pub(super) fn select<const EMIT: bool>(
         &mut self,
         probe: &mut Probe,
         position: usize,
@@ -64,21 +64,31 @@ impl Witnesses {
         room: usize,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
-        if self.groups.get(&group).is_some_and(|pending| {
-            pending.examined.start <= window.start && window.end <= pending.examined.end
-        }) {
+        let examined = self
+            .groups
+            .get(&group)
+            .map(|pending| &pending.examined)
+            .or_else(|| {
+                self.last_marked_window
+                    .as_ref()
+                    .filter(|(last, _)| *last == group)
+                    .map(|(_, range)| range)
+            });
+        if examined.is_some_and(|range| range.start <= window.start && window.end <= range.end) {
             return Ok(());
         }
-        self.scan(probe, position, (group, bucket), &window, room, check)?;
-        if probe.count <= room
-            && let Some(pending) = self.groups.get_mut(&group)
-        {
-            pending.examined = window;
+        self.scan::<EMIT>(probe, position, (group, bucket), &window, room, check)?;
+        if probe.count <= room {
+            if let Some(pending) = self.groups.get_mut(&group) {
+                pending.examined = window;
+            } else {
+                self.last_marked_window = Some((group, window));
+            }
         }
         Ok(())
     }
 
-    fn scan(
+    fn scan<const EMIT: bool>(
         &mut self,
         probe: &mut Probe,
         position: usize,
@@ -95,14 +105,9 @@ impl Witnesses {
             #[cfg(test)]
             ELIGIBILITY_READS.set(ELIGIBILITY_READS.get() + 1);
             let index = window.start + offset;
-            let selected = !entry.locator.witnessed
-                && self
-                    .groups
-                    .entry(group)
-                    .or_default()
-                    .positions
-                    .insert(bucket.head + index);
-            if probe.witness_row(position, index, selected, room, &mut start)? {
+            let selected =
+                self.select_position(group, bucket.head + index, entry.locator.witnessed);
+            if EMIT && probe.witness_row(position, index, selected, room, &mut start)? {
                 return Ok(());
             }
         }
@@ -110,6 +115,16 @@ impl Witnesses {
             return probe.push(position, first..window.end);
         }
         Ok(())
+    }
+
+    fn select_position(&mut self, group: GroupId, position: usize, witnessed: bool) -> bool {
+        !witnessed
+            && self
+                .groups
+                .entry(group)
+                .or_default()
+                .positions
+                .insert(position)
     }
 
     pub(super) fn seal(&mut self, state: &RunState) {
@@ -212,7 +227,7 @@ mod tests {
         let mut checks = 0;
         let measured = allocation_counter::measure(|| {
             witnesses
-                .select(&mut probe, 0, (group, &bucket), 0..rows, 1, &mut || {
+                .select::<true>(&mut probe, 0, (group, &bucket), 0..rows, 1, &mut || {
                     checks += 1;
                     Ok(())
                 })
@@ -223,8 +238,8 @@ mod tests {
         assert!(witnesses.groups.is_empty());
         assert_eq!(measured.count_total, 0);
         checks = 0;
-        let error = witnesses
-            .select(&mut probe, 0, (group, &bucket), 0..rows, 1, &mut || {
+        let error = Witnesses::default()
+            .select::<true>(&mut probe, 0, (group, &bucket), 0..rows, 1, &mut || {
                 checks += 1;
                 if checks == 2 {
                     Err(super::super::run_error("cancelled witness scan"))

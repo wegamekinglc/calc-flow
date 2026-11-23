@@ -1563,11 +1563,12 @@ class TableNamespace:
         output_event_time: str | None = None,
         output_sequence_by: Sequence[str] = (),
     ) -> TableExpr:
-        """Declare a bounded native inner or left semi join in either lifecycle.
+        """Declare a bounded native inner, left semi, or left anti join.
 
         An inner join produces pairs. A left semi join emits an original left
         row once when any right row satisfies the keys and inclusive bounds.
-        Identical left rows remain distinct. Witness arrival can reorder left rows.
+        A left anti join emits an unmatched left row when absence is established
+        by right progress or EOF. Identical left rows keep separate identities.
 
         Finite limits cover each complete input Batch, including all RecordBatches.
         Each finite execution owns fresh state. Streaming state persists across batches.

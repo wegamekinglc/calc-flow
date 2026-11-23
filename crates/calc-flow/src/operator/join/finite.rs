@@ -49,6 +49,9 @@ impl StreamJoinOperator {
                 .process_data(side, input.clone(), &context, &mut output)
                 .await?;
         }
+        if self.spec.join_type == super::StreamJoinType::LeftAnti {
+            scratch.on_end(&context, &mut output).await?;
+        }
         run.check_cancelled()?;
         let schema = scratch.output_ports[0]
             .schema()

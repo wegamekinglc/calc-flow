@@ -1425,7 +1425,7 @@ The [API reference](api-reference.md) lists the exported static-input types.
 
 ## Bounded event-time Join
 
-Finite and streaming plans support an inner join and a left semi join. They
+Finite and streaming plans support inner, left semi, and left anti joins. They
 compare equal keys and require the right event time to fall inside the inclusive interval
 `[left_time - before, left_time + after]`. The two source lineages must provide
 watermark progress so the operator can evict rows that cannot match again.
@@ -1506,6 +1506,37 @@ after all sends succeed. A collector can have received a prefix before a
 later send returns an error. Restart uses the cut and the sink's delivery
 contract. A dropped processing future requires job recovery.
 
+Set `join_type="left_anti"` for SQL NOT EXISTS over the same keys and interval.
+Each left identity with an eligible right witness produces zero rows. Once
+the right watermark moves strictly beyond a left row's inclusive upper bound,
+the join emits that row if it has no witness. Right EOF finalizes every
+pending left row. A newly arriving left row still probes retained rights
+after right EOF. Idle preserves the accepted watermark. A progress release
+precedes its outgoing control and follows retained left `(event_time, row_id)`
+order. Finite execution finalizes the right side after reading both inputs.
+
+A null left event time, or an on-time left row with any null equality key,
+can never match. If admitted by the source, these rows emit immediately in
+physical left input order alongside rows whose intervals have already closed.
+Source schema and event-time policies apply first. In particular, a symbolic
+input declared with a non-null event-time field rejects an Arrow table that
+contains a null in that field before starting the join. An unrepresentable
+non-null timestamp fails the input even when a key is null. A representable
+left timestamp strictly below its own watermark is dropped even with a null
+key. Right nulls and late right rows supply no witness.
+
+The anti join uses the declared left schema. Its match cap counts emitted
+rows per complete data input. A right watermark or EOF can release more than
+that cap in edge-budgeted envelopes. The operator checks the full release
+before sending, retaining at most one selection of up to 4,096 rows and the
+edge's row limit at a time. Emission failures preserve the prior operator cut.
+A sink may have accepted a prefix before a later envelope failed. The sink's
+delivery contract applies to that prefix on retry. A cancelled handler future
+requires job recovery. Direct Rust callers supply the collector to
+`StreamOperator::on_ingress_progress_with_output` for right progress.
+Calling `StreamOperator::on_end` closes both inputs, emits any remaining
+unwitnessed left rows and releases retained rights before the terminal cut.
+
 The Join has one required table output port named `output`. In an inner join,
 every left column is emitted as
 `left_prefix__name`, followed by every right column as `right_prefix__name`,
@@ -1579,10 +1610,10 @@ bounded morsels, probes through shared keys and commits runs only after output
 acceptance. Compiler output projection is applied during materialization; it
 does not select a separate retained-state implementation.
 
-Native layout 12 stores inner join state. For left semi joins, layout 13 also
-records witnessed rows in the left key buckets. A witness-only update rewrites
-the affected bucket at the next checkpoint. Both layouts store payload and
-identity pages, per-key and expiration
+Native layout 12 stores inner join state. Layout 13 for left semi joins and
+layout 14 for left anti joins record witnessed rows in left key buckets.
+A witness-only update rewrites the affected bucket at the next checkpoint.
+All three layouts store payload and identity pages, per-key and expiration
 indexes, shared keys, control counters and operator metadata. The managed runner
 persists `NativeCapture` pages through manifest v4. Direct
 `checkpoint()`/`restore()` uses the same encoding and validates page inventory,

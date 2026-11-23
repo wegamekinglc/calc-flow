@@ -246,6 +246,36 @@ fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
 }
 
 #[test]
+fn test_anti_empty_physical_message_can_commit_after_frontier_moves() {
+    let mut state = state(10);
+    let schema = record(&[], &[]).schema();
+    let empty_batch =
+        Batch::table(vec![record(&[], &[])], crate::BatchMetadata::default()).unwrap();
+    let mut output = RunOutputContext::new(&schema, None, 2, EdgeBudget::default());
+    output.join_type = super::StreamJoinType::LeftAnti;
+    output.anti_left = Some(super::runs::AntiInput {
+        batch: &empty_batch,
+        null_ids: &[],
+        retained_columns: None,
+    });
+    let empty = state
+        .prepare_batch(JoinSide::Left, Vec::new(), output, &mut || Ok(()))
+        .unwrap();
+    state
+        .apply(
+            JoinSide::Left,
+            fanout_input(1, 0, true),
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    assert!(empty.commit(&mut state).unwrap().is_empty());
+    assert_eq!(state.next_row_id(JoinSide::Left), 1);
+}
+
+#[test]
 fn test_stale_left_semi_witness_cannot_commit_after_left_eviction() {
     let (mut state, right) = fanout_state(2);
     let schema = record(&[1], &[1]).schema();
