@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
+import subprocess
 from pathlib import Path
 
 from benchmarks.native_release_identity import verify_package_files
@@ -13,7 +13,6 @@ from scripts.benchmark_suite.catalog import engine_cases
 from scripts.benchmark_suite.process import ROOT, command, install
 from scripts.benchmark_suite.release import load_release
 from scripts.sparse_changelog_ci import _resource, guarded_measure
-from scripts.sparse_changelog_wheels import seal
 from scripts.toolkit import sha256_file, write_json
 
 SIDES = ("baseline", "candidate")
@@ -27,13 +26,37 @@ PROTOCOL = ROOT / "benchmarks/rolling/20261124-partial-ticks/protocol.md"
 
 
 def register():
-    refs = {
-        s: {
-            "sha": os.environ[f"{s.upper()}_SHA"],
-            "artifact": int(os.environ[f"{s.upper()}_ARTIFACT"]),
+    run = os.environ["GITHUB_RUN_ID"]
+    attempt = os.environ["GITHUB_RUN_ATTEMPT"]
+    artifacts = json.loads(
+        subprocess.check_output(
+            [
+                "gh",
+                "api",
+                f"repos/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run}/artifacts?per_page=100",
+            ]
+        )
+    )["artifacts"]
+    refs = {}
+    for side in SIDES:
+        expected = os.environ[f"{side.upper()}_SHA"]
+        (artifact,) = [
+            a
+            for a in artifacts
+            if a["name"] == f"benchmark-release-{side}-{run}-{attempt}"
+        ]
+        release = load_release(OUT / side / "release.json")
+        if (
+            artifact["expired"]
+            or release["git_sha"] != expected
+            or not artifact["digest"].startswith("sha256:")
+        ):
+            raise ValueError("unexpected sealed build or artifact")
+        refs[side] = {
+            "sha": expected,
+            "artifact": artifact["id"],
+            "digest": artifact["digest"],
         }
-        for s in SIDES
-    }
     write_json(
         OUT / "registration.json",
         {
@@ -47,8 +70,6 @@ def register():
         },
         exclusive=True,
     )
-    for s, ref in refs.items():
-        seal(os.environ["GITHUB_REPOSITORY"], ref["artifact"], ref["sha"], OUT / s)
 
 
 async def measure():
@@ -72,7 +93,11 @@ async def measure():
         ]
         if not any(line.startswith("rustc version ") for line in comments):
             raise ValueError("missing compiler identity")
-        tags[side] = (release["image"], release["image_version"], sorted(comments))
+        image = (directory / "image.txt").read_text()
+        compiler = (directory / "compiler.txt").read_text()
+        if "ImageVersion=" not in image or "rustc 1.94.0" not in compiler:
+            raise ValueError("missing build image or compiler")
+        tags[side] = (image, compiler, sorted(comments))
     if (
         tags["baseline"] != tags["candidate"]
         or releases["baseline"]["native_sha256"]
@@ -89,15 +114,13 @@ async def measure():
 
 
 if __name__ == "__main__":
-    if sys.argv[1] == "seal":
+    result = {"state": "stopped"}
+    try:
         register()
-    else:
-        result = {"state": "stopped"}
-        try:
-            asyncio.run(asyncio.wait_for(measure(), timeout=135))
-            result["state"] = "completed"
-        except BaseException as exc:
-            result["reason"] = repr(exc)
-            raise
-        finally:
-            write_json(OUT / "outcome.json", result)
+        asyncio.run(asyncio.wait_for(measure(), timeout=135))
+        result["state"] = "completed"
+    except BaseException as exc:
+        result["reason"] = repr(exc)
+        raise
+    finally:
+        write_json(OUT / "outcome.json", result)

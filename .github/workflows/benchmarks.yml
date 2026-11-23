@@ -40,7 +40,68 @@ concurrency:
   group: benchmarks-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  build:
+    name: Release benchmark wheel (${{ matrix.side }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The rust-baseline wheel anchors the Rust shard at the first parent;
+        # the candidate bench file it compiles cannot build against a release
+        # checkout that predates its benchmark_internals APIs.
+        side: [baseline, candidate]
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ matrix.side == 'baseline' && inputs.baseline_sha || inputs.candidate_sha }}
+          path: target/source
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+        with:
+          workspaces: target/source -> ../release/cargo
+          key: benchmark-${{ matrix.side }}
+      - name: Install identical locked build dependencies
+        run: |
+          uv venv target/benchmark-venv
+          uv pip sync --python target/benchmark-venv/bin/python \
+            --require-hashes benchmarks/requirements.lock
+      - name: Build and seal release wheel
+        run: >-
+          target/benchmark-venv/bin/python -m scripts.benchmark_suite build
+          --source target/source --output target/release
+      - name: Record runner and compiler identity
+        run: |
+          rustc -Vv > target/release/compiler.txt
+          env | grep -E '^(ImageOS|ImageVersion)=' | sort > target/release/image.txt
+      - name: Retain release wheel and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-release-${{ matrix.side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/release/*.whl
+            target/release/release.json
+            target/release/compiler.txt
+            target/release/image.txt
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain build diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: benchmark-build-${{ matrix.side }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/release/build.log
+          retention-days: 30
+
   sparse-changelog:
+    needs: build
     name: Public partial-tick single-thread SMA20
     if: inputs.mode == 'sparse-changelog'
     runs-on: ubuntu-latest
@@ -55,20 +116,26 @@ jobs:
         with:
           python-version-file: .python-version
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-      - name: Register comparison and verify tested CI wheels
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BASELINE_SHA: ${{ inputs.baseline_sha }}
-          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-          BASELINE_ARTIFACT: ${{ inputs.baseline_wheel_artifact }}
-          CANDIDATE_ARTIFACT: ${{ inputs.candidate_wheel_artifact }}
-        run: python -m scripts.measure_partial_ticks seal
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: benchmark-release-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/partial-ticks/baseline
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: benchmark-release-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/partial-ticks/candidate
+          digest-mismatch: error
       - name: Install locked benchmark dependencies
         run: |
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock
       - name: Measure fresh stream through retained Arrow and cleanup
         timeout-minutes: 3
+        env:
+          BASELINE_SHA: ${{ inputs.baseline_sha }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          GH_TOKEN: ${{ github.token }}
         run: target/benchmark-venv/bin/python -m scripts.measure_partial_ticks measure
       - name: Preserve provenance, resource checks, and complete or partial samples
         if: always()
@@ -81,6 +148,7 @@ jobs:
             target/partial-ticks/*/release.json
             target/partial-ticks/*/install.log
             target/partial-ticks/*/compiler.log
+            target/partial-ticks/*/*.txt
             target/partial-ticks/measurement/
           if-no-files-found: error
           retention-days: 90
