@@ -1555,6 +1555,11 @@ without a Join node report an empty mapping.
 Watermarks are the last accepted ingress frontier, initially `None`; idle
 preserves that frontier and does not imply EOF. A non-terminal managed restart
 exposes restored progress before the running job's startup acknowledgement.
+For direct Rust callers, `StreamOperator::on_end` releases the retained
+rows on both sides of inner and left semi joins. The terminal native pages
+keep the key dictionary. Each released row increments that side's eviction
+counter. The terminal checkpoint preserves both physical row frontiers and
+the output sequence. Inner and left semi joins emit no rows during this close.
 Terminal-manifest recovery validates each Join and publishes its restored ended
 ingress observations before operator entry, without starting data-plane
 handlers, reopening sources, or repeating `on_end` and final emission.
