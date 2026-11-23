@@ -1882,6 +1882,11 @@ fn cast_primitive(array: &ArrayRef, target: &DataType, node_id: &str) -> Result<
 
 impl RollingKernelState {
     #[cfg(test)]
+    pub(super) fn direct_entities_for_test(&self) -> &HashMap<String, (usize, usize)> {
+        &self.direct_entities
+    }
+
+    #[cfg(test)]
     pub(super) fn canonical_state_for_test(&self) -> String {
         let entities = self
             .entities

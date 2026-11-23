@@ -1328,8 +1328,9 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
         (10, "new", 6, Some(56.0)),
         (11, "b", 7, Some(-1.0)),
         (12, "a", 8, Some(-3.0)),
-        (20, "a", 9, Some(1.0)),
-        (21, "new", 10, None),
+        (13, "another-new", 9, Some(5.0)),
+        (20, "a", 10, Some(1.0)),
+        (21, "new", 11, None),
     ]);
     let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
     let (expected, _) = reference_output(&operator, &input);
@@ -1337,10 +1338,20 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
     let job = job.with_checkpointing(false);
     assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(0, 6)).await);
     let mut emitted = close(&mut operator, &job, &store, &mut output, 9).await;
-    assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(6, 5)).await);
+    assert!(
+        observe_data(
+            &mut operator,
+            &job,
+            &store,
+            &mut output,
+            input.slice(6, input.num_rows() - 6)
+        )
+        .await
+    );
     let state = operator.state.typed_kernel_state.as_deref().unwrap();
     assert_eq!(state.shares_durations(), shared_duration);
-    let before = format!("{state:?}");
+    let before = state.canonical_state_for_test();
+    let direct = state.direct_entities_for_test().clone();
     let charge = operator.state.charge;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(9)));
     let error = operator
@@ -1354,7 +1365,9 @@ async fn retry_mixed_entities(short: Value, shared_duration: bool) {
     assert!(error.to_string().contains("unknown output port"), "{error}");
     assert_eq!(operator.state.charge, charge);
     let state = operator.state.typed_kernel_state.as_deref().unwrap();
-    assert_eq!(format!("{state:?}"), before);
+    assert_eq!(state.canonical_state_for_test(), before);
+    assert_eq!(state.direct_entities_for_test(), &direct);
+    assert_eq!(state.shares_durations(), shared_duration);
     emitted.extend(close(&mut operator, &job, &store, &mut output, 21).await);
     assert_eq!(
         concat_batches(&expected.schema(), &emitted).unwrap(),
