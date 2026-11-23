@@ -577,3 +577,19 @@ CALC_FLOW_BENCHMARK_SCALE=standard \
   uv run pytest benchmarks/test_symbolic_baseline.py -q --benchmark-only \
   --benchmark-json=<output>.json
 ```
+
+## Sparse changelog through the Python stream API
+
+The [public changelog baseline](sum-state/public-sparse-changelog-20261123/README.md)
+measures the full async stream lifecycle for 10,000 retained groups and checks
+every emitted retract and upsert against the same sparse trades used by the
+Rust grouped SUM benchmark.
+
+The [recorded reference](sum-state/public-sparse-changelog-20261123/baseline.json)
+contains all 20 timed observations, the two warmups, and host resource samples.
+Each run returned 13,200 changes across 21 batches. The two round medians on
+the reference wheel were 399.0 and 429.6 ms.
+
+These timings cover the complete 21-batch stream, including the opening
+10,000 rows. The 15 ms target for delivering an individual incremental batch
+requires a separate input-to-delivery clock.

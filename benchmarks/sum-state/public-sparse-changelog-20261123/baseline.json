@@ -1,0 +1,290 @@
+{
+  "contract": "calc-flow.public-sparse-changelog.v1",
+  "description": "Single-build reference for a fresh public stream with all Arrow outputs retained through stream cleanup.",
+  "build": {
+    "artifact_sha256": "28d836524655c4267e30affcecf59a79497426a2864c9750706bfe6e1f47c2da",
+    "github_artifact": 14773009244,
+    "github_run": 45069870259,
+    "native_sha256": "1bb87c8482913352419cb2c7cb57dea49e0063bda002aec9c88bddc440439425",
+    "profile": "release",
+    "source_sha": "fced5062c1a6f05b6302674e8eda926182bb558a",
+    "tracked_source_clean": true,
+    "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+    "wheel_sha256": "dd8cc3a3274414eb8d60b258279d3aeb30b7d5a909313ed5cde820b5c6fc89f9"
+  },
+  "environment": {
+    "cpu_affinity": [
+      8
+    ],
+    "logical_cpus": 32,
+    "native_sha256": "1bb87c8482913352419cb2c7cb57dea49e0063bda002aec9c88bddc440439425",
+    "numpy": "2.5.1",
+    "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "pyarrow": "24.0.0",
+    "python": "3.13.9",
+    "tokio_worker_threads": "1"
+  },
+  "fixture_sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
+  "harness_sha256": "17314a398192db7d5171a968c84b681fa1a8a692f132d0a2a8876eab07601ac1",
+  "registration_sha256": "0863d57b7f4bebfd0960483593df2d02395b69c056d61bda09a068261aa12332",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "clock": "perf_counter_ns",
+  "input_rows": [
+    10000,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100,
+    100
+  ],
+  "verified_output_rows_per_sample": [
+    10000,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160,
+    160
+  ],
+  "total_verified_outputs_per_sample": 13200,
+  "rounds": [
+    {
+      "round": 1,
+      "warmup_ns": 417074332,
+      "observations_ns": [
+        398395471,
+        416568419,
+        390292275,
+        402695506,
+        394217038,
+        425346542,
+        399600768,
+        408628621,
+        392118051,
+        393490554
+      ],
+      "median_ns": 398998119.5
+    },
+    {
+      "round": 2,
+      "warmup_ns": 422013392,
+      "observations_ns": [
+        389441664,
+        419253815,
+        423654370,
+        413238998,
+        450396804,
+        446822873,
+        439431431,
+        432188780,
+        433045566,
+        427086736
+      ],
+      "median_ns": 429637758.0
+    }
+  ],
+  "resources": {
+    "budget_seconds": 600,
+    "wall_seconds": 17.019125069025904,
+    "stop": "completed",
+    "cpu": 8,
+    "sibling": 9,
+    "background": "Concurrent Rust compilations excluded CPUs 8 and 9. Host paging counters cover all processes.",
+    "intervals": [
+      {
+        "preflight": true,
+        "seconds": 3.001,
+        "cpu8_busy_pct": 0.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 9.7312,
+        "available_gib": 21.529,
+        "major_faults": 11,
+        "swap_in_pages": 6,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.3469,
+        "available_gib": 21.4672,
+        "major_faults": 19,
+        "swap_in_pages": 24,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 99.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.5938,
+        "available_gib": 21.4386,
+        "major_faults": 19,
+        "swap_in_pages": 18,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 99.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.5938,
+        "available_gib": 21.4227,
+        "major_faults": 101,
+        "swap_in_pages": 106,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.1625,
+        "available_gib": 21.3938,
+        "major_faults": 8,
+        "swap_in_pages": 7,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.15,
+        "available_gib": 21.3918,
+        "major_faults": 3,
+        "swap_in_pages": 4,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 12.9219,
+        "available_gib": 21.7116,
+        "major_faults": 0,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.3219,
+        "available_gib": 21.6133,
+        "major_faults": 1,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 12.7219,
+        "available_gib": 21.4971,
+        "major_faults": 14,
+        "swap_in_pages": 14,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.425,
+        "available_gib": 21.3112,
+        "major_faults": 16,
+        "swap_in_pages": 19,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.1625,
+        "available_gib": 21.1769,
+        "major_faults": 157,
+        "swap_in_pages": 224,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 1.0,
+        "host_mean_busy_pct": 13.0,
+        "available_gib": 21.0474,
+        "major_faults": 11,
+        "swap_in_pages": 11,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.002,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 12.9656,
+        "available_gib": 20.9104,
+        "major_faults": 0,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 100.0,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 13.3625,
+        "available_gib": 20.8123,
+        "major_faults": 7,
+        "swap_in_pages": 6,
+        "swap_out_pages": 0
+      },
+      {
+        "preflight": false,
+        "seconds": 1.001,
+        "cpu8_busy_pct": 47.5,
+        "cpu9_busy_pct": 0.0,
+        "host_mean_busy_pct": 11.1625,
+        "available_gib": 20.794,
+        "major_faults": 4,
+        "swap_in_pages": 2,
+        "swap_out_pages": 0
+      }
+    ]
+  }
+}
