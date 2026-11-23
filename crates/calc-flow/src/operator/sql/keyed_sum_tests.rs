@@ -647,21 +647,27 @@ async fn check_multibatch_undo_reservation(parallel: bool) {
             .to_vec()
     };
     let original = snapshot();
+    assert_eq!(keyed.lease_counts(), [1, 1]);
     let baseline = runtime.compact_state_bytes();
     let mut tx = keyed.begin(None).unwrap();
     apply(&mut tx, &inputs[0]).unwrap();
     let first = runtime.compact_state_bytes() - baseline;
+    assert_eq!(keyed.lease_counts(), [2, 1]);
     apply(&mut tx, &inputs[0]).unwrap();
     let repeated = runtime.compact_state_bytes() - baseline;
+    assert_eq!(keyed.lease_counts(), [2, 1]);
     apply(&mut tx, &inputs[1]).unwrap();
     let both = runtime.compact_state_bytes() - baseline;
+    assert_eq!(keyed.lease_counts(), [2, 2]);
     eprintln!(
         "active SUM undo bytes after first, repeated and second keys: {first}/{repeated}/{both}"
     );
     assert!(first > 0);
+    assert_eq!(both, tx.change_log_bytes());
     assert_eq!(repeated, first);
     assert_eq!(both, first * 2);
     drop(tx);
+    assert_eq!(keyed.lease_counts(), [1, 1]);
     assert_eq!(runtime.compact_state_bytes(), baseline);
     assert_eq!(snapshot(), original);
 
@@ -680,6 +686,7 @@ async fn check_multibatch_undo_reservation(parallel: bool) {
             .contains("SQL compact state budget exceeded")
     );
     drop(limited);
+    assert_eq!(keyed.lease_counts(), [1, 1]);
     assert_eq!(runtime.compact_state_bytes(), baseline);
     runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
     assert_eq!(snapshot(), original);
@@ -700,6 +707,7 @@ async fn check_multibatch_undo_reservation(parallel: bool) {
                 .to_string()
                 .contains("SQL compact state budget exceeded")
         );
+        assert_eq!(keyed.lease_counts(), [1, 1]);
         assert_eq!(runtime.compact_state_bytes(), baseline);
         runtime.set_compact_state_limit(None, "keyed-sum").unwrap();
         assert_eq!(snapshot(), original);
@@ -708,6 +716,7 @@ async fn check_multibatch_undo_reservation(parallel: bool) {
     apply(&mut retry, second).unwrap();
     let committed = retry.commit();
     assert_eq!(committed.affected.len(), 1);
+    assert_eq!(keyed.lease_counts(), [1, 1]);
     assert_eq!(
         runtime.compact_state_bytes() - baseline,
         size_of_val(committed.affected.as_slice())

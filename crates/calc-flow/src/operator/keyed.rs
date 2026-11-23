@@ -203,6 +203,11 @@ impl KeyStore {
         self.reservation.new_empty()
     }
 
+    #[cfg(test)]
+    pub(crate) fn lease_counts(&self) -> &[u64] {
+        &self.leases
+    }
+
     pub(crate) fn acquire(&mut self, group: GroupId) -> Result<()> {
         let lease = &mut self.leases[group.index()];
         *lease = lease
