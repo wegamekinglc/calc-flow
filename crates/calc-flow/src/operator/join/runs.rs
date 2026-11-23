@@ -272,7 +272,6 @@ impl Incoming {
     }
 }
 
-#[derive(Clone)]
 enum RunCharge {
     Fixed { row: usize },
     Variable { rows: Vec<usize> },
@@ -342,14 +341,13 @@ impl RunCharge {
     }
 }
 
-#[derive(Clone)]
 struct Run {
     id: RunId,
     payload: RecordBatch,
-    groups: Arc<[GroupId]>,
-    times: Arc<[i64]>,
-    row_ids: Arc<[u64]>,
-    order: Arc<[usize]>,
+    groups: Box<[GroupId]>,
+    times: Box<[i64]>,
+    row_ids: Box<[u64]>,
+    order: Box<[usize]>,
     charge: RunCharge,
     bytes: usize,
 }
@@ -2189,4 +2187,21 @@ fn test_fixed_prefix_charge_uses_only_the_number_of_expired_rows() {
         row: usize::MAX / 2 + 1,
     };
     assert!(large.rows_charge([1, 0].into_iter()).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn retained_run_identity_columns_fit_in_one_set_of_allocations() {
+    const ROWS: usize = 1024;
+    let incoming = super::run_tests::fanout_input(ROWS, 0, true);
+    let mut run = None;
+    let allocations = allocation_counter::measure(|| {
+        run = Run::new(RunId(0), &incoming).unwrap();
+    });
+    let run = run.unwrap();
+    assert_eq!(run.len(), ROWS);
+    assert!(run.order.iter().copied().eq(0..ROWS));
+    eprintln!("retained Join run allocation: {allocations:?}");
+    // Includes the retained identity columns, row selection and sorting workspace.
+    assert!(allocations.bytes_total <= 64 * 1024, "{allocations:?}");
 }
