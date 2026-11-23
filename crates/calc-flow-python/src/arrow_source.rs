@@ -95,14 +95,12 @@ fn last_ordered_time(
     for column in columns {
         let integers = cast(column, &DataType::Int64).map_err(|_| "expected timestamp column")?;
         let values = integers.as_primitive::<Int64Type>().values();
-        if let Some(&first) = values.first() {
-            if previous.is_some_and(|last| first < last) || !values.is_sorted() {
-                return Err(
-                    "expected nondecreasing event time; select an explicit watermark policy for out-of-order input",
-                );
-            }
-            previous = values.last().copied();
+        if !previous.iter().chain(values.iter()).is_sorted() {
+            return Err(
+                "expected nondecreasing event time; select an explicit watermark policy for out-of-order input",
+            );
         }
+        previous = values.last().copied().or(previous);
     }
     Ok(previous)
 }
