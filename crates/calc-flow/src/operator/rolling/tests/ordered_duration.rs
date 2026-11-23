@@ -1304,8 +1304,17 @@ fn test_pending_window_records_recheck_after_retry_and_drain() {
 
 #[tokio::test]
 async fn pool_rolls_back_mixed_duration_entities_before_retry() {
+    retry_mixed_entities(duration_output("sum", "price", "short", 3), true).await;
+}
+
+#[tokio::test]
+async fn new_numeric_entities_retry_across_rows_and_duration_frames() {
+    retry_mixed_entities(aggregate_output("sum", "price", "short", 1), false).await;
+}
+
+async fn retry_mixed_entities(short: Value, shared_duration: bool) {
     let spec = kernel_spec(json!([
-        duration_output("sum", "price", "short", 3),
+        short,
         duration_output("sum", "price", "medium", 8),
         duration_output("mean", "price", "long", 15),
     ]));
@@ -1330,7 +1339,7 @@ async fn pool_rolls_back_mixed_duration_entities_before_retry() {
     let mut emitted = close(&mut operator, &job, &store, &mut output, 9).await;
     assert!(observe_data(&mut operator, &job, &store, &mut output, input.slice(6, 5)).await);
     let state = operator.state.typed_kernel_state.as_deref().unwrap();
-    assert!(state.shares_durations());
+    assert_eq!(state.shares_durations(), shared_duration);
     let before = format!("{state:?}");
     let charge = operator.state.charge;
     let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(9)));

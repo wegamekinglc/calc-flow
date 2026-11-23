@@ -33,14 +33,10 @@ pub(super) struct InPlaceUpdate {
     key_bytes: Vec<usize>,
     new_local_keys: Vec<(usize, Vec<u8>)>,
     new_direct_keys: Vec<(usize, String)>,
-    undo: Vec<EntityUndo>,
+    // New keys roll back by removing the whole entity.
+    undo: Vec<Option<TypedEntityUndo>>,
     duration_windows: Vec<WindowBeforeImage>,
     previous_charge: StateCharge,
-}
-
-struct EntityUndo {
-    previous: Option<TypedEntityUndo>,
-    is_new: bool,
 }
 
 struct TypedEntityUndo {
@@ -202,10 +198,7 @@ fn inspect_residents(
                     residents.push(usize::MAX);
                     key_bytes.push(bytes.len());
                     new_local_keys.push((local, std::mem::take(bytes)));
-                    undo.push(EntityUndo {
-                        is_new: true,
-                        previous: None,
-                    });
+                    undo.push(None);
                     continue;
                 };
                 (resident, bytes.len())
@@ -231,14 +224,17 @@ fn inspect_residents(
         } else {
             Some(TypedEntityUndo::new(entity, &mut duration_windows)?)
         };
-        undo.push(EntityUndo {
-            is_new: false,
-            previous,
-        });
+        undo.push(previous);
     }
     if state.share_durations {
-        duration_windows =
-            snapshot_duration_windows(state, &residents, &mut undo, group_count, node_id)?;
+        duration_windows = snapshot_duration_windows(
+            state,
+            &residents,
+            &mut undo,
+            residents.len() - new_local_keys.len(),
+            group_count,
+            node_id,
+        )?;
     }
     Ok(Some(InPlaceUpdate {
         new_direct_keys: Vec::new(),
@@ -255,12 +251,12 @@ fn inspect_residents(
 fn snapshot_duration_windows(
     state: &RollingKernelState,
     residents: &[usize],
-    undo: &mut [EntityUndo],
+    undo: &mut [Option<TypedEntityUndo>],
+    existing: usize,
     group_count: usize,
     node_id: &str,
 ) -> Result<Vec<WindowBeforeImage>> {
-    let window_count = residents
-        .len()
+    let window_count = existing
         .checked_mul(group_count)
         .ok_or_else(|| operator_error(node_id, "rolling undo window count overflowed"))?;
     let mut windows = Vec::new();
@@ -270,9 +266,9 @@ fn snapshot_duration_windows(
             &format!("cannot reserve rolling undo windows: {error}"),
         )
     })?;
-    for (&resident, entry) in residents.iter().zip(undo) {
-        if !entry.is_new {
-            entry.previous = Some(TypedEntityUndo::new(&state.states[resident], &mut windows)?);
+    for (&resident, previous) in residents.iter().zip(undo) {
+        if let Some(entity) = state.states.get(resident) {
+            *previous = Some(TypedEntityUndo::new(entity, &mut windows)?);
         }
     }
     Ok(windows)
@@ -321,10 +317,6 @@ impl InPlaceUpdate {
                     state.share_durations,
                 )));
             update.residents[local] = resident;
-            update.undo[local].previous = Some(
-                TypedEntityUndo::new(&state.states[resident], &mut update.duration_windows)
-                    .expect("a new numeric entity matches its plan"),
-            );
             if let Some(name) = direct_names.get(local) {
                 let name = (*name).to_owned();
                 state
@@ -349,19 +341,15 @@ impl InPlaceUpdate {
         Ok((self.previous_charge, new))
     }
 
-    pub(super) fn rollback(&mut self, base: &mut RollingKernelState) {
-        for local_index in (0..self.residents.len()).rev() {
+    pub(super) fn rollback(mut self, base: &mut RollingKernelState) {
+        for (local_index, previous) in self.undo.into_iter().enumerate().rev() {
             let resident = self.residents[local_index];
-            let undo = &mut self.undo[local_index];
-            if !undo.is_new {
-                undo.previous
-                    .take()
-                    .expect("resident numeric entity has an undo snapshot")
-                    .rollback(
-                        Arc::get_mut(&mut base.states[resident])
-                            .expect("in-place rolling entities remain exclusive"),
-                        &self.duration_windows,
-                    );
+            if let Some(previous) = previous {
+                previous.rollback(
+                    Arc::get_mut(&mut base.states[resident])
+                        .expect("in-place rolling entities remain exclusive"),
+                    &self.duration_windows,
+                );
                 continue;
             }
             let (key_local, key) = self
@@ -583,9 +571,19 @@ fn update_entity_groups_reversible(
     inputs: TypedRowInputs<'_>,
     row_index: usize,
     entity: &mut TypedEntityState,
-    previous: &mut TypedEntityUndo,
+    previous: Option<&mut TypedEntityUndo>,
     node_id: &str,
 ) -> Result<()> {
+    let Some(previous) = previous else {
+        return super::update_typed_groups(
+            inputs.columns,
+            inputs.event_times.value(row_index),
+            entity,
+            row_index,
+            plan.nan_as_value,
+            node_id,
+        );
+    };
     if let NumericGroupsUndo::Durations(undo) = &mut previous.groups {
         let samples = entity
             .shared_duration
@@ -649,16 +647,12 @@ fn process_row(
         )
     })?;
     *processed += 1;
-    let previous = update.undo[local]
-        .previous
-        .as_mut()
-        .expect("resident numeric entity has an undo snapshot");
     update_entity_groups_reversible(
         context.plan,
         context.inputs,
         row_index,
         entity,
-        previous,
+        update.undo[local].as_mut(),
         context.node_id,
     )?;
     super::append_typed_outputs::<false>(
@@ -856,6 +850,39 @@ mod tests {
     }
 
     #[test]
+    fn new_duration_entities_need_no_saved_windows() {
+        const ENTITIES: usize = 128;
+        let groups = [3, 8, 15].map(|width| super::super::TypedGroupPlan::Numeric {
+            input_index: 0,
+            frame: TypedFrame::Duration(width),
+            dispersion: true,
+        });
+        let plan = super::super::tests::plan(groups.to_vec(), vec![]);
+        let names = StringArray::from_iter_values((0..ENTITIES).map(|i| format!("key-{i}")));
+        let mut state = RollingKernelState {
+            share_durations: true,
+            ..Default::default()
+        };
+        let routing = route_direct_entities(&state, &names, "r").unwrap();
+        let mut resolved = None;
+        let allocations = allocation_counter::measure(|| {
+            resolved = InPlaceUpdate::resolve(&plan, &mut state, routing, "r", None).unwrap();
+        });
+        let (update, _, _) = resolved.unwrap();
+        assert_eq!(state.states.len(), ENTITIES);
+        eprintln!(
+            "new Duration state allocation {allocations:?}, saved windows {} (capacity {})",
+            update.duration_windows.len(),
+            update.duration_windows.capacity()
+        );
+        assert_eq!(update.duration_windows.capacity(), 0);
+        update.rollback(&mut state);
+        assert!(state.states.is_empty());
+        assert!(state.entities.is_empty());
+        assert!(state.direct_entities.is_empty());
+    }
+
+    #[test]
     fn shared_duration_inspection_uses_one_batch_of_window_before_images() {
         const ENTITIES: usize = 128;
         let plans = [3, 8, 15].map(|width| super::super::TypedGroupPlan::Numeric {
@@ -881,7 +908,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(inspected.undo.len(), ENTITIES);
-            assert!(inspected.undo.iter().all(|entry| entry.previous.is_some()));
+            assert!(inspected.undo.iter().all(Option::is_some));
             std::hint::black_box(inspected);
         });
         eprintln!("shared Duration inspection {measured:?}");

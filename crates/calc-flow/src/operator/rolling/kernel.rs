@@ -654,9 +654,8 @@ impl StreamKernelUpdate {
             slab.rollback(base);
             return;
         }
-        if let Some(in_place) = &mut self.in_place {
+        if let Some(in_place) = self.in_place.take() {
             in_place.rollback(base);
-            self.in_place = None;
         }
     }
 
@@ -6011,7 +6010,10 @@ mod tests {
         .unwrap()
     }
 
-    fn plan(groups: Vec<TypedGroupPlan>, outputs: Vec<TypedOutputPlan>) -> RollingKernelPlan {
+    pub(super) fn plan(
+        groups: Vec<TypedGroupPlan>,
+        outputs: Vec<TypedOutputPlan>,
+    ) -> RollingKernelPlan {
         let mut plan = RollingKernelPlan {
             version: ROLLING_KERNEL_PLAN_VERSION,
             state_layout_version: 3,
