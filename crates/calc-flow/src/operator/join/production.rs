@@ -14,7 +14,6 @@ use crate::state::v4::native::{NativeCapture, NativePage, NativePageChange, Nati
 use crate::{Batch, BatchMetadata, EventTime, Result, StreamCollector, StreamOperatorContext};
 use datafusion::arrow::{
     array::{BooleanArray, TimestampMicrosecondArray},
-    datatypes::SchemaRef,
     record_batch::{RecordBatch, RecordBatchOptions},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -111,12 +110,7 @@ impl RunCore {
         if incoming.is_empty() {
             return Ok(());
         }
-        let output = RunOutputContext::new(
-            run_output_schema(operator),
-            operator.output_columns.as_deref(),
-            operator.retained_schema(0).fields().len(),
-            crate::EdgeBudget::default(),
-        );
+        let output = run_output_context(operator, crate::EdgeBudget::default());
         let prepared =
             self.state
                 .prepare_batch(JoinSide::Left, incoming, output, &mut || Ok(()))?;
@@ -629,12 +623,7 @@ impl RunCore {
         )?;
         #[cfg(feature = "benchmark-internals")]
         drop(route_span);
-        let output = RunOutputContext::new(
-            run_output_schema(operator),
-            operator.output_columns.as_deref(),
-            operator.retained_schema(0).fields().len(),
-            context.output_budget(),
-        );
+        let output = run_output_context(operator, context.output_budget());
         #[cfg(feature = "benchmark-internals")]
         let output = output.with_trace(context.job().join_cpu_trace());
         self.state
@@ -742,14 +731,21 @@ fn deferred_left_metrics(
     Ok(Some(metrics))
 }
 
-fn run_output_schema(operator: &StreamJoinOperator) -> &SchemaRef {
-    if operator.hot_projection.is_some() {
-        &operator.logical_output_schema
-    } else {
-        operator.output_ports[0]
-            .schema()
-            .expect("compiled Join output schema")
-    }
+fn run_output_context(
+    operator: &StreamJoinOperator,
+    budget: crate::EdgeBudget,
+) -> RunOutputContext<'_> {
+    let schema = operator.output_ports[0]
+        .schema()
+        .expect("compiled Join output schema");
+    let mut output = RunOutputContext::new(
+        schema,
+        operator.output_columns.as_deref(),
+        operator.retained_schema(0).fields().len(),
+        budget,
+    );
+    output.product = operator.hot_projection;
+    output
 }
 
 fn retained_left_record(
@@ -796,10 +792,9 @@ async fn emit_prepared(
     for item in prepared.outputs() {
         for (record, sequence) in item.records.iter().zip(&item.sequences) {
             context.check_cancelled()?;
-            let record = super::hot::project_run_record(operator, record)?;
             let metadata = BatchMetadata::new(&operator.name, *sequence, BTreeMap::new())?;
             output
-                .emit("output", Batch::table(vec![record], metadata)?)
+                .emit("output", Batch::table(vec![record.clone()], metadata)?)
                 .await?;
         }
     }

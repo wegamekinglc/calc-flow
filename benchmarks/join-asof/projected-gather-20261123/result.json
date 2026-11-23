@@ -1,0 +1,266 @@
+{
+  "builds": {
+    "baseline": {
+      "bench_recompiled": true,
+      "binary_sha256": "0a74baf94a66bf8650bd656389091969346a3b40dd96b9e929d0978c4aa43075",
+      "build_seconds": 1228.4070935409982,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "calc-flow",
+        "--features",
+        "benchmark-internals",
+        "--bench",
+        "stream_join_perf",
+        "--message-format=json-render-diagnostics"
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "dirty": "",
+      "file_sha256": {
+        "Cargo.lock": "fe3a5c9b99de6bdb59a5c78a24fa7700e0b6b9cc8934316f58a83ab85440ddfe",
+        "Cargo.toml": "bfd2a6850177719b8c87792148e6143fa6294d483e91538cc2f0e005d4b8abef",
+        "crates/calc-flow/benches/stream_join_perf.rs": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",
+        "crates/calc-flow/src/benchmark_internals.rs": "95fd91c046fc80c9d83b791f2c94680525dcbdb1736c4321715e232117353137",
+        "crates/calc-flow/src/runtime/streaming/operator_task/benchmark_replay.rs": "9aa1d6e9f7b8ddda8532d4f8584b2e5e2f8498245d7caf0ffd41eed0494c42e4"
+      },
+      "product_recompiled": true,
+      "revision": "519b78c5d2ae682056715649947172da27a0f64a",
+      "tree": "29448580c947f6bd1a7e80f8a20ae767816fe8d3"
+    },
+    "candidate": {
+      "bench_recompiled": true,
+      "binary_sha256": "3076471ed85a120003f8e561043a0ce0bd9c17387f083dec8bf37f78fcf4b5e0",
+      "build_seconds": 1025.463571945089,
+      "command": [
+        "cargo",
+        "build",
+        "--locked",
+        "--release",
+        "-p",
+        "calc-flow",
+        "--features",
+        "benchmark-internals",
+        "--bench",
+        "stream_join_perf",
+        "--message-format=json-render-diagnostics"
+      ],
+      "compiler": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "dirty": "",
+      "file_sha256": {
+        "Cargo.lock": "fe3a5c9b99de6bdb59a5c78a24fa7700e0b6b9cc8934316f58a83ab85440ddfe",
+        "Cargo.toml": "bfd2a6850177719b8c87792148e6143fa6294d483e91538cc2f0e005d4b8abef",
+        "crates/calc-flow/benches/stream_join_perf.rs": "b379815c0fe8b28fc8131681c538a43881498741cb167c1c31c60492d1a9b4a0",
+        "crates/calc-flow/src/benchmark_internals.rs": "95fd91c046fc80c9d83b791f2c94680525dcbdb1736c4321715e232117353137",
+        "crates/calc-flow/src/runtime/streaming/operator_task/benchmark_replay.rs": "9aa1d6e9f7b8ddda8532d4f8584b2e5e2f8498245d7caf0ffd41eed0494c42e4"
+      },
+      "product_recompiled": true,
+      "revision": "a0a5b4f2e792c17c10aa71a706ed2427d9279fca",
+      "tree": "0e6c279d1bc9cb59163be134d3341d60860465b7"
+    }
+  },
+  "controller_affinity": [
+    31
+  ],
+  "controller_sha256": "32c58994b0f09ba4f2218fe3e5a5b7399fe4c9022fa9559d7c285cbf37f0d444",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "failure": "ValueError(\"host pressure: {'cpu': 8, 'cpu_busy': 0.0, 'siblings': [9], 'sibling_busy': 0.0, 'host_busy': 2.690625, 'available_bytes': 31080058880, 'major_faults': 365, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False, 'seconds': 1.0809225499397144, 'preflight': False}\")",
+  "fixture_generator": {
+    "github_artifact": 14784320573,
+    "github_job": 137436274161,
+    "github_run": 45096060316,
+    "native_sha256": "4bd3e9d8d299553cbb0ef06c3c321f7463c191039d62bf2cdc9cd24ad15c817b",
+    "source_sha": "ccef6edc981e04d2999482b09bd8d02c6dd8f5c4",
+    "wheel_sha256": "c6752ae3df7228cf58fe80d64367301ccf09a5f36bceaf224b060f0e7333c822"
+  },
+  "fixture_manifest": {
+    "batch_rows": 1024,
+    "canonical_native_events_sha256": "49f56065486a9da9cb0c37461cc9e2430e612f2f23dde4c4b25d104768aa68bb",
+    "checkpoint_enabled": true,
+    "compiled_plan_fingerprint": "ae746f342f25a2335c278a69bc2506681351b0ed69a33f2d7b2a874c83a1a7c5",
+    "dimension_rows": 64,
+    "events": {
+      "path": "events.json",
+      "sha256": "8d1324bd4a4bb293a4f8fa618e10cd3b8a8f456319aea6b26cdfc661b8f6e409"
+    },
+    "expected_output": {
+      "path": "expected.arrow",
+      "rows": 1000000,
+      "sha256": "909a7a2abe3094490b283f9b16a5e1c0479fe5da030b85d867e015c63ef746cf"
+    },
+    "inputs": {
+      "left": {
+        "path": "input-0.arrow",
+        "rows": 1000000,
+        "sha256": "ac2e05791750fdf083332556c2d1a76a117a6f831d328ee02a69d721a1413e9a"
+      },
+      "right": {
+        "path": "input-1.arrow",
+        "rows": 64,
+        "sha256": "5c1afd1d1468871239c230e21349d6659e85dae0d7c79c9589a9b6253ec8e69a"
+      }
+    },
+    "inputs_sha256": "e24d3c6ad0ff026a14d4db4a81e3aec15f60d940ba3321c4346807013070325a",
+    "output_binding": "output",
+    "project": {
+      "path": "project.json",
+      "sha256": "164f4aa531b6707041a349ee9112770b41f6c4bb0b0342372bdcbe9457bb775a"
+    },
+    "rows": 1000000,
+    "scenario": "join_sealed",
+    "schema": "calc-flow.matched-native-fixture.v1",
+    "shared_partial_order_sha256": "14054b29b8a9393bb86abd7379cd4043b1af89015581797b62435ce8243da718"
+  },
+  "fixture_receipt": {
+    "worker_cpu_seconds": 0.6896049999999999,
+    "worker_peak_rss_bytes": 226238464,
+    "worker_wall_seconds": 0.9203013039659709
+  },
+  "fixture_sha256": "cead51335d911009ab04cb19a8ca95e477f5ebcb5bccda398b90929eaab02e9e",
+  "host": {
+    "machine": "x86_64",
+    "node": "chengli-i9",
+    "processor": "",
+    "release": "5.15.167.4-microsoft-standard-WSL2",
+    "system": "Linux",
+    "version": "#1 SMP Tue Nov 5 00:21:55 UTC 2024"
+  },
+  "id": "rust/join_sealed/1024/projected",
+  "intervals": [
+    {
+      "available_bytes": 31080968192,
+      "cpu": 8,
+      "cpu_busy": 0.0,
+      "host_busy": 0.209375,
+      "major_faults": 17,
+      "preflight": true,
+      "seconds": 3.000584335066378,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": true,
+      "swap_in_pages": 40,
+      "swap_out_pages": 0,
+      "swap_pages": 40
+    },
+    {
+      "available_bytes": 31080058880,
+      "cpu": 8,
+      "cpu_busy": 0.0,
+      "host_busy": 2.690625,
+      "major_faults": 365,
+      "preflight": false,
+      "seconds": 1.0809225499397144,
+      "sibling_busy": 0.0,
+      "siblings": [
+        9
+      ],
+      "suitable": false,
+      "swap_in_pages": 0,
+      "swap_out_pages": 0,
+      "swap_pages": 0
+    }
+  ],
+  "kernel_counts": [
+    {
+      "baseline": 8,
+      "candidate": 3,
+      "scope": "actual Arrow take and interleave calls, one matched output batch",
+      "shape": "Equi"
+    },
+    {
+      "baseline": 8,
+      "candidate": 4,
+      "scope": "actual Arrow take and interleave calls, one matched output batch",
+      "shape": "Band"
+    }
+  ],
+  "observations": [],
+  "preparation_note": "An initial dependency compilation using a mislocated target was stopped before either release library or binary existed. Both sealed builds used the same cache.",
+  "profile": {
+    "calc_flow": {
+      "features": [
+        "benchmark-internals"
+      ],
+      "fresh": false,
+      "profile": {
+        "debug_assertions": false,
+        "debuginfo": 0,
+        "opt_level": "3",
+        "overflow_checks": false,
+        "test": false
+      }
+    },
+    "environment": {
+      "CARGO_BUILD_JOBS": "2",
+      "CARGO_INCREMENTAL": "0"
+    },
+    "shared_cargo_target": true,
+    "stream_join_perf": {
+      "features": [
+        "benchmark-internals"
+      ],
+      "fresh": false,
+      "profile": {
+        "debug_assertions": false,
+        "debuginfo": 0,
+        "opt_level": "3",
+        "overflow_checks": false,
+        "test": true
+      }
+    }
+  },
+  "registration": {
+    "abort_on_unsuitable_interval": true,
+    "attempts": 1,
+    "case": "join_sealed",
+    "complete_pairs": 0,
+    "complete_warmups": 0,
+    "inclusive_wall_budget_s": 180,
+    "order": "alternating AB/BA, reverse first order in second round",
+    "primary": "per-process median of the 976 complete 1,024-row Join handlers; excludes final 576-row tail",
+    "regression_threshold_percent": 5,
+    "resource_thresholds": {
+      "available_bytes_at_least": 10737418240,
+      "host_busy_percent_below": 50,
+      "later_sibling_busy_percent_below": 50,
+      "major_faults_below": 256,
+      "preflight_each_worker_and_sibling_busy_percent_max": 20,
+      "preflight_seconds": 3,
+      "swap_pages_below": 1024
+    },
+    "rounds": 2,
+    "samples_per_round": 10,
+    "source_base": {
+      "bucket_ranges_head": "dd252fdebcaeff068b87be9072527d1d8781962f",
+      "bucket_ranges_pr": 639,
+      "deferred_left_head": "2d305594a169a4d96f34d1cd566762afd4d09aa5",
+      "deferred_left_pr": 636,
+      "main": "3a63b11275577a3824e48df94fbc5fc15c6a2e07"
+    },
+    "stage": "first baseline warmup after shared fixture initialization",
+    "warmups_per_arm_per_round": 1
+  },
+  "siblings": [
+    9
+  ],
+  "status": "stopped",
+  "thread_settings": {
+    "DATAFUSION_EXECUTION_TARGET_PARTITIONS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "POLARS_MAX_THREADS": "1",
+    "RAYON_NUM_THREADS": "1",
+    "TOKIO_WORKER_THREADS": "1",
+    "VECLIB_MAXIMUM_THREADS": "1"
+  },
+  "wall_seconds": 6.349322308902629,
+  "worker_affinity": [
+    8
+  ]
+}
