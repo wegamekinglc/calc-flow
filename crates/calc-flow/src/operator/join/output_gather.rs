@@ -2,10 +2,11 @@ use super::{PayloadRef, canonical_column, concat_output_column, operator_error};
 use crate::Result;
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, BinaryViewArray, StringViewArray, UInt32Array, UInt64Array, make_array,
+        Array, ArrayRef, BinaryViewArray, PrimitiveArray, PrimitiveBuilder, StringViewArray,
+        UInt32Array, UInt64Array, make_array,
     },
     compute::{interleave, take},
-    datatypes::DataType,
+    datatypes::{ArrowPrimitiveType, DataType},
 };
 use std::collections::BTreeMap;
 
@@ -19,6 +20,11 @@ pub(super) mod test_support;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static COORDINATE_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 pub(super) enum SideGather<'a> {
     Single {
@@ -45,6 +51,28 @@ impl Indices {
     }
 }
 
+// Arrow take uses coordinates relative to each sliced array.
+fn narrow_last_row(columns: &[ArrayRef]) -> Option<usize> {
+    let last = columns.first()?.len().checked_sub(1)?;
+    u32::try_from(last).ok().map(|_| last)
+}
+
+fn repeat_indices<T: ArrowPrimitiveType>(
+    spans: impl Iterator<Item = (usize, usize)>,
+    capacity: usize,
+) -> Option<PrimitiveArray<T>>
+where
+    T::Native: TryFrom<usize>,
+{
+    let mut rows = PrimitiveBuilder::<T>::with_capacity(capacity);
+    for (offset, count) in spans {
+        #[cfg(test)]
+        COORDINATE_READS.set(COORDINATE_READS.get() + 1);
+        rows.append_value_n(T::Native::try_from(offset).ok()?, count);
+    }
+    Some(rows.finish())
+}
+
 impl<'a> SideGather<'a> {
     pub(super) fn new(payloads: impl Iterator<Item = PayloadRef<'a>>) -> Option<Self> {
         let capacity = payloads.size_hint().0;
@@ -52,19 +80,15 @@ impl<'a> SideGather<'a> {
     }
 
     pub(super) fn with_capacity(
-        mut payloads: impl Iterator<Item = PayloadRef<'a>>,
+        payloads: impl Iterator<Item = PayloadRef<'a>>,
         capacity: usize,
     ) -> Option<Self> {
+        #[cfg(test)]
+        let payloads = payloads.inspect(|_| COORDINATE_READS.set(COORDINATE_READS.get() + 1));
+        let mut payloads = payloads;
         let first = payloads.next()?;
         let columns = first.columns();
-        // Array lengths bound logical source coordinates, including sliced arrays.
-        let narrow = columns.first().is_some_and(|column| {
-            first.offset() < column.len()
-                && column
-                    .len()
-                    .checked_sub(1)
-                    .is_some_and(|last| u32::try_from(last).is_ok())
-        });
+        let narrow = narrow_last_row(columns).is_some_and(|last| first.offset() <= last);
         if narrow {
             Self::single(first, payloads, capacity, |rows: Vec<u32>| {
                 Indices::Narrow(UInt32Array::from(rows))
@@ -74,6 +98,19 @@ impl<'a> SideGather<'a> {
                 Indices::Wide(UInt64Array::from(rows))
             })
         }
+    }
+
+    pub(super) fn repeated(
+        columns: &'a [ArrayRef],
+        spans: impl Iterator<Item = (usize, usize)>,
+        capacity: usize,
+    ) -> Option<Self> {
+        let rows = if narrow_last_row(columns).is_some() {
+            Indices::Narrow(repeat_indices(spans, capacity)?)
+        } else {
+            Indices::Wide(repeat_indices(spans, capacity)?)
+        };
+        Some(Self::Single { columns, rows })
     }
 
     fn single<I>(

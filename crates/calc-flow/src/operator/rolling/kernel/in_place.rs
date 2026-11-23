@@ -366,12 +366,13 @@ fn route_direct_entities<'a>(
         .iter()
         .copied()
         .enumerate()
-        .map(|(local, name)| match state.direct_entities.get(name) {
-            Some(&(resident, key_bytes)) => RoutedEntity::Cached {
-                resident,
-                key_bytes,
-            },
-            None => {
+        .map(|(local, name)| {
+            if let Some(&(resident, key_bytes)) = state.direct_entities.get(name) {
+                RoutedEntity::Cached {
+                    resident,
+                    key_bytes,
+                }
+            } else {
                 misses.push((local, name));
                 RoutedEntity::Canonical(Vec::new())
             }
@@ -415,23 +416,20 @@ impl RollingKernelPlan {
         observer: Option<&RollingMetricsRecorder>,
     ) -> Result<InPlaceRouting<'a>> {
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::EntityResolution));
-        match super::direct_entity_column(self, input) {
-            Some(entities) => route_direct_entities(state, entities, node_id),
-            None => {
-                let routing =
-                    self.encoded_entity_routing(input, state.states.len().max(16), node_id)?;
-                Ok(InPlaceRouting {
-                    entities: routing
-                        .keys
-                        .into_iter()
-                        .map(RoutedEntity::Canonical)
-                        .collect(),
-                    rows: routing.rows,
-                    entity_ids: routing.entity_ids,
-                    direct_names: Vec::new(),
-                })
-            }
+        if let Some(entities) = super::direct_entity_column(self, input) {
+            return route_direct_entities(state, entities, node_id);
         }
+        let routing = self.encoded_entity_routing(input, state.states.len().max(16), node_id)?;
+        Ok(InPlaceRouting {
+            entities: routing
+                .keys
+                .into_iter()
+                .map(RoutedEntity::Canonical)
+                .collect(),
+            rows: routing.rows,
+            entity_ids: routing.entity_ids,
+            direct_names: Vec::new(),
+        })
     }
 
     fn ordered_event_times(

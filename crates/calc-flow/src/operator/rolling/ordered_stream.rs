@@ -35,9 +35,13 @@ use super::{
 
 #[derive(Clone, Default)]
 pub(super) struct OrderedStreamBuffer {
+    #[cfg(test)]
+    pub(super) closing_coordinates_checked: usize,
     records: VecDeque<RecordBatch>,
+    // Record ends checked against this operator's fixed allowed lateness.
+    checked_records: usize,
     retry_records: Vec<RecordBatch>,
-    last_identity: Option<Vec<u8>>,
+    last_identity: Option<Box<[u8]>>,
 }
 
 impl OrderedStreamBuffer {
@@ -46,7 +50,7 @@ impl OrderedStreamBuffer {
     }
 
     pub(super) fn last_identity(&self) -> Option<Vec<u8>> {
-        self.last_identity.clone()
+        self.last_identity.as_deref().map(<[u8]>::to_vec)
     }
 
     pub(super) fn restore_pending(
@@ -54,10 +58,11 @@ impl OrderedStreamBuffer {
         records: Vec<RecordBatch>,
         last_identity: Option<Vec<u8>>,
     ) {
+        self.checked_records = 0;
         for record in records.into_iter().rev() {
             self.records.push_front(record);
         }
-        self.last_identity = last_identity;
+        self.last_identity = last_identity.map(Vec::into_boxed_slice);
     }
 
     pub(super) fn restore_front(
@@ -74,6 +79,7 @@ impl OrderedStreamBuffer {
     }
 
     pub(super) fn clear(&mut self) {
+        self.checked_records = 0;
         self.records.clear();
         self.retry_records.clear();
         self.last_identity = None;
@@ -84,6 +90,7 @@ impl OrderedStreamBuffer {
     }
 
     pub(super) fn take_all(&mut self) -> Vec<RecordBatch> {
+        self.checked_records = 0;
         self.last_identity = None;
         self.retry_records.clear();
         self.records.drain(..).collect()
@@ -113,6 +120,7 @@ impl OrderedStreamBuffer {
             }
             let record = self.records.pop_front().expect("front was present");
             if count == record.num_rows() {
+                self.checked_records -= 1;
                 closed.push(record);
             } else {
                 closed.push(record.slice(0, count));
@@ -130,14 +138,17 @@ impl OrderedStreamBuffer {
         Ok(closed)
     }
     fn validate_closing_coordinates(
-        &self,
+        &mut self,
         compiled: &CompiledRollingSpec,
         allowed_lateness_micros: u64,
         node_id: &str,
     ) -> Result<()> {
-        // Check every coordinate before changing the buffer, matching the
-        // general path's atomic closing-key validation.
-        for record in &self.records {
+        // Check appended records before removing any part of the buffered prefix.
+        for record in self.records.range(self.checked_records..) {
+            #[cfg(test)]
+            {
+                self.closing_coordinates_checked += 1;
+            }
             let times = timestamps(record, compiled)?;
             closing_coordinate(
                 times.value(record.num_rows() - 1),
@@ -145,6 +156,7 @@ impl OrderedStreamBuffer {
                 node_id,
             )?;
         }
+        self.checked_records = self.records.len();
         Ok(())
     }
 }
@@ -251,11 +263,14 @@ impl RollingOperator {
                 // one of those exact records is idempotent; it is not new state.
                 continue;
             }
-            if last.as_ref().is_some_and(|previous| previous >= &first) {
+            if last
+                .as_deref()
+                .is_some_and(|previous| previous >= first.as_slice())
+            {
                 return Ok(false);
             }
             prepared.push(record.clone());
-            last = Some(end);
+            last = Some(end.into_boxed_slice());
         }
         let Some(incoming) =
             super::budget::ordered_buffer_charge(prepared.iter(), &self.compiled, &self.name)?

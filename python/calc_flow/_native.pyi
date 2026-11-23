@@ -181,6 +181,10 @@ class StreamingRuntimeError(CalcFlowError):
 
 class CheckpointPublicationUnknownError(StreamingRuntimeError): ...
 
+def _ordered_event_time(
+    batch: Batch, column: str, previous: int | None
+) -> int | None: ...
+
 @final
 class _ArrowSource:
     def __init__(

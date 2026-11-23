@@ -239,3 +239,52 @@ fn test_equal_hashes_remain_distinct_across_growth_and_rollback() {
     keys.rollback(empty);
     assert_eq!(route(&mut keys, 0, 16, 16).unwrap(), prefix);
 }
+
+#[test]
+fn test_group_key_export_writes_arrow_without_row_sized_temporaries() {
+    use datafusion::arrow::array::{
+        BooleanArray, Int64Array, LargeStringArray, TimestampNanosecondArray, UInt32Array,
+    };
+    use datafusion::arrow::compute::take;
+
+    let columns: Vec<ArrayRef> = vec![
+        Arc::new(BooleanArray::from(vec![None, Some(true), Some(false)])),
+        Arc::new(Int64Array::from(vec![Some(-1), None, Some(2)])),
+        Arc::new(StringArray::from(vec![Some("茶"), None, Some("")])),
+        Arc::new(LargeStringArray::from(vec![None, Some(""), Some("米")])),
+        Arc::new(
+            TimestampNanosecondArray::from(vec![None, Some(-1), Some(129)]).with_timezone("UTC"),
+        ),
+    ];
+    let fields = columns
+        .iter()
+        .enumerate()
+        .map(|(id, column)| Arc::new(Field::new(id.to_string(), column.data_type().clone(), true)))
+        .collect();
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut keys = KeyStore::new(
+        KeySchema::groupable(fields).unwrap(),
+        runtime.incremental_reservation("key-export"),
+    );
+    let routed = keys.route(&columns, &mut || Ok(())).unwrap();
+    let selected = [2_u32, 0, 1, 2].repeat(32);
+    let groups = selected
+        .iter()
+        .map(|&row| routed[row as usize])
+        .collect::<Vec<_>>();
+    let indices = UInt32Array::from(selected);
+    let mut output = None;
+    let allocations = allocation_counter::measure(|| {
+        output = Some(keys.columns(&groups).unwrap());
+    });
+    let output = output.unwrap();
+    for (source, actual) in columns.iter().zip(&output) {
+        assert_eq!(
+            actual.as_ref(),
+            take(source.as_ref(), &indices, None).unwrap().as_ref()
+        );
+    }
+    let transient = allocations.bytes_total - u64::try_from(allocations.bytes_current).unwrap();
+    eprintln!("128 group IDs, five Arrow columns: {allocations:?}, {transient} temporary bytes");
+    assert!(transient < 1024);
+}

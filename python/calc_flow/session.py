@@ -146,6 +146,10 @@ class StreamSession(Generic[T]):
     def _data(self, inputs: TableData | Mapping[str, TableData]) -> TableData:
         if self._table_output:
             return cast(TableData, inputs)
+        if type(inputs) is dict and len(inputs) == 1:
+            data = inputs.get(self._input.name)
+            if data is not None:
+                return data
         if not isinstance(inputs, Mapping):
             raise TypeError("session.inputs: expected a mapping by declared input name")
         names = set(inputs)

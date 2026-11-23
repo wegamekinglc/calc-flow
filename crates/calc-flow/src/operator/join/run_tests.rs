@@ -450,8 +450,8 @@ fn test_sparse_cursor_handles_time_reversal_and_missing_keys() {
         .apply_checked(JoinSide::Left, left, output, &mut || Ok(()))
         .unwrap();
     let right = incoming(
-        &record(&[1, 2, 1], &[21, 22, 23]),
-        vec![0, 1, 2],
+        &record(&[2, 1, 1, 1], &[22, 99, 21, 23]),
+        vec![2, 0, 3],
         vec![group, missing, group],
         &[15, 15, 10],
         &[0, 1, 2],
@@ -632,9 +632,9 @@ fn fanout_state(rows: usize) -> (RunState, Incoming) {
 }
 
 #[test]
-fn test_chunked_run_gather_visits_only_its_matched_pairs() {
+fn test_chunked_run_gather_reads_each_incoming_match_span_once() {
     let (mut state, right) = fanout_state_with_rows(8, 11);
-    super::runs::GATHER_VISITS.set(0);
+    super::output_gather::COORDINATE_READS.set(0);
     let output = state
         .apply(
             JoinSide::Right,
@@ -645,7 +645,7 @@ fn test_chunked_run_gather_visits_only_its_matched_pairs() {
             EdgeBudget::new(7, 1_000_000).unwrap(),
         )
         .unwrap();
-    let visits = super::runs::GATHER_VISITS.get();
+    let visits = super::output_gather::COORDINATE_READS.get();
     let expected = (100..111)
         .flat_map(|right| (0..8).map(move |left| (left, right)))
         .collect::<Vec<_>>();
@@ -658,7 +658,18 @@ fn test_chunked_run_gather_visits_only_its_matched_pairs() {
         assert_eq!(actual, pairs);
     }
     assert_eq!(output.len(), 13);
-    assert_eq!(visits, 2 * expected.len());
+    // A row can span two output chunks, so count incoming spans in each chunk.
+    let spans: usize = expected
+        .chunks(7)
+        .map(|chunk| {
+            1 + chunk
+                .windows(2)
+                .filter(|pair| pair[0].1 != pair[1].1)
+                .count()
+        })
+        .sum();
+    assert_eq!(spans, 22);
+    assert_eq!(visits, expected.len() + spans);
 }
 
 fn estimated(batch: &Batch) -> usize {

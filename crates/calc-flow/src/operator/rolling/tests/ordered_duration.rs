@@ -1203,3 +1203,101 @@ async fn close(
         })
         .collect()
 }
+
+#[tokio::test]
+async fn test_pending_window_records_validate_finality_once_across_watermarks() {
+    let mut spec = kernel_spec(json!([duration_output("sum", "price", "sum", 5)]));
+    spec.allowed_lateness_micros = 1;
+    let rows = (0..64_u32)
+        .map(|row| {
+            (
+                100 + i64::from(row),
+                "a",
+                u64::from(row),
+                Some(f64::from(row)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let input = float64_fast_record(&rows);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let (expected, _) = reference_output(&operator, &input);
+    let (job, store, mut output) = fixture(&operator);
+    for offset in 0..32_u32 {
+        assert!(
+            observe_data(
+                &mut operator,
+                &job,
+                &store,
+                &mut output,
+                input.slice(2 * offset as usize, 2)
+            )
+            .await
+        );
+        assert!(
+            close(&mut operator, &job, &store, &mut output, i64::from(offset))
+                .await
+                .is_empty()
+        );
+    }
+    let mut emitted = close(&mut operator, &job, &store, &mut output, 101).await;
+    assert_eq!(emitted.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    emitted.extend(close(&mut operator, &job, &store, &mut output, i64::MAX).await);
+    let actual = concat_batches(&expected.schema(), &emitted).unwrap();
+    capability_profiles::assert_complete_bits(&actual, &expected);
+    assert_eq!(operator.state.ordered.closing_coordinates_checked, 32);
+}
+
+#[test]
+fn test_pending_window_records_recheck_after_retry_and_drain() {
+    let mut spec = kernel_spec(json!([duration_output("sum", "price", "sum", 5)]));
+    spec.allowed_lateness_micros = 1;
+    let input = float64_fast_record(&[
+        (1, "a", 1, Some(1.0)),
+        (2, "a", 2, Some(2.0)),
+        (3, "a", 3, Some(3.0)),
+    ]);
+    let mut operator = RollingOperator::new("rolling", input.schema(), spec).unwrap();
+    let batch = Batch::table(
+        vec![input.slice(0, 2), input.slice(2, 1)],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    assert!(
+        operator
+            .try_buffer_ordered(batch.table_payload().unwrap(), None, None)
+            .unwrap()
+    );
+    let buffer = &mut operator.state.owned_mut().unwrap().ordered;
+    let close = |buffer: &mut ordered_stream::OrderedStreamBuffer, time| {
+        buffer.take_closed(
+            EventTime::from_micros(time),
+            &operator.compiled,
+            1,
+            "rolling",
+        )
+    };
+    let identity = buffer.last_identity();
+    let prior = close(buffer, 2).unwrap();
+    assert_eq!(prior, [input.slice(0, 1)]);
+    buffer.restore_front(prior, identity);
+    assert_eq!(close(buffer, 2).unwrap(), [input.slice(0, 1)]);
+    assert_eq!(buffer.closing_coordinates_checked, 5);
+    let retained = buffer.take_all();
+    assert_eq!(retained, [input.slice(1, 1), input.slice(2, 1)]);
+    let last = float64_fast_record(&[(i64::MAX, "b", 4, None)]);
+    buffer.restore_pending(
+        vec![retained[0].clone(), last.clone(), retained[1].clone()],
+        None,
+    );
+    let error = close(buffer, 3).unwrap_err();
+    assert!(
+        error.to_string().contains("finality coordinate overflowed"),
+        "{error}"
+    );
+    assert_eq!(
+        buffer.records().cloned().collect::<Vec<_>>(),
+        [retained[0].clone(), last, retained[1].clone()]
+    );
+    buffer.clear();
+    assert!(close(buffer, 3).unwrap().is_empty());
+}
