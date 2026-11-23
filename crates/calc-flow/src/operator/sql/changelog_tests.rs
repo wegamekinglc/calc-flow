@@ -223,6 +223,13 @@ async fn test_sparse_keyed_sum_projects_only_affected_group_versions() {
     )
     .await;
     assert_eq!(first.len(), 256);
+    let projected_batches = operator
+        .incremental
+        .as_ref()
+        .unwrap()
+        .keyed_output_batches
+        .load(Ordering::Relaxed);
+    assert_eq!(projected_batches, 1);
     let projected = |operator: &SqlOperator| {
         operator
             .incremental
@@ -250,6 +257,64 @@ async fn test_sparse_keyed_sum_projects_only_affected_group_versions() {
         ]
     );
     assert_eq!(projected(&operator) - before, 3);
+}
+
+#[tokio::test]
+async fn test_small_changelog_operation_column_keeps_only_small_buffers() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "changes", None);
+    let mut operator = changelog(GROUPED);
+    for (value, count) in [(1, 1), (0, 0), (1, 2)] {
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "events",
+                input(&[Some("a")], &[Some(value)]),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let emitted = collector.drain("output");
+        let table = emitted[0].as_data().unwrap().table_payload().unwrap();
+        let operations = table.batches()[0].column_by_name("_cf_op").unwrap();
+        assert_eq!(operations.len(), count);
+        let bytes = operations.get_buffer_memory_size();
+        assert!(bytes <= 256, "{count} operations retain {bytes} bytes");
+    }
+}
+
+#[tokio::test]
+async fn test_changelog_preserves_projected_versions_across_key_morsels() {
+    let job = job();
+    let context = StreamOperatorContext::new(&job, "changes", None);
+    let mut operator = changelog(
+        "SELECT SUM(value) AS total, key AS id, SUM(value) AS repeated FROM events GROUP BY key",
+    );
+    let keys = (0..4097).map(|i| format!("key-{i}")).collect::<Vec<_>>();
+    let names = keys
+        .iter()
+        .map(|key| Some(key.as_str()))
+        .collect::<Vec<_>>();
+    let batch = input(&names, &vec![Some(1); keys.len()]);
+    process(&mut operator, batch.clone(), &context).await;
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("events", batch, &context, &mut collector)
+        .await
+        .unwrap();
+    let emitted = collector.drain("output");
+    let [message] = emitted.as_slice() else {
+        panic!("expected one output")
+    };
+    let batch = message.as_data().unwrap();
+    assert_eq!(batch.table_payload().unwrap().batches().len(), 1);
+    let actual = rows(batch);
+    assert_eq!(actual.len(), keys.len() * 2);
+    for (key, pair) in keys.iter().zip(actual.chunks_exact(2)) {
+        assert_eq!(pair[0], [int(1), text(key), int(1), text("retract")]);
+        assert_eq!(pair[1], [int(2), text(key), int(2), text("upsert")]);
+    }
 }
 
 #[tokio::test]

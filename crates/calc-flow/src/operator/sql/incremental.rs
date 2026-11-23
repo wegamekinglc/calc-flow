@@ -172,6 +172,8 @@ pub(super) struct IncrementalSql {
     container_fee: Option<MemoryReservation>,
     reservation: MemoryReservation,
     #[cfg(test)]
+    pub(super) keyed_output_batches: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
     pub(super) keyed_output_rows: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     pub(super) finalized_groups: Arc<std::sync::atomic::AtomicUsize>,
@@ -1054,6 +1056,8 @@ impl IncrementalSql {
             index: HashMap::with_hasher(RandomState::new()),
             reservation: parts.reservation,
             #[cfg(test)]
+            keyed_output_batches: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             keyed_output_rows: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             finalized_groups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1903,6 +1907,29 @@ impl IncrementalSql {
         name: &str,
     ) -> Result<PreparedKeyedRecords> {
         let width = self.keyed_output_charge(0, 1, name)?;
+        let reserve = |key_bytes, versions| {
+            // Reserve key buffers, projected columns and any final concatenation before export.
+            let row_bytes = checked_bytes(width, [(key_bytes, 3)], name)?;
+            reservation
+                .try_grow(checked_bytes(0, [(row_bytes, versions)], name)?)
+                .map_err(|error| df_error(name, error))
+        };
+        if self.projects_sum_columns() {
+            let (aggregate, operations) = transaction.change_record(
+                &self.aggregate_schema,
+                || context.check_cancelled(),
+                reserve,
+            )?;
+            context.check_cancelled()?;
+            let mut columns = self
+                .keyed_output_record(&aggregate, name)?
+                .columns()
+                .to_vec();
+            columns.push(operations);
+            let record = RecordBatch::try_new(self.changelog_schema(), columns)
+                .map_err(|error| df_error(name, error))?;
+            return Ok((vec![record], transaction.group_count()));
+        }
         let mut changes = Vec::new();
         let visible = |record: &RecordBatch| {
             visible_record_row(&self.keyed_output_record(record, name)?, name)
@@ -1910,13 +1937,7 @@ impl IncrementalSql {
         transaction.visit_changes(
             &self.aggregate_schema,
             || context.check_cancelled(),
-            |key_bytes, versions| {
-                // Projected scalars coexist with growing Arrow string buffers.
-                let row_bytes = checked_bytes(width, [(key_bytes, 3)], name)?;
-                reservation
-                    .try_grow(checked_bytes(0, [(row_bytes, versions)], name)?)
-                    .map_err(|error| df_error(name, error))
-            },
+            reserve,
             |previous, current| {
                 let old = previous.as_ref().map(visible).transpose()?.flatten();
                 push_visible_changes(&mut changes, old, visible(&current)?);
@@ -1927,6 +1948,21 @@ impl IncrementalSql {
             self.changelog_records(changes, name)?,
             transaction.group_count(),
         ))
+    }
+
+    /// A changed sum is always visible when a direct output column retains its value.
+    fn projects_sum_columns(&self) -> bool {
+        if self.post_filter.is_some() || self.post_order.is_some() {
+            return false;
+        }
+        let mut includes_sum = false;
+        for expression in &self.projection {
+            let Some(column) = expression.downcast_ref::<Column>() else {
+                return false;
+            };
+            includes_sum |= column.index() == self.keys.len();
+        }
+        includes_sum
     }
 
     fn prepare_keyed_records<T: SnapshotTransaction>(
@@ -2055,6 +2091,9 @@ impl IncrementalSql {
     }
 
     fn keyed_output_record(&self, aggregate: &RecordBatch, name: &str) -> Result<RecordBatch> {
+        #[cfg(test)]
+        self.keyed_output_batches
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         #[cfg(test)]
         self.keyed_output_rows
             .fetch_add(aggregate.num_rows(), std::sync::atomic::Ordering::Relaxed);

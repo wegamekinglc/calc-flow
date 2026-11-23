@@ -598,9 +598,59 @@ impl Transaction {
     pub(super) fn visit_changes(
         &mut self,
         schema: &SchemaRef,
+        check: impl FnMut() -> Result<()>,
+        reserve: impl FnMut(usize, usize) -> Result<()>,
+        mut visit: impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+    ) -> Result<()> {
+        self.changed_groups(check, reserve, |state, group, previous, current| {
+            let keys = state.keys.columns(&[group])?;
+            let before = previous
+                .map(|value| value.record(&keys, schema))
+                .transpose()?;
+            visit(before, current.record(&keys, schema)?)
+        })
+    }
+
+    pub(super) fn change_record(
+        &mut self,
+        schema: &SchemaRef,
+        mut check: impl FnMut() -> Result<()>,
+        reserve: impl FnMut(usize, usize) -> Result<()>,
+    ) -> Result<(RecordBatch, ArrayRef)> {
+        let mut versions = Vec::new();
+        let mut records = Vec::new();
+        let mut operations = super::StringBuilder::with_capacity(0, 0);
+        self.changed_groups(&mut check, reserve, |state, group, previous, current| {
+            if versions.len() + 1 + usize::from(previous.is_some()) > MORSEL_ROWS {
+                state.flush_versions(schema, &mut versions, &mut records)?;
+            }
+            if let Some(previous) = previous {
+                versions.push((group, previous));
+                operations.append_value("retract");
+            }
+            versions.push((group, current));
+            operations.append_value("upsert");
+            Ok(())
+        })?;
+        check()?;
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .flush_versions(schema, &mut versions, &mut records)?;
+        let record = match records.as_slice() {
+            [] => RecordBatch::new_empty(schema.clone()),
+            [only] => only.clone(),
+            _ => datafusion::arrow::compute::concat_batches(schema, &records)
+                .map_err(|error| super::df_error("keyed SUM", error))?,
+        };
+        Ok((record, Arc::new(operations.finish())))
+    }
+
+    fn changed_groups(
+        &mut self,
         mut check: impl FnMut() -> Result<()>,
         mut reserve: impl FnMut(usize, usize) -> Result<()>,
-        mut visit: impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+        mut visit: impl FnMut(&KeyedSumState, GroupId, Option<SumValue>, SumValue) -> Result<()>,
     ) -> Result<()> {
         check()?;
         self.undo.sort_unstable_by_key(|(group, _)| *group);
@@ -616,7 +666,7 @@ impl Transaction {
                 check()?;
             }
             let (group, previous) = item?;
-            state.visit_change(group, previous, schema, &mut reserve, &mut visit)?;
+            state.visit_change(group, previous, &mut reserve, &mut visit)?;
         }
         Ok(())
     }
@@ -920,27 +970,44 @@ impl Drop for Transaction {
 }
 
 impl KeyedSumState {
+    fn flush_versions(
+        &self,
+        schema: &SchemaRef,
+        versions: &mut Vec<(GroupId, SumValue)>,
+        records: &mut Vec<RecordBatch>,
+    ) -> Result<()> {
+        if versions.is_empty() {
+            return Ok(());
+        }
+        let groups = versions.iter().map(|&(group, _)| group).collect::<Vec<_>>();
+        let mut columns = self.keys.columns(&groups)?;
+        columns.push(
+            self.sums
+                .values_array(versions.drain(..).map(|(_, value)| value)),
+        );
+        records.push(
+            RecordBatch::try_new(schema.clone(), columns)
+                .map_err(|error| super::df_error("keyed SUM", error))?,
+        );
+        Ok(())
+    }
+
     fn visit_change(
         &self,
         group: GroupId,
         previous: Option<SumValue>,
-        schema: &SchemaRef,
         reserve: &mut impl FnMut(usize, usize) -> Result<()>,
-        visit: &mut impl FnMut(Option<RecordBatch>, RecordBatch) -> Result<()>,
+        visit: &mut impl FnMut(&KeyedSumState, GroupId, Option<SumValue>, SumValue) -> Result<()>,
     ) -> Result<()> {
         let current = self.sums.value(group);
-        if previous == Some(current) {
-            return Ok(());
+        if previous != Some(current) {
+            reserve(
+                self.keys.output_charge(&[group])?,
+                1 + usize::from(previous.is_some()),
+            )?;
+            visit(self, group, previous, current)?;
         }
-        reserve(
-            self.keys.output_charge(&[group])?,
-            1 + usize::from(previous.is_some()),
-        )?;
-        let keys = self.keys.columns(&[group])?;
-        let before = previous
-            .map(|value| value.record(&keys, schema))
-            .transpose()?;
-        visit(before, current.record(&keys, schema)?)
+        Ok(())
     }
 
     fn records(
@@ -1132,25 +1199,19 @@ impl PartitionedSums {
     }
 
     fn array(&self, groups: &[GroupId]) -> ArrayRef {
+        self.values_array(groups.iter().map(|&group| self.value(group)))
+    }
+
+    fn values_array(&self, values: impl Iterator<Item = SumValue>) -> ArrayRef {
         match self.kind {
-            SumKind::Int64 => Arc::new(Int64Array::from(
-                groups
-                    .iter()
-                    .map(|group| match self.value(*group) {
-                        SumValue::Int64(value) => value,
-                        SumValue::UInt64(_) => unreachable!(),
-                    })
-                    .collect::<Vec<_>>(),
-            )),
-            SumKind::UInt64 => Arc::new(UInt64Array::from(
-                groups
-                    .iter()
-                    .map(|group| match self.value(*group) {
-                        SumValue::Int64(_) => unreachable!(),
-                        SumValue::UInt64(value) => value,
-                    })
-                    .collect::<Vec<_>>(),
-            )),
+            SumKind::Int64 => Arc::new(Int64Array::from_iter(values.map(|value| match value {
+                SumValue::Int64(value) => value,
+                SumValue::UInt64(_) => unreachable!(),
+            }))),
+            SumKind::UInt64 => Arc::new(UInt64Array::from_iter(values.map(|value| match value {
+                SumValue::UInt64(value) => value,
+                SumValue::Int64(_) => unreachable!(),
+            }))),
         }
     }
 
