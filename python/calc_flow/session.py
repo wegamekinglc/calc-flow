@@ -65,7 +65,14 @@ class StreamSession(Generic[T]):
     ``RuntimeError``.
     """
 
-    __slots__ = ("_native", "_input", "_outputs", "_empty", "_table_output")
+    __slots__ = (
+        "_native",
+        "_input",
+        "_outputs",
+        "_empty",
+        "_table_output",
+        "_copy_empty_program",
+    )
 
     def __init__(
         self,
@@ -81,6 +88,11 @@ class StreamSession(Generic[T]):
         self._outputs = outputs
         self._empty = dict(empty)
         self._table_output = table_output
+        self._copy_empty_program = (
+            not table_output
+            and len(outputs) > 1
+            and tuple(self._empty) == tuple(name for name, _ in outputs)
+        )
 
     def push(
         self,
@@ -186,6 +198,9 @@ class StreamSession(Generic[T]):
             batches = emitted.get(physical)
             table = pa.Table.from_batches(batches) if batches else self._empty[name]
             return cast(T, table if self._table_output else {name: table})
+
+        if not emitted and self._copy_empty_program:
+            return cast(T, self._empty.copy())
 
         tables: dict[str, pa.Table] = {}
         by_physical: dict[str, pa.Table] = {}
