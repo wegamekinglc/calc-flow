@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import perf_counter_ns
 
@@ -23,6 +24,7 @@ from scripts.toolkit import worker_environment, write_json
 NATIVE_STUDY = Path(__file__).parent / "stream-session/20261123-native-push"
 HISTORY = 4096
 APPENDS = 64
+UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _input_file(path: Path) -> pa.Table:
@@ -55,9 +57,8 @@ def _verify_result(result: dict[str, pa.Table], name: str, expected: pa.Table) -
 
 
 def _prepared(table: pa.Table):
-    return {warm.SESSION_INPUT: Batch.from_pyarrow(table)}, Watermark(
-        table["event_time"][-1].as_py()
-    )
+    mark = UTC_EPOCH + timedelta(microseconds=table["event_time"][-1].value)
+    return {warm.SESSION_INPUT: Batch.from_pyarrow(table)}, Watermark(mark)
 
 
 def _program():

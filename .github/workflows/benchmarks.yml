@@ -6,9 +6,9 @@ permissions:
   actions: read
 jobs:
   public-steady-session:
-    name: Public steady session
+    name: Public steady session phases
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 3
     env:
       RAYON_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"

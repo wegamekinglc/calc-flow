@@ -49,3 +49,19 @@ class PublicSessionStudyTest(unittest.TestCase):
         verify_compiler(raw, compiler)
         with self.assertRaises(ValueError):
             verify_compiler(raw.replace("1.94.0", "1.95.0"), compiler)
+
+    def test_rejects_a_missing_or_noncontiguous_probed_push(self):
+        from scripts.hosted_steady_session import verify_phases
+
+        valid = {
+            "mode": "probed",
+            "append_ns": [10] * 64,
+            "phases_ns": [[1, 7, 2]] * 64,
+            "calibration_ns": 0.5,
+        }
+        verify_phases(valid, "probed")
+        for wrong in ([], [[1, 7, 3]] * 64, [[1, 9]] * 64, [[0, 9, 1]] * 64):
+            with self.assertRaises(ValueError):
+                verify_phases({**valid, "phases_ns": wrong}, "probed")
+        with self.assertRaises(ValueError):
+            verify_phases(valid, "plain")

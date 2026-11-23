@@ -1,4 +1,4 @@
-"""Collect steady public one-row session pushes on two official release products."""
+"""Observe the public session clock with a paired native-call probe."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from scripts.toolkit import linear_percentile, sha256_file, write_json
 
 OUT = ROOT / "target/public-steady-session"
 CONFIG = ROOT / "benchmarks/hosted-steady-session-registration.json"
-MODES = ("baseline", "candidate")
+MODES = ("plain", "probed")
 
 
 def read(path: Path) -> dict:
@@ -57,6 +57,21 @@ def verify_worker(data: dict, cpu: int, native: str) -> None:
         raise ValueError("worker CPU, thread count or native module differed")
 
 
+def verify_phases(data: dict, mode: str) -> None:
+    if data["mode"] != mode:
+        raise ValueError("wrong monitoring mode")
+    phases = data["phases_ns"]
+    if mode == "plain":
+        if phases or data["calibration_ns"] is not None:
+            raise ValueError("unmonitored control returned phases")
+        return
+    if len(phases) != 64 or data["calibration_ns"] < 0:
+        raise ValueError("incomplete probe")
+    for parts, total in zip(phases, data["append_ns"], strict=True):
+        if len(parts) != 3 or min(parts) <= 0 or sum(parts) != total:
+            raise ValueError("noncontiguous probe regions")
+
+
 def verify_compiler(dump: str, expected: list[str]) -> None:
     actual = {
         line.partition("]")[2].strip() for line in dump.splitlines() if "]" in line
@@ -74,7 +89,7 @@ def acquire() -> None:
     jobs = json.loads(
         _api(repo, f"actions/runs/{run}/attempts/{attempt}/jobs?per_page=100")
     )["jobs"]
-    (job,) = (j for j in jobs if j["name"] == "Public steady session")
+    (job,) = (j for j in jobs if j["name"] == "Public steady session phases")
     started = datetime.fromisoformat(job["started_at"]).timestamp()
     write_json(
         OUT / "registration.json",
@@ -112,16 +127,17 @@ def acquire() -> None:
             raise ValueError("unexpected sealed release")
 
 
-async def workers(cpu: int, sites: dict, releases: dict, fixture: Path) -> list[dict]:
+async def workers(cpu: int, site: Path, native: str, fixture: Path) -> list[dict]:
     observations = []
     for group, pair, mode in schedule():
-        env = child_environment(sites[mode], tokio_threads=1, polars_threads=1)
+        env = child_environment(site, tokio_threads=1, polars_threads=1)
         target = OUT / "workers" / f"r{group}-p{pair}-{mode}.json"
         await command(
             [
                 sys.executable,
                 "-m",
-                "benchmarks.steady_session",
+                "benchmarks.steady_phases",
+                mode,
                 str(fixture),
                 str(target),
             ],
@@ -131,7 +147,8 @@ async def workers(cpu: int, sites: dict, releases: dict, fixture: Path) -> list[
             timeout=25,
         )
         observation = read(target)
-        verify_worker(observation, cpu, releases[mode]["native_sha256"])
+        verify_worker(observation, cpu, native)
+        verify_phases(observation, mode)
         observations.append({"round": group, "pair": pair, "mode": mode, **observation})
         write_json(OUT / "partial.json", {"observations": observations})
     return observations
@@ -156,38 +173,39 @@ def summarize(observations: list[dict]) -> dict:
     intervals = [
         paired_round(a, b) for a, b in zip(*(by_round[m] for m in MODES), strict=True)
     ]
+    probed = [entry for entry in formal if entry["mode"] == "probed"]
+    phases = {}
+    for index, name in enumerate(
+        ("argument_handling", "native_call", "result_assembly")
+    ):
+        values = [
+            parts[index] / 1000 for entry in probed for parts in entry["phases_ns"]
+        ]
+        phases[name] = {
+            "p50": statistics.median(values),
+            "p95": linear_percentile(values, 0.95),
+        }
     return {
         "pooled": pooled,
+        "pooled_phase_us": phases,
+        "calibration_median_ns": statistics.median(
+            entry["calibration_ns"] for entry in probed
+        ),
         "paired_intervals": intervals,
         "verdict": _paired_verdict(intervals),
     }
 
 
 async def observe() -> None:
-    releases = {side: load_release(OUT / side / "release.json") for side in MODES}
-    if (
-        any(
-            releases["baseline"][k] != releases["candidate"][k]
-            for k in ("image", "image_version")
-        )
-        or releases["baseline"]["native_sha256"]
-        == releases["candidate"]["native_sha256"]
-    ):
-        raise ValueError("incompatible wheels")
-    sites = {}
-    for side, manifest in releases.items():
-        site = await install(manifest, OUT / side)
-        verify_package_files(Path(manifest["wheel_path"]), site)
-        (library,) = (site / "calc_flow").glob("_native*.so")
-        report = OUT / side / "compiler.log"
-        await command(
-            ["readelf", "-p", ".comment", str(library)],
-            cwd=ROOT,
-            log=report,
-            timeout=10,
-        )
-        verify_compiler(report.read_text(), read(CONFIG)["elf_toolchain"])
-        sites[side] = site
+    manifest = load_release(OUT / "release/release.json")
+    site = await install(manifest, OUT / "release")
+    verify_package_files(Path(manifest["wheel_path"]), site)
+    (library,) = (site / "calc_flow").glob("_native*.so")
+    report = OUT / "release/compiler.log"
+    await command(
+        ["readelf", "-p", ".comment", str(library)], cwd=ROOT, log=report, timeout=10
+    )
+    verify_compiler(report.read_text(), read(CONFIG)["elf_toolchain"])
     fixture = OUT / "fixture"
     fixture.mkdir()
     for name, digest in read(CONFIG)["fixture_sha256"].items():
@@ -204,7 +222,9 @@ async def observe() -> None:
     cpu = await _resource(OUT / "resources.jsonl", None)
     os.sched_setaffinity(0, {cpu})
     async with asyncio.TaskGroup() as tasks:
-        acquire_workers = tasks.create_task(workers(cpu, sites, releases, fixture))
+        acquire_workers = tasks.create_task(
+            workers(cpu, site, manifest["native_sha256"], fixture)
+        )
         while not acquire_workers.done():
             await _resource(OUT / "resources.jsonl", cpu)
     write_json(OUT / "result.json", summarize(acquire_workers.result()))
