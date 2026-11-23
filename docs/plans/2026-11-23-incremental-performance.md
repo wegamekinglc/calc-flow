@@ -82,6 +82,13 @@ p50 从 34.98 降至 28.34 ms。TA-Lib 的 WMA 同时维护普通和加权总和
 均验证过拒绝后重试的完整输出。
 [集成后的分配和重试验证](https://github.com/wegamekinglc/calc-flow/pull/690#issuecomment-7102333282)
 
+继续缩减撤销记录后，在相同的 128 个新实体、三个时间窗口上，撤销槽位容量从
+128 变为 0，请求字节从 208,316 降到 175,548，准备阶段的临时堆峰值从
+180,548 降到 147,780 字节。128 个已有实体的对照组在两版上都是 4 次分配、
+114,688 请求字节。混合批次的测试在已有实体前后插入新键，拒绝一次输出后重试，
+逐行核对结果。单个 60 秒 SUM 的十万行完整运行器仍需复测，其 p50 目标为 ≤8 ms。
+[分配对照及失败重试](https://github.com/wegamekinglc/calc-flow/pull/701)
+
 ## Interval Join
 
 融合投影只读取输出所需的序列列和价格列后，Python 公开路径在两侧各一百万行的区间连接上，
@@ -132,6 +139,13 @@ Inner/LeftSemi 时保留物理输入位置并清空两侧已缓冲的行，使�
 [融合回归](https://github.com/wegamekinglc/calc-flow/pull/689#issuecomment-7102333306) ·
 [Join 结束和检查点恢复](https://github.com/wegamekinglc/calc-flow/pull/691)
 
+等值和区间连接共用的驻留数据段现在直接持有组号、事件时间、行号与过期顺序四列。
+检查点与活动连接状态共享整个数据段。单键、相同时间戳的 1,024 行构造实验中，
+分配从 20 次降至 16 次，累计请求从 82,144 降至 53,408 字节（−35.0%）。
+该段临时堆峰值为 45,152 → 45,088 字节。此处的收益集中在构造期间的分配流量；
+完整连接的延迟仍须单独测量。等值与区间连接的检查点恢复均核对了后续输出。
+[驻留状态与恢复实测](https://github.com/wegamekinglc/calc-flow/pull/700)
+
 ## 单行同步会话
 
 Rust 已把有序输入的固定绑定准备移至会话构造。对已经推进水位的一次冷批次，
@@ -176,3 +190,40 @@ p50 为 60.243 → 60.032 µs，p95 为 79.9105 → 79.6515 µs，两轮配对�
 执行和输出导出内进一步定位。
 [绑定修订和两组原始样本](https://github.com/wegamekinglc/calc-flow/pull/695) ·
 [未插桩公开调用的独立配对](https://github.com/wegamekinglc/calc-flow/actions/runs/45194346131)
+
+Rust 批次封装将记录、行数和字节估算缓存放入同一个共享对象，可接收已填满的记录向量。
+封装一条已有记录时，额外分配从 2 次、104 字节降至 1 次、72 字节。对同一单行双均线
+场景，Rust 公开调用的 p50/p95 从 4.911/6.359 变为 4.876/6.101 µs，两端均在
+10/25 µs 目标内。两轮配对变化为 −2.11% 和 +1.90%，区间均跨零。用独立官方 wheel
+测量 Python 单行公开调用时，同核另一硬件线程忙碌率达到 67.3%，实验按预登记规则
+停止。两轮预定的 44 个进程仅完成 24 个（含预热），本次无法判定 Python 的延迟变化。
+[Rust 分配与公开调用](https://github.com/wegamekinglc/calc-flow/pull/699) ·
+[Python 已完成样本与资源记录](https://github.com/wegamekinglc/calc-flow/actions/runs/45238492928/artifacts/14850617924)
+
+## Python 多输出同步会话
+
+当水位推进未产生新数据时，`Program.session().advance` 仍需为每个声明名称返回
+带正确 schema 的空表。现在可复制准备好的名称到空表的映射，每次返回独立的字典，
+省去逐名称查找物理输出。两个官方 Linux wheel 的预热均核对了 32 个名称、字段元数据、
+行数据和字典的独立性。预检后的第一个一秒主机监控区间记录到 302 次主缺页，超过上限
+255 次，已完成的正式配对数为 0。空水位 p50 降低 10% 的目标及有数据推送的对照延迟
+均待验证。
+[实现与回归测试](https://github.com/wegamekinglc/calc-flow/pull/702) ·
+[预登记、构建身份和原始记录](https://github.com/wegamekinglc/calc-flow/tree/e62f3cc9b8dc8596135da0494fc0cf79bc0a9990/benchmarks/stream-session/20261124-quiet-program-results)
+
+## 后续小阶段与验收目标
+
+1. **Python 单行推送。** 在既有双均线负载中，把 PyO3 调用继续划分为 Rust 执行、
+   Arrow C Data 导出与 PyArrow 导入。先用相同 wheel 比较有无插桩，再用两个独立
+   wheel 复测未插桩的公开入口。正常 GC 下的目标仍是 p50/p95 ≤20/40 µs。
+   [PyO3 会话与输出导出](../../crates/calc-flow-python/src/session.rs)
+2. **Rust 单时间窗口。** 对已有实体的 60 秒 SUM 分别测量实体定位、状态准备与
+   数值更新。每次只改变一段，复测十万行完整运行器。状态准备目标 ≤4 ms，
+   全程 p50 目标 ≤8 ms。密集新键与已有键分别保留分配对照。
+   [有序窗口更新路径](../../crates/calc-flow/src/operator/rolling/kernel/in_place.rs)
+3. **Join 从探测到交付。** 对百万行事实表与 64 行维表的公开 Python 用例，
+   分别定位探测、输出投影和最终 Arrow 拼接。Rust 侧独立测量构造与探测，
+   再判断驻留列的分配优化能否降低全程延迟。Python 目标仍为 p50 ≤30 ms。
+   百万行区间连接另行核对匹配对数与乘积。左反连接在活动水位越界后分九个块
+   释放 257 个未匹配左行，此负载的 p50 目标为 Rust ≤1 ms、Python ≤5 ms。
+   [Join 处理与输出](../../crates/calc-flow/src/operator/join/production.rs)
