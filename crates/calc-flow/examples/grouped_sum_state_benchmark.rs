@@ -2,6 +2,10 @@
 //!
 //! See `benchmarks/sum-state/README.md` for the paired collection contract.
 
+#[path = "support/runner_channel.rs"]
+mod runner_channel;
+#[path = "grouped_sum_state_benchmark/sparse_update.rs"]
+mod sparse_update;
 #[path = "support/stock_account_data.rs"]
 mod stock_account_data;
 mod support;
@@ -10,8 +14,8 @@ use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchMetadata, Cursor, DataFusionConfig, DataFusionParallelismMode, ExecutionOptions,
     PipelineBuilder, SinkBinding, SourceBinding, SourceCapabilities, SourceEvent,
-    SqlAggregateOutputMode, StateBudget, StreamRuntimeConfig, StreamSink, StreamSource,
-    StreamingRunner, UdfRegistry, WatermarkPolicy,
+    SqlAggregateOutputMode, StateBudget, StreamRuntimeConfig, StreamSource, StreamingRunner,
+    UdfRegistry, WatermarkPolicy,
 };
 use datafusion::arrow::{
     array::{Array, Int64Array, StringArray},
@@ -171,21 +175,6 @@ impl StreamSource for Preloaded {
     }
     async fn close(&mut self) -> calc_flow::Result<()> {
         self.offset = self.batches.len();
-        Ok(())
-    }
-}
-
-struct SnapshotSink(Snapshots);
-#[async_trait]
-impl StreamSink for SnapshotSink {
-    async fn open(&mut self) -> calc_flow::Result<()> {
-        Ok(())
-    }
-    async fn write(&mut self, batch: &Batch) -> calc_flow::Result<()> {
-        self.0.lock().await.push(batch.clone());
-        Ok(())
-    }
-    async fn close(&mut self) -> calc_flow::Result<()> {
         Ok(())
     }
 }
@@ -357,23 +346,29 @@ fn stream_runner(
         offset: 0,
         capabilities: DemoSource::trades(options(0, 100, 100_000)).capabilities(),
     };
-    let config = stream_config()?;
+    configured_runner(
+        SourceBinding::new(source),
+        SinkBinding::ordinary("snapshots", support::CollectSink(Arc::clone(state)))?,
+        partitions,
+        changelog,
+    )
+}
+
+fn configured_runner(
+    source: SourceBinding,
+    sink: SinkBinding,
+    partitions: usize,
+    changelog: bool,
+) -> ExampleResult<StreamingRunner> {
     let runner = StreamingRunner::without_checkpoints(
         support::best_effort_plan(graph(partitions, changelog)?)?,
         BTreeMap::from([(
             "input".into(),
-            SourceBinding::new(source)
-                .with_watermark_policy(WatermarkPolicy::Disabled { idle_timeout: None }),
+            source.with_watermark_policy(WatermarkPolicy::Disabled { idle_timeout: None }),
         )]),
-        BTreeMap::from([(
-            "output".into(),
-            vec![SinkBinding::ordinary(
-                "snapshots",
-                SnapshotSink(Arc::clone(state)),
-            )?],
-        )]),
+        BTreeMap::from([("output".into(), vec![sink])]),
     )?;
-    Ok(runner.with_runtime_config(config)?)
+    Ok(runner.with_runtime_config(stream_config()?)?)
 }
 
 async fn execute_stream(
@@ -882,6 +877,9 @@ async fn prepare_command(args: &[String]) -> ExampleResult {
 #[tokio::main]
 async fn main() -> ExampleResult {
     let args = support::arguments()?;
+    if args.first().map(String::as_str) == Some("--sparse-update") {
+        return sparse_update::command(&args[1..]).await;
+    }
     if args.first().map(String::as_str) == Some("--paired-changelog") {
         return paired_changelog_command(&args).await;
     }

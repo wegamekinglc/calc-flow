@@ -1,14 +1,18 @@
+#[path = "../examples/support/runner_channel.rs"]
+mod runner_channel;
+
+use runner_channel::{RunnerBenchSink, RunnerBenchSource};
 use std::{any::Any, collections::BTreeMap, hint::black_box, sync::Arc};
 
 use async_trait::async_trait;
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, BatchOperator, BatchOperatorContext, CalcFlowError,
-    CancellationToken, Cursor, DataFusionConfig, DataFusionRuntime, EdgeBudget, EdgeCollector,
+    CancellationToken, DataFusionConfig, DataFusionRuntime, EdgeBudget, EdgeCollector,
     ExecutionOptions, ExpressionOperator, ExternalPayload, JsonMap, NativeWatermarkCapability,
     OperatorMetadata, PipelineBuilder, Port, ReplayPositioning, Result, SinkBinding, SourceBinding,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamCollector,
-    StreamJobContext, StreamMessage, StreamOperator, StreamOperatorContext, StreamRequirements,
-    StreamSink, StreamingRunner, UdfReference, UdfRegistry, canonical_json, edge_channel,
+    SourceCapabilities, SourceDeliveryCapability, SourceSchema, StreamCollector, StreamJobContext,
+    StreamMessage, StreamOperator, StreamOperatorContext, StreamRequirements, StreamingRunner,
+    UdfReference, UdfRegistry, canonical_json, edge_channel,
 };
 use criterion::{Criterion, criterion_group, criterion_main};
 use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
@@ -214,70 +218,6 @@ fn encode_canonical_json(c: &mut Criterion) {
     });
 }
 
-struct RunnerBenchSource {
-    input: tokio::sync::mpsc::Receiver<Batch>,
-    sequence: u64,
-}
-
-#[async_trait]
-impl calc_flow::StreamSource for RunnerBenchSource {
-    fn capabilities(&self) -> SourceCapabilities {
-        SourceCapabilities {
-            replay_positioning: ReplayPositioning::Unsupported,
-            delivery: SourceDeliveryCapability::Lossy,
-            max_batch_rows: 1,
-            max_batch_bytes: 1024,
-            schema: SourceSchema::DynamicOrUnknown,
-            native_watermarks: NativeWatermarkCapability::EmitsNative,
-        }
-    }
-
-    async fn open(&mut self, _cursor: Option<Cursor>) -> Result<()> {
-        Ok(())
-    }
-
-    async fn next(&mut self) -> Result<Option<SourceEvent>> {
-        let Some(batch) = self.input.recv().await else {
-            return Ok(None);
-        };
-        let cursor = Cursor::unbound(self.sequence.to_be_bytes().to_vec(), JsonMap::new())?;
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .expect("benchmark source sequence exhausted");
-        Ok(Some(SourceEvent::Data { batch, cursor }))
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.input.close();
-        Ok(())
-    }
-}
-
-struct RunnerBenchSink {
-    output: tokio::sync::mpsc::Sender<Batch>,
-}
-
-#[async_trait]
-impl StreamSink for RunnerBenchSink {
-    async fn open(&mut self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn write(&mut self, batch: &Batch) -> Result<()> {
-        self.output
-            .send(batch.clone())
-            .await
-            .map_err(|_| CalcFlowError::Internal {
-                message: "benchmark output receiver closed".into(),
-            })
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
 fn stream_runner_single_input(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let plan = PipelineBuilder::new("single-input-runner")
@@ -294,29 +234,22 @@ fn stream_runner_single_input(c: &mut Criterion) {
             &StreamRequirements::default(),
         )
         .unwrap();
-    let (input_sender, input_receiver) = tokio::sync::mpsc::channel(1);
-    let (output_sender, output_receiver) = tokio::sync::mpsc::channel(1);
+    let (input_sender, source) = RunnerBenchSource::channel(SourceCapabilities {
+        replay_positioning: ReplayPositioning::Unsupported,
+        delivery: SourceDeliveryCapability::Lossy,
+        max_batch_rows: 1,
+        max_batch_bytes: 1024,
+        schema: SourceSchema::DynamicOrUnknown,
+        native_watermarks: NativeWatermarkCapability::EmitsNative,
+    });
+    let (sink, output_receiver) = RunnerBenchSink::channel();
     let output_receiver = tokio::sync::Mutex::new(output_receiver);
     let runner = StreamingRunner::without_checkpoints(
         plan,
-        BTreeMap::from([(
-            "input".into(),
-            SourceBinding::new(RunnerBenchSource {
-                input: input_receiver,
-                sequence: 0,
-            }),
-        )]),
+        BTreeMap::from([("input".into(), SourceBinding::new(source))]),
         BTreeMap::from([(
             "output".into(),
-            vec![
-                SinkBinding::ordinary(
-                    "output",
-                    RunnerBenchSink {
-                        output: output_sender,
-                    },
-                )
-                .unwrap(),
-            ],
+            vec![SinkBinding::ordinary("output", sink).unwrap()],
         )]),
     )
     .unwrap();

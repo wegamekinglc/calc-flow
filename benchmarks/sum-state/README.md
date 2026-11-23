@@ -1,5 +1,15 @@
 # Grouped integer SUM state measurements
 
+The Rust example also measures an individual update on a running graph. Build
+`grouped_sum_state_benchmark` with `--release --features benchmark-internals`
+and pass `--sparse-update sparse.arrow snapshot` or
+`--sparse-update sparse.arrow changelog`. Both modes preload the standard
+fixture, deliver the 10,000-row seed, and then send one 100-row update at a
+time. Each interval starts immediately before submitting a ready input and ends
+when the caller receives its output from the sink. The worker retains all 21
+outputs through natural end and checks the complete positions after every batch.
+The JSON includes the 20 warm update durations in nanoseconds.
+
 [Complete 2026-11-06 sign CASE retest](sum-case-retest-20261106.md) records
 five fixed cases, 200 formal observations, both CPU profiles and 4,872 full
 snapshot checks in a quiet environment. All five maintained verdicts are
