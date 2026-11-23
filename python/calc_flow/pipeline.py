@@ -1231,7 +1231,7 @@ class PipelineBuilder:
         left_prefix: str = "left",
         right_prefix: str = "right",
     ) -> PipelineBuilder:
-        """Add a bounded pair join or a left-only first-witness join."""
+        """Add a bounded inner, left semi, or left anti join."""
         if not isinstance(name, str) or not name:
             raise TypeError("name must be a non-empty string")
         copied_left_schema = _arrow_fields(left_schema, "left_schema")

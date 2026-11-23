@@ -493,7 +493,11 @@ impl CompiledStreamOperator {
         output: &mut dyn crate::StreamCollector,
     ) -> Result<()> {
         match self {
-            Self::External(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::External(operator) => {
+                operator
+                    .on_ingress_progress_with_output(ingress, context, output)
+                    .await
+            }
             Self::NativeSequence(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Expression(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::SyncArraySequence(_) | Self::SyncExpression(_) | Self::SyncRolling(_) => Ok(()),
@@ -506,7 +510,11 @@ impl CompiledStreamOperator {
             Self::Window(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::Rolling(operator) => operator.on_ingress_progress(ingress, context).await,
             Self::CrossSection(operator) => operator.on_ingress_progress(ingress, context).await,
-            Self::StreamJoin(operator) => operator.on_ingress_progress(ingress, context).await,
+            Self::StreamJoin(operator) => {
+                operator
+                    .on_ingress_progress_with_output(ingress, context, output)
+                    .await
+            }
             Self::StreamAsofJoin(operator) => {
                 operator
                     .on_ingress_progress_with_output(ingress, context, output)

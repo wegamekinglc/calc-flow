@@ -225,10 +225,20 @@ impl AdmissionMasks {
         EventTime::from_micros(self.times[offset])
     }
 
-    pub(super) fn at(&self, offset: usize, name: &str, ingress: &str) -> Result<RowAdmission> {
+    pub(super) fn at(
+        &self,
+        offset: usize,
+        name: &str,
+        ingress: &str,
+        anti_left: bool,
+    ) -> Result<RowAdmission> {
         let bit = 1_u64 << offset;
         if self.null_time & bit != 0 {
-            return Ok(RowAdmission::Dropped(DropKind::NullEventTime));
+            return Ok(if anti_left {
+                RowAdmission::Unmatchable
+            } else {
+                RowAdmission::Dropped(DropKind::NullEventTime)
+            });
         }
         if self.conversion_error & bit != 0 {
             return Err(operator_reason(
@@ -237,8 +247,12 @@ impl AdmissionMasks {
                 &format!("{ingress} event time cannot be represented"),
             ));
         }
-        if self.null_key & bit != 0 {
-            return Ok(RowAdmission::Dropped(DropKind::NullKey));
+        if self.null_key & bit != 0 && (!anti_left || self.late & bit == 0) {
+            return Ok(if anti_left {
+                RowAdmission::Unmatchable
+            } else {
+                RowAdmission::Dropped(DropKind::NullKey)
+            });
         }
         if self.late & bit != 0 {
             let lateness = u64::try_from(self.watermark - i128::from(self.times[offset]))

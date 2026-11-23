@@ -505,27 +505,35 @@ impl RunCore {
             }
             self.deferred_left = DeferredLeft::Disabled;
         }
-        self.process_admitted(operator, plan, bundle, context, output)
+        self.process_admitted(operator, (plan, batch), bundle, context, output)
             .await
     }
 
     async fn process_admitted(
         &mut self,
         operator: &mut StreamJoinOperator,
-        plan: super::SidePlan,
+        input: (super::SidePlan, &Batch),
         bundle: super::AdmissionBundle,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
+        let (plan, batch) = input;
         let super::AdmissionBundle {
             metrics,
             admitted,
             next_row_id,
+            absent_null_ids,
             ..
         } = bundle;
         let cut = self.keys.cut();
         let prepared = self
-            .prepare(operator, &plan, &admitted, context)
+            .prepare(
+                operator,
+                &plan,
+                &admitted,
+                (batch, &absent_null_ids),
+                context,
+            )
             .and_then(|prepared| prepared.with_physical_row_frontier(next_row_id));
         drop(admitted);
         let mut prepared = match prepared {
@@ -603,6 +611,7 @@ impl RunCore {
         operator: &StreamJoinOperator,
         plan: &super::SidePlan,
         admitted: &AdmittedBatch,
+        source: (&Batch, &[u64]),
         context: &StreamOperatorContext<'_>,
     ) -> Result<PreparedRuns> {
         let side = if plan.incoming_is_left {
@@ -632,11 +641,66 @@ impl RunCore {
         )?;
         #[cfg(feature = "benchmark-internals")]
         drop(route_span);
-        let output = run_output_context(operator, context.output_budget());
+        let mut output = run_output_context(operator, context.output_budget());
+        if operator.spec.join_type == super::StreamJoinType::LeftAnti && plan.incoming_is_left {
+            output.anti_left = Some(super::runs::AntiInput {
+                batch: source.0,
+                null_ids: source.1,
+                #[cfg(test)]
+                retained_columns: operator
+                    .payload_projection
+                    .as_ref()
+                    .map(|layout| layout.columns[0].as_slice()),
+            });
+        }
         #[cfg(feature = "benchmark-internals")]
         let output = output.with_trace(context.job().join_cpu_trace());
         self.state
             .prepare_batch(side, incoming, output, &mut || context.check_cancelled())
+    }
+
+    pub(super) async fn release_absent(
+        &mut self,
+        operator: &mut StreamJoinOperator,
+        right: Option<crate::IngressProgress>,
+        context: &StreamOperatorContext<'_>,
+        collector: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        let left_cut = match right {
+            Some(progress) if progress.state() != crate::IngressState::Ended => {
+                progress.watermark().map_or(0, |time| {
+                    self.state.expiring_rows(
+                        JoinSide::Left,
+                        operator.spec.bounds.after_micros,
+                        time,
+                    )
+                })
+            }
+            _ => self.state.rows(JoinSide::Left),
+        };
+        let right_cut = if right.is_none() {
+            self.state.rows(JoinSide::Right)
+        } else {
+            0
+        };
+        let output = run_output_context(operator, context.output_budget());
+        let metrics = self
+            .state
+            .release_absent(
+                [left_cut, right_cut],
+                &output,
+                operator.state.metrics.clone(),
+                context,
+                collector,
+            )
+            .await?;
+        self.sync_side(operator, JoinSide::Left, metrics.left);
+        if right_cut != 0 {
+            self.sync_side(operator, JoinSide::Right, metrics.right);
+        }
+        operator.state.metrics.emitted_match_rows = metrics.emitted_match_rows;
+        operator.state.next_output_sequence = self.state.next_output_sequence();
+        Ok(())
     }
 
     pub(super) fn evict(

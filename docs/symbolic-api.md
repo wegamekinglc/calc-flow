@@ -507,7 +507,7 @@ semantics are unsupported.
 `table.stream_join(left, right, /, *, left_keys, right_keys,
 left_event_time, right_event_time, bounds, limits, join_type="inner", left_prefix="left",
 right_prefix="right", output_entity_by=(), output_event_time=None,
-output_sequence_by=())` declares a bounded inner or left semi join.
+output_sequence_by=())` declares a bounded inner, left semi, or left anti join.
 `bounds` is a public `JoinTimeBounds`; `limits` is a public `JoinStateLimits`.
 Both key sequences are non-empty and equal in length, and the corresponding
 resolved fields must have identical supported Arrow types. Each event-time
@@ -520,7 +520,10 @@ right fields named `{right_prefix}__{name}` in source order, with exact type
 and nullability preserved.
 
 With `join_type="left_semi"`, each left row appears once when an eligible right
-witness exists. All output fields retain their declared left names and types.
+witness exists. With `join_type="left_anti"`, an unmatched left row appears
+when the right watermark passes its inclusive upper bound or the right input
+ends. Finite execution also finalizes pending rows. Both forms return the
+declared left names and types.
 When explicit output identity is needed, supply the left join keys, left
 event-time column and complete left sequence in their original names. The
 identity describes rows without imposing a global arrival order.

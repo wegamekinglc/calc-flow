@@ -140,7 +140,7 @@ fn unsupported_join_type_scalar_reports_the_stable_issue() {
             vec![(
                 "graph.nodes[0].operator.spec.join_type".into(),
                 "unsupported_join_type".into(),
-                "join_type must be inner or left_semi".into(),
+                "join_type must be inner, left_semi, or left_anti".into(),
             )],
             "join_type = {join_type}"
         );
@@ -152,7 +152,7 @@ fn unsupported_join_type_scalar_reports_the_stable_issue() {
         vec![(
             "graph.nodes[0].operator.spec.join_type".into(),
             "unsupported_join_type".into(),
-            "join_type must be inner or left_semi".into(),
+            "join_type must be inner, left_semi, or left_anti".into(),
         )]
     );
 }
@@ -446,7 +446,7 @@ fn semantic_issues(project: &ProjectSpec) -> Vec<(String, String, String)> {
 
 #[test]
 fn test_left_semi_raw_and_typed_projects_ignore_unused_prefixed_collisions() {
-    for kind in ["inner", "left_semi"] {
+    for kind in ["inner", "left_semi", "left_anti"] {
         let mut spec = valid_spec();
         spec["join_type"] = kind.into();
         spec["left_prefix"] = "x".into();
@@ -467,7 +467,7 @@ fn test_left_semi_raw_and_typed_projects_ignore_unused_prefixed_collisions() {
             .any(|(_, code, _)| code == "invalid_output_prefix");
         assert_eq!(
             (raw_accepts, typed_accepts),
-            (kind == "left_semi", kind == "left_semi"),
+            (kind != "inner", kind != "inner"),
             "{kind}: {issues:?}"
         );
     }

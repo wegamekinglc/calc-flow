@@ -295,24 +295,6 @@ impl StreamAsofJoinOperator {
             .map(EventTime::from_micros))
     }
 
-    pub(crate) async fn on_ingress_progress_with_output(
-        &mut self,
-        _ingress: &str,
-        context: &StreamOperatorContext<'_>,
-        output: &mut dyn StreamCollector,
-    ) -> Result<()> {
-        self.record_replay(replay::Callback::Progress, None, context)?;
-        self.observe(context.ingress_progress());
-        self.finalize_with_replay(
-            frontier(context.ingress_progress()),
-            all_ended(context.ingress_progress()),
-            context,
-            output,
-        )
-        .await
-        .map_err(|error| self.attempt_error(error))
-    }
-
     pub(super) fn refresh_state_gauges(&mut self) {
         self.status.pending_left_rows = self.state.pending_left_rows() as u64;
         self.status.retained_right_rows = self.state.right_payload_rows() as u64;
@@ -430,6 +412,24 @@ impl OperatorMetadata for StreamAsofJoinOperator {
 
 #[async_trait]
 impl StreamOperator for StreamAsofJoinOperator {
+    async fn on_ingress_progress_with_output(
+        &mut self,
+        _ingress: &str,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.record_replay(replay::Callback::Progress, None, context)?;
+        self.observe(context.ingress_progress());
+        self.finalize_with_replay(
+            frontier(context.ingress_progress()),
+            all_ended(context.ingress_progress()),
+            context,
+            output,
+        )
+        .await
+        .map_err(|error| self.attempt_error(error))
+    }
+
     async fn process_data(
         &mut self,
         ingress: &str,

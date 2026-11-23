@@ -258,3 +258,33 @@ async fn native_null_keys_and_extreme_time_bounds() -> Result<()> {
     assert_eq!(out.outputs["output"].num_rows(), 0);
     Ok(())
 }
+
+#[tokio::test]
+async fn test_left_anti_finite_preserves_nulls_and_duplicate_absences() -> Result<()> {
+    let kind = serde_json::from_value(serde_json::json!("left_anti")).unwrap();
+    let plan = join_plan(kind, JoinStateLimits::new(100, 1_000_000, 1)?)?;
+    let left = data(vec![Some(10), Some(20), None, Some(21), Some(10), Some(21)]);
+    let right = data(vec![Some(8), Some(13), None]);
+    let result = plan
+        .execute(
+            BTreeMap::from([("left".into(), left), ("right".into(), right)]),
+            ExecutionOptions::default(),
+        )
+        .await?;
+    let table = result.outputs["output"].table_payload()?;
+    assert_eq!(table.schema(), &schema());
+    let times = table
+        .batches()
+        .iter()
+        .flat_map(|record| {
+            record
+                .column(1)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .iter()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(times, [None, Some(20), Some(21), Some(21)]);
+    Ok(())
+}

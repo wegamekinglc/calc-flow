@@ -803,6 +803,32 @@ pub trait StreamOperator: OperatorMetadata {
         Ok(())
     }
 
+    /// Observes accepted progress and emits completed data before control forwarding.
+    /// Interval anti joins may release previously retained left rows on right progress.
+    ///
+    /// # Errors
+    /// Returns an error when progress validation or output delivery fails.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use calc_flow::{Result, StreamCollector, StreamOperator, StreamOperatorContext};
+    /// async fn right_progress(
+    ///     join: &mut dyn StreamOperator,
+    ///     progress: &StreamOperatorContext<'_>,
+    ///     output: &mut dyn StreamCollector,
+    /// ) -> Result<()> {
+    ///     join.on_ingress_progress_with_output("right", progress, output).await
+    /// }
+    /// ```
+    async fn on_ingress_progress_with_output(
+        &mut self,
+        ingress: &str,
+        context: &StreamOperatorContext<'_>,
+        _output: &mut dyn StreamCollector,
+    ) -> Result<()> {
+        self.on_ingress_progress(ingress, context).await
+    }
+
     /// Processes one batch from the named ingress.
     ///
     /// # Errors

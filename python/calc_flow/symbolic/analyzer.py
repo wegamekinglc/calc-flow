@@ -1478,7 +1478,7 @@ class _Analyzer:
         right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
         output_schema = (
             left.schema
-            if _cstr_or_none(node.attr("join_type")) == "left_semi"
+            if _cstr_or_none(node.attr("join_type")) in ("left_semi", "left_anti")
             else self._stream_join_schema(left, right, left_prefix, right_prefix)
         )
         output_event_time = _cstr_or_none(node.attr("output_event_time"))
@@ -1583,7 +1583,7 @@ class _Analyzer:
         fields = {field.name: field for field in schema}
         left_prefix = _cstr_or_none(node.attr("left_prefix")) or "left"
         right_prefix = _cstr_or_none(node.attr("right_prefix")) or "right"
-        if _cstr_or_none(node.attr("join_type")) == "left_semi":
+        if _cstr_or_none(node.attr("join_type")) in ("left_semi", "left_anti"):
             entities = _cstr_seq(node.attr("left_keys"))
             times = {_cstr_or_none(node.attr("left_event_time"))}
             sequences = left.sequence_by
