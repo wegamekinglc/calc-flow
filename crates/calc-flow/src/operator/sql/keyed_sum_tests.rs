@@ -725,3 +725,147 @@ async fn test_serial_sum_retains_undo_charge_across_morsels() {
 async fn test_parallel_sum_retains_undo_charge_across_morsels() {
     check_multibatch_undo_reservation(true).await;
 }
+
+#[tokio::test]
+async fn test_direct_sum_output_preflight_refuses_before_export_and_retries_exact_quota() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let plan = plan(&runtime, false).await;
+    let keyed = plan.keyed_sum.as_ref().unwrap();
+    let job = StreamJobContext::new(
+        912,
+        "change-quota",
+        JsonMap::new(),
+        None,
+        CancellationToken::new(),
+    );
+    let context = StreamOperatorContext::new(&job, "change-quota", None);
+    let labels = ["old".to_owned(), "long-key".repeat(2_048)];
+    let keys = [
+        Arc::new(Int64Array::from(vec![11, 22])) as ArrayRef,
+        Arc::new(StringArray::from_iter_values(&labels)) as ArrayRef,
+    ];
+    let deltas = Arc::new(Int64Array::from(vec![7, 3])) as ArrayRef;
+    let mut seed = keyed.begin(None).unwrap();
+    seed.apply(
+        &[keys[0].slice(0, 1), keys[1].slice(0, 1)],
+        &deltas.slice(0, 1),
+        None,
+        None,
+        &mut || Ok(()),
+    )
+    .unwrap();
+    drop(seed.commit());
+    let before = (keyed.canonical_bytes(), keyed.reserved_bytes());
+    let prepare = || {
+        let mut tx = keyed.begin(None).unwrap();
+        tx.apply(&keys, &deltas, None, None, &mut || Ok(()))
+            .unwrap();
+        tx
+    };
+    let paid = |bytes| {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(bytes));
+        MemoryConsumer::new("change-quota").register(&pool)
+    };
+    let mut candidate = prepare();
+    let canonical = keyed.canonical_bytes();
+    let width = plan.keyed_output_charge(0, 1, "change-quota").unwrap();
+    let charge = 3 * width + 3 * (2 * (128 + canonical[0].len()) + 128 + canonical[1].len());
+    let tight = paid(charge - 1);
+    let error = plan
+        .prepare_sum_changes(&mut candidate, &tight, &context, "change-quota")
+        .unwrap_err();
+    assert!(
+        matches!(error, CalcFlowError::DataFusion { .. }),
+        "{error:?}"
+    );
+    assert_eq!(
+        tight.size(),
+        0,
+        "denied output must not consume a partial reservation"
+    );
+    drop(candidate);
+    assert_eq!((keyed.canonical_bytes(), keyed.reserved_bytes()), before);
+    let mut retry = prepare();
+    let exact = paid(charge);
+    let (records, groups) = plan
+        .prepare_sum_changes(&mut retry, &exact, &context, "change-quota")
+        .unwrap();
+    assert_eq!((records.len(), groups, exact.size()), (1, 2, charge));
+    let row = |id, label: &str, sum, op: &str| {
+        vec![
+            ScalarValue::Int64(Some(id)),
+            ScalarValue::from(label),
+            ScalarValue::Int64(Some(sum)),
+            ScalarValue::from(op),
+        ]
+    };
+    assert_eq!(
+        output_rows(&records),
+        [
+            row(11, &labels[0], 7, "retract"),
+            row(11, &labels[0], 14, "upsert"),
+            row(22, &labels[1], 3, "upsert"),
+        ]
+    );
+    drop(retry.commit());
+}
+
+#[tokio::test]
+async fn test_direct_sum_cancelled_after_output_preflight_releases_the_transaction() {
+    use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryConsumer, MemoryPool};
+
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let plan = plan(&runtime, false).await;
+    let keyed = plan.keyed_sum.as_ref().unwrap();
+    let record = record(false, &fixture(false)).slice(0, 1);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1));
+    {
+        let reservation = MemoryConsumer::new("sum-cancel").register(&pool);
+        let mut tx = keyed.begin(None).unwrap();
+        tx.apply(
+            &record.columns()[..2],
+            record.column(2),
+            None,
+            None,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let error = tx
+            .change_record(
+                &plan.aggregate_schema,
+                || {
+                    if reservation.size() == 0 {
+                        Ok(())
+                    } else {
+                        Err(CalcFlowError::Cancelled {
+                            run_id: "sum-cancel".into(),
+                        })
+                    }
+                },
+                |total, _, versions| Ok(total + versions),
+                |bytes| {
+                    reservation.try_grow(bytes).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(error, CalcFlowError::Cancelled { .. }));
+        assert_eq!(reservation.size(), 1);
+    }
+    assert_eq!(pool.reserved(), 0);
+    assert!(keyed.is_empty());
+    let mut retry = keyed.begin(None).unwrap();
+    retry
+        .apply(
+            &record.columns()[..2],
+            record.column(2),
+            None,
+            None,
+            &mut || Ok(()),
+        )
+        .unwrap();
+    drop(retry.commit());
+    assert_eq!(keyed.len(), 1);
+}
