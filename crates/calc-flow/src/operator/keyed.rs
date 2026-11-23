@@ -1015,9 +1015,18 @@ fn canonical_row(
     let mut canonical = Vec::new();
     for array in arrays {
         canonical.push(canonical_tag(array.data_type())?);
-        let value = ScalarValue::try_from_array(array, row)
-            .map_err(|error| keyed_error(error.to_string()))?;
-        canonical_value(&value, &mut canonical, variable)?;
+        let is_null = array.is_null(row);
+        canonical.push(u8::from(is_null));
+        if is_null {
+            continue;
+        }
+        if matches!(array.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+            canonical_string(string_value(array, row)?, &mut canonical, variable)?;
+        } else {
+            let value = ScalarValue::try_from_array(array, row)
+                .map_err(|error| keyed_error(error.to_string()))?;
+            canonical_scalar(&value, &mut canonical)?;
+        }
     }
     Ok(canonical)
 }
@@ -1072,21 +1081,13 @@ fn canonical_temporal_tag(data_type: &DataType) -> Result<u8> {
     }
 }
 
-fn canonical_value(
-    value: &ScalarValue,
-    output: &mut Vec<u8>,
-    variable: &mut VariableWork<'_>,
-) -> Result<()> {
-    output.push(u8::from(value.is_null()));
+fn canonical_scalar(value: &ScalarValue, output: &mut Vec<u8>) -> Result<()> {
     match value {
         ScalarValue::Boolean(value) => {
             if let Some(value) = value {
                 output.push(u8::from(*value));
             }
             Ok(())
-        }
-        ScalarValue::Utf8(value) | ScalarValue::LargeUtf8(value) => {
-            canonical_string(value.as_deref(), output, variable)
         }
         ScalarValue::TimestampSecond(..)
         | ScalarValue::TimestampMillisecond(..)
@@ -1097,19 +1098,17 @@ fn canonical_value(
 }
 
 fn canonical_string(
-    value: Option<&str>,
+    value: &str,
     output: &mut Vec<u8>,
     variable: &mut VariableWork<'_>,
 ) -> Result<()> {
-    if let Some(value) = value {
-        output.extend_from_slice(&(value.len() as u64).to_le_bytes());
-        let bytes = value.as_bytes();
-        let mut offset = 0;
-        while offset < bytes.len() {
-            let count = variable.chunk(bytes.len() - offset)?;
-            output.extend_from_slice(&bytes[offset..offset + count]);
-            offset += count;
-        }
+    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let count = variable.chunk(bytes.len() - offset)?;
+        output.extend_from_slice(&bytes[offset..offset + count]);
+        offset += count;
     }
     Ok(())
 }
