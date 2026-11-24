@@ -22,6 +22,7 @@ use std::{
 thread_local! {
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CANDIDATE_TIME_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1238,13 +1239,16 @@ impl ColumnarState {
     }
 
     fn candidate(&self, bucket: &RightBucket, time: i64) -> Option<RowLocator> {
+        let right_time = |locator: RowLocator| {
+            #[cfg(test)]
+            CANDIDATE_TIME_READS.set(CANDIDATE_TIME_READS.get() + 1);
+            self.right_runs[&locator.run].time(locator)
+        };
         let rows = bucket.payloads.rows();
-        if rows.is_empty() {
-            return None;
-        }
+        let latest = rows.last()?;
         let direct = || {
-            let latest = rows.last().copied().expect("non-empty right bucket");
-            (self.right_runs[&latest.run].time(latest) <= time).then_some(latest)
+            let timestamp = right_time(*latest);
+            (timestamp <= time).then_some((*latest, timestamp))
         };
         #[cfg(feature = "benchmark-internals")]
         let direct = if self.legacy_latest_lookup {
@@ -1254,17 +1258,16 @@ impl ColumnarState {
         };
         #[cfg(not(feature = "benchmark-internals"))]
         let direct = direct();
-        let locator = if let Some(latest) = direct {
+        let (locator, timestamp) = if let Some(latest) = direct {
             latest
         } else {
             #[cfg(test)]
             LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
-            let end = rows
-                .partition_point(|locator| self.right_runs[&locator.run].time(*locator) <= time);
-            rows.get(end.checked_sub(1)?).copied()?
+            let end = rows.partition_point(|locator| right_time(*locator) <= time);
+            let locator = *rows.get(end.checked_sub(1)?)?;
+            (locator, right_time(locator))
         };
-        let right_time = self.right_runs[&locator.run].time(locator);
-        (i128::from(right_time) >= i128::from(time) - i128::from(self.spec.tolerance_micros()))
+        (i128::from(timestamp) >= i128::from(time) - i128::from(self.spec.tolerance_micros()))
             .then_some(locator)
     }
 
