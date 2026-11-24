@@ -1,0 +1,141 @@
+{
+  "baseline": {
+    "handler_p50_us": 71641.5,
+    "handler_p95_us": 72865.95,
+    "total_handler_us_by_round": [
+      [
+        71239,
+        72466,
+        71315,
+        70789,
+        71110,
+        73492,
+        72009,
+        71537,
+        70514,
+        71041
+      ],
+      [
+        72438,
+        72833,
+        72041,
+        71746,
+        71856,
+        71822,
+        70987,
+        71876,
+        70675,
+        70835
+      ]
+    ],
+    "watermark_max_us": 1,
+    "watermark_min_us": 0,
+    "watermark_us_by_round": [
+      [
+        1,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "candidate": {
+    "handler_p50_us": 81265.0,
+    "handler_p95_us": 82788.25,
+    "total_handler_us_by_round": [
+      [
+        81315,
+        80572,
+        81047,
+        79656,
+        82765,
+        81734,
+        82138,
+        81971,
+        80307,
+        80575
+      ],
+      [
+        83230,
+        80389,
+        80666,
+        81324,
+        81413,
+        81405,
+        81279,
+        81125,
+        80889,
+        81251
+      ]
+    ],
+    "watermark_max_us": 1,
+    "watermark_min_us": 0,
+    "watermark_us_by_round": [
+      [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        1
+      ],
+      [
+        0,
+        0,
+        1,
+        1,
+        1,
+        0,
+        1,
+        1,
+        0,
+        1
+      ]
+    ]
+  },
+  "paired_diagnostic": [
+    {
+      "candidate_above_baseline": 10,
+      "exact_change_percent": {
+        "coverage": 0.978515625,
+        "high": 14.585459272823865,
+        "low": 11.21482610352147,
+        "median": 13.767260084215183
+      },
+      "paired_difference_median_us": 9762.5
+    },
+    {
+      "candidate_above_baseline": 10,
+      "exact_change_percent": {
+        "coverage": 0.978515625,
+        "high": 14.704595185995629,
+        "low": 11.972349078996691,
+        "median": 13.346290763000468
+      },
+      "paired_difference_median_us": 9580.5
+    }
+  ],
+  "scope": "Post-hoc cumulative operator-status counter for all successful data and watermark handlers, including awaited emissions. Per-ingestion, dedicated sink, Python table conversion and concatenation clocks were not recorded."
+}
