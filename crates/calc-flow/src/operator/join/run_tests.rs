@@ -1,8 +1,8 @@
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
     runs::{
-        Incoming, RouteInput, RunOutputContext, RunState, merge_visits, reset_merge_visits,
-        reset_run_lookups, route_hot_keys, run_lookups,
+        Incoming, RouteInput, RunOutputContext, RunState, count_hot_keys, merge_visits,
+        reset_merge_visits, reset_run_lookups, run_lookups,
     },
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
@@ -1453,12 +1453,19 @@ fn assert_hot_route_matches_full_routing(record: &RecordBatch, field: Field) {
         runtime.incremental_reservation("expected-hot-route"),
     );
     let mut actual = KeyStore::new(schema, runtime.incremental_reservation("actual-hot-route"));
-    let arrays = vec![record.column(0).clone()];
-    let expected = expected
-        .route_with_limit(&arrays, record.num_rows(), &mut || Ok(()))
+    let routed = expected
+        .route_with_limit(&[record.column(0).clone()], record.num_rows(), &mut || {
+            Ok(())
+        })
         .unwrap();
-    let actual = route_hot_keys(record, &[0], &mut actual).unwrap();
-    assert_eq!(actual, expected);
+    let mut expected_counts = std::collections::BTreeMap::<_, usize>::new();
+    for group in routed {
+        *expected_counts.entry(group).or_default() += 1;
+    }
+    let mut actual_counts = std::collections::BTreeMap::new();
+    count_hot_keys(record, &[0], &mut actual, &mut actual_counts).unwrap();
+    assert_eq!(actual_counts, expected_counts);
+    assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
 }
 
 #[test]
@@ -1499,16 +1506,16 @@ fn test_hot_dictionary_routing_admits_new_keys_after_existing_groups() {
         keys.route_with_limit(&[existing.column(0).clone()], 1, &mut || Ok(()))
             .unwrap();
     }
-    let record = RecordBatch::try_from_iter([(
-        "key",
-        Arc::new(StringArray::from(vec!["new", "new"])) as ArrayRef,
-    )])
-    .unwrap();
-    let expected = expected
+    let record =
+        RecordBatch::try_from_iter([("key", Arc::new(StringArray::from(vec!["new"])) as ArrayRef)])
+            .unwrap();
+    let expected_id = expected
         .route_with_limit(&[record.column(0).clone()], 2, &mut || Ok(()))
-        .unwrap();
-    let actual = route_hot_keys(&record, &[0], &mut actual).unwrap();
-    assert_eq!(actual, expected);
+        .unwrap()[0];
+    let mut counts = std::collections::BTreeMap::new();
+    count_hot_keys(&record, &[0], &mut actual, &mut counts).unwrap();
+    assert_eq!(counts, std::collections::BTreeMap::from([(expected_id, 1)]));
+    assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
 }
 
 #[test]

@@ -453,15 +453,12 @@ impl LiveRun {
     }
 }
 
-pub(super) fn route_hot_keys(
+pub(super) fn count_hot_keys(
     record: &RecordBatch,
     key_indices: &[usize],
     keys: &mut KeyStore,
-) -> Result<Vec<GroupId>> {
-    let arrays = key_indices
-        .iter()
-        .map(|&index| record.column(index).clone())
-        .collect::<Vec<_>>();
+    counts: &mut BTreeMap<GroupId, usize>,
+) -> Result<()> {
     if let [index] = key_indices
         && let Some(values) = record
             .column(*index)
@@ -469,36 +466,44 @@ pub(super) fn route_hot_keys(
             .downcast_ref::<StringArray>()
             .filter(|values| values.null_count() == 0)
     {
-        return dictionary_route(values, keys);
+        return count_string_keys(values, keys, counts);
     }
-    keys.route_with_limit(&arrays, record.num_rows(), &mut || Ok(()))
+    let arrays = key_indices
+        .iter()
+        .map(|&index| record.column(index).clone())
+        .collect::<Vec<_>>();
+    let limit = keys.len().saturating_add(record.num_rows());
+    for group in keys.route_with_limit(&arrays, limit, &mut || Ok(()))? {
+        *counts.entry(group).or_default() += 1;
+    }
+    Ok(())
 }
 
-fn dictionary_route(values: &StringArray, keys: &mut KeyStore) -> Result<Vec<GroupId>> {
+fn count_string_keys(
+    values: &StringArray,
+    keys: &mut KeyStore,
+    counts: &mut BTreeMap<GroupId, usize>,
+) -> Result<()> {
     if values.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
-    let mut unique = hashbrown::HashMap::<&str, usize, ahash::RandomState>::default();
-    let mut dictionary = Vec::new();
-    let mut indices = Vec::with_capacity(values.len());
+    let mut indices = hashbrown::HashMap::<&str, usize, ahash::RandomState>::default();
+    let mut distinct = Vec::new();
     for row in 0..values.len() {
         let value = values.value(row);
-        let index = if let Some(&index) = unique.get(value) {
-            index
-        } else {
-            let index = dictionary.len();
-            dictionary.push(value);
-            unique.insert(value, index);
-            index
-        };
-        indices.push(index);
+        let index = *indices.entry(value).or_insert_with(|| {
+            distinct.push((value, 0usize));
+            distinct.len() - 1
+        });
+        distinct[index].1 += 1;
     }
-    let groups = keys.route_with_limit(
-        &[Arc::new(StringArray::from(dictionary))],
-        values.len(),
-        &mut || Ok(()),
-    )?;
-    Ok(indices.into_iter().map(|index| groups[index]).collect())
+    let limit = keys.len().saturating_add(distinct.len());
+    let dictionary = StringArray::from_iter_values(distinct.iter().map(|&(value, _)| value));
+    let groups = keys.route_with_limit(&[Arc::new(dictionary)], limit, &mut || Ok(()))?;
+    for (group, (_, count)) in groups.into_iter().zip(distinct) {
+        *counts.entry(group).or_default() += count;
+    }
+    Ok(())
 }
 
 pub(super) fn hot_batch_charge(
@@ -507,8 +512,7 @@ pub(super) fn hot_batch_charge(
     keys: &mut KeyStore,
 ) -> Result<(usize, usize)> {
     let mut run_bytes = 0usize;
-    let mut groups = BTreeMap::<GroupId, Vec<usize>>::new();
-    let mut expiration = Vec::new();
+    let mut groups = BTreeMap::<GroupId, usize>::new();
     for record in batch.table_payload()?.batches() {
         for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
             let rows = (record.num_rows() - start).min(MORSEL_ROWS);
@@ -516,22 +520,31 @@ pub(super) fn hot_batch_charge(
             run_bytes = run_bytes
                 .checked_add(RunCharge::read(&record)?.total(rows)?)
                 .ok_or_else(|| run_error("hot state run charge overflowed"))?;
-            let routed = route_hot_keys(&record, key_indices, keys)?;
-            for group in routed {
-                groups.entry(group).or_default().push(0);
-                expiration.push(0);
-            }
+            count_hot_keys(&record, key_indices, keys, &mut groups)?;
         }
     }
-    let bucket_bytes = groups.into_values().try_fold(0usize, |total, entries| {
-        let charge = BUCKET_OWNER_BYTES + entries.capacity() * size_of::<LocatorEntry>();
-        total.checked_add(charge)
-    });
-    let bytes = bucket_bytes
-        .and_then(|bytes| bytes.checked_add(expiration.capacity() * size_of::<LocatorEntry>()))
-        .and_then(|bytes| bytes.checked_add(run_bytes))
+    let rows = batch.num_rows();
+    let bytes = groups
+        .into_values()
+        .try_fold(run_bytes, |total, count| {
+            total
+                .checked_add(BUCKET_OWNER_BYTES)?
+                .checked_add(deferred_locator_bytes(count)?)
+        })
+        .and_then(|bytes| bytes.checked_add(deferred_locator_bytes(rows)?))
         .ok_or_else(|| run_error("hot state owner charge overflowed"))?;
-    Ok((batch.num_rows(), bytes))
+    Ok((rows, bytes))
+}
+
+// Charge the same four-slot initial capacity and doubling used for deferred
+// locator storage, without allocating row-sized indices just to read capacity.
+fn deferred_locator_bytes(rows: usize) -> Option<usize> {
+    if rows == 0 {
+        return Some(0);
+    }
+    rows.max(4)
+        .checked_next_power_of_two()?
+        .checked_mul(size_of::<LocatorEntry>())
 }
 
 /// Reclaim a mostly expired locator array while keeping small watermark advances cheap.
@@ -2204,4 +2217,47 @@ fn retained_run_identity_columns_fit_in_one_set_of_allocations() {
     eprintln!("retained Join run allocation: {allocations:?}");
     // Includes the retained identity columns, row selection and sorting workspace.
     assert!(allocations.bytes_total <= 64 * 1024, "{allocations:?}");
+}
+
+#[cfg(test)]
+#[test]
+fn test_deferred_locator_charge_matches_capacity_at_growth_boundaries() {
+    let mut entries = Vec::<usize>::new();
+    for rows in 0..=MORSEL_ROWS + 1 {
+        assert_eq!(
+            deferred_locator_bytes(rows),
+            entries.capacity().checked_mul(size_of::<LocatorEntry>())
+        );
+        entries.push(rows);
+    }
+    assert_eq!(deferred_locator_bytes(usize::MAX), None);
+}
+
+#[cfg(test)]
+#[test]
+fn test_deferred_charge_avoids_per_row_locator_placeholders() {
+    use crate::operator::keyed::KeySchema;
+    use crate::{DataFusionConfig, DataFusionRuntime};
+    use datafusion::arrow::array::ArrayRef;
+
+    let values =
+        StringArray::from_iter_values(["aa", "bb", "cc", "dd"].into_iter().cycle().take(4096));
+    let record = RecordBatch::try_from_iter([("key", Arc::new(values) as ArrayRef)]).unwrap();
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut keys = KeyStore::new(
+        KeySchema::groupable(record.schema().fields().to_vec()).unwrap(),
+        runtime.incremental_reservation("deferred-charge"),
+    );
+    let expected_bytes = RunCharge::read(&record).unwrap().total(4096).unwrap()
+        + 4 * BUCKET_OWNER_BYTES
+        + 8192 * size_of::<LocatorEntry>();
+    let batch = Batch::table(vec![record], BatchMetadata::default()).unwrap();
+    let mut charge = (0, 0);
+    let costs = allocation_counter::measure(|| {
+        charge = hot_batch_charge(&batch, &[0], &mut keys).unwrap();
+    });
+    println!("deferred charge {charge:?}, {costs:?}");
+    assert_eq!(charge, (4096, expected_bytes));
+    assert_eq!(keys.len(), 4);
+    assert!(costs.bytes_total < 110_000, "{costs:?}");
 }
