@@ -1052,9 +1052,13 @@ impl KeyedSumState {
     }
 
     fn output_charge(&self, slots: Option<&[usize]>) -> Result<usize> {
-        let count = slots.map_or(self.keys.len(), <[usize]>::len);
-        let groups = (0..count)
-            .map(|row| GroupId::new(slots.map_or(row, |slots| slots[row])))
+        let Some(slots) = slots else {
+            return Ok(self.keys.full_output_charge());
+        };
+        let groups = slots
+            .iter()
+            .copied()
+            .map(GroupId::new)
             .collect::<Result<Vec<_>>>()?;
         self.keys.output_charge(&groups)
     }
