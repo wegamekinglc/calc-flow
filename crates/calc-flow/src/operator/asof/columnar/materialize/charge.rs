@@ -32,40 +32,52 @@ impl ColumnarState {
         side: usize,
         columns: impl Iterator<Item = usize> + Clone,
     ) -> Result<usize> {
-        if columns.clone().next().is_none() {
-            return Ok(0);
-        }
         let (locators, validity) = if side == 0 {
             (&selection.left, None)
         } else {
             (&selection.right, Some(&selection.right_validity))
         };
         let unmatched = validity.map_or(0, |bits| locators.len() - bits.count_set_bits());
-        let mut total = 0;
-        for column in columns.clone() {
-            let field = self.schemas[side]
-                .fields()
-                .get(column)
-                .ok_or_else(|| invalid("ASOF projection column is out of bounds"))?;
-            total = add_charge(total, 256)?;
-            if unmatched > 0 {
-                total = add_charge(total, locators.len().div_ceil(8))?;
-                total = add_charge(total, logical_null_charge(field.data_type(), unmatched))?;
-            }
+        let mut total = self.column_overhead(side, columns.clone(), locators.len(), unmatched)?;
+        if total == 0 {
+            return Ok(0);
         }
         for (run, rows) in selected_rows(locators, validity) {
             let record = self
                 .run(side, run)
                 .payload_record()
                 .expect("selected live ASOF payload");
-            for column in columns.clone() {
-                total = add_charge(
-                    total,
-                    logical_array_indices_charge(record.column(column), &rows),
-                )?;
-            }
+            total = columns
+                .clone()
+                .map(|column| logical_array_indices_charge(record.column(column), &rows))
+                .try_fold(total, add_charge)?;
         }
         Ok(total)
+    }
+
+    fn column_overhead(
+        &self,
+        side: usize,
+        mut columns: impl Iterator<Item = usize>,
+        rows: usize,
+        unmatched: usize,
+    ) -> Result<usize> {
+        columns.try_fold(0, |total, column| {
+            let field = self.schemas[side]
+                .fields()
+                .get(column)
+                .ok_or_else(|| invalid("ASOF projection column is out of bounds"))?;
+            let total = add_charge(total, 256)?;
+            if unmatched == 0 {
+                return Ok(total);
+            }
+            let total = total
+                .checked_add(rows.div_ceil(8))
+                .ok_or_else(|| invalid("ASOF output validity charge overflowed"))?;
+            total
+                .checked_add(logical_null_charge(field.data_type(), unmatched))
+                .ok_or_else(|| invalid("ASOF output null-data charge overflowed"))
+        })
     }
 }
 
