@@ -1,0 +1,154 @@
+{
+  "additional_common_repo_sources_sha256": {
+    "Cargo.toml": "bfd2a6850177719b8c87792148e6143fa6294d483e91538cc2f0e005d4b8abef",
+    "crates/calc-flow/Cargo.toml": "c5d364543885ea11b9cb97130f5dcf3d3324475de26989ea7d1daac45b59f78f",
+    "scripts/benchmark_suite/catalog.py": "8b690b92620066ea2ae395e4ff73ec24a91e3ef1c08a66e79d015c16eb17ea17",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+  },
+  "arms": {
+    "baseline": {
+      "cargo_build_events": 327,
+      "cargo_build_events_sha256": "83b63c4c940626adea4bb606e0c1577c1a5b5aaf1e98bbd22b6d08f1785ee63e",
+      "cargo_build_finished": "Finished `bench` profile [optimized] target(s) in 10m 41s",
+      "cargo_build_log_sha256": "7e5196f79acb134b1aa51356e2f432ecd814a97c8d16593cfc5dc462ad88b524",
+      "changed_repo_paths_present_at_commit_sha256": {
+        "crates/calc-flow/src/operator/asof/columnar/materialize.rs": "410db98ac76a10a042e5c8dd76c94319db818d184b392b804dccbbd2b01326b4",
+        "crates/calc-flow/src/operator/asof/columnar/tests.rs": "d3f91dacfcb58962e88c281d22573b1604558181cd86ccc5aaa07dfbfc689ac4"
+      },
+      "commit": "8ce0b7c8303918821fec24654c36f1d99113de21",
+      "crate_and_bench_artifacts": [
+        {
+          "features": [
+            "benchmark-internals"
+          ],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "target": "calc_flow"
+        },
+        {
+          "features": [
+            "benchmark-internals"
+          ],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": true
+          },
+          "target": "stream_asof_perf"
+        }
+      ],
+      "executable_bytes": 10447128,
+      "executable_sha256": "59548f6c7c6340cd01f78b66bd97604c260c1488b09c5aab41f3ead2ecdaa31f",
+      "tree": "e0f0f3b5573f56f81220edc2848e4ed82ab1daae"
+    },
+    "candidate": {
+      "cargo_build_events": 327,
+      "cargo_build_events_sha256": "b90fe66a611b6b999ee237f1054353002c56b83340692bee470829592906a218",
+      "cargo_build_finished": "Finished `bench` profile [optimized] target(s) in 7m 04s",
+      "cargo_build_log_sha256": "28785643511ac681d3498f2201f6b11ebf93240ac9299a3fe4927c69a178f238",
+      "changed_repo_paths_present_at_commit_sha256": {
+        "crates/calc-flow/src/operator/asof/columnar/materialize.rs": "f9a04d22c7a5ab5446cb37a6c9bee3e25e0e6fda89a4835a052177ada1b669ac",
+        "crates/calc-flow/src/operator/asof/columnar/materialize/charge.rs": "08b3b41f54a5cd1fd8880376dd2035ff2ae8153570d11b60e88788fb124c4745",
+        "crates/calc-flow/src/operator/asof/columnar/tests.rs": "c5a9a53c63cb1c4c38b56c508d7a3886bf512f95c961240e1d6ce93b45a2c953",
+        "crates/calc-flow/src/operator/asof/columnar/tests/charge.rs": "757273bfc557eb3b3ed1f06791c550b57874abc455ff6b21f7446c705be510b0"
+      },
+      "commit": "476431f371eda962471a57bd64eece36f0a8765b",
+      "crate_and_bench_artifacts": [
+        {
+          "features": [
+            "benchmark-internals"
+          ],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": false
+          },
+          "target": "calc_flow"
+        },
+        {
+          "features": [
+            "benchmark-internals"
+          ],
+          "fresh": false,
+          "profile": {
+            "debug_assertions": false,
+            "debuginfo": 0,
+            "opt_level": "3",
+            "overflow_checks": false,
+            "test": true
+          },
+          "target": "stream_asof_perf"
+        }
+      ],
+      "executable_bytes": 10447928,
+      "executable_sha256": "6ac034b78e13515fe4b4c7629448575d49d8a01082bb8a0bc52cbecf111d40b5",
+      "tree": "49d1411ca6dc0655e7e27f92f638bc7a4e445550"
+    }
+  },
+  "build_settings": "Default locked Cargo bench profile with benchmark-internals; private target directory and reusable dependency artifacts. No task-supplied profile overrides. Both calc-flow and the benchmark were rebuilt.",
+  "case": "stream_asof_perf/balanced_512",
+  "collector_timeout_seconds": 580,
+  "compiler_verbose": [
+    "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "binary: rustc",
+    "commit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db",
+    "commit-date: 2026-03-02",
+    "host: x86_64-unknown-linux-gnu",
+    "release: 1.94.0",
+    "LLVM version: 21.1.8"
+  ],
+  "config": {
+    "pending": 512,
+    "restored": false,
+    "retained": 512,
+    "skew": false
+  },
+  "driver_psutil": "7.2.2",
+  "driver_python": "CPython 3.13.9",
+  "driver_sha256": "db66ab6051a7a41128b98f5578e12aa992fd78a44b5cf340ae25e8832150f978",
+  "fresh_process_timeout_seconds": 20,
+  "host": {
+    "admitted_cpu": 4,
+    "architecture": "x86_64",
+    "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+    "kernel": "5.15.167.4-microsoft-standard-WSL2",
+    "reported_smt_siblings": [
+      5
+    ],
+    "system": "Linux"
+  },
+  "original_identity_json_sha256": "bd07f4d8c2568512a1e32c9bf0ee4844c1e6cdc9f6be39d1137821d25730fd2e",
+  "outcome_json_sha256": "c87f74d452f8337546ce903cb88508578afaaa6b788e2ac43b5243450b2168d6",
+  "partial_json_sha256": "acbd296612bb8697983b790587d42f83fb559c25479adf17ea6e9e2d4c35f0d4",
+  "registered_file_hashes_manifest_sha256": "e89bf7a57e01f2058656e6f750a7b589916158ff2bb02f147aa2732a5169d66d",
+  "registered_protocol_sha256": "c68ae62d80ae8e52a88526d3482764200d170274174b2a6c550ddf68df22b010",
+  "registered_wall_budget_seconds": 600,
+  "resource_intervals_utc_end": [
+    "2026-11-24T05:12:11.007485+00:00",
+    "2026-11-24T05:12:12.009568+00:00"
+  ],
+  "resources_jsonl_sha256": "615ec7ea20c841e876aa9c4f66567bfac325d58991afe94215e9184b386bce2b",
+  "source_difference_sha256_git_diff_binary_full_index": "046ee99c3610fc1d65d789fd5d1ac07ea1833422ea1e388c1a9a54362363fde3",
+  "threading": {
+    "MKL_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "POLARS_MAX_THREADS": "1",
+    "TOKIO_WORKER_THREADS": "1",
+    "queue_or_runner": "direct StreamAsofJoinOperator callback",
+    "tokio_runtime": "current_thread"
+  },
+  "worker_logset_sha256": "47c26ceec8e856a710254a51c60ff0f5f44622fb183e8cea2f83f4d384504fac"
+}
