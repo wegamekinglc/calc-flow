@@ -17,11 +17,11 @@ impl ColumnarState {
             Some(fields) => self.side_output_charge(
                 selection,
                 side,
-                fields
+                &fields
                     .iter()
                     .filter_map(move |&(source, column)| (source == side).then_some(column)),
             ),
-            None => self.side_output_charge(selection, side, 0..self.column_count(side)),
+            None => self.side_output_charge(selection, side, &(0..self.column_count(side))),
         };
         add_charge(charge(0)?, charge(1)?)
     }
@@ -30,7 +30,7 @@ impl ColumnarState {
         &self,
         selection: &Selection,
         side: usize,
-        columns: impl Iterator<Item = usize> + Clone,
+        columns: &(impl Iterator<Item = usize> + Clone),
     ) -> Result<usize> {
         if columns.clone().next().is_none() {
             return Ok(0);
