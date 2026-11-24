@@ -295,6 +295,24 @@ impl KeyedSum {
     }
 }
 
+const RETRACT: &str = "retract";
+const UPSERT: &str = "upsert";
+
+pub(super) fn operation_bytes(upserts: usize, retracts: usize) -> Result<usize> {
+    let bytes = super::checked_bytes(
+        0,
+        [(upserts, UPSERT.len()), (retracts, RETRACT.len())],
+        "keyed SUM",
+    )?;
+    i32::try_from(bytes).map_err(|_| {
+        super::df_error(
+            "keyed SUM",
+            "changelog operation tags exceed Arrow Utf8 offsets",
+        )
+    })?;
+    Ok(bytes)
+}
+
 impl Transaction {
     #[cfg(test)]
     pub(super) fn change_log_bytes(&self) -> usize {
@@ -618,9 +636,6 @@ impl Transaction {
         charge: impl Fn(usize, usize, usize) -> Result<usize>,
         reserve: impl FnOnce(usize) -> Result<()>,
     ) -> Result<(RecordBatch, ArrayRef)> {
-        const RETRACT: &str = "retract";
-        const UPSERT: &str = "upsert";
-
         check()?;
         self.undo.sort_unstable_by_key(|(group, _)| *group);
         let mut bytes = 0;
@@ -642,8 +657,8 @@ impl Transaction {
         }
         // This transaction owns all writes until commit or rollback; both passes see the same versions.
         reserve(bytes)?;
+        let tag_bytes = operation_bytes(upserts, retracts)?;
         let rows = upserts + retracts;
-        let tag_bytes = upserts * UPSERT.len() + retracts * RETRACT.len();
         let mut versions = Vec::with_capacity(rows.min(MORSEL_ROWS));
         let mut records = Vec::new();
         let mut operations = super::StringBuilder::with_capacity(rows, tag_bytes);

@@ -1043,3 +1043,16 @@ async fn test_sparse_sum_change_operations_fit_the_selected_versions() {
         assert_eq!(retained, used);
     }
 }
+
+#[test]
+fn test_sum_operation_tags_fit_signed_arrow_utf8_offsets() {
+    // 7 bytes for one retract plus 6 per upsert reaches i32::MAX exactly.
+    let upserts = (i32::MAX as usize - 7) / 6;
+    assert_eq!(
+        keyed_sum::operation_bytes(upserts, 1).unwrap(),
+        i32::MAX as usize
+    );
+    let error = keyed_sum::operation_bytes(upserts - 1, 2).unwrap_err();
+    assert!(error.to_string().contains("Utf8"));
+    assert!(keyed_sum::operation_bytes(usize::MAX, 1).is_err());
+}
