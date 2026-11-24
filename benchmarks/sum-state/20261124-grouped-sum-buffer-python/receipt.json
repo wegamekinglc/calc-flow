@@ -1,0 +1,151 @@
+{
+  "build_base_commit": "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+  "build_base_tree": "211269ccfb5b76dc5db3554ec8447edef6610645",
+  "case": "python/public-sparse-changelog/fresh-stream",
+  "checks": {
+    "excluded_warmup_streams": 4,
+    "formal_pairs_per_round": 10,
+    "fresh_streams_validated": 44,
+    "input_rows_per_stream": 12000,
+    "input_rows_per_subsequent_batch": 100,
+    "output_rows_per_stream": 13200,
+    "output_rows_per_subsequent_batch": 160,
+    "paired_rounds": 2,
+    "seed_rows": 10000,
+    "subsequent_batches": 20,
+    "validated_output_prefixes": 924,
+    "worker_processes": 4
+  },
+  "comparator_sha256": {
+    ".github/workflows/benchmarks.yml": "65f9b5af39d8ae204023c4aee3513afc35cf2df124e04e42113e3b68385a950f",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+    "benchmarks/sparse_changelog.py": "3270357247092f3daad6f9f6953c7010c17882af2ac623091af0a508b961b7a6",
+    "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd"
+  },
+  "elapsed_scope": "New public table_input, filter, select, changelog_sql declaration, compilation, 21 batches through owned TableExpr.stream, complete Arrow delivery and context close.",
+  "evidence": {
+    "archive_bytes": 149353,
+    "artifact": 14921196563,
+    "members": 171,
+    "name": "sparse-changelog-45396066297-1",
+    "registration_sha256": "8785041b372745cc6f8130d0572134478ba72b53ca69e11ccb86eb0d5cc24b0a",
+    "resources_sha256": "d449c3ab53e0f4739e722b6ebaecea58b9e746c0775ccc253a6a6ab0f2fdfa9b",
+    "result_sha256": "37f38d16d3409e9d1d949a1c2e74cb099078b2675bdf2434fb0d8a9b6ec77be8",
+    "samples_sha256": "2391ea33d6c83172c31f86d603ceeefb720653117594c7a58be423142fbc3806",
+    "sha256": "7082f2b9622515b4e04dda01612cf92b92f63c9f6f1147038b173b14e0ad3b8b"
+  },
+  "fixture_gzip_sha256": "742ac1b18cfa1b2a58403a0c3cf31e84f8a41c3434e5f58912cef1b6934fabd1",
+  "fixture_uncompressed_sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
+  "other_differences_between_baseline_wheel_and_base": [
+    "docs/plans/2026-11-23-incremental-performance.md"
+  ],
+  "paired_threshold_percent": 5,
+  "per_arm": {
+    "baseline": {
+      "official_release": {
+        "artifact": 14897014496,
+        "artifact_digest": "sha256:f37ff1db4a53b48b5f728400ae486e827aceed8379c9728cd830785900fd80ad",
+        "build_profile": "release",
+        "checkout": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+        "contract": "benchmark-release-v1",
+        "git_clean": true,
+        "git_sha": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+        "image": "ubuntu-26.04",
+        "image_version": "20261116.202.1",
+        "job": 138283593607,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "requested_sha": "ba5471bbe5b18aee129f6461bbdf96c5237e3c24",
+        "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2",
+        "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+        "wheel_sha256": "c339d8b13991396ba902c3a53e924c25986ef6af4a21e272488d9f3844553d11",
+        "workflow_run": 45342562023
+      },
+      "official_release_receipt_sha256": "1383ab47213cda04a144479977b3c8fe03e960c2a7769691fd2862b42ae605f6",
+      "pooled_p50_ms": 18.753914,
+      "pooled_p95_ms": 19.3624045,
+      "timed_streams": 20
+    },
+    "candidate": {
+      "official_release": {
+        "artifact": 14921540444,
+        "artifact_digest": "sha256:cc43d9523ab9be3af5b3215433e46073f6c9fc720b465e9969e87d30324011a0",
+        "build_profile": "release",
+        "checkout": "5d69b559a7252f641dc73ff376a94445e9904f96",
+        "contract": "benchmark-release-v1",
+        "git_clean": true,
+        "git_sha": "5d69b559a7252f641dc73ff376a94445e9904f96",
+        "image": "ubuntu-26.04",
+        "image_version": "20261116.202.1",
+        "job": 138440879736,
+        "native_sha256": "2d18398f3c7af19843da72fcec60fdae0b015c42face4ea8fe5cd9275ded3a3a",
+        "requested_sha": "7d23e1879be48bb83f0d508f15a5442e028c19ee",
+        "tree": "79f56a276f52e8ecd9432d0e2b618b06b8d2b239",
+        "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+        "wheel_sha256": "0ae6c1355712f8e38a7722c4d336a658b3b29a0c17f43084d2372f88d56ad110",
+        "workflow_run": 45392732141
+      },
+      "official_release_receipt_sha256": "8e844509fa4fd5cda398a4a3e58a2a1d620176a3c7b75af24c84268d54056fe6",
+      "pooled_p50_ms": 18.615274,
+      "pooled_p95_ms": 18.9832562,
+      "timed_streams": 20
+    }
+  },
+  "pooled_p50_change_percent": -0.7392590154780443,
+  "pooled_p95_change_percent": -1.9581674373138958,
+  "product_paths_differing_between_baseline_wheel_and_base": [],
+  "product_pr": 721,
+  "protocol_file_sha256": "ebebff1b003b519485c2970cc48854b0b5ccb67eb1c3de047d54c1de2e31878b",
+  "resources": {
+    "cpu": 2,
+    "largest_major_fault_delta": 6,
+    "largest_swapped_pages_delta": 0,
+    "max_host_busy_percent": 25.5,
+    "max_sibling_busy_percent": 2.9,
+    "min_available_memory_bytes": 15598657536,
+    "monitoring_intervals": 10,
+    "observations": 11,
+    "preflight_intervals": 1,
+    "smt_siblings": [
+      3
+    ],
+    "tokio_worker_threads": 1
+  },
+  "rounds_percent_change": [
+    {
+      "baseline_median_ms": 18.426482500000002,
+      "candidate_median_ms": 18.567753,
+      "coverage": 0.978515625,
+      "high": 1.0995307616095795,
+      "low": -2.35914562907541,
+      "median": 0.22348207385108898,
+      "round": 1
+    },
+    {
+      "baseline_median_ms": 18.904593000000002,
+      "candidate_median_ms": 18.768515999999998,
+      "coverage": 0.978515625,
+      "high": 2.314762918651314,
+      "low": -3.8098936106370274,
+      "median": -1.2601182508098274,
+      "round": 2
+    }
+  ],
+  "stage_p50_goal_met": false,
+  "stage_p50_goal_ms": 15,
+  "verdict": "no-confirmed-regression",
+  "wheel_build_identity_verification": "Each official Linux build job and upload receipt matched the released artifact ID and digest. Both official ZIPs, inner wheels and native modules were rehashed. The actual and requested Git trees matched separately for each build.",
+  "workflow": {
+    "attempt": 1,
+    "head_sha": "7d23e1879be48bb83f0d508f15a5442e028c19ee",
+    "job": 138452059786,
+    "job_completed_at": "2026-11-24T12:42:57Z",
+    "job_started_at": "2026-11-24T12:42:14Z",
+    "job_wall_seconds": 43,
+    "measurement_phase_seconds": 15.748460111999997,
+    "run": 45396066297
+  }
+}
