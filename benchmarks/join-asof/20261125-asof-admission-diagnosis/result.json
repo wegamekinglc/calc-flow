@@ -1,0 +1,158 @@
+{
+  "outcome": {
+    "elapsed": 7.038455871981569,
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 7.1, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 2.553125, 'available_bytes': 31083655168, 'major_faults': 418, 'swap_pages': 1, 'swap_in_pages': 1, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 6, 'cpu_busy': 66.7, 'siblings': [7], 'sibling_busy': 0.0, 'host_busy': 2.553125, 'available_bytes': 31083655168, 'major_faults': 418, 'swap_pages': 1, 'swap_in_pages': 1, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 8, 'cpu_busy': 0.0, 'siblings': [9], 'sibling_busy': 0.0, 'host_busy': 2.553125, 'available_bytes': 31083655168, 'major_faults': 418, 'swap_pages': 1, 'swap_in_pages': 1, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 10, 'cpu_busy': 5.9, 'siblings': [11], 'sibling_busy': 0.0, 'host_busy': 2.553125, 'available_bytes': 31083655168, 'major_faults': 418, 'swap_pages': 1, 'swap_in_pages': 1, 'swap_out_pages': 0, 'suitable': False}]\")])",
+    "state": "stopped"
+  },
+  "controller_completed_warmups": 0,
+  "completed_formal_samples": 0,
+  "worker_only_baseline_warmup": {
+    "eligible_for_comparison": false,
+    "accepted_counts": {
+      "left": 1000000,
+      "right": 1000000
+    },
+    "sink_rows_at_boundary": 0,
+    "oracle": {
+      "finite_rows": 1000000,
+      "max_abs_error": 0.0,
+      "passed": true,
+      "rows": 1000000
+    }
+  },
+  "resources": [
+    {
+      "epoch": 1795543990.5520022,
+      "preflight": true,
+      "cores": [
+        {
+          "cpu": 2,
+          "cpu_busy": 0.0,
+          "siblings": [
+            3
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 0.109375,
+          "available_bytes": 31276851200,
+          "major_faults": 4,
+          "swap_pages": 4,
+          "swap_in_pages": 4,
+          "swap_out_pages": 0,
+          "suitable": true
+        },
+        {
+          "cpu": 6,
+          "cpu_busy": 0.0,
+          "siblings": [
+            7
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 0.109375,
+          "available_bytes": 31276851200,
+          "major_faults": 4,
+          "swap_pages": 4,
+          "swap_in_pages": 4,
+          "swap_out_pages": 0,
+          "suitable": true
+        },
+        {
+          "cpu": 8,
+          "cpu_busy": 0.0,
+          "siblings": [
+            9
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 0.109375,
+          "available_bytes": 31276851200,
+          "major_faults": 4,
+          "swap_pages": 4,
+          "swap_in_pages": 4,
+          "swap_out_pages": 0,
+          "suitable": true
+        },
+        {
+          "cpu": 10,
+          "cpu_busy": 0.0,
+          "siblings": [
+            11
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 0.109375,
+          "available_bytes": 31276851200,
+          "major_faults": 4,
+          "swap_pages": 4,
+          "swap_in_pages": 4,
+          "swap_out_pages": 0,
+          "suitable": true
+        }
+      ]
+    },
+    {
+      "epoch": 1795543991.5536473,
+      "preflight": false,
+      "cores": [
+        {
+          "cpu": 2,
+          "cpu_busy": 7.1,
+          "siblings": [
+            3
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 2.553125,
+          "available_bytes": 31083655168,
+          "major_faults": 418,
+          "swap_pages": 1,
+          "swap_in_pages": 1,
+          "swap_out_pages": 0,
+          "suitable": false
+        },
+        {
+          "cpu": 6,
+          "cpu_busy": 66.7,
+          "siblings": [
+            7
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 2.553125,
+          "available_bytes": 31083655168,
+          "major_faults": 418,
+          "swap_pages": 1,
+          "swap_in_pages": 1,
+          "swap_out_pages": 0,
+          "suitable": false
+        },
+        {
+          "cpu": 8,
+          "cpu_busy": 0.0,
+          "siblings": [
+            9
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 2.553125,
+          "available_bytes": 31083655168,
+          "major_faults": 418,
+          "swap_pages": 1,
+          "swap_in_pages": 1,
+          "swap_out_pages": 0,
+          "suitable": false
+        },
+        {
+          "cpu": 10,
+          "cpu_busy": 5.9,
+          "siblings": [
+            11
+          ],
+          "sibling_busy": 0.0,
+          "host_busy": 2.553125,
+          "available_bytes": 31083655168,
+          "major_faults": 418,
+          "swap_pages": 1,
+          "swap_in_pages": 1,
+          "swap_out_pages": 0,
+          "suitable": false
+        }
+      ]
+    }
+  ],
+  "verdict": "inconclusive"
+}
