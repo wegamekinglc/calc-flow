@@ -960,3 +960,86 @@ async fn test_direct_sum_cancelled_after_output_preflight_releases_the_transacti
     drop(retry.commit());
     assert_eq!(keyed.len(), 1);
 }
+
+#[tokio::test]
+async fn test_sparse_sum_change_operations_fit_the_selected_versions() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let plan = plan(&runtime, false).await;
+    let keyed = plan.keyed_sum.as_ref().unwrap();
+    for (seed, ids) in [
+        (true, (0..10_000).collect::<Vec<i64>>()),
+        (false, (0..64).chain(10_000..10_036).collect()),
+    ] {
+        let rows = ids.len();
+        let keys = [
+            Arc::new(Int64Array::from(ids)) as ArrayRef,
+            Arc::new(StringArray::from(vec!["key"; rows])) as ArrayRef,
+        ];
+        let values = Arc::new(Int64Array::from(vec![1; rows])) as ArrayRef;
+        let mut tx = keyed.begin(None).unwrap();
+        for start in (0..rows).step_by(MORSEL_ROWS) {
+            let count = (rows - start).min(MORSEL_ROWS);
+            tx.apply(
+                &keys.each_ref().map(|key| key.slice(start, count)),
+                &values.slice(start, count),
+                None,
+                None,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        }
+        if seed {
+            drop(tx.commit());
+            continue;
+        }
+        let mut result = None;
+        let allocations = allocation_counter::measure(|| {
+            result = Some(
+                tx.change_record(
+                    &plan.aggregate_schema,
+                    || Ok(()),
+                    |total, _, versions| Ok(total + versions),
+                    |_| Ok(()),
+                )
+                .unwrap(),
+            );
+        });
+        let (record, operations) = result.unwrap();
+        let ops = operations.as_any().downcast_ref::<StringArray>().unwrap();
+        let groups = record
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let sums = record
+            .column(2)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let expected = (0..64)
+            .flat_map(|id| [(id, 1, "retract"), (id, 2, "upsert")])
+            .chain((10_000..10_036).map(|id| (id, 1, "upsert")));
+        assert_eq!(record.num_rows(), 164);
+        for (row, (key, sum, op)) in expected.enumerate() {
+            assert_eq!(
+                (groups.value(row), sums.value(row), ops.value(row)),
+                (key, sum, op)
+            );
+        }
+        let buffers = operations.to_data();
+        let retained = buffers
+            .buffers()
+            .iter()
+            .map(|buffer| buffer.capacity())
+            .sum::<usize>();
+        let used = buffers
+            .buffers()
+            .iter()
+            .map(|buffer| buffer.len())
+            .sum::<usize>();
+        eprintln!(
+            "Grouped SUM changelog allocations {allocations:?}, operation buffers {used}/{retained}"
+        );
+        assert_eq!(retained, used);
+    }
+}
