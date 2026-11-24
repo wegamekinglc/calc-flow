@@ -113,13 +113,10 @@ impl LocatorColumn {
 
     fn retain(&mut self, mut keep: impl FnMut(RowLocator) -> bool) -> (usize, usize) {
         let before = self.capacity_bytes();
-        let live = self
-            .rows()
-            .iter()
-            .copied()
-            .filter(|locator| keep(*locator))
-            .collect();
-        self.values = live;
+        let mut values = std::mem::take(&mut self.values);
+        values.drain(..self.head);
+        values.retain(|&locator| keep(locator));
+        self.values = values.into_boxed_slice().into_vec();
         self.head = 0;
         (before, self.capacity_bytes())
     }
@@ -135,7 +132,8 @@ impl LocatorColumn {
         }
         incoming.sort_unstable_by(|left, right| compare(*left, *right));
         if self.is_empty() {
-            self.values = incoming;
+            // Projection charges the live length, excluding staging vector spare capacity.
+            self.values = incoming.into_boxed_slice().into_vec();
             self.head = 0;
             return (before, self.capacity_bytes());
         }

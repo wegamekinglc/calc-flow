@@ -571,6 +571,82 @@ fn test_restore_charge_counts_mixed_right_liveness_at_the_exact_limit() {
     assert_eq!(exact.state_rows(), 5);
     assert_eq!(exact.identity_only_rows(), 2);
     assert_eq!(exact.right_payload_rows(), 3);
+    assert_eq!(
+        exact.persistent_bytes(),
+        bytes - 7 * size_of::<super::RowLocator>()
+    );
+}
+
+#[test]
+fn test_sparse_fresh_indexes_retain_only_the_charged_locator_slots() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let rows = (0..64).map(|key| (key, key, 0, None)).collect::<Vec<_>>();
+    let input = record(&rows);
+    let slot = u64::try_from(size_of::<super::RowLocator>()).unwrap();
+    for side in [0, 1] {
+        let mut admitted = state(&spec(0, 100, 1 << 20), &pool);
+        admit(&mut admitted, side, &input).unwrap();
+        let capacities = admitted.index_capacities();
+        if side == 0 {
+            assert_eq!(capacities.left, vec![slot; rows.len()]);
+        } else {
+            assert_eq!(capacities.right_payloads, vec![slot; rows.len()]);
+            assert_eq!(capacities.right_identities, vec![slot; rows.len()]);
+        }
+
+        let retained = admitted.persistent_bytes();
+        let exact =
+            u64::try_from(retained).unwrap() + 2 * u64::try_from(rows.len()).unwrap() * slot;
+        let mut short = state(&spec(0, 100, exact - 1), &pool);
+        assert!(matches!(
+            admit(&mut short, side, &input),
+            Err(crate::CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofStateLimitExceeded,
+                ..
+            })
+        ));
+        assert_eq!(short.persistent_bytes(), 0);
+        assert_eq!(short.state_rows(), 0);
+        let mut tight = state(&spec(0, 100, exact), &pool);
+        admit(&mut tight, side, &input).unwrap();
+        assert_eq!(tight.persistent_bytes(), retained);
+    }
+}
+
+#[test]
+fn test_partial_commit_does_not_grow_singleton_locator_columns() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&spec(0, 100, 1 << 20), &pool);
+    admit(&mut state, 0, &record(&[(1, 7, 0, None), (2, 8, 0, None)])).unwrap();
+    let slot = u64::try_from(size_of::<super::RowLocator>()).unwrap();
+    let mut capacities = state.index_capacities();
+    capacities.left.fill(slot);
+    state.restore_index_capacities(&capacities).unwrap();
+    let prefix = select(&state, None, true, 1);
+    state.commit(&prefix).unwrap();
+    assert_eq!(state.index_capacities().left, [0, slot]);
+}
+
+#[test]
+fn test_restore_preserves_explicit_spare_capacity_from_older_checkpoints() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut source = state(&spec(0, 100, 1 << 20), &pool);
+    admit(&mut source, 1, &record(&[(1, 7, 0, None)])).unwrap();
+    let mut capacities = source.index_capacities();
+    capacities.right_identities[0] = u64::try_from(64 * size_of::<super::RowLocator>()).unwrap();
+    source.restore_index_capacities(&capacities).unwrap();
+    let bytes = u64::try_from(source.persistent_bytes()).unwrap();
+    let segments = source.capture(1 << 20).unwrap();
+    let restored = ColumnarState::restore(
+        "asof-columnar-test",
+        &spec(0, 100, bytes),
+        &[input_schema(), input_schema()],
+        &pool,
+        &segments,
+    )
+    .unwrap();
+    assert_eq!(u64::try_from(restored.persistent_bytes()).unwrap(), bytes);
+    assert_eq!(restored.capture(1 << 20).unwrap(), segments);
 }
 
 #[test]
