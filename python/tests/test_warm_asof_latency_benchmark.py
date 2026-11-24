@@ -72,8 +72,11 @@ def test_clock_only_covers_prefix_submission_and_delivery(monkeypatch):
 @pytest.mark.parametrize("row,wrong_sequence", [(0, 1), (2, None), (4, 4)])
 def test_oracle_rejects_wrong_tie_tolerance_or_missing_key(row, wrong_sequence):
     expected = latency.prefix_oracle()
-    values = expected.to_pydict()
-    values["right__seq"][row] = wrong_sequence
-    corrupt = type(expected).from_pydict(values, schema=expected.schema)
+    field = expected.schema.field("right__seq")
+    values = expected[field.name].to_pylist()
+    values[row] = wrong_sequence
+    corrupt = expected.set_column(
+        expected.schema.get_field_index(field.name), field, pa.array(values, field.type)
+    )
     with pytest.raises(ValueError, match="ASOF"):
         latency.check_rows([corrupt], expected)
