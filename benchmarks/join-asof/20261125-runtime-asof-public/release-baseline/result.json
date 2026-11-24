@@ -1,0 +1,54 @@
+{
+  "outcome": {
+    "elapsed": 20.994790164986625,
+    "state": "completed"
+  },
+  "resources": {
+    "intervals": 17,
+    "max_host_busy": 3.41875,
+    "max_sibling_busy": 2.0,
+    "min_available_bytes": 29758681088,
+    "violations": 0
+  },
+  "result": {
+    "base_p50": 0.059832746,
+    "base_p95": 0.0622991435,
+    "change_percent": 334.60051123175936,
+    "cpus": [
+      0,
+      2,
+      4,
+      8
+    ],
+    "head_max": 0.281477868,
+    "head_min": 0.24472899,
+    "head_p50": 0.26003342,
+    "head_p95": 0.28138397285,
+    "oracle_checked_executions": 44,
+    "round_changes": [
+      338.94761938555797,
+      334.5747487123958
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 360.17609474590364,
+        "low": 312.9088215330218,
+        "median": 338.94761938555797
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 351.4619338507226,
+        "low": 308.5990421781841,
+        "median": 334.5747487123958
+      }
+    ],
+    "round_min_changes": [
+      333.82557633291174,
+      337.17697086427717
+    ],
+    "rows_per_second": 3845659.530994131,
+    "samples": 20,
+    "verdict": "regression"
+  }
+}

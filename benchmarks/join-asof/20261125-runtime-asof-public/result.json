@@ -1,0 +1,54 @@
+{
+  "outcome": {
+    "elapsed": 32.61166214407422,
+    "state": "completed"
+  },
+  "resources": {
+    "intervals": 28,
+    "max_host_busy": 5.06875,
+    "max_sibling_busy": 2.9,
+    "min_available_bytes": 29395759104,
+    "violations": 0
+  },
+  "result": {
+    "base_p50": 0.4923671485,
+    "base_p95": 0.5394638176500001,
+    "change_percent": -41.42606510637255,
+    "cpus": [
+      2,
+      4,
+      6,
+      10
+    ],
+    "head_max": 0.515739659,
+    "head_min": 0.260458709,
+    "head_p50": 0.28839881300000003,
+    "head_p95": 0.43196102290000005,
+    "oracle_checked_executions": 44,
+    "round_changes": [
+      -38.730972148115946,
+      -42.60423605652819
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": -22.800209249412838,
+        "low": -43.89138804072207,
+        "median": -38.730972148115946
+      },
+      {
+        "coverage": 0.978515625,
+        "high": -36.79203082586607,
+        "low": -46.099712068526735,
+        "median": -42.60423605652819
+      }
+    ],
+    "round_min_changes": [
+      -43.73862909471961,
+      -42.65593879541164
+    ],
+    "rows_per_second": 3467420.651277091,
+    "samples": 20,
+    "verdict": "improved"
+  }
+}
