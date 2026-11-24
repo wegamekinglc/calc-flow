@@ -1,0 +1,108 @@
+{
+  "archive_format": "All original artifact files, with byte-identical contents, sorted in a gzip-compressed tar archive",
+  "archived_raw_members": 523,
+  "case": "engines/1000000/calc-flow-stream-1t/join",
+  "collector_elapsed_seconds": 42.289998054504395,
+  "complete_formal_samples": 40,
+  "direct_baseline_tree_diff": [
+    "docs/plans/2026-11-23-incremental-performance.md"
+  ],
+  "evidence_artifact": 14920827115,
+  "formal_pairs_per_round": [
+    10,
+    10
+  ],
+  "full_validations": 44,
+  "job": 138450007891,
+  "job_completed_at": "2026-11-24T12:39:24Z",
+  "job_started_at": "2026-11-24T12:38:39Z",
+  "job_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45395479694/job/138450007891",
+  "job_wall_seconds": 45.0,
+  "maximum_observed_absolute_error": 0.0,
+  "measurement_commit": "9aebb60438000a28c03163e2abab4f2950547508",
+  "observed_warmups": 4,
+  "original_archive_bytes": 483754,
+  "original_archive_sha256": "dfcc821023250335e74c342493c9e5cf509ba3440bd683d7854f6be55bcd9fab",
+  "outcome": {
+    "elapsed_since_job_start_seconds": 42.289998054504395,
+    "state": "completed"
+  },
+  "raw_tar_gzip_sha256": "8e2ae3845d21872ee6ddd3f1d81b9005332ed51af17ce202ddbc5ae8452177c0",
+  "resource_intervals": 16,
+  "resources_all_admitted": true,
+  "result": {
+    "base_p50": 0.095125991,
+    "base_p95": 0.0964496694,
+    "change_percent": 9.737130097283298,
+    "head_max": 0.106924495,
+    "head_min": 0.101917708,
+    "head_p50": 0.10438853249999999,
+    "head_p95": 0.10644159385,
+    "round_changes": [
+      9.45343023798958,
+      9.895792490199796
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 11.022052274649852,
+        "low": 8.133181654886545,
+        "median": 9.45343023798958
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 11.148659552993735,
+        "low": 8.863128119485797,
+        "median": 9.895792490199796
+      }
+    ],
+    "round_min_changes": [
+      8.704689646251285,
+      10.005011094294613
+    ],
+    "rows_per_second": 9579596.302879343,
+    "samples": 20,
+    "verdict": "regression"
+  },
+  "rows_per_output": 1000000,
+  "state": "completed",
+  "wheels": {
+    "baseline": {
+      "artifact": 14897014496,
+      "artifact_digest": "sha256:f37ff1db4a53b48b5f728400ae486e827aceed8379c9728cd830785900fd80ad",
+      "build_profile": "release",
+      "checkout": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138283593607,
+      "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+      "requested_sha": "ba5471bbe5b18aee129f6461bbdf96c5237e3c24",
+      "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "c339d8b13991396ba902c3a53e924c25986ef6af4a21e272488d9f3844553d11",
+      "workflow_run": 45342562023
+    },
+    "candidate": {
+      "artifact": 14920586804,
+      "artifact_digest": "sha256:e95b924cb88846eed9721cf2f4d239fa9e62cc6195912b6f732ee9f3775e7f90",
+      "build_profile": "release",
+      "checkout": "f9ce08428f813d860b656e11eb091d143947363e",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "f9ce08428f813d860b656e11eb091d143947363e",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138435990960,
+      "native_sha256": "75a0933479c88d3ddad60096bf6d66e0a66b713130ab9e5ca4e38a321b917f73",
+      "requested_sha": "cd879969d1840da16f89514996f508b6b9baee64",
+      "tree": "93276c2830a52a756ccdec4486573740ce7db29f",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "781bd33960f3dba5c16222bab386d55c52122240986edee2d586edf06b16857d",
+      "workflow_run": 45391430171
+    }
+  },
+  "workflow_run": 45395479694
+}
