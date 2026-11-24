@@ -570,6 +570,41 @@ def test_materialized_join_matches_full_oracle(side, materialized_join, monkeypa
         assert data.equals(before[name], check_metadata=True), name
 
 
+def test_join_exports_each_prepared_input_batch_once(materialized_join, monkeypatch):
+    program, inputs, expected = materialized_join
+    left = [cf.Batch.from_pyarrow(record) for record in inputs["left"].to_batches()]
+    right = cf.Batch.from_pyarrow(
+        inputs["right"].replace_schema_metadata({b"source": b"dimension"}),
+        metadata={"sequence": 7},
+    )
+    exports = {id(batch): 0 for batch in [*left, right]}
+    to_pyarrow = cf.Batch.to_pyarrow
+
+    def count_exports(batch):
+        if id(batch) in exports:
+            exports[id(batch)] += 1
+        return to_pyarrow(batch)
+
+    monkeypatch.setattr(cf.Batch, "to_pyarrow", count_exports)
+
+    async def events():
+        for batch in left:
+            yield batch
+
+    async def run():
+        async with program.stream(
+            {"left": events(), "right": right},
+            watermarks={name: cf.DisabledWatermarks() for name in inputs},
+            config=cf.StreamRuntimeConfig(checkpointing=False),
+        ) as results:
+            tables = [event.table async for event in results]
+        return pa.concat_tables(tables).sort_by("key")
+
+    assert asyncio.run(run()).equals(expected, check_metadata=True)
+    assert right.metadata == {"sequence": 7}
+    assert list(exports.values()) == [1] * (len(left) + 1)
+
+
 def test_materialized_binding_preserves_batch_metadata_and_can_be_reused() -> None:
     data = cf.Batch.from_pyarrow(
         pa.table({"a": [1, 2, 3]}), metadata={"caller": [1, 2]}

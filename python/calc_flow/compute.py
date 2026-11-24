@@ -50,7 +50,10 @@ def _arrow_table(data: TableData, path: str) -> pa.Table | pa.RecordBatch:
 
 
 def _table_batch(data: TableData, path: str) -> Batch:
-    table = _arrow_table(data, path)
+    return _normalized_table_batch(data, _arrow_table(data, path))
+
+
+def _normalized_table_batch(data: TableData, table: pa.Table | pa.RecordBatch) -> Batch:
     if table.schema.metadata is not None or any(
         field.metadata is not None for field in table.schema
     ):
