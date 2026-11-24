@@ -18,14 +18,15 @@
   "budget_seconds": 180,
   "candidate_identity": "dispatch binds one official CI head SHA and artifact ID",
   "case": "engines/1000000/calc-flow-stream-1t/join",
-  "change": "The admitted morsel already carries a compact payload. Route it directly while preserving sparse source row IDs and the retain mask.",
+  "change": "Route contiguous admitted ranges in bulk and retain general sparse and crossed-record routing.",
   "dimension_rows": 64,
   "fact_rows": 1000000,
   "output_rows": 1000000,
   "overall_budget_seconds": 600,
   "pairs_per_round": 10,
+  "prior_candidate": "cd879969d1840da16f89514996f508b6b9baee64",
   "processing_goal_ms": 30,
-  "registered_utc": "2026-11-24T12:09:11.745943+00:00",
+  "registered_utc": "2026-11-24T12:51:35.771946+00:00",
   "requested_baseline_product": {
     "all_changed_paths": [
       "docs/plans/2026-11-23-incremental-performance.md"
@@ -38,7 +39,7 @@
     ".github/workflows/benchmarks.yml": "c1fc8bf9ef92a80963366a880afcb3a9a0e2c494b54d1d0a6b19b0d7cc66eec3",
     "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
     "benchmarks/engine_stream.py": "4bfcbc72f2d71d3ea224a062af63fc9831e68b791f3c5643d0df33cda9912a29",
-    "benchmarks/hosted-product-protocol.md": "b9c27e559a69aa26c41a3ac0a0465ff0eb7a8e02526d360e9af770d0d1c8d647",
+    "benchmarks/hosted-product-protocol.md": "74204ed9c530ba490f0a77498c4cef29c13f72a0ec8f94a580042d4dc64e287e",
     "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
     "scripts/benchmark_suite/measure.py": "b9bfc765b8b6088fa3b971cf02ddf08bd54598c40c2f9533d41cc5f9e631099c",
     "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",

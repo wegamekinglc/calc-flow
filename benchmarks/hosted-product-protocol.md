@@ -35,3 +35,5 @@ Previous complete hosted jobs, including receipt upload, took 46 seconds and
 each separately. Enforce the three-second CPU/sibling, paging and memory
 preflight and one-second monitoring throughout collection. Stop on any
 deadline, provenance, oracle or resource failure. Run each registration once.
+
+The first compact route candidate cd879969 regressed the static case in both rounds. This comparison is reserved for a new implementation that bypasses per-row staging for a contiguous admitted segment. The reference remains the verified pre-change main runtime. Register both workload arms before measuring and require a complete static comparison before clearing the earlier regression.
