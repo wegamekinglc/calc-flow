@@ -1,3 +1,5 @@
+mod charge;
+
 use super::{ColumnarState, RowLocator, Selection};
 use crate::Result;
 use crate::operator::asof::arrow_error;
@@ -9,10 +11,7 @@ use datafusion::arrow::{
     error::ArrowError,
     record_batch::RecordBatch,
 };
-use std::{
-    collections::{BTreeMap, HashMap},
-    convert::AsRef,
-};
+use std::{collections::HashMap, convert::AsRef};
 
 struct SideSources {
     runs: Vec<u64>,
@@ -21,73 +20,6 @@ struct SideSources {
 }
 
 impl ColumnarState {
-    pub(in crate::operator::asof) fn output_charge(
-        &self,
-        selection: &Selection,
-        projection: Option<&[(usize, usize)]>,
-    ) -> Result<usize> {
-        let requests = projection.map_or_else(
-            || {
-                (0..self.column_count(0))
-                    .map(|column| (0, column))
-                    .chain((0..self.column_count(1)).map(|column| (1, column)))
-                    .collect()
-            },
-            <[(usize, usize)]>::to_vec,
-        );
-        requests
-            .into_iter()
-            .try_fold(0usize, |total, (side, column)| {
-                if column >= self.column_count(side) {
-                    return Err(invalid("ASOF projection column is out of bounds"));
-                }
-                let (locators, validity) = if side == 0 {
-                    (&selection.left, None)
-                } else {
-                    (&selection.right, Some(&selection.right_validity))
-                };
-                let mut selected_rows = BTreeMap::new();
-                for (index, locator) in locators.iter().copied().enumerate() {
-                    if validity.is_some_and(|validity| !validity.value(index)) {
-                        continue;
-                    }
-                    selected_rows
-                        .entry(locator.run)
-                        .or_insert_with(Vec::new)
-                        .push(locator.row as usize);
-                }
-                let mut charge = 256usize;
-                for (run_id, rows) in selected_rows {
-                    let run = self.run(side, run_id);
-                    let record = run.payload.as_ref().expect("selected live ASOF payload");
-                    let selected =
-                        super::run::logical_array_indices_charge(record.column(column), &rows);
-                    charge = charge
-                        .checked_add(selected)
-                        .ok_or_else(|| invalid("ASOF output workspace charge overflowed"))?;
-                }
-                if side == 1 {
-                    let unmatched =
-                        locators.len() - validity.map_or(0, BooleanBuffer::count_set_bits);
-                    if unmatched != 0 {
-                        charge = charge
-                            .checked_add(locators.len().div_ceil(8))
-                            .ok_or_else(|| invalid("ASOF output validity charge overflowed"))?;
-                        let null_data = super::run::logical_null_charge(
-                            self.schemas[side].field(column).data_type(),
-                            unmatched,
-                        );
-                        charge = charge
-                            .checked_add(null_data)
-                            .ok_or_else(|| invalid("ASOF output null-data charge overflowed"))?;
-                    }
-                }
-                total
-                    .checked_add(charge)
-                    .ok_or_else(|| invalid("ASOF output workspace charge overflowed"))
-            })
-    }
-
     pub(in crate::operator::asof) fn materialize(
         &self,
         selection: &Selection,
