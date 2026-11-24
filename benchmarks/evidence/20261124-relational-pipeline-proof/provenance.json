@@ -1,0 +1,80 @@
+{
+  "execution_kind": "Public async Python TableExpr.stream with locally compiled debug Rust/PyO3 extension and checkpointing disabled",
+  "executed_integration": {
+    "commit": "d2a877b754b79d91e55dcbc53ed2e7dbafbf219f",
+    "tree": "80826dace2a0a4a654ca83e8daabd48f375bffc0",
+    "core_src": "bf1ecabd9482f218986a1c7bc89e3ab7d8991cf7",
+    "pyo3_crate": "ac8104e82791bc2c1975e80f6bb938e3c1d36b87",
+    "python_package": "1aa3346fb948798bc84892e2834b91e9ad70a6a6"
+  },
+  "final_integration": {
+    "commit": "a9290ed32f4dd0dc6f7c9707b582db1bb4316ee0",
+    "tree": "1789c977c1e2618d1d2ad6aed6f53439e8bd410b",
+    "core_src": "a92f615b1f5b21871a2437d242ec209d35dc76a0",
+    "pyo3_crate": "ac8104e82791bc2c1975e80f6bb938e3c1d36b87",
+    "python_package": "1aa3346fb948798bc84892e2834b91e9ad70a6a6"
+  },
+  "base_after_pr_720": {
+    "commit": "dc1fd149032c586aeb5334095f6862d935b1c8fd",
+    "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68",
+    "core_src": "baa60facceb45bbbbd1789c915fc36a7dce15156",
+    "pyo3_crate": "ac8104e82791bc2c1975e80f6bb938e3c1d36b87",
+    "python_package": "1aa3346fb948798bc84892e2834b91e9ad70a6a6"
+  },
+  "pr_heads_as_executed": {
+    "719": "c2598d6e9c362558727d5aa8781b36cb7bb72381",
+    "720": "a21d3eed7088795763f511d9aed2fd81920e8201",
+    "721": "f3d88fb63a5df3f41d5bcc1aa6a3c58a3ab165a7",
+    "722": "1c1b25a4dfdb705dfb174edc32337d912f5f87dc",
+    "723": "f34040ea135004021bbc1f9ca83b186d2edb8d0f"
+  },
+  "pr_722_final": "8abc1d00038623b7f13cd73f1575c958e9848876",
+  "diff_executed_to_final": {
+    "path": "crates/calc-flow/src/operator/join/production.rs",
+    "only_modified_module": "#[cfg(test)] mod tests",
+    "unchanged_prefix_bytes": 36112,
+    "unchanged_prefix_sha256": "2a0486f679a0f76cb2de37120e535898d47cdb541d116e4ab1fa073e302e5518"
+  },
+  "versions": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "cpython": "3.13.9",
+    "pyarrow": "24.0.0",
+    "numpy": "2.5.1",
+    "typing_extensions": "4.16.0",
+    "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+    "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)"
+  },
+  "cargo_compiler_artifacts": {
+    "calc_flow": {
+      "features": [],
+      "fresh": false,
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    },
+    "calc_flow_python": {
+      "features": [
+        "connector-file",
+        "default"
+      ],
+      "fresh": false,
+      "profile": {
+        "opt_level": "0",
+        "debuginfo": 0,
+        "debug_assertions": true,
+        "overflow_checks": true,
+        "test": false
+      }
+    }
+  },
+  "original_native_shared_library_sha256": "0d9bde3562f0ea45922915f9c59a60a63165b91b732199416d04e69d1dcdf795",
+  "sha256": {
+    "proof.py": "f89cda389fa2b5af186b786438db24f6b8dc5cae6d597413fc0fd8493906fd1e",
+    "observations.ndjson": "76f9356cf1b8a617e8377852544ed5fce8ccd9a232a291ea0ee186d3df689356"
+  }
+}
