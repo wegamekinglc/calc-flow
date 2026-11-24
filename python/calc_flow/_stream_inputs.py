@@ -10,7 +10,7 @@ import pyarrow as pa
 
 from calc_flow._compat import TypeAliasType, dataclass
 from calc_flow._native import Batch, NativeArray, _ordered_event_time
-from calc_flow.compute import TableData, _arrow_table, _table_batch
+from calc_flow.compute import TableData, _arrow_table, _normalized_table_batch
 from calc_flow.runtime import (
     BoundedOutOfOrderness,
     Cursor,
@@ -173,7 +173,7 @@ class _IterableSource:
         self._validate_structure(table)
         column = self._config.ordered_column
         try:
-            batch = _table_batch(data, self._path)
+            batch = _normalized_table_batch(data, table)
         except Exception:
             if column is not None:
                 # An invalid event time precedes an unrelated table-import failure.
@@ -268,7 +268,7 @@ def _materialized_binding(
         source._validate_structure(table)
         return SourceBinding(source, watermark_policy=config.policy), source
     return _arrow_source_binding(
-        _table_batch(data, path),
+        _normalized_table_batch(data, table),
         config.budget,
         config.policy,
         config.ordered_column,

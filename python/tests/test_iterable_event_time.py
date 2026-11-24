@@ -58,13 +58,22 @@ def test_ordered_time_checks_all_records_in_the_declared_unit(chunks, prior, mes
 
 
 def test_timestamp_error_precedes_table_import_error(monkeypatch):
-    from calc_flow import _stream_inputs
+    table = pa.table(
+        {
+            "ts": pa.array([2, 1], type=pa.timestamp("us", tz="UTC")),
+            "value": [10, 20],
+        }
+    )
+    original = cf.Batch.from_pyarrow
+    rejected = []
 
-    def fail_import(*args):
-        raise RuntimeError("cannot import table")
+    def fail_full_import(value, *args, **kwargs):
+        if value is table:
+            rejected.append(value)
+            raise RuntimeError("cannot import table")
+        return original(value, *args, **kwargs)
 
-    monkeypatch.setattr(_stream_inputs, "_table_batch", fail_import)
-    table = pa.table({"ts": pa.array([2, 1], type=pa.timestamp("us", tz="UTC"))})
+    monkeypatch.setattr(cf.Batch, "from_pyarrow", fail_full_import)
     source = cf.table_input("events", schema=table.schema, event_time="ts")
 
     async def feed():
@@ -78,6 +87,7 @@ def test_timestamp_error_precedes_table_import_error(monkeypatch):
                 await results.__anext__()
 
     asyncio.run(run())
+    assert len(rejected) == 1
 
 
 def test_empty_iterable_batch_keeps_previous_timestamp_for_next_batch():

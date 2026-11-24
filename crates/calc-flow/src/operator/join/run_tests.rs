@@ -1,8 +1,8 @@
 use super::{
     JoinSide, JoinStateLimits, JoinTimeBounds,
     runs::{
-        Incoming, RouteInput, RunOutputContext, RunState, merge_visits, reset_merge_visits,
-        reset_run_lookups, route_hot_keys, run_lookups,
+        Incoming, RouteInput, RunOutputContext, RunState, count_hot_keys, merge_visits,
+        reset_merge_visits, reset_run_lookups, run_lookups,
     },
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
@@ -687,6 +687,81 @@ fn fanout_state_with_rows(left_rows: usize, right_rows: usize) -> (RunState, Inc
 
 fn fanout_state(rows: usize) -> (RunState, Incoming) {
     fanout_state_with_rows(rows, 1)
+}
+
+#[test]
+fn test_chunked_interval_output_reads_only_projected_match_coordinates() {
+    let mut reads = Vec::new();
+    for projection in [&[3][..], &[1], &[], &[1, 3]] {
+        let mut state = RunState::new(
+            "projected-interval",
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+            JoinTimeBounds::from_micros(1, 1).unwrap(),
+        )
+        .unwrap();
+        let schema = output_schema();
+        state
+            .apply(
+                JoinSide::Left,
+                fanout_input(8, 0, true),
+                &schema,
+                Some(&[1, 3]),
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap();
+        let fields: Vec<_> = projection
+            .iter()
+            .map(|&index| Arc::clone(&schema.fields()[index / 2]))
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let probe = incoming(
+            &record(&[1; 11], &(100..111).collect::<Vec<_>>()),
+            (0..11).collect(),
+            vec![GroupId::new(0).unwrap(); 11],
+            &[11; 11],
+            &(0..11).collect::<Vec<_>>(),
+            vec![false; 11],
+            11,
+        );
+        super::output_gather::COORDINATE_READS.set(0);
+        let mut batches = Vec::new();
+        let allocations = allocation_counter::measure(|| {
+            batches = state
+                .apply(
+                    JoinSide::Right,
+                    probe,
+                    &schema,
+                    Some(projection),
+                    2,
+                    EdgeBudget::new(7, 1_000_000).unwrap(),
+                )
+                .unwrap();
+        });
+        let visits = super::output_gather::COORDINATE_READS.get();
+        println!("projection {projection:?} reads={visits} allocations={allocations:?}");
+        reads.push(visits);
+        assert_projected_fanout(&batches, projection);
+    }
+    // Eight retained rows for each incoming row span 22 windows across 13 chunks.
+    assert_eq!(reads, [22, 88, 0, 110]);
+}
+
+fn assert_projected_fanout(batches: &[Batch], projection: &[usize]) {
+    assert_eq!(sequences(batches), (0..13).collect::<Vec<_>>());
+    for (chunk, batch) in batches.iter().enumerate() {
+        let rows = chunk * 7..((chunk + 1) * 7).min(88);
+        assert_eq!(batch.num_rows(), rows.len());
+        assert_eq!(output_record(batch).num_columns(), projection.len());
+        for (ordinal, &index) in projection.iter().enumerate() {
+            let expected: Vec<_> = rows
+                .clone()
+                .map(|row| if index < 2 { row % 8 } else { 100 + row / 8 })
+                .map(|value| i64::try_from(value).unwrap())
+                .collect();
+            assert_eq!(values(batch, ordinal), expected);
+        }
+    }
 }
 
 #[test]
@@ -1453,12 +1528,19 @@ fn assert_hot_route_matches_full_routing(record: &RecordBatch, field: Field) {
         runtime.incremental_reservation("expected-hot-route"),
     );
     let mut actual = KeyStore::new(schema, runtime.incremental_reservation("actual-hot-route"));
-    let arrays = vec![record.column(0).clone()];
-    let expected = expected
-        .route_with_limit(&arrays, record.num_rows(), &mut || Ok(()))
+    let routed = expected
+        .route_with_limit(&[record.column(0).clone()], record.num_rows(), &mut || {
+            Ok(())
+        })
         .unwrap();
-    let actual = route_hot_keys(record, &[0], &mut actual).unwrap();
-    assert_eq!(actual, expected);
+    let mut expected_counts = std::collections::BTreeMap::<_, usize>::new();
+    for group in routed {
+        *expected_counts.entry(group).or_default() += 1;
+    }
+    let mut actual_counts = std::collections::BTreeMap::new();
+    count_hot_keys(record, &[0], &mut actual, &mut actual_counts).unwrap();
+    assert_eq!(actual_counts, expected_counts);
+    assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
 }
 
 #[test]
@@ -1499,16 +1581,16 @@ fn test_hot_dictionary_routing_admits_new_keys_after_existing_groups() {
         keys.route_with_limit(&[existing.column(0).clone()], 1, &mut || Ok(()))
             .unwrap();
     }
-    let record = RecordBatch::try_from_iter([(
-        "key",
-        Arc::new(StringArray::from(vec!["new", "new"])) as ArrayRef,
-    )])
-    .unwrap();
-    let expected = expected
+    let record =
+        RecordBatch::try_from_iter([("key", Arc::new(StringArray::from(vec!["new"])) as ArrayRef)])
+            .unwrap();
+    let expected_id = expected
         .route_with_limit(&[record.column(0).clone()], 2, &mut || Ok(()))
-        .unwrap();
-    let actual = route_hot_keys(&record, &[0], &mut actual).unwrap();
-    assert_eq!(actual, expected);
+        .unwrap()[0];
+    let mut counts = std::collections::BTreeMap::new();
+    count_hot_keys(&record, &[0], &mut actual, &mut counts).unwrap();
+    assert_eq!(counts, std::collections::BTreeMap::from([(expected_id, 1)]));
+    assert_eq!(actual.canonical_bytes(), expected.canonical_bytes());
 }
 
 #[test]

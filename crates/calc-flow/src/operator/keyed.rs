@@ -76,6 +76,7 @@ pub(crate) struct KeyStore {
     leases: Vec<u64>,
     next: usize,
     logical_bytes: usize,
+    full_output_charge: usize,
     reservation: MemoryReservation,
     canonical_births: usize,
     fingerprint: [u8; 32],
@@ -104,6 +105,7 @@ pub(crate) struct KeyCut {
     groups: usize,
     next: usize,
     logical_bytes: usize,
+    full_output_charge: usize,
     reserved_bytes: usize,
     canonical_births: usize,
 }
@@ -126,6 +128,7 @@ impl KeyStore {
             leases: Vec::new(),
             next: 0,
             logical_bytes: 0,
+            full_output_charge: 0,
             reservation,
             canonical_births: 0,
             fingerprint,
@@ -499,6 +502,7 @@ impl KeyStore {
             .next
             .checked_add(1)
             .ok_or_else(|| keyed_error("key ID frontier overflowed"))?;
+        self.full_output_charge = add_key_output_charge(self.full_output_charge, canonical)?;
         self.canonical_births += 1;
         Ok(group)
     }
@@ -508,6 +512,7 @@ impl KeyStore {
             groups: self.len(),
             next: self.next,
             logical_bytes: self.logical_bytes,
+            full_output_charge: self.full_output_charge,
             reserved_bytes: self.reservation.size(),
             canonical_births: self.canonical_births,
         }
@@ -546,6 +551,7 @@ impl KeyStore {
         self.leases.truncate(cut.groups);
         self.next = cut.next;
         self.logical_bytes = cut.logical_bytes;
+        self.full_output_charge = cut.full_output_charge;
         self.reservation.resize(cut.reserved_bytes);
         self.canonical_births = cut.canonical_births;
     }
@@ -607,12 +613,13 @@ impl KeyStore {
             .map_err(|error| keyed_error(error.to_string()))
     }
 
+    pub(crate) fn full_output_charge(&self) -> usize {
+        self.full_output_charge
+    }
+
     pub(crate) fn output_charge(&self, groups: &[GroupId]) -> Result<usize> {
         groups.iter().try_fold(0usize, |total, group| {
-            total
-                .checked_add(self.canonical[group.index()].len())
-                .and_then(|total| total.checked_add(128))
-                .ok_or_else(|| keyed_error("key output charge overflowed"))
+            add_key_output_charge(total, &self.canonical[group.index()])
         })
     }
 
@@ -706,6 +713,13 @@ fn validate_arrays(schema: &KeySchema, arrays: &[ArrayRef]) -> Result<usize> {
         }
     }
     Ok(rows)
+}
+
+fn add_key_output_charge(total: usize, canonical: &[u8]) -> Result<usize> {
+    total
+        .checked_add(canonical.len())
+        .and_then(|total| total.checked_add(128))
+        .ok_or_else(|| keyed_error("key output charge overflowed"))
 }
 
 fn birth_charge(

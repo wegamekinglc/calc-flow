@@ -239,6 +239,49 @@ async fn test_keyed_integer_sum_matches_naive_oracle_across_batch_splits() {
 }
 
 #[tokio::test]
+async fn test_full_sum_key_charge_needs_no_group_scratch_and_rolls_back() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let plan = plan(&runtime, false).await;
+    let keyed = plan.keyed_sum.as_ref().unwrap();
+    let keys = [
+        Arc::new(Int64Array::from_iter_values(0..4096)) as ArrayRef,
+        Arc::new(
+            (0..4096)
+                .map(|i| [None, Some("a"), Some("longer label")][i % 3])
+                .collect::<StringArray>(),
+        ) as ArrayRef,
+    ];
+    let values = Arc::new(Int64Array::from(vec![1; 4096])) as ArrayRef;
+    let mut seed = keyed.begin(None).unwrap();
+    seed.apply(&keys, &values, None, None, &mut || Ok(()))
+        .unwrap();
+    drop(seed.commit());
+    let expected: usize = keyed
+        .canonical_bytes()
+        .iter()
+        .map(|key| 128 + key.len())
+        .sum();
+    let measured = allocation_counter::measure(|| {
+        assert_eq!(keyed.output_charge(None).unwrap(), expected);
+    });
+    eprintln!("Full SUM key charge for 4096 groups: {measured:?}");
+    assert_eq!(measured.count_total, 0);
+
+    let mut candidate = keyed.begin(None).unwrap();
+    let extra = [
+        Arc::new(Int64Array::from(vec![4096])) as ArrayRef,
+        keys[1].slice(2, 1),
+    ];
+    candidate
+        .apply(&extra, &values.slice(0, 1), None, None, &mut || Ok(()))
+        .unwrap();
+    let extra_charge = keyed.output_charge(Some(&[4096])).unwrap();
+    assert_eq!(candidate.output_charge().unwrap(), expected + extra_charge);
+    drop(candidate);
+    assert_eq!(keyed.output_charge(None).unwrap(), expected);
+}
+
+#[tokio::test]
 async fn test_keyed_integer_sum_discard_restores_values_births_ids_and_charges() {
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let mut plan = plan(&runtime, false).await;
@@ -333,6 +376,18 @@ async fn test_keyed_integer_sum_restore_reexports_identically_and_continues() {
             .export_native_state("keyed-sum", || Ok(()))
             .unwrap();
         assert_eq!(exported.records(), reexported.records());
+        assert_eq!(
+            restored
+                .keyed_sum
+                .as_ref()
+                .unwrap()
+                .output_charge(None)
+                .unwrap(),
+            canonical
+                .iter()
+                .map(|bytes| 128 + bytes.len())
+                .sum::<usize>()
+        );
         assert_eq!(
             restored.keyed_sum.as_ref().unwrap().canonical_bytes(),
             canonical
