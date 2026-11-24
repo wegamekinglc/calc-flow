@@ -963,6 +963,8 @@ async fn test_direct_sum_cancelled_after_output_preflight_releases_the_transacti
 
 #[tokio::test]
 async fn test_sparse_sum_change_operations_fit_the_selected_versions() {
+    use datafusion::arrow::buffer::Buffer;
+
     let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
     let plan = plan(&runtime, false).await;
     let keyed = plan.keyed_sum.as_ref().unwrap();
@@ -1030,13 +1032,9 @@ async fn test_sparse_sum_change_operations_fit_the_selected_versions() {
         let retained = buffers
             .buffers()
             .iter()
-            .map(|buffer| buffer.capacity())
+            .map(Buffer::capacity)
             .sum::<usize>();
-        let used = buffers
-            .buffers()
-            .iter()
-            .map(|buffer| buffer.len())
-            .sum::<usize>();
+        let used = buffers.buffers().iter().map(Buffer::len).sum::<usize>();
         eprintln!(
             "Grouped SUM changelog allocations {allocations:?}, operation buffers {used}/{retained}"
         );
