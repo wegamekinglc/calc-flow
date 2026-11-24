@@ -1,0 +1,16 @@
+{
+  "arm_seal_before_acquisition_sha256": "b33d33604f86ea41a3c1d231f03dc198a39a6960b586d0f39e99f986c7d9a50c",
+  "collected_workers": 44,
+  "driver_sha256": "6dba1e33b0f7e787c9927226b2e3cd1d1dc4af5852ddab6e70904e16c8aae2f8",
+  "outcome_json_sha256": "e86ab83e6f7b5e6f72f344663d9cad5dbfdac74457561f0556d177ef5f81f445",
+  "partial_json_sha256": "ff9f140cc34f4257883919c665f3da02c0096ffaa1cfa31101a17a54f2f0a167",
+  "registered_file_hashes_manifest_sha256": "1c7dde6a10042c6250ce0f8ac6ec268b7bb808fa33662fc09187ce7730913852",
+  "registered_protocol_sha256": "0eb3419d5803f82dd15aaef90b23cecf3b93db734b72998bc8345a8264bc2a15",
+  "release_receipts": {
+    "baseline": "94b5333dd9a5ab986e993da85ed24f61ad41d776d09befe761d4745c44cb121e",
+    "candidate": "738e80153b73b94236157ba12d041bda1d5a1df4d06fecc6554d9a80687f6e77"
+  },
+  "resources_jsonl_sha256": "0c9cfe3cc13b23ef3b462a7239b2bd4d6462aeaf1cf731a831562645e35e4706",
+  "source_checkout": "The same isolated checkout and Cargo cache built both arms. Full target receipts for non-fresh product and benchmark compilation are included.",
+  "worker_logset_sha256": "fbab8b9badeb413d96b8f21a6641da13322e0ba563d1304a6f4a88e4b737f765"
+}

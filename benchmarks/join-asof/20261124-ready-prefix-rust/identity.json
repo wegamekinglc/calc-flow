@@ -1,0 +1,30 @@
+{
+  "builds": {
+    "baseline": {
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "sha": "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+      "sha256": "07b98985100c02329829eca1bf7535129898a10e49c1813669467540ae9de201"
+    },
+    "candidate": {
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+      "sha": "a21d3eed7088795763f511d9aed2fd81920e8201",
+      "sha256": "127f86c2fe5620c497123e037294ed5a59a6ef7db2b37379f7b90fbd7f70f0c5"
+    }
+  },
+  "case": {
+    "pending": 512,
+    "restored": false,
+    "retained": 512,
+    "skew": false
+  },
+  "machine": {
+    "machine": "x86_64",
+    "node": "chengli-i9",
+    "processor": "",
+    "release": "5.15.167.4-microsoft-standard-WSL2",
+    "system": "Linux",
+    "version": "#1 SMP Tue Nov 5 00:21:55 UTC 2024"
+  },
+  "schedule": "2 rounds; 1 warmup each + 10 AB/BA pairs",
+  "source": "6dba1e33b0f7e787c9927226b2e3cd1d1dc4af5852ddab6e70904e16c8aae2f8"
+}

@@ -1,0 +1,31 @@
+{
+  "build_tools": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "precollection_source_hashes_sha256": "1c7dde6a10042c6250ce0f8ac6ec268b7bb808fa33662fc09187ce7730913852",
+  "product_diff": [
+    "crates/calc-flow/src/operator/asof/columnar.rs",
+    "crates/calc-flow/src/operator/asof/columnar/state.rs",
+    "crates/calc-flow/src/operator/asof/columnar/tests.rs",
+    "crates/calc-flow/src/operator/asof/columnar/tests/charge.rs",
+    "crates/calc-flow/src/operator/asof/finalize.rs",
+    "crates/calc-flow/src/operator/asof/tests/columnar_production.rs"
+  ],
+  "products": {
+    "baseline": {
+      "binary_sha256": "07b98985100c02329829eca1bf7535129898a10e49c1813669467540ae9de201",
+      "build_seconds": 817,
+      "revision": "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+      "source_tree": "2030d57b0ab9271b4d96065e18e7e6e933a92a2d",
+      "tree": "211269ccfb5b76dc5db3554ec8447edef6610645"
+    },
+    "candidate": {
+      "binary_sha256": "127f86c2fe5620c497123e037294ed5a59a6ef7db2b37379f7b90fbd7f70f0c5",
+      "build_seconds": 498,
+      "revision": "a21d3eed7088795763f511d9aed2fd81920e8201",
+      "source_tree": "baa60facceb45bbbbd1789c915fc36a7dce15156",
+      "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68"
+    }
+  },
+  "psutil": "7.2.2",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]"
+}
