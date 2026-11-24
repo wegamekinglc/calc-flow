@@ -1,0 +1,183 @@
+{
+  "baseline": {
+    "distinct_traffic_counters": {
+      "errors": [
+        0
+      ],
+      "fanned_out_batches": [
+        245
+      ],
+      "fanned_out_bytes": [
+        16000000
+      ],
+      "fanned_out_rows": [
+        1000000
+      ],
+      "input_batches": [
+        2
+      ],
+      "input_bytes": [
+        32002056
+      ],
+      "input_rows": [
+        1000064
+      ]
+    },
+    "handler_p50_us": 72536.0,
+    "handler_p95_us": 73977.4,
+    "total_handler_us_by_round": [
+      [
+        72067,
+        71521,
+        71653,
+        72287,
+        73955,
+        72693,
+        72647,
+        71092,
+        72566,
+        72482
+      ],
+      [
+        72595,
+        74403,
+        73230,
+        72546,
+        72136,
+        72289,
+        73238,
+        72093,
+        72526,
+        72644
+      ]
+    ],
+    "watermark_us_by_round": [
+      [
+        1,
+        0,
+        1,
+        0,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    ]
+  },
+  "candidate": {
+    "distinct_traffic_counters": {
+      "errors": [
+        0
+      ],
+      "fanned_out_batches": [
+        245
+      ],
+      "fanned_out_bytes": [
+        16000000
+      ],
+      "fanned_out_rows": [
+        1000000
+      ],
+      "input_batches": [
+        2
+      ],
+      "input_bytes": [
+        32002056
+      ],
+      "input_rows": [
+        1000064
+      ]
+    },
+    "handler_p50_us": 63931.5,
+    "handler_p95_us": 64968.75,
+    "total_handler_us_by_round": [
+      [
+        64077,
+        63811,
+        64889,
+        63276,
+        64736,
+        64845,
+        66484,
+        63980,
+        63789,
+        63518
+      ],
+      [
+        63947,
+        63474,
+        63783,
+        62964,
+        63916,
+        63416,
+        64324,
+        64153,
+        64247,
+        63432
+      ]
+    ],
+    "watermark_us_by_round": [
+      [
+        1,
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0
+      ]
+    ]
+  },
+  "descriptive_paired_diagnostic": [
+    {
+      "candidate_above_baseline": 0,
+      "change_percent": {
+        "coverage": 0.978515625,
+        "high": -9.439939709432965,
+        "low": -12.46558855672527,
+        "median": -10.941496448632186
+      },
+      "paired_difference_median_us": -7919.0
+    },
+    {
+      "candidate_above_baseline": 0,
+      "change_percent": {
+        "coverage": 0.978515625,
+        "high": -11.39514250859488,
+        "low": -13.208171367132582,
+        "median": -12.222810233449593
+      },
+      "paired_difference_median_us": -8893.5
+    }
+  ],
+  "scope": "Previously emitted cumulative handler time includes the untimed dimension preload and awaited emissions. There are no separate clocks for ingestion, Arrow conversion, concatenation or downstream backpressure."
+}

@@ -1,0 +1,106 @@
+{
+  "archive_format": "All original artifact files, with byte-identical contents, sorted in a gzip-compressed tar archive",
+  "archived_raw_members": 523,
+  "case": "engines/1000000/calc-flow-stream-1t/join",
+  "collector_elapsed_seconds": 44.95633053779602,
+  "complete_formal_samples": 40,
+  "direct_baseline_tree_diff": [],
+  "evidence_artifact": 14925023157,
+  "formal_pairs_per_round": [
+    10,
+    10
+  ],
+  "full_validations": 44,
+  "job": 138483957148,
+  "job_completed_at": "2026-11-24T13:37:34Z",
+  "job_started_at": "2026-11-24T13:36:45Z",
+  "job_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45405217201/job/138483957148",
+  "job_wall_seconds": 49.0,
+  "maximum_observed_absolute_error": 0.0,
+  "measurement_commit": "cea3974c22610932270700c1ac7f4469922c7f37",
+  "observed_warmups": 4,
+  "original_archive_bytes": 483849,
+  "original_archive_sha256": "d4bb8b330ce6f61cbcd096e5cfb7864ab1b6bc06a48098fe68c38a5673f708c2",
+  "outcome": {
+    "elapsed_since_job_start_seconds": 44.95633053779602,
+    "state": "completed"
+  },
+  "raw_tar_gzip_sha256": "70baf29c98ed4026e1db937e235329705f2527719c3a5aa9b7a7d757dbf3ead1",
+  "resource_intervals": 16,
+  "resources_all_admitted": true,
+  "result": {
+    "base_p50": 0.095550027,
+    "base_p95": 0.09662837215000002,
+    "change_percent": -8.776753145239823,
+    "head_max": 0.090656662,
+    "head_min": 0.085834063,
+    "head_p50": 0.087163837,
+    "head_p95": 0.0888118152,
+    "round_changes": [
+      -8.423915465929982,
+      -8.692438493401696
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": -7.266280216093524,
+        "low": -10.20887817774181,
+        "median": -8.423915465929982
+      },
+      {
+        "coverage": 0.978515625,
+        "high": -8.415765583487278,
+        "low": -9.854827263162214,
+        "median": -8.692438493401696
+      }
+    ],
+    "round_min_changes": [
+      -8.853116406868756,
+      -9.148733618738458
+    ],
+    "rows_per_second": 11472647.767904023,
+    "samples": 20,
+    "verdict": "improved"
+  },
+  "rows_per_output": 1000000,
+  "state": "completed",
+  "wheels": {
+    "baseline": {
+      "artifact": 14918393624,
+      "artifact_digest": "sha256:c046d951f299036f70a46fc89e00455bb9e4f3892e1417f657e9b3b1d2cb0e52",
+      "build_profile": "release",
+      "checkout": "f0bb1c7bb5c2aa1450a5be6ac9da4c015c5c842d",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "f0bb1c7bb5c2aa1450a5be6ac9da4c015c5c842d",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138427152678,
+      "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+      "requested_sha": "a21d3eed7088795763f511d9aed2fd81920e8201",
+      "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "9860fc61936768740455d1f4928fbe7f4331ddb9d686519bb11cb1d6fa393f60",
+      "workflow_run": 45388900446
+    },
+    "candidate": {
+      "artifact": 14924728799,
+      "artifact_digest": "sha256:87a0b74e871fa3b21c365145220ed77992fa638ea64265f409e11701aa0d0e11",
+      "build_profile": "release",
+      "checkout": "f1aed6080d1289c62ea94be7535db80be0234906",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "f1aed6080d1289c62ea94be7535db80be0234906",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138469727934,
+      "native_sha256": "f48492d1d3ab9c7ec5691f42275b7c0129d55dfbb8788d83ac68ebea7b5560c2",
+      "requested_sha": "8abc1d00038623b7f13cd73f1575c958e9848876",
+      "tree": "8b7810b36a9b806afb7063db13f6eb98a7043852",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "ecb0f8cb5883314731eac08bfbae74ba7c56b3ed76bf3cc84615c58643649db6",
+      "workflow_run": 45400956803
+    }
+  },
+  "workflow_run": 45405217201
+}
