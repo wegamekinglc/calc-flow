@@ -75,6 +75,15 @@ fn output_schema(declaration: &StreamAsofJoinSpec) -> SchemaRef {
     schema::output_schema(declaration, &input_schema(), &input_schema()).unwrap()
 }
 
+fn select(
+    state: &ColumnarState,
+    frontier: Option<i64>,
+    ended: bool,
+    limit: usize,
+) -> super::Selection {
+    state.select_prefix(state.finalizable_len(frontier, ended, limit))
+}
+
 fn admit(state: &mut ColumnarState, side: usize, input: &RecordBatch) -> Result<()> {
     state
         .admit(side, input, None, AsofLatePolicy::Error, &mut || Ok(()))
@@ -130,7 +139,7 @@ fn test_visible_latest_right_row_skips_binary_search_only_when_safe() {
             &record(&[(1, 5, 100, Some("left")), (2, 5, 200, Some("empty"))]),
         )
         .unwrap();
-        let selection = state.select(None, true, 10).unwrap();
+        let selection = select(&state, None, true, 10);
         assert_eq!(selection.matched(), 1);
         assert_eq!(super::state::take_latest_binary_searches(), 0);
     }
@@ -139,7 +148,7 @@ fn test_visible_latest_right_row_skips_binary_search_only_when_safe() {
         let mut state = state(&declaration, &pool);
         admit(&mut state, 1, &record(&[(1, 5, 1, Some("future"))])).unwrap();
         admit(&mut state, 0, &record(&[(1, 4, 1, Some("left"))])).unwrap();
-        assert_eq!(state.select(None, true, 10).unwrap().matched(), 0);
+        assert_eq!(select(&state, None, true, 10).matched(), 0);
         assert_eq!(super::state::take_latest_binary_searches(), 1);
     }
     {
@@ -147,7 +156,7 @@ fn test_visible_latest_right_row_skips_binary_search_only_when_safe() {
         let mut state = state(&declaration, &pool);
         admit(&mut state, 1, &record(&[(1, 5, 1, Some("old"))])).unwrap();
         admit(&mut state, 0, &record(&[(1, 11, 1, Some("left"))])).unwrap();
-        assert_eq!(state.select(None, true, 10).unwrap().matched(), 0);
+        assert_eq!(select(&state, None, true, 10).matched(), 0);
         assert_eq!(super::state::take_latest_binary_searches(), 0);
     }
 }
@@ -230,6 +239,38 @@ fn test_columnar_restore_rejects_forged_run_charges() {
 }
 
 #[test]
+fn test_candidate_reuses_visible_tail_time_at_inclusive_tolerance() {
+    let declaration = spec(1, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let max = i64::MAX;
+    let reads = [(max - 3, 2), (max, 3)].map(|(left_time, expected_index)| {
+        let mut state = state(&declaration, &pool);
+        let right = record(&[
+            (1, i64::MIN, 0, Some("first")),
+            (1, max - 4, 1, Some("older tie")),
+            (1, max - 4, 2, Some("newer tie")),
+            (1, max - 1, 3, None),
+        ]);
+        admit(&mut state, 1, &right).unwrap();
+        admit(&mut state, 0, &record(&[(1, left_time, 0, None)])).unwrap();
+        super::state::CANDIDATE_TIME_READS.set(0);
+        let selection = select(&state, None, true, 1);
+        let reads = super::state::CANDIDATE_TIME_READS.replace(0);
+        assert_eq!(selection.matched(), 1);
+        let output = state
+            .materialize(&selection, &output_schema(&declaration), None)
+            .unwrap();
+        let expected_right = right.slice(expected_index, 1);
+        assert_eq!(&output.columns()[4..], expected_right.columns());
+        reads
+    });
+    let [historical, latest] = reads;
+    eprintln!("ASOF candidate right timestamp reads: historical={historical}, latest={latest}");
+    assert!(historical <= 5);
+    assert_eq!(latest, 1);
+}
+
+#[test]
 fn test_candidate_is_greatest_time_and_sequence_inside_inclusive_tolerance() {
     let declaration = spec(5, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
@@ -263,7 +304,7 @@ fn test_candidate_is_greatest_time_and_sequence_inside_inclusive_tolerance() {
     )
     .unwrap();
 
-    let selection = state.select(Some(100), false, 100).unwrap();
+    let selection = select(&state, Some(100), false, 100);
     let output = state
         .materialize(&selection, &output_schema(&declaration), None)
         .unwrap();
@@ -316,7 +357,7 @@ fn test_pending_output_uses_typed_key_order_across_runs_not_group_birth_order() 
     .unwrap();
     admit(&mut state, 0, &record(&[(1, 4, 1, Some("sequence-1"))])).unwrap();
 
-    let selection = state.select(None, true, 100).unwrap();
+    let selection = select(&state, None, true, 100);
     let output = state
         .materialize(&selection, &output_schema(&declaration), None)
         .unwrap();
@@ -358,6 +399,32 @@ fn test_pending_output_uses_typed_key_order_across_runs_not_group_birth_order() 
 }
 
 #[test]
+fn test_ready_prefix_respects_row_limits_and_timestamp_extremes() {
+    let declaration = spec(0, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    assert_eq!(state.finalizable_len(Some(0), false, 8), 0);
+    let input = [
+        (1, i64::MAX, 0, None),
+        (1, 0, 2, None),
+        (1, 0, 1, None),
+        (1, i64::MIN, 0, None),
+    ];
+    admit(&mut state, 0, &record(&input)).unwrap();
+    super::take_finality_probes();
+    assert_eq!(state.finalizable_len(None, false, 4), 0);
+    assert_eq!(state.finalizable_len(Some(i64::MIN), true, 2), 2);
+    assert_eq!(state.finalizable_len(None, true, usize::MAX), 4);
+    assert_eq!(state.finalizable_len(Some(i64::MAX), false, 0), 0);
+    assert_eq!(super::take_finality_probes(), 0);
+    assert_eq!(state.finalizable_len(Some(i64::MIN), false, 4), 0);
+    assert_eq!(state.finalizable_len(Some(0), false, 4), 1);
+    assert_eq!(state.finalizable_len(Some(i64::MAX), false, usize::MAX), 3);
+    assert_eq!(state.finalizable_len(Some(1), false, 1), 1);
+    assert_eq!(state.finalizable_len(Some(1), false, 2), 2);
+}
+
+#[test]
 fn test_strict_finality_commits_only_the_closed_prefix_and_eof_drains() {
     let declaration = spec(0, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
@@ -369,13 +436,13 @@ fn test_strict_finality_commits_only_the_closed_prefix_and_eof_drains() {
     )
     .unwrap();
 
-    assert!(state.select(Some(10), false, 100).unwrap().is_empty());
-    let closed = state.select(Some(11), false, 100).unwrap();
+    assert!(select(&state, Some(10), false, 100).is_empty());
+    let closed = select(&state, Some(11), false, 100);
     assert_eq!(closed.len(), 1);
     state.commit(&closed).unwrap();
-    assert!(state.select(Some(11), false, 100).unwrap().is_empty());
+    assert!(select(&state, Some(11), false, 100).is_empty());
 
-    let ended = state.select(None, true, 100).unwrap();
+    let ended = select(&state, None, true, 100);
     assert_eq!(ended.len(), 1);
     let output = state
         .materialize(&ended, &output_schema(&declaration), None)
@@ -399,7 +466,7 @@ fn test_admission_after_partial_commit_reuses_reclaimed_capacity() {
         .map(|row| (1, row, row, Some("pending")))
         .collect::<Vec<_>>();
     admit(&mut state, 0, &record(&rows)).unwrap();
-    let prefix = state.select(None, true, 1_000).unwrap();
+    let prefix = select(&state, None, true, 1_000);
     state.commit(&prefix).unwrap();
     admit(&mut state, 0, &record(&[(1, 2_000, 2_000, Some("next"))])).unwrap();
     assert_eq!(state.pending_left_rows(), 25);
@@ -428,7 +495,7 @@ fn test_late_drop_excludes_rows_before_key_birth_and_retains_watermark_equality(
     );
     assert_eq!(state.keys.len(), 1);
     admit(&mut state, 0, &record(&[(1, 5, 1, Some("left"))])).unwrap();
-    let selection = state.select(Some(6), false, 10).unwrap();
+    let selection = select(&state, Some(6), false, 10);
     assert_eq!(selection.matched(), 1);
 }
 
@@ -499,7 +566,7 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
         ..super::Progress::default()
     });
     assert_eq!(equality, super::EvictionSummary::default());
-    let selection = state.select(Some(11), false, 10).unwrap();
+    let selection = select(&state, Some(11), false, 10);
     assert_eq!(selection.matched(), 1);
     state.commit(&selection).unwrap();
 
@@ -555,7 +622,7 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
     assert_eq!(state.capture(1 << 20).unwrap(), segments);
     admit(&mut state, 0, &record(&[(2, 20, 1, Some("new"))])).unwrap();
     assert!(state.next_run > run_frontier);
-    let selection = state.select(Some(21), false, 10).unwrap();
+    let selection = select(&state, Some(21), false, 10);
     assert_eq!(selection.matched(), 0);
     state.commit(&selection).unwrap();
     assert_eq!(state.persistent_bytes(), 0);
@@ -590,7 +657,7 @@ fn test_eviction_drops_dominated_prefix_but_keeps_newest_tie_at_threshold() {
         }
     );
     assert_eq!(state.right_payload_rows(), 1);
-    let selection = state.select(Some(11), false, 10).unwrap();
+    let selection = select(&state, Some(11), false, 10);
     let output = state
         .materialize(&selection, &output_schema(&declaration), None)
         .unwrap();
@@ -784,7 +851,7 @@ fn test_single_run_projection_reuses_indices_across_asof_columns() {
     let left = record(&left_rows);
     admit(&mut state, 1, &record(&right_rows)).unwrap();
     admit(&mut state, 0, &left).unwrap();
-    let selection = state.select(None, true, 1024).unwrap();
+    let selection = select(&state, None, true, 1024);
     let schema = Arc::new(
         output_schema(&declaration)
             .project(&[0, 1, 2, 4, 5, 6])
@@ -847,7 +914,7 @@ fn test_projection_interleaves_multiple_owners_and_explicit_unmatched_validity()
         &record(&[(1, 6, 1, Some("left-6")), (1, 7, 1, Some("left-7"))]),
     )
     .unwrap();
-    let selection = state.select(None, true, 10).unwrap();
+    let selection = select(&state, None, true, 10);
     let projected_schema = Arc::new(Schema::new(vec![
         Field::new("right_value", DataType::Utf8, true),
         Field::new("left_value", DataType::Utf8, true),

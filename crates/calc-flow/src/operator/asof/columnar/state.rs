@@ -20,8 +20,15 @@ use std::{
 
 #[cfg(test)]
 thread_local! {
+    static FINALITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CANDIDATE_TIME_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(in crate::operator::asof) fn take_finality_probes() -> usize {
+    FINALITY_PROBES.with(|count| count.replace(0))
 }
 
 #[cfg(test)]
@@ -1027,15 +1034,27 @@ impl ColumnarState {
         ended: bool,
         limit: usize,
     ) -> usize {
-        self.pending
-            .rows()
-            .iter()
-            .take(limit)
-            .take_while(|locator| {
-                let time = self.left_runs[&locator.run].time(**locator);
-                ended || frontier.is_some_and(|frontier| time < frontier)
-            })
-            .count()
+        let pending = self.pending.rows();
+        let count = pending.len().min(limit);
+        if ended || count == 0 {
+            return count;
+        }
+        let Some(frontier) = frontier else {
+            return 0;
+        };
+        // Pending rows are ordered by event time before key rank and sequence.
+        let ready = |locator: &RowLocator| {
+            #[cfg(test)]
+            FINALITY_PROBES.set(FINALITY_PROBES.get() + 1);
+            self.left_runs[&locator.run].time(*locator) < frontier
+        };
+        if !ready(&pending[0]) {
+            0
+        } else if count == 1 || ready(&pending[count - 1]) {
+            count
+        } else {
+            1 + pending[1..count - 1].partition_point(ready)
+        }
     }
 
     pub(in crate::operator::asof) fn selection_scratch_charge(
@@ -1049,25 +1068,10 @@ impl ColumnarState {
             .saturating_add(4096)
     }
 
-    pub(in crate::operator::asof) fn select(
-        &self,
-        frontier: Option<i64>,
-        ended: bool,
-        limit: usize,
-    ) -> Result<Selection> {
+    /// Builds a selection for an already verified pending prefix.
+    pub(in crate::operator::asof) fn select_prefix(&self, count: usize) -> Selection {
         #[cfg(test)]
         SELECTIONS.with(|count| count.set(count.get() + 1));
-        if limit == 0 {
-            return Err(reason(
-                &self.name,
-                StreamingFailureReason::AsofOutputLimitExceeded,
-                "ASOF selection requires a positive output row limit",
-            ));
-        }
-        let count = self.finalizable_len(frontier, ended, limit);
-        if count == 0 {
-            return Ok(Selection::empty());
-        }
         let left = self.pending.rows()[..count].to_vec();
         let mut right = Vec::with_capacity(count);
         let mut validity = Vec::with_capacity(count);
@@ -1082,7 +1086,7 @@ impl ColumnarState {
             validity.push(candidate.is_some());
             right.push(candidate.unwrap_or_default());
         }
-        Ok(Selection::new(left, right, validity))
+        Selection::new(left, right, validity)
     }
 
     pub(in crate::operator::asof) fn evict(&mut self, progress: Progress) -> EvictionSummary {
@@ -1238,13 +1242,16 @@ impl ColumnarState {
     }
 
     fn candidate(&self, bucket: &RightBucket, time: i64) -> Option<RowLocator> {
+        let right_time = |locator: RowLocator| {
+            #[cfg(test)]
+            CANDIDATE_TIME_READS.set(CANDIDATE_TIME_READS.get() + 1);
+            self.right_runs[&locator.run].time(locator)
+        };
         let rows = bucket.payloads.rows();
-        if rows.is_empty() {
-            return None;
-        }
+        let latest = rows.last()?;
         let direct = || {
-            let latest = rows.last().copied().expect("non-empty right bucket");
-            (self.right_runs[&latest.run].time(latest) <= time).then_some(latest)
+            let timestamp = right_time(*latest);
+            (timestamp <= time).then_some((*latest, timestamp))
         };
         #[cfg(feature = "benchmark-internals")]
         let direct = if self.legacy_latest_lookup {
@@ -1254,17 +1261,16 @@ impl ColumnarState {
         };
         #[cfg(not(feature = "benchmark-internals"))]
         let direct = direct();
-        let locator = if let Some(latest) = direct {
+        let (locator, timestamp) = if let Some(latest) = direct {
             latest
         } else {
             #[cfg(test)]
             LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
-            let end = rows
-                .partition_point(|locator| self.right_runs[&locator.run].time(*locator) <= time);
-            rows.get(end.checked_sub(1)?).copied()?
+            let end = rows.partition_point(|locator| right_time(*locator) <= time);
+            let locator = *rows.get(end.checked_sub(1)?)?;
+            (locator, right_time(locator))
         };
-        let right_time = self.right_runs[&locator.run].time(locator);
-        (i128::from(right_time) >= i128::from(time) - i128::from(self.spec.tolerance_micros()))
+        (i128::from(timestamp) >= i128::from(time) - i128::from(self.spec.tolerance_micros()))
             .then_some(locator)
     }
 

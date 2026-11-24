@@ -8,10 +8,10 @@ mod state;
 use run::RowLocator;
 pub(super) use run::logical_record_selection_charge;
 #[cfg(test)]
-pub(super) use state::take_selections;
-#[cfg(test)]
 pub(super) use state::{AdmissionSummary, EvictionSummary};
 pub(super) use state::{ColumnarState, Progress};
+#[cfg(test)]
+pub(super) use state::{take_finality_probes, take_selections};
 
 use datafusion::arrow::{array::BooleanArray, buffer::BooleanBuffer};
 
@@ -22,14 +22,6 @@ pub(super) struct Selection {
 }
 
 impl Selection {
-    pub(super) fn empty() -> Self {
-        Self {
-            left: Vec::new(),
-            right: Vec::new(),
-            right_validity: BooleanBuffer::new_unset(0),
-        }
-    }
-
     pub(super) fn new(left: Vec<RowLocator>, right: Vec<RowLocator>, validity: Vec<bool>) -> Self {
         debug_assert_eq!(left.len(), right.len());
         debug_assert_eq!(left.len(), validity.len());
