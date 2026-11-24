@@ -1,0 +1,10 @@
+{
+  "product": "a21d3eed7088795763f511d9aed2fd81920e8201",
+  "binary_sha256": "127f86c2fe5620c497123e037294ed5a59a6ef7db2b37379f7b90fbd7f70f0c5",
+  "original_and_reused_receipt_sha256": "738e80153b73b94236157ba12d041bda1d5a1df4d06fecc6554d9a80687f6e77",
+  "original_builder_sha256": "3140dc8ac583607eb63bf31219c8d8c2898e6c7880713e6bec0b88a7dd0e6eda",
+  "prior_ready_prefix_evidence_archive_sha256": "2b5c6dac4d7287cec559a9b23c40ce178fb822c22c001de7b3487021021c2245",
+  "source": "Sealed ready-prefix candidate executable becomes this experiment's baseline. Its Git tree equals the complete merged main tree. Every timed observation is new.",
+  "merged_main": "dc1fd149032c586aeb5334095f6862d935b1c8fd",
+  "identical_complete_git_tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68"
+}

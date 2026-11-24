@@ -1,0 +1,9 @@
+{
+  "state": "superseded-before-acquisition",
+  "reason": "main incorporated ready-prefix. Compare only newly integrated code to the merged full main tree.",
+  "observations": 0,
+  "warmups": 0,
+  "resource_preflights": 0,
+  "standalone_candidate_build": "interrupted after ~150s",
+  "replacement": "../tail-lookup-on-main/protocol.md"
+}

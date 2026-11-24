@@ -1,0 +1,10 @@
+{
+  "binary_sha256": "127f86c2fe5620c497123e037294ed5a59a6ef7db2b37379f7b90fbd7f70f0c5",
+  "function": "calc_flow::operator::asof::finalize::<impl calc_flow::operator::asof::StreamAsofJoinOperator>::prepare_output",
+  "function_size_bytes": 11415,
+  "instruction_count": 2171,
+  "note": "The caller includes other settlement work. Instruction mnemonics omit operands and relocation targets. Neither code size nor this hash counts dynamically executed right-timestamp reads.",
+  "opcode_sequence_sha256": "e715a5a04322749b269d24ea4567155e0ed15a8268338a6bd422a54f9155cfca",
+  "start": "0000000000640360",
+  "text_section_sha256": "de8e682bcad4e271a4f9f9bed7041d3f3150dfe9c27ec8589a65473860cde5bb"
+}

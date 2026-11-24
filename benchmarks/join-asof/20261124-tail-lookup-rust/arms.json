@@ -1,0 +1,29 @@
+{
+  "build_tools": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+  "cpu_model": "13th Gen Intel(R) Core(TM) i9-13900HX",
+  "merged_main_baseline": "dc1fd149032c586aeb5334095f6862d935b1c8fd",
+  "merged_main_tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68",
+  "precollection_source_hashes_sha256": "f11a53b7d09eb01c44dab1604fbedf99be5352c35e1edc528d72c774da36e052",
+  "product_diff": [
+    "crates/calc-flow/src/operator/asof/columnar/state.rs",
+    "crates/calc-flow/src/operator/asof/columnar/tests.rs"
+  ],
+  "products": {
+    "baseline": {
+      "binary_sha256": "127f86c2fe5620c497123e037294ed5a59a6ef7db2b37379f7b90fbd7f70f0c5",
+      "build_seconds": 498,
+      "revision": "a21d3eed7088795763f511d9aed2fd81920e8201",
+      "source_tree": "baa60facceb45bbbbd1789c915fc36a7dce15156",
+      "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68"
+    },
+    "candidate": {
+      "binary_sha256": "a28683cf67ddaf61dc66c83786b45661382bf338ff0d50545972dc96e4d58696",
+      "build_seconds": 570,
+      "revision": "f34040ea135004021bbc1f9ca83b186d2edb8d0f",
+      "source_tree": "908f9ac310b8044fa77662723c2a60a9a1e30156",
+      "tree": "307532292b498c4bdb247a548cb2a003cd849dec"
+    }
+  },
+  "psutil": "7.2.2",
+  "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:16:10) [GCC 11.2.0]"
+}

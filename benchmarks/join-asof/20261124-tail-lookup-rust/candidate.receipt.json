@@ -1,0 +1,101 @@
+{
+  "revision": "f34040ea135004021bbc1f9ca83b186d2edb8d0f",
+  "tree": "307532292b498c4bdb247a548cb2a003cd849dec",
+  "source_tree": "908f9ac310b8044fa77662723c2a60a9a1e30156",
+  "source_directory": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24",
+  "build_seconds": 570,
+  "binary_sha256": "a28683cf67ddaf61dc66c83786b45661382bf338ff0d50545972dc96e4d58696",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+  "files": {
+    "Cargo.lock": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+    "crates/calc-flow/benches/stream_asof_perf.rs": "9db82b971f3a5c716b7896df8d4db11a8c8fb6f46ff4eaed3c9fa1264e8142f2",
+    "scripts/benchmark_suite/asof.py": "7c9706659f4d8f30055f1e37c60c16cccadf0b2d9455b35ac689e9c9493eebde",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294"
+  },
+  "environment": {
+    "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo",
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": null,
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTC_WRAPPER": null,
+    "CARGO_PROFILE_BENCH_LTO": null,
+    "CARGO_PROFILE_BENCH_CODEGEN_UNITS": null
+  },
+  "cargo_targets": {
+    "calc_flow": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24/crates/calc-flow#2026.11.14",
+      "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24/crates/calc-flow/Cargo.toml",
+      "target": {
+        "kind": [
+          "lib"
+        ],
+        "crate_types": [
+          "lib"
+        ],
+        "name": "calc_flow",
+        "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24/crates/calc-flow/src/lib.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": true,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [
+        "benchmark-internals"
+      ],
+      "filenames": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/libcalc_flow-40022fa2d6baf386.rlib",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/libcalc_flow-40022fa2d6baf386.rmeta"
+      ],
+      "executable": null,
+      "fresh": false
+    },
+    "stream_asof_perf": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24/crates/calc-flow#2026.11.14",
+      "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24/crates/calc-flow/Cargo.toml",
+      "target": {
+        "kind": [
+          "bench"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "stream_asof_perf",
+        "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-prefix-rust-timing-nov24/crates/calc-flow/benches/stream_asof_perf.rs",
+        "edition": "2024",
+        "required-features": [
+          "benchmark-internals"
+        ],
+        "doc": false,
+        "doctest": false,
+        "test": false
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": true
+      },
+      "features": [
+        "benchmark-internals"
+      ],
+      "filenames": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/stream_asof_perf-927bbd712089d691"
+      ],
+      "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/stream_asof_perf-927bbd712089d691",
+      "fresh": false
+    }
+  }
+}
