@@ -1,4 +1,4 @@
-"""Single-core public interval join comparison for the bucket-range candidate."""
+"""Single-core public interval join comparison for the admitted-row iterator."""
 
 from __future__ import annotations
 
@@ -15,11 +15,10 @@ from scripts.benchmark_suite.catalog import engine_cases
 from scripts.benchmark_suite.process import ROOT, install
 from scripts.benchmark_suite.release import load_release
 from scripts.sparse_changelog_ci import _resource, guarded_measure
-from scripts.sparse_changelog_wheels import _api, _wheel
+from scripts.sparse_changelog_wheels import _api, seal
 from scripts.toolkit import (
     linear_percentile,
     sha256_file,
-    wheel_native_sha256,
     write_json,
 )
 
@@ -31,7 +30,7 @@ def case():
     return chosen
 
 
-BUDGET = 250
+BUDGET = 300
 ROW_COUNT = 10998080
 SIDES = ("baseline", "candidate")
 CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
@@ -57,6 +56,10 @@ def acquire() -> None:
     started = datetime.fromisoformat(job["started_at"]).timestamp()
     record = {
         **registration,
+        "candidate": {
+            "requested_sha": os.environ["CANDIDATE_SHA"],
+            "artifact": int(os.environ["CANDIDATE_ARTIFACT"]),
+        },
         "workflow_sha": os.environ["GITHUB_SHA"],
         "job": job["id"],
         "workflow_run": run,
@@ -67,40 +70,33 @@ def acquire() -> None:
         "requirements_sha256": sha256_file(ROOT / "benchmarks/requirements.lock"),
     }
     write_json(OUT / "registration.json", record, exclusive=True)
+    if any(
+        sha256_file(ROOT / path) != digest
+        for path, digest in record["source_hashes"].items()
+    ):
+        raise ValueError("registered measurement sources changed")
     for side in SIDES:
-        manifest = record[side]
-        metadata = json.loads(
-            _api(repository, f"actions/artifacts/{manifest['artifact']}")
+        requested = record[side]
+        manifest = seal(
+            repository, requested["artifact"], requested["requested_sha"], OUT / side
         )
         if (
-            metadata["digest"] != manifest["artifact_digest"]
-            or metadata["expired"]
-            or metadata["workflow_run"]["id"] != manifest["workflow_run"]
-            or metadata["workflow_run"]["head_sha"] != manifest["requested_sha"]
+            side == "baseline"
+            and requested["artifact_digest"] != manifest["artifact_digest"]
         ):
-            raise ValueError(f"published {side} artifact identity changed")
-        directory = OUT / side
-        directory.mkdir()
-        wheel = _wheel(
-            _api(repository, f"actions/artifacts/{manifest['artifact']}/zip"),
-            manifest["artifact_digest"],
-            directory,
-        )
-        write_json(
-            directory / "release.json",
-            {
-                **manifest,
-                "wheel": wheel.name,
-                "wheel_sha256": sha256_file(wheel),
-                "native_sha256": wheel_native_sha256(wheel),
-            },
-        )
-
-        load_release(directory / "release.json")
+            raise ValueError("unexpected published baseline")
+        load_release(OUT / side / "release.json")
 
 
 async def observe() -> None:
     releases = {side: load_release(OUT / side / "release.json") for side in SIDES}
+    if any(
+        releases["baseline"][key] != releases["candidate"][key]
+        for key in ("image", "image_version")
+    ):
+        raise ValueError("the two official wheel build images differ")
+    if releases["baseline"]["native_sha256"] == releases["candidate"]["native_sha256"]:
+        raise ValueError("expected two independent native builds")
     sites = {}
     for side, release in releases.items():
         site = await install(release, OUT / side)

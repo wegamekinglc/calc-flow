@@ -20,6 +20,6 @@ class BenchCase(unittest.TestCase):
         self.assertEqual(case["scope"], "ready-enqueue-to-arrow/retained-interval-v2")
 
     def test_deadline_counts_prior_setup_and_keeps_worker_cleanup_time(self):
-        self.assertEqual(evidence.remaining_seconds(100, 120), 250 - 20 - 45)
+        self.assertEqual(evidence.remaining_seconds(100, 120), 300 - 20 - 45)
         with self.assertRaises(TimeoutError):
-            evidence.remaining_seconds(100, 306)
+            evidence.remaining_seconds(100, 356)

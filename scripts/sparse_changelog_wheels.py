@@ -69,17 +69,25 @@ def _api(repository: str, path: str) -> bytes:
         allowed, path
     ):
         raise ValueError("invalid repository or Linux CI evidence endpoint")
-    # Only fixed GitHub GET endpoints above reach the resolved gh executable.
+    options = []
+    if path.endswith("/logs") and b"--allow-escape-sequences" in _capture_gh_api(
+        "--help"
+    ):
+        options.append("--allow-escape-sequences")
+    return _capture_gh_api(
+        "--hostname",
+        "github.com",
+        "--method",
+        "GET",
+        *options,
+        f"repos/{repository}/{path}",
+    )
+
+
+def _capture_gh_api(*arguments: str) -> bytes:
+    # Capture fixed help and allowlisted GETs in memory, including raw CI logs.
     return subprocess.check_output(  # noqa: S603  # nosec B603  # nosemgrep
-        [
-            require_executable("gh"),
-            "api",
-            "--hostname",
-            "github.com",
-            "--method",
-            "GET",
-            f"repos/{repository}/{path}",
-        ],
+        [require_executable("gh"), "api", *arguments],
         shell=False,
         timeout=60,
     )
