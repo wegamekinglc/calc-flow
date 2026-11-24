@@ -171,6 +171,51 @@ struct RightBucket {
     identities: LocatorColumn,
 }
 
+const SELECTION_ROW_BYTES: usize = 72;
+const MIN_PROBES_PER_GROUP: usize = 4;
+// While probing, only the two locator columns, validity bytes, and group offsets are live.
+const _: () = assert!(
+    2 * size_of::<RowLocator>()
+        + size_of::<bool>()
+        + size_of::<usize>().div_ceil(MIN_PROBES_PER_GROUP)
+        <= SELECTION_ROW_BYTES
+);
+
+struct ProbeOffsets {
+    groups: usize,
+    ends: Vec<usize>,
+}
+
+impl ProbeOffsets {
+    fn visible_end(
+        &mut self,
+        group: usize,
+        rows: &[RowLocator],
+        visible: impl Fn(&RowLocator) -> bool,
+    ) -> usize {
+        let search = |suffix: &[RowLocator]| {
+            #[cfg(test)]
+            LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
+            suffix.partition_point(&visible)
+        };
+        if self.groups == 0 || rows.len() < MIN_PROBES_PER_GROUP {
+            return search(rows);
+        }
+        if self.ends.is_empty() {
+            self.ends = vec![0; self.groups];
+        }
+        let end = &mut self.ends[group];
+        // Pending time is nondecreasing per group. Bound the walk when time jumps.
+        let suffix = &rows[*end..];
+        let adjacent = suffix.len().min(2);
+        *end += suffix[..adjacent]
+            .iter()
+            .position(|row| !visible(row))
+            .unwrap_or_else(|| adjacent + search(&suffix[adjacent..]));
+        *end
+    }
+}
+
 pub(in crate::operator::asof) struct ColumnarState {
     pub(super) name: String,
     pub(super) spec: StreamAsofJoinSpec,
@@ -1109,7 +1154,7 @@ impl ColumnarState {
         columns: usize,
     ) -> usize {
         let runs = self.left_runs.len() + self.right_runs.len();
-        rows.saturating_mul(72 + columns.saturating_mul(8))
+        rows.saturating_mul(SELECTION_ROW_BYTES + columns.saturating_mul(8))
             .saturating_add(runs.saturating_mul(128 + columns.saturating_mul(64)))
             .saturating_add(4096)
     }
@@ -1121,17 +1166,23 @@ impl ColumnarState {
         let left = self.pending.rows()[..count].to_vec();
         let mut right = Vec::with_capacity(count);
         let mut validity = Vec::with_capacity(count);
+        let groups = self.right_by_key.len();
+        let reuse = groups <= count / MIN_PROBES_PER_GROUP;
+        #[cfg(feature = "benchmark-internals")]
+        let reuse = reuse && !self.legacy_latest_lookup;
+        let mut offsets = ProbeOffsets {
+            groups: if reuse { groups } else { 0 },
+            ends: Vec::new(),
+        };
         for locator in left.iter().copied() {
             let run = &self.left_runs[&locator.run];
             let group = run.group(locator).index();
             let time = run.time(locator);
-            let candidate = self
-                .right_by_key
-                .get(group)
-                .and_then(|bucket| self.candidate(bucket, time));
+            let candidate = self.candidate(group, time, &mut offsets);
             validity.push(candidate.is_some());
             right.push(candidate.unwrap_or_default());
         }
+        drop(offsets);
         Selection::new(left, right, validity)
     }
 
@@ -1287,13 +1338,13 @@ impl ColumnarState {
         self.sync_reservation();
     }
 
-    fn candidate(&self, bucket: &RightBucket, time: i64) -> Option<RowLocator> {
+    fn candidate(&self, group: usize, time: i64, offsets: &mut ProbeOffsets) -> Option<RowLocator> {
         let right_time = |locator: RowLocator| {
             #[cfg(test)]
             CANDIDATE_TIME_READS.set(CANDIDATE_TIME_READS.get() + 1);
             self.right_runs[&locator.run].time(locator)
         };
-        let rows = bucket.payloads.rows();
+        let rows = self.right_by_key.get(group)?.payloads.rows();
         let latest = rows.last()?;
         let direct = || {
             let timestamp = right_time(*latest);
@@ -1310,9 +1361,7 @@ impl ColumnarState {
         let (locator, timestamp) = if let Some(latest) = direct {
             latest
         } else {
-            #[cfg(test)]
-            LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
-            let end = rows.partition_point(|locator| right_time(*locator) <= time);
+            let end = offsets.visible_end(group, rows, |locator| right_time(*locator) <= time);
             let locator = *rows.get(end.checked_sub(1)?)?;
             (locator, right_time(locator))
         };
