@@ -888,3 +888,5 @@ fn test_projection_interleaves_multiple_owners_and_explicit_unmatched_validity()
         vec![Some(1), Some(2), None]
     );
 }
+
+mod charge;
