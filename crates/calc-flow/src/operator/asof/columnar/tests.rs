@@ -770,6 +770,70 @@ fn test_one_byte_short_state_pool_rejects_without_partial_key_or_run() {
 }
 
 #[test]
+fn test_single_run_projection_reuses_indices_across_asof_columns() {
+    let declaration = spec(2, 4096, 8 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let mut state = state(&declaration, &pool);
+    let left_rows = (0..1024)
+        .map(|t| (i64::from(t != 1022), t, t, None))
+        .collect::<Vec<_>>();
+    let right_rows = (4..1024)
+        .step_by(4)
+        .flat_map(|t| [(1, t, 1, None), (1, t, 2, None)])
+        .collect::<Vec<_>>();
+    let left = record(&left_rows);
+    admit(&mut state, 1, &record(&right_rows)).unwrap();
+    admit(&mut state, 0, &left).unwrap();
+    let selection = state.select(None, true, 1024).unwrap();
+    let schema = Arc::new(
+        output_schema(&declaration)
+            .project(&[0, 1, 2, 4, 5, 6])
+            .unwrap(),
+    );
+    let projection = [(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (1, 2)];
+    let mut output = None;
+    let measured = allocation_counter::measure(|| {
+        output = Some(
+            state
+                .materialize(&selection, &schema, Some(&projection))
+                .unwrap(),
+        );
+    });
+    let matches = (0i64..1024)
+        .map(|time| (time >= 4 && time != 1022 && time % 4 <= 2).then_some(time - time % 4));
+    let mut columns = left.columns()[..3].to_vec();
+    columns.push(Arc::new(
+        matches
+            .clone()
+            .map(|m| m.map(|_| 1))
+            .collect::<Int64Array>(),
+    ));
+    columns.push(Arc::new(
+        matches
+            .clone()
+            .collect::<TimestampMicrosecondArray>()
+            .with_timezone("UTC"),
+    ));
+    columns.push(Arc::new(
+        matches.map(|m| m.map(|_| 2)).collect::<Int64Array>(),
+    ));
+    let output = output.unwrap();
+    assert_eq!(output, RecordBatch::try_new(schema, columns).unwrap());
+    let keys = output
+        .column(3)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(
+        keys.values()[0],
+        0,
+        "a missing match must not copy a right key into the null slot"
+    );
+    eprintln!("1024-row single-run ASOF projection: {measured:?}");
+    assert!(measured.bytes_total <= 80 * 1024, "{measured:?}");
+}
+
+#[test]
 fn test_projection_interleaves_multiple_owners_and_explicit_unmatched_validity() {
     let declaration = spec(0, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
