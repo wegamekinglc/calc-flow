@@ -767,7 +767,7 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::{
-        array::{Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+        array::{Array, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
         datatypes::{DataType, Field, Schema, TimeUnit},
         record_batch::RecordBatch,
     };
@@ -842,6 +842,59 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn partial_numeric_tick_uses_the_same_allocation_path_as_complete_ticks() {
+        let mut plan = plan();
+        plan.groups = vec![TypedGroupPlan::Numeric {
+            input_index: 2,
+            frame: TypedFrame::Rows(20),
+            dispersion: false,
+        }];
+        plan.outputs.truncate(1);
+        let entities = 64;
+        let names: Vec<_> = (0..entities)
+            .map(|index| format!("symbol-{index}"))
+            .collect();
+        let measure = |rows: i32| {
+            let times: Vec<_> = (0..rows).map(i64::from).collect();
+            let values: Vec<_> = (0..rows).map(|row| Some(f64::from(row))).collect();
+            let fixture = input(&times, &values);
+            let keys = names.iter().map(String::as_str).cycle().take(times.len());
+            let mut columns = fixture.columns().to_vec();
+            columns[1] = Arc::new(StringArray::from_iter_values(keys));
+            let fixture = RecordBatch::try_new(fixture.schema(), columns).unwrap();
+            let mut state = RollingKernelState::default();
+            let mut update = None;
+            let allocation = allocation_counter::measure(|| {
+                update = Some(
+                    plan.prepare_slab_ordered_stream(&mut state, &fixture, "r", None)
+                        .unwrap(),
+                );
+            });
+            let mut update = update.unwrap();
+            let output = update.take_columns();
+            let means = output[0].as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(means.len(), times.len());
+            assert_eq!(means.null_count(), 0);
+            for row in 0..rows {
+                let oldest = row - (row / entities).min(19) * entities;
+                let expected = f64::from(oldest + row) / 2.0;
+                assert_eq!(
+                    means.value(usize::try_from(row).unwrap()).to_bits(),
+                    expected.to_bits()
+                );
+            }
+            update.rollback(&mut state);
+            assert!(state.slab.is_none());
+            allocation
+        };
+        let complete = measure(9_984);
+        let partial = measure(10_000);
+        eprintln!("complete {complete:?}; partial {partial:?}");
+        assert!(complete.count_total < 1_024);
+        assert!(partial.count_total <= complete.count_total + 64);
     }
 
     #[test]

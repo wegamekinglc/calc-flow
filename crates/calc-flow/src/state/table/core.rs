@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     mem::size_of,
     ops::Range,
     sync::Arc,
@@ -2071,16 +2071,18 @@ impl StateTable {
         !self.checkpointing
             && !order.is_empty()
             && ids.len() >= order.len()
-            && ids.len().is_multiple_of(order.len())
             && values.len() >= ids.len()
     }
 
     fn full_tick_order_is_valid(order: &[EntityId], ids: &[EntityId]) -> bool {
-        !order
-            .iter()
-            .enumerate()
-            .any(|(index, entity)| order[..index].contains(entity))
-            && ids.chunks(order.len()).all(|chunk| chunk == order)
+        if !ids.chunks(order.len()).all(|tick| order.starts_with(tick)) {
+            return false;
+        }
+        if order.windows(2).all(|pair| pair[0].index < pair[1].index) {
+            return true;
+        }
+        let mut seen = HashSet::with_capacity(order.len());
+        order.iter().all(|entity| seen.insert(entity.index))
     }
 
     fn full_tick_entities_are_valid(&self, order: &[EntityId]) -> bool {
