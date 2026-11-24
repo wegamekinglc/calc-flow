@@ -239,6 +239,38 @@ fn test_columnar_restore_rejects_forged_run_charges() {
 }
 
 #[test]
+fn test_candidate_reuses_visible_tail_time_at_inclusive_tolerance() {
+    let declaration = spec(1, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let max = i64::MAX;
+    let reads = [(max - 3, 2), (max, 3)].map(|(left_time, expected_index)| {
+        let mut state = state(&declaration, &pool);
+        let right = record(&[
+            (1, i64::MIN, 0, Some("first")),
+            (1, max - 4, 1, Some("older tie")),
+            (1, max - 4, 2, Some("newer tie")),
+            (1, max - 1, 3, None),
+        ]);
+        admit(&mut state, 1, &right).unwrap();
+        admit(&mut state, 0, &record(&[(1, left_time, 0, None)])).unwrap();
+        super::state::CANDIDATE_TIME_READS.set(0);
+        let selection = select(&state, None, true, 1);
+        let reads = super::state::CANDIDATE_TIME_READS.replace(0);
+        assert_eq!(selection.matched(), 1);
+        let output = state
+            .materialize(&selection, &output_schema(&declaration), None)
+            .unwrap();
+        let expected_right = right.slice(expected_index, 1);
+        assert_eq!(&output.columns()[4..], expected_right.columns());
+        reads
+    });
+    let [historical, latest] = reads;
+    eprintln!("ASOF candidate right timestamp reads: historical={historical}, latest={latest}");
+    assert!(historical <= 5);
+    assert_eq!(latest, 1);
+}
+
+#[test]
 fn test_candidate_is_greatest_time_and_sequence_inside_inclusive_tolerance() {
     let declaration = spec(5, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
