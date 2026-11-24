@@ -1,0 +1,15 @@
+{
+  "base": "983f57435639037f40fb8a9d30aa1f33567ccd16",
+  "head": "6269bda3b1516902a88c5dd0c5beeb790720830d",
+  "case": "asof",
+  "processor": {
+    "system": "Linux",
+    "node": "chengli-i9",
+    "release": "5.15.167.4-microsoft-standard-WSL2",
+    "version": "#1 SMP Tue Nov 5 00:21:55 UTC 2024",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "protocol_sha256": "6eb350ce19875d5840fc1233bc3553fa0f9f241cd7faf08d55f4781af7a4a07a",
+  "adapter_sha256": "836c1aadd8464de70de3cb6b496349e0b21542156195b3afd14367ad164451e9"
+}

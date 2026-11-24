@@ -1,0 +1,57 @@
+PR #728 head 6269bda3b1516902a88c5dd0c5beeb790720830d
+source tree be1441f43b399a20d8434186788e59fcdc07a625
+Local TDD: 576 left probes, 8,064 to 2,352 right timestamp reads; 29 columnar tests passed; 3 production output-budget tests passed; legacy guard passed with benchmark-internals.
+Local shell sessions 2866 / 11959 ended before results could be collected. No local integration or Clippy exit code is available. The Clippy log ended while waiting for the build lock.
+
+https://github.com/wegamekinglc/calc-flow/actions/runs/45445916677/job/138629642406
+Run cargo clippy --workspace --lib --bins --tests --examples --all-features -- -D warnings | completed | success | 2026-11-24T17:17:52Z
+
+https://github.com/wegamekinglc/calc-flow/actions/runs/45445916557/job/138629661406
+Run Windows clippy (calc-flow) | completed | success | 2026-11-24T17:19:40Z
+Run Windows clippy (connectors, non-kafka) | completed | success | 2026-11-24T17:23:50Z
+
+Linux PR Rust harness: completed | success | 2026-11-24T17:37:11Z
+https://github.com/wegamekinglc/calc-flow/actions/runs/45445916677/job/138629642406
+
+Exact excerpts from Linux completed job 138629642406 (ANSI colors omitted)
+2026-11-24T17:36:11.6077541Z      Running tests/stream_asof_join_boundaries.rs (target/debug/deps/stream_asof_join_boundaries-c802b14ad0971aef)
+2026-11-24T17:36:11.6189605Z test native_constructor_rejects_nullable_wrong_time_and_unordered_identity_types ... ok
+2026-11-24T17:36:11.6323581Z test composite_keys_and_numeric_then_utf8_sequence_choose_the_same_row ... ok
+2026-11-24T17:36:11.6334309Z test time_extremes_and_maximum_tolerance_do_not_wrap_or_end_at_max_watermark ... ok
+2026-11-24T17:36:11.6336425Z test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+2026-11-24T17:36:11.6349839Z      Running tests/stream_asof_join_properties.rs (target/debug/deps/stream_asof_join_properties-c8009a86c9cb60c6)
+2026-11-24T17:36:11.7355922Z test backward_asof_is_inclusive_left_preserving_and_final ... ok
+2026-11-24T17:36:11.7359274Z test materialization::typed_sequence_encoding_orders_signed_values_and_utf8 ... ok
+2026-11-24T17:36:11.7363592Z test materialization::work_pool_fails_before_exceeding_its_reservation ... ok
+2026-11-24T17:36:11.7490814Z test duplicate_or_cancelled_admission_leaves_no_partial_state ... ok
+2026-11-24T17:36:11.7639944Z test typed_ties_and_legal_batch_interleavings_match_independent_oracle ... ok
+2026-11-24T17:36:11.8096359Z test shuffled_rows_across_watermark_and_restore_match_oracle ... ok
+2026-11-24T17:36:11.8349225Z test composite_keys_and_string_sequences_match_oracle_after_restore ... ok
+2026-11-24T17:36:11.8496189Z test materialization::bounded_candidate_join_preserves_unmatched_and_reused_right_rows ... ok
+2026-11-24T17:36:11.8498289Z test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+2026-11-24T17:36:47.8830738Z      Running tests/stream_asof_join_state.rs (target/debug/deps/stream_asof_join_state-4f54b0b8eff7ad48)
+2026-11-24T17:36:47.9116557Z test duplicate_identity_precedes_even_unavailable_identity_workspace ... ok
+2026-11-24T17:36:47.9172201Z test duplicate_in_batch_is_rejected_atomically ... ok
+2026-11-24T17:36:47.9181061Z test empty_input_and_eof_require_no_identity_state_budget ... ok
+2026-11-24T17:36:47.9199210Z test expired_payload_retains_on_time_identity_until_own_watermark ... ok
+2026-11-24T17:36:47.9220333Z test a_second_ipc_schema_is_rejected_before_arrow_conversion ... ok
+2026-11-24T17:36:47.9220873Z test cancellation_interrupts_unacknowledged_asof_delivery ... ok
+2026-11-24T17:36:47.9221369Z test invalid_flat_payload_parameters_are_rejected_at_declaration ... ok
+2026-11-24T17:36:47.9225124Z test late_error_precedes_duplicate_and_keeps_admission_atomic ... ok
+2026-11-24T17:36:47.9245209Z test failed_restore_is_atomic_and_reset_does_not_mutate_shared_segments ... ok
+2026-11-24T17:36:47.9245913Z test malformed_ipc_body_length_is_rejected_before_body_allocation ... ok
+2026-11-24T17:36:47.9256919Z test malformed_ipc_schema_is_rejected_before_arrow_schema_conversion ... ok
+2026-11-24T17:36:47.9258280Z test malformed_metadata_does_not_copy_unbounded_error_values ... ok
+2026-11-24T17:36:47.9261184Z test nested_payload_without_bounded_materialization_accounting_is_rejected ... ok
+2026-11-24T17:36:47.9317396Z test flat_payload_types_roundtrip_through_checkpoint_and_arrow_output ... ok
+2026-11-24T17:36:47.9319935Z test repeated_snapshot_restore_keeps_pending_and_terminal_does_not_flush ... ok
+2026-11-24T17:36:47.9352424Z test restored_identity_only_encoding_is_validated_without_payload ... ok
+2026-11-24T17:36:47.9360923Z test state_rows_are_shared_and_rejected_batch_leaves_no_prefix ... ok
+2026-11-24T17:36:47.9403452Z test terminal_restore_rejects_new_input ... ok
+2026-11-24T17:36:47.9411454Z test repeated_wide_candidate_is_finalized_in_bounded_chunks ... ok
+2026-11-24T17:36:47.9425198Z test unmatched_fixed_binary_output_respects_workspace_limit ... ok
+2026-11-24T17:36:47.9427686Z test wide_admission_reserves_workspace_before_committing_state ... ok
+2026-11-24T17:36:47.9551733Z test tiny_slice_does_not_retain_its_large_utf8_backing_allocation ... ok
+2026-11-24T17:36:47.9757000Z test direct_checkpoint_rebases_nonincreasing_epochs_for_cold_restore ... ok
+2026-11-24T17:36:48.3342478Z test schema_metadata_is_reserved_before_encoding_and_after_duplicate_validation ... ok
+2026-11-24T17:36:48.3346055Z test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s

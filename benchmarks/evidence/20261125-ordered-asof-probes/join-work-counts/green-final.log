@@ -1,0 +1,41 @@
+    Blocking waiting for file lock on artifact directory
+   Compiling calc-flow v2026.11.14 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/reduce-join-range-gather-20261125/crates/calc-flow)
+    Finished `test` profile [unoptimized] target(s) in 8m 13s
+     Running unittests src/lib.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/join-admission-iterator-nov24/target/rust-work/debug/deps/calc_flow-602417164309e0d6)
+
+running 32 tests
+band projection eligibility allocated 0 bytes
+test operator::join::hot::tests::band_projection_admission_does_not_allocate_a_query ... ok
+test operator::join::hot::tests::projected_gather::test_contiguous_product_borrows_operands_and_detaches_sliced_nullable_sequences ... ok
+test operator::join::hot::tests::admission_tests::hot_admission_enforces_state_row_limits ... ok
+test operator::join::hot::tests::hot_multi_static_enforces_the_match_limit_before_emitting ... ok
+test operator::join::hot::tests::admission_tests::hot_no_matches_emit_an_empty_output ... ok
+test operator::join::hot::tests::admission_tests::hot_admission_drops_late_and_null_rows_with_metrics ... ok
+test operator::join::hot::tests::projected_gather::test_dense_product_on_sliced_nullable_operands_preserves_ieee_values ... ok
+test operator::join::hot::tests::projected_gather::test_band_gathers_only_its_four_operands ... ok
+test operator::join::hot::tests::admission_tests::hot_output_respects_the_edge_row_budget ... ok
+test operator::join::hot::tests::projected_gather::test_band_budget_charges_emitted_fields_and_retries_the_whole_input ... ok
+test operator::join::hot::tests::band_matches_subsecond_offsets_and_rejects_excess_pairs_before_delivery ... ok
+test operator::join::hot::tests::hot_static_right_input_uses_ingress_order ... ok
+test operator::join::hot::tests::admission_tests::hot_watermark_migration_evicts_expired_history ... ok
+test operator::join::hot::tests::hot_multi_accumulates_same_side_batches_before_joining ... ok
+test operator::join::hot::tests::hot_multi_continues_after_the_first_pair_without_replaying_matches ... ok
+test operator::join::hot::tests::projected_gather::test_equi_gathers_only_its_three_operands ... ok
+test operator::join::hot::tests::hot_band_emits_requested_input_columns ... ok
+test operator::join::hot::tests::projected_gather::test_nullable_products_preserve_bits_and_pair_order_under_the_final_byte_budget ... ok
+test operator::join::hot::tests::test_left_semi_excludes_inner_pair_projection_for_hot_schemas ... ok
+test operator::join::hot::tests::projected_gather::test_dense_product_keeps_the_nullable_path_nan_bits_across_chunk_sizes ... ok
+test operator::join::hot::tests::hot_join_emits_the_complete_downstream_schema ... ok
+test operator::join::hot::tests::projected_gather::test_queue_admission_reuses_measured_join_envelopes ... ok
+test operator::join::hot::tests::projected_gather::test_static_product_uses_contiguous_inputs_and_owns_delivered_sequences ... ok
+test operator::join::hot::tests::test_direct_end_preserves_deferred_left_frontier_without_materializing ... ok
+test operator::join::hot::tests::admission_tests::watermark_checkpoint_restores_compacted_locator_pages ... ok
+test operator::join::hot::tests::projected_gather::test_cancelled_projected_delivery_replays_from_the_committed_sequence ... ok
+test operator::join::hot::tests::test_deferred_left_admits_new_symbol_in_short_record_and_restores ... ok
+test operator::join::hot::tests::hot_multi_native_checkpoint_preserves_a_pending_side ... ok
+test operator::join::hot::tests::hot_multi_band_native_checkpoint_restores_history_and_output_sequence ... ok
+test operator::join::hot::tests::hot_multi_native_checkpoint_restores_history_and_output_sequence ... ok
+test operator::join::hot::tests::hot_band_uses_large_output_batches ... ok
+test operator::join::hot::tests::hot_multi_native_checkpoint_accepts_large_static_history ... ok
+
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 3258 filtered out; finished in 3.61s

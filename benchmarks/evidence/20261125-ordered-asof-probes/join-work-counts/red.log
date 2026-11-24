@@ -1,0 +1,53 @@
+   Compiling arrow-ipc v59.2.0 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/reduce-join-range-gather-20261125/vendor/arrow-ipc)
+   Compiling arrow v59.2.0
+   Compiling datafusion-common v55.0.0
+   Compiling datafusion-expr-common v55.0.0
+   Compiling datafusion-physical-expr-common v55.0.0
+   Compiling datafusion-functions-window-common v55.0.0
+   Compiling datafusion-functions-aggregate-common v55.0.0
+   Compiling datafusion-expr v55.0.0
+   Compiling datafusion-physical-expr v55.0.0
+   Compiling datafusion-execution v55.0.0
+   Compiling datafusion-functions v55.0.0
+   Compiling datafusion-functions-aggregate v55.0.0
+   Compiling datafusion-functions-window v55.0.0
+   Compiling datafusion-optimizer v55.0.0
+   Compiling datafusion-physical-plan v55.0.0
+   Compiling datafusion-physical-expr-adapter v55.0.0
+   Compiling datafusion-functions-nested v55.0.0
+   Compiling datafusion-sql v55.0.0
+   Compiling datafusion-session v55.0.0
+   Compiling datafusion-datasource v55.0.0
+   Compiling datafusion-catalog v55.0.0
+   Compiling datafusion-pruning v55.0.0
+   Compiling datafusion-datasource-csv v55.0.0
+   Compiling datafusion-datasource-arrow v55.0.0
+   Compiling datafusion-datasource-json v55.0.0
+   Compiling datafusion-physical-optimizer v55.0.0
+   Compiling datafusion-catalog-listing v55.0.0
+   Compiling datafusion-functions-table v55.0.0
+   Compiling datafusion v55.0.0
+   Compiling calc-flow v2026.11.14 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/reduce-join-range-gather-20261125/crates/calc-flow)
+    Finished `test` profile [unoptimized] target(s) in 7m 37s
+     Running unittests src/lib.rs (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/join-admission-iterator-nov24/target/rust-work/debug/deps/calc_flow-602417164309e0d6)
+
+running 1 test
+test operator::join::hot::tests::projected_gather::test_static_product_uses_contiguous_inputs_and_owns_delivered_sequences ... FAILED
+
+failures:
+
+---- operator::join::hot::tests::projected_gather::test_static_product_uses_contiguous_inputs_and_owns_delivered_sequences stdout ----
+
+thread 'operator::join::hot::tests::projected_gather::test_static_product_uses_contiguous_inputs_and_owns_delivered_sequences' (24973) panicked at crates/calc-flow/src/operator/join/hot/tests/projected_gather.rs:91:5:
+assertion `left == right` failed
+  left: (128, 24)
+ right: (64, 8)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    operator::join::hot::tests::projected_gather::test_static_product_uses_contiguous_inputs_and_owns_delivered_sequences
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3286 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p calc-flow --lib`

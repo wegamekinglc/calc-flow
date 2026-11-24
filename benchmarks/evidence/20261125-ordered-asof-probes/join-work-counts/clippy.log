@@ -1,0 +1,32 @@
+    Blocking waiting for file lock on build directory
+    Checking arrow-ipc v59.2.0 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/reduce-join-range-gather-20261125/vendor/arrow-ipc)
+    Checking arrow v59.2.0
+    Checking datafusion-common v55.0.0
+    Checking datafusion-expr-common v55.0.0
+    Checking datafusion-physical-expr-common v55.0.0
+    Checking datafusion-functions-window-common v55.0.0
+    Checking datafusion-functions-aggregate-common v55.0.0
+    Checking datafusion-expr v55.0.0
+    Checking datafusion-physical-expr v55.0.0
+    Checking datafusion-execution v55.0.0
+    Checking datafusion-functions v55.0.0
+    Checking datafusion-functions-aggregate v55.0.0
+    Checking datafusion-optimizer v55.0.0
+    Checking datafusion-functions-window v55.0.0
+    Checking datafusion-physical-plan v55.0.0
+    Checking datafusion-physical-expr-adapter v55.0.0
+    Checking datafusion-functions-nested v55.0.0
+    Checking datafusion-sql v55.0.0
+    Checking datafusion-session v55.0.0
+    Checking datafusion-datasource v55.0.0
+    Checking datafusion-catalog v55.0.0
+    Checking datafusion-pruning v55.0.0
+    Checking datafusion-datasource-arrow v55.0.0
+    Checking datafusion-datasource-json v55.0.0
+    Checking datafusion-datasource-csv v55.0.0
+    Checking datafusion-physical-optimizer v55.0.0
+    Checking datafusion-catalog-listing v55.0.0
+    Checking datafusion-functions-table v55.0.0
+    Checking datafusion v55.0.0
+    Checking calc-flow v2026.11.14 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/reduce-join-range-gather-20261125/crates/calc-flow)
+    Finished `dev` profile [unoptimized] target(s) in 11m 27s

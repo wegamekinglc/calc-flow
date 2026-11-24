@@ -1,0 +1,9 @@
+
+running 5 tests
+test pipeline::stream::projection::tests::join::fused_join_preserves_the_declared_consumer_schema ... ok
+test pipeline::stream::projection::tests::join::fused_join_keeps_the_full_output_for_named_union_inputs ... ok
+test pipeline::stream::projection::tests::join::hot_join_fuses_native_final_projection ... ok
+test pipeline::stream::projection::tests::join::execution::fused_join_retains_the_exact_quoted_output_alias ... ok
+test pipeline::stream::projection::tests::join::execution::fused_join_preserves_the_filter_when_delivering_rows ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 3284 filtered out; finished in 0.05s
