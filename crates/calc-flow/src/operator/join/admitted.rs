@@ -2,7 +2,11 @@
 use super::{AdmittedRow, columnar::RowPayload};
 use super::{StreamJoinOperator, operator_error};
 use crate::{Batch, EventTime, Result, batch::TableBatch};
-use datafusion::arrow::{array::ArrayRef, datatypes::SchemaRef, record_batch::RecordBatch};
+use datafusion::arrow::{
+    array::{ArrayRef, BooleanArray},
+    datatypes::SchemaRef,
+    record_batch::RecordBatch,
+};
 use datafusion::execution::memory_pool::MemoryReservation;
 use std::ops::Range;
 #[cfg(test)]
@@ -142,6 +146,7 @@ impl<'a> GroupView<'a> {
         AdmittedRef {
             record: self.payload_at(offset),
             row_id: self.segment.row_id_base + physical as u64,
+            #[cfg(test)]
             event_time: EventTime::from_micros(self.batch.times.get(position)),
             retain: self.batch.retained.get(position),
         }
@@ -242,7 +247,50 @@ impl AdmittedBatch {
     }
 
     pub(super) fn iter(&self) -> RowIter<'_> {
-        RowIter::new(self, 0..self.len)
+        self.iter_range(0..self.len)
+    }
+
+    pub(super) fn iter_range(&self, range: Range<usize>) -> RowIter<'_> {
+        RowIter::new(self, range)
+    }
+
+    pub(super) fn dense_record(&self, range: &Range<usize>) -> Option<(RecordBatch, u64)> {
+        let segment = self.segments.get(self.segment_index(range.start));
+        if segment.sparse_start.is_some() || range.end > segment.range.end {
+            return None;
+        }
+        #[cfg(test)]
+        if segment.payload.is_some() {
+            return None;
+        }
+        let record = &self.table.as_ref()?.batches()[segment.record];
+        if record
+            .columns()
+            .iter()
+            .zip(record.schema_ref().fields())
+            .any(|(column, field)| column.data_type() != field.data_type())
+        {
+            return None;
+        }
+        let offset = self.physical(segment, range.start);
+        let payload = if range.len() == record.num_rows() {
+            record.clone()
+        } else {
+            record.slice(offset, range.len())
+        };
+        Some((payload, segment.row_id_base + offset as u64))
+    }
+
+    pub(super) fn event_times(&self, range: Range<usize>) -> Vec<EventTime> {
+        self.times.as_slice()[range]
+            .iter()
+            .copied()
+            .map(EventTime::from_micros)
+            .collect()
+    }
+
+    pub(super) fn retain_mask(&self, range: Range<usize>) -> BooleanArray {
+        self.retained.array(range)
     }
 
     pub(super) fn begin_record(&mut self, row_id: u64, source_base: usize) -> usize {
@@ -674,6 +722,7 @@ impl<'a> From<&'a RowPayload> for PayloadRef<'a> {
 
 pub(super) struct AdmittedRef<'a> {
     pub(super) record: PayloadRef<'a>,
+    #[cfg(test)]
     pub(super) event_time: EventTime,
     pub(super) row_id: u64,
     pub(super) retain: bool,
