@@ -47,7 +47,11 @@ impl ColumnarState {
         &self,
         limit: usize,
     ) -> Result<BTreeMap<String, StateSegment>> {
-        if self.keys.is_empty() && self.left_runs.is_empty() && self.right_runs.is_empty() {
+        if self.next_run == 0
+            && self.keys.is_empty()
+            && self.left_runs.is_empty()
+            && self.right_runs.is_empty()
+        {
             return Ok(BTreeMap::new());
         }
         let mut segments = BTreeMap::new();
@@ -92,7 +96,15 @@ impl ColumnarState {
             runs: descriptors,
             capacities: self.index_capacities(),
         };
-        let bytes = serde_json::to_vec(&control).map_err(|error| mismatch(&error.to_string()))?;
+        let mut bytes = Vec::new();
+        serde_json::to_writer(codec::BoundedWriter::growable(&mut bytes, limit), &control)
+            .map_err(|error| {
+                super::super::reason(
+                    &self.name,
+                    crate::StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                    &error.to_string(),
+                )
+            })?;
         segments.insert(CONTROL_ID.into(), StateSegment::new(bytes));
         Ok(segments)
     }
@@ -179,9 +191,10 @@ impl ColumnarState {
         if control.next_run == u64::MAX {
             return Err(mismatch("columnar run identifier space is exhausted"));
         }
-        if maximum_run.is_some_and(|run| control.next_run <= run)
-            || (maximum_run.is_none() && control.next_run != 0 && !control.keys)
-        {
+        if !control.keys && control.capacities.pending != 0 {
+            return Err(mismatch("keyless columnar control owns pending capacity"));
+        }
+        if maximum_run.is_some_and(|run| control.next_run <= run) {
             return Err(mismatch(
                 "columnar next run identifier is not beyond retained runs",
             ));
