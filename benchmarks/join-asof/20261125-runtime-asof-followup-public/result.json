@@ -1,0 +1,14 @@
+{
+  "outcome": {
+    "elapsed": 8.312217351049185,
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 6, 'cpu_busy': 0.0, 'siblings': [7], 'sibling_busy': 0.0, 'host_busy': 3.053125, 'available_bytes': 30839443456, 'major_faults': 348, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 8, 'cpu_busy': 72.7, 'siblings': [9], 'sibling_busy': 0.0, 'host_busy': 3.053125, 'available_bytes': 30839443456, 'major_faults': 348, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 14, 'cpu_busy': 1.0, 'siblings': [15], 'sibling_busy': 0.0, 'host_busy': 3.053125, 'available_bytes': 30839443456, 'major_faults': 348, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 20, 'cpu_busy': 7.0, 'siblings': [21], 'sibling_busy': 0.0, 'host_busy': 3.053125, 'available_bytes': 30839443456, 'major_faults': 348, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}]\")])",
+    "state": "stopped"
+  },
+  "resources": {
+    "bad_intervals": 1,
+    "completed_formal_single_arm_samples": 0,
+    "completed_warmups": 0,
+    "intervals": 2
+  },
+  "result": null
+}
