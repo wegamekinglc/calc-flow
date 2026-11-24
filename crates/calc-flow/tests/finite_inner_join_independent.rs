@@ -73,7 +73,7 @@ async fn execute(plan: &BatchExecutionPlan, left: Batch, right: Batch) -> Result
         .clone())
 }
 
-fn pairs(batch: &Batch) -> Vec<(i64, i64)> {
+fn ordered_pairs(batch: &Batch) -> Vec<(i64, i64)> {
     let mut result = Vec::new();
     for record in batch.table_payload().unwrap().batches() {
         let left = record
@@ -95,6 +95,11 @@ fn pairs(batch: &Batch) -> Vec<(i64, i64)> {
                 .zip(right.values().iter().copied()),
         );
     }
+    result
+}
+
+fn pairs(batch: &Batch) -> Vec<(i64, i64)> {
+    let mut result = ordered_pairs(batch);
     result.sort_unstable();
     result
 }
@@ -162,6 +167,30 @@ async fn test_native_null_time_and_key_drop_preserves_exact_six_pairs() -> Resul
             .collect::<Vec<_>>(),
     ));
     assert_eq!(output.table_payload()?.schema(), &expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sparse_segment_boundaries_preserve_interval_match_order() -> Result<()> {
+    let plan = plan(JoinStateLimits::new(128, 1_000_000, 128)?)?;
+    let dense = (0..32)
+        .map(|i| (Some(1), Some(10), 100 - i))
+        .collect::<Vec<_>>();
+    let sparse = (0..48)
+        .map(|i| ((i % 3 != 0).then_some(1), Some(10), 50 - i))
+        .collect::<Vec<_>>();
+    let skipped = [(Some(1), None, -1)];
+    let left = data(&[&[], &dense, &skipped, &sparse, &[]]);
+    let right = data(&[&[(Some(1), Some(13), 700)]]);
+    let output = execute(&plan, left, right).await?;
+    let expected: Vec<_> = dense
+        .iter()
+        .chain(&sparse)
+        .filter(|row| row.0.is_some())
+        .map(|row| (row.2, 700))
+        .collect();
+    assert_eq!(expected.len(), 64);
+    assert_eq!(ordered_pairs(&output), expected);
     Ok(())
 }
 

@@ -10,6 +10,7 @@ fn assert_admitted_accessors(rows: &dyn AdmittedRows) {
         assert!(Arc::ptr_eq(payload.schema_ref(), row.record.schema_ref()));
     }
     assert_admitted_cursors(rows);
+    assert_double_ended_rows(rows);
     for index in [rows.len(), usize::MAX] {
         assert!(
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.row(index))).is_err()
@@ -22,6 +23,31 @@ fn assert_admitted_accessors(rows: &dyn AdmittedRows) {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rows.payload(index))).is_err()
         );
     }
+}
+
+fn assert_double_ended_rows(rows: &dyn AdmittedRows) {
+    let mut iter = rows.iter();
+    let mut indices = 0..rows.len();
+    for step in 0..rows.len() {
+        let (index, row) = if step.is_multiple_of(2) {
+            indices.next().zip(iter.next())
+        } else {
+            indices.next_back().zip(iter.next_back())
+        }
+        .unwrap();
+        let expected = rows.row(index);
+        assert_eq!(row.row_id, expected.row_id);
+        assert_eq!(row.event_time, expected.event_time);
+        assert_eq!(row.retain, expected.retain);
+        assert_eq!(row.record.offset(), expected.record.offset());
+        assert!(std::ptr::eq(
+            row.record.columns(),
+            expected.record.columns()
+        ));
+        assert_eq!(iter.len(), indices.len());
+    }
+    assert!(iter.next().is_none());
+    assert!(iter.next_back().is_none());
 }
 
 fn assert_admitted_cursors(rows: &dyn AdmittedRows) {

@@ -109,20 +109,20 @@ impl Segments {
 }
 
 /// One bound segment, shared by all row/selection reads in a group.
-#[cfg(test)]
 #[derive(Clone, Copy)]
 pub(super) struct GroupView<'a> {
     batch: &'a AdmittedBatch,
     segment: &'a Segment,
 }
-#[cfg(test)]
 impl<'a> GroupView<'a> {
     fn contains(self, position: usize) -> bool {
         self.segment.range.contains(&position)
     }
+    #[cfg(test)]
     fn source_index(self, position: usize) -> usize {
         self.segment.source_base + self.batch.physical(self.segment, position)
     }
+    #[cfg(test)]
     fn payload(self, position: usize) -> PayloadRef<'a> {
         let offset = self.segment.payload_base.map_or_else(
             || self.batch.physical(self.segment, position),
@@ -132,6 +132,9 @@ impl<'a> GroupView<'a> {
     }
     fn row(self, position: usize) -> AdmittedRef<'a> {
         let physical = self.batch.physical(self.segment, position);
+        #[cfg(not(test))]
+        let offset = physical;
+        #[cfg(test)]
         let offset = self
             .segment
             .payload_base
@@ -144,18 +147,19 @@ impl<'a> GroupView<'a> {
         }
     }
     fn payload_at(self, offset: usize) -> PayloadRef<'a> {
-        match &self.segment.payload {
-            Some(payload) => PayloadRef::Payload(payload, offset),
-            None => PayloadRef::Record(
-                &self
-                    .batch
-                    .table
-                    .as_ref()
-                    .expect("borrowed admission table")
-                    .batches()[self.segment.record],
-                offset,
-            ),
+        #[cfg(test)]
+        if let Some(payload) = &self.segment.payload {
+            return PayloadRef::Payload(payload, offset);
         }
+        PayloadRef::Record(
+            &self
+                .batch
+                .table
+                .as_ref()
+                .expect("borrowed admission table")
+                .batches()[self.segment.record],
+            offset,
+        )
     }
 }
 
@@ -367,29 +371,9 @@ impl AdmittedBatch {
 
     #[inline]
     pub(super) fn row(&self, position: usize) -> AdmittedRef<'_> {
-        #[cfg(test)]
-        return self.view(position).row(position);
-        #[cfg(not(test))]
-        {
-            let segment = self.segments.get(self.segment_index(position));
-            let physical = self.physical(segment, position);
-            AdmittedRef {
-                record: PayloadRef::Record(
-                    &self
-                        .table
-                        .as_ref()
-                        .expect("borrowed admission table")
-                        .batches()[segment.record],
-                    physical,
-                ),
-                row_id: segment.row_id_base + physical as u64,
-                event_time: EventTime::from_micros(self.times.get(position)),
-                retain: self.retained.get(position),
-            }
-        }
+        self.view(position).row(position)
     }
 
-    #[cfg(test)]
     fn view(&self, position: usize) -> GroupView<'_> {
         GroupView {
             batch: self,
@@ -696,7 +680,6 @@ pub(super) struct AdmittedRef<'a> {
 }
 
 pub(super) trait AdmittedRows: Sync {
-    #[cfg(test)]
     fn group_view(&self, _position: usize) -> Option<GroupView<'_>> {
         None
     }
@@ -756,7 +739,6 @@ pub(super) trait AdmittedRows: Sync {
 }
 
 impl AdmittedRows for AdmittedBatch {
-    #[cfg(test)]
     fn group_view(&self, position: usize) -> Option<GroupView<'_>> {
         Some(self.view(position))
     }
@@ -887,7 +869,6 @@ pub(super) struct RowIter<'a> {
     #[cfg(feature = "benchmark-internals")]
     visits: Option<&'a mut usize>,
     range: Range<usize>,
-    #[cfg(test)]
     view: Option<GroupView<'a>>,
 }
 impl<'a> RowIter<'a> {
@@ -897,7 +878,6 @@ impl<'a> RowIter<'a> {
             #[cfg(feature = "benchmark-internals")]
             visits: None,
             range,
-            #[cfg(test)]
             view: None,
         }
     }
@@ -912,17 +892,11 @@ impl<'a> RowIter<'a> {
         if let Some(visits) = self.visits.as_deref_mut() {
             *visits = visits.saturating_add(1);
         }
-        #[cfg(test)]
         if !self.view.is_some_and(|view| view.contains(position)) {
             self.view = self.rows.group_view(position);
         }
-        #[cfg(test)]
-        let row = self
-            .view
-            .map_or_else(|| self.rows.row(position), |view| view.row(position));
-        #[cfg(not(test))]
-        let row = self.rows.row(position);
-        row
+        self.view
+            .map_or_else(|| self.rows.row(position), |view| view.row(position))
     }
 }
 impl<'a> Iterator for RowIter<'a> {
