@@ -1,0 +1,5 @@
+{
+  "elapsed_since_job_start_seconds": 32.46596956253052,
+  "error": "ValueError('the two official wheel build images differ')",
+  "state": "stopped"
+}
