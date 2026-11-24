@@ -44,6 +44,83 @@ async fn assert_operand_gathers(
 }
 
 #[tokio::test]
+async fn test_static_product_uses_contiguous_inputs_and_owns_delivered_sequences() {
+    use crate::operator::join::output_gather::COORDINATE_READS;
+
+    let (left, right) = large_static_inputs(70, 4);
+    let left = left.slice(2, 64);
+    let sequence = left.column(1).to_data().buffers()[0].clone();
+    let factors = [3.0, 5.0, 5.0, 7.0];
+    let mut dimensions = right.columns().to_vec();
+    dimensions[1] = Arc::new(Float64Array::from(factors.to_vec()));
+    let right = RecordBatch::try_new(right.schema(), dimensions).unwrap();
+    let mut operator = static_operator(true);
+    let job = job();
+    let context = hot_progress_context(&job, -1, EdgeBudget::new(64, 128).unwrap());
+    let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+    operator
+        .process_data("right", input(right), &context, &mut collector)
+        .await
+        .unwrap();
+    COORDINATE_READS.set(0);
+    reset_join_work();
+    operator
+        .process_data("left", input(left), &context, &mut collector)
+        .await
+        .unwrap();
+    let reads = COORDINATE_READS.get();
+    let takes = join_work().output_column_takes;
+    let output = collector.drain("output");
+    assert_eq!(
+        static_pairs(&output, true),
+        (2_u16..66)
+            .map(|n| (u64::from(n), 2.0 * factors[usize::from(n % 4)]))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(output.len(), 8);
+    for (index, message) in output.iter().enumerate() {
+        let batch = message.as_data().unwrap();
+        assert_eq!(batch.metadata().sequence(), u64::try_from(index).unwrap());
+        assert_eq!(batch.estimated_bytes().unwrap(), 128);
+        let record = &batch.table_payload().unwrap().batches()[0];
+        assert_ne!(
+            record.column(0).to_data().buffers()[0].data_ptr(),
+            sequence.data_ptr()
+        );
+    }
+    assert_eq!((reads, takes), (64, 8));
+}
+
+#[test]
+fn test_contiguous_product_borrows_operands_and_detaches_sliced_nullable_sequences() {
+    let product = band_projection();
+    let price: ArrayRef = Arc::new(Float64Array::from(vec![None, Some(-0.0), Some(3.0)]));
+    let operand = price.slice(1, 2);
+    for logical in [product.left_price, product.right_price] {
+        assert!(Arc::ptr_eq(
+            &product.contiguous_column(logical, Arc::clone(&operand)),
+            &operand
+        ));
+    }
+    let source = UInt64Array::from(vec![Some(42), None, Some(7), Some(8)]);
+    for logical in [product.sequence, product.right_sequence.unwrap()] {
+        let owned = product.contiguous_column(logical, Arc::new(source.slice(1, 2)));
+        let owned = owned.as_primitive::<UInt64Type>();
+        assert_eq!(owned.iter().collect::<Vec<_>>(), [None, Some(7)]);
+        assert_ne!(
+            owned.values().inner().data_ptr(),
+            source.values().inner().data_ptr()
+        );
+        assert_ne!(
+            owned.nulls().unwrap().buffer().data_ptr(),
+            source.nulls().unwrap().buffer().data_ptr()
+        );
+        let all_valid = product.contiguous_column(logical, Arc::new(source.slice(2, 2)));
+        assert!(all_valid.nulls().is_none());
+    }
+}
+
+#[tokio::test]
 async fn test_equi_gathers_only_its_three_operands() {
     let (left, right) = static_inputs();
     assert_operand_gathers(static_operator(true), left, right, 3).await;

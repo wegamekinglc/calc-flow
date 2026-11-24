@@ -1,8 +1,8 @@
 use super::{HotProjection, JoinTimeBounds, StreamJoinOperator};
 use crate::Result;
 use datafusion::arrow::{
-    array::{Array, ArrayRef, AsArray, Float64Array},
-    datatypes::{DataType, Float64Type, Schema, TimeUnit},
+    array::{Array, ArrayRef, AsArray, Float64Array, UInt64Builder},
+    datatypes::{DataType, Float64Type, Schema, TimeUnit, UInt64Type},
 };
 use std::sync::Arc;
 
@@ -81,6 +81,17 @@ impl HotKind {
 }
 
 impl HotProjection {
+    pub(super) fn contiguous_column(self, logical: usize, slice: ArrayRef) -> ArrayRef {
+        if logical == self.sequence || Some(logical) == self.right_sequence {
+            // Only sequences outlive multiplication and need independent buffers.
+            let mut owned = UInt64Builder::with_capacity(slice.len());
+            owned.append_array(slice.as_primitive::<UInt64Type>());
+            Arc::new(owned.finish())
+        } else {
+            slice
+        }
+    }
+
     pub(super) fn gather(
         self,
         column: impl Fn(usize, &DataType) -> Result<ArrayRef>,
