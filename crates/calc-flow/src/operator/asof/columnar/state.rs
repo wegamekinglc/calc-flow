@@ -20,6 +20,7 @@ use std::{
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static ADMISSION_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FINALITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -193,8 +194,26 @@ pub(in crate::operator::asof) struct ColumnarState {
 }
 
 fn compare_identity(runs: &BTreeMap<u64, Run>, left: RowLocator, right: RowLocator) -> Ordering {
-    let left_run = &runs[&left.run];
-    let right_run = &runs[&right.run];
+    compare_time_sequence(&runs[&left.run], left, &runs[&right.run], right)
+}
+
+fn admission_identity_order(
+    left_run: &Run,
+    left: RowLocator,
+    right_run: &Run,
+    right: RowLocator,
+) -> Ordering {
+    #[cfg(test)]
+    ADMISSION_IDENTITY_COMPARISONS.set(ADMISSION_IDENTITY_COMPARISONS.get() + 1);
+    compare_time_sequence(left_run, left, right_run, right)
+}
+
+fn compare_time_sequence(
+    left_run: &Run,
+    left: RowLocator,
+    right_run: &Run,
+    right: RowLocator,
+) -> Ordering {
     left_run
         .time(left)
         .cmp(&right_run.time(right))
@@ -757,19 +776,57 @@ impl ColumnarState {
         Ok(reservation)
     }
 
+    fn resident_identities(&self, side: usize, group: usize) -> Option<&LocatorColumn> {
+        if side == 0 {
+            self.left_by_key.get(group)
+        } else {
+            self.right_by_key
+                .get(group)
+                .map(|bucket| &bucket.identities)
+        }
+    }
+
+    fn strictly_appends_identities(&self, side: usize, run: &Run, locators: &[RowLocator]) -> bool {
+        if self.keys.len() > locators.len() {
+            return false;
+        }
+        let mut last_rows = vec![None; self.keys.len()];
+        for &locator in locators {
+            let group = run.group(locator).index();
+            // The first row for this key must also follow its last resident identity.
+            let previous = match last_rows[group].replace(locator.row) {
+                Some(row) => Some((run, RowLocator { row, ..locator })),
+                None => self
+                    .resident_identities(side, group)
+                    .and_then(|column| column.rows().last())
+                    .map(|&last| (self.run(side, last.run), last)),
+            };
+            if let Some((previous_run, previous)) = previous
+                && admission_identity_order(previous_run, previous, run, locator) != Ordering::Less
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     fn validate_new_identities(
         &self,
         side: usize,
         run: &Run,
         locators: &[RowLocator],
     ) -> Result<()> {
+        if self.strictly_appends_identities(side, run, locators) {
+            return Ok(());
+        }
         let mut sorted = locators.to_vec();
         sorted.sort_unstable_by(|left, right| {
+            #[cfg(test)]
+            ADMISSION_IDENTITY_COMPARISONS.set(ADMISSION_IDENTITY_COMPARISONS.get() + 1);
             run.group(*left)
                 .index()
                 .cmp(&run.group(*right).index())
-                .then_with(|| run.time(*left).cmp(&run.time(*right)))
-                .then_with(|| run.sequence(*left).cmp(run.sequence(*right)))
+                .then_with(|| compare_time_sequence(run, *left, run, *right))
         });
         if sorted
             .windows(2)
@@ -779,24 +836,13 @@ impl ColumnarState {
         }
         for locator in locators.iter().copied() {
             let group = run.group(locator).index();
-            let resident = if side == 0 {
-                self.left_by_key.get(group)
-            } else {
-                self.right_by_key
-                    .get(group)
-                    .map(|bucket| &bucket.identities)
-            };
-            let Some(resident) = resident else {
+            let Some(resident) = self.resident_identities(side, group) else {
                 continue;
             };
             let duplicate = resident
                 .rows()
                 .binary_search_by(|existing| {
-                    let existing_run = self.run(side, existing.run);
-                    existing_run
-                        .time(*existing)
-                        .cmp(&run.time(locator))
-                        .then_with(|| existing_run.sequence(*existing).cmp(run.sequence(locator)))
+                    admission_identity_order(self.run(side, existing.run), *existing, run, locator)
                 })
                 .is_ok();
             if duplicate {
