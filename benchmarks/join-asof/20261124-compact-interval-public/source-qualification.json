@@ -1,0 +1,80 @@
+{
+  "direct_tree_diff": [
+    "docs/plans/2026-11-23-incremental-performance.md"
+  ],
+  "official_builds": {
+    "baseline": {
+      "artifact": 14897014496,
+      "artifact_digest": "sha256:f37ff1db4a53b48b5f728400ae486e827aceed8379c9728cd830785900fd80ad",
+      "build_completed_at": "2026-11-24T07:02:37Z",
+      "build_started_at": "2026-11-24T06:43:42Z",
+      "checkout": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138283593607,
+      "requested_sha": "ba5471bbe5b18aee129f6461bbdf96c5237e3c24",
+      "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2",
+      "workflow_run": 45342562023
+    },
+    "candidate": {
+      "artifact": 14920586804,
+      "artifact_digest": "sha256:e95b924cb88846eed9721cf2f4d239fa9e62cc6195912b6f732ee9f3775e7f90",
+      "build_completed_at": "2026-11-24T12:38:08Z",
+      "build_started_at": "2026-11-24T12:13:44Z",
+      "checkout": "f9ce08428f813d860b656e11eb091d143947363e",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138435990960,
+      "requested_sha": "cd879969d1840da16f89514996f508b6b9baee64",
+      "tree": "93276c2830a52a756ccdec4486573740ce7db29f",
+      "workflow_run": 45391430171
+    }
+  },
+  "product": {
+    "A": {
+      "parents": [
+        "696e90029e4730e98954cbca38e185c2e9b2b96a",
+        "ba5471bbe5b18aee129f6461bbdf96c5237e3c24"
+      ],
+      "sha": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+      "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2"
+    },
+    "B": {
+      "parents": [
+        "85af0b53e0a38e19cb472aff18c1ccfd84048912"
+      ],
+      "sha": "cd879969d1840da16f89514996f508b6b9baee64",
+      "tree": "93276c2830a52a756ccdec4486573740ce7db29f"
+    },
+    "base": {
+      "parents": [
+        "b58f4cb6e9474fbd0222d30eaf4e8764b648c28d",
+        "f70643419e55c41e5ab3aaaeb83608e860d9c775"
+      ],
+      "sha": "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+      "tree": "211269ccfb5b76dc5db3554ec8447edef6610645"
+    },
+    "ci_merge": {
+      "parents": [
+        "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+        "cd879969d1840da16f89514996f508b6b9baee64"
+      ],
+      "sha": "f9ce08428f813d860b656e11eb091d143947363e",
+      "tree": "93276c2830a52a756ccdec4486573740ce7db29f"
+    },
+    "interval": {
+      "parents": [
+        "1053b12c515491651507070316d3c0c38800bd4b"
+      ],
+      "sha": "d2a66c69ab5c7596f8b9e021b8d58141c156f266",
+      "tree": "ead3010eedd6bf234a7f68fcd0e5fc1634c11ad6"
+    },
+    "static": {
+      "parents": [
+        "722bd93aae4bf7edd944f9554fbc5097a2cf6ad9"
+      ],
+      "sha": "9aebb60438000a28c03163e2abab4f2950547508",
+      "tree": "e853e716f33e42aa35f78f0e811f758a55c3661a"
+    }
+  }
+}

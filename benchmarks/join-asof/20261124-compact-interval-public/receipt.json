@@ -1,0 +1,108 @@
+{
+  "archive_format": "All original artifact files, with byte-identical contents, sorted in a gzip-compressed tar archive",
+  "archived_raw_members": 523,
+  "case": "engines/1000000/calc-flow-stream-1t/interval_join",
+  "collector_elapsed_seconds": 132.59838151931763,
+  "complete_formal_samples": 40,
+  "direct_baseline_tree_diff": [
+    "docs/plans/2026-11-23-incremental-performance.md"
+  ],
+  "evidence_artifact": 14920847429,
+  "formal_pairs_per_round": [
+    10,
+    10
+  ],
+  "full_validations": 44,
+  "job": 138450029106,
+  "job_completed_at": "2026-11-24T12:41:01Z",
+  "job_started_at": "2026-11-24T12:38:42Z",
+  "job_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45395487646/job/138450029106",
+  "job_wall_seconds": 139.0,
+  "maximum_observed_absolute_error": 0.0,
+  "measurement_commit": "d2a66c69ab5c7596f8b9e021b8d58141c156f266",
+  "observed_warmups": 4,
+  "original_archive_bytes": 489270,
+  "original_archive_sha256": "dc4405390efea324812f73a682252bf1cd741943b8f7512a4fd7d6d32723475e",
+  "outcome": {
+    "elapsed_since_job_start_seconds": 132.59838151931763,
+    "state": "completed"
+  },
+  "raw_tar_gzip_sha256": "62104d7079a79e41913fdd2d169f000eb0eb91da79a9530bd66b68514fa14d4b",
+  "resource_intervals": 89,
+  "resources_all_admitted": true,
+  "result": {
+    "base_p50": 0.4168920625,
+    "base_p95": 0.42849624770000005,
+    "change_percent": 0.21591020337548006,
+    "head_max": 0.453663861,
+    "head_min": 0.393926021,
+    "head_p50": 0.417792175,
+    "head_p95": 0.4424707349,
+    "round_changes": [
+      1.8084681427549487,
+      -1.416524823861126
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 7.494145556980358,
+        "low": -4.172827011085733,
+        "median": 1.8084681427549487
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 5.136774927795673,
+        "low": -3.8045857427448038,
+        "median": -1.416524823861126
+      }
+    ],
+    "round_min_changes": [
+      -0.505858822908245,
+      -1.5182711964756068
+    ],
+    "rows_per_second": 2393534.53663894,
+    "samples": 20,
+    "verdict": "inconclusive"
+  },
+  "rows_per_output": 10998080,
+  "state": "completed",
+  "wheels": {
+    "baseline": {
+      "artifact": 14897014496,
+      "artifact_digest": "sha256:f37ff1db4a53b48b5f728400ae486e827aceed8379c9728cd830785900fd80ad",
+      "build_profile": "release",
+      "checkout": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138283593607,
+      "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+      "requested_sha": "ba5471bbe5b18aee129f6461bbdf96c5237e3c24",
+      "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "c339d8b13991396ba902c3a53e924c25986ef6af4a21e272488d9f3844553d11",
+      "workflow_run": 45342562023
+    },
+    "candidate": {
+      "artifact": 14920586804,
+      "artifact_digest": "sha256:e95b924cb88846eed9721cf2f4d239fa9e62cc6195912b6f732ee9f3775e7f90",
+      "build_profile": "release",
+      "checkout": "f9ce08428f813d860b656e11eb091d143947363e",
+      "contract": "benchmark-release-v1",
+      "git_clean": true,
+      "git_sha": "f9ce08428f813d860b656e11eb091d143947363e",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138435990960,
+      "native_sha256": "75a0933479c88d3ddad60096bf6d66e0a66b713130ab9e5ca4e38a321b917f73",
+      "requested_sha": "cd879969d1840da16f89514996f508b6b9baee64",
+      "tree": "93276c2830a52a756ccdec4486573740ce7db29f",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "781bd33960f3dba5c16222bab386d55c52122240986edee2d586edf06b16857d",
+      "workflow_run": 45391430171
+    }
+  },
+  "workflow_run": 45395487646
+}
