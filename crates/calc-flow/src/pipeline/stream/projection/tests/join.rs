@@ -223,6 +223,11 @@ fn graph(selects: &[&[&str]]) -> PipelineBuilder {
 
 pub(super) fn exact_consumers_prune_join_output() {
     assert_eq!(
+        super::physical_fields(graph(&[&["right__value AS price"]])),
+        vec!["right__value"]
+    );
+    assert!(super::physical_fields(graph(&[&["1 AS constant"]])).is_empty());
+    assert_eq!(
         super::physical_fields(graph(&[
             &["right__value AS price", "left__seq"],
             &["left__key", "left__seq AS sequence"],
