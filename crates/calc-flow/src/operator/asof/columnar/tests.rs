@@ -531,6 +531,65 @@ fn test_duplicate_and_row_limit_refusal_roll_back_new_key_births() {
 }
 
 #[test]
+fn test_ordered_interleaved_identity_admission_is_linear_on_both_sides() {
+    const KEYS: usize = 64;
+    const ROWS: usize = 1024;
+    let input = |start: usize| {
+        record(
+            &(start..start + ROWS)
+                .map(|i| ((i % KEYS) as i64, (i / KEYS) as i64, i as i64, Some("p")))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let spec = spec(0, 4096, 1 << 25);
+    for side in 0..2 {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 25));
+        let mut state = state(&spec, &pool);
+        admit(&mut state, side, &input(0)).unwrap();
+        super::state::ADMISSION_IDENTITY_COMPARISONS.set(0);
+        admit(&mut state, side, &input(ROWS)).unwrap();
+        let comparisons = super::state::ADMISSION_IDENTITY_COMPARISONS.replace(0);
+        assert_eq!(comparisons, ROWS, "one comparison per row for side {side}");
+        assert_eq!(state.state_rows(), 2 * ROWS);
+    }
+}
+
+#[test]
+fn test_per_key_identity_order_accepts_overlap_and_rejects_nonadjacent_duplicates() {
+    let declaration = spec(0, 20, 1 << 20);
+    for side in 0..2 {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+        let mut state = state(&declaration, &pool);
+        admit(
+            &mut state,
+            side,
+            &record(&[(1, 5, 1, None), (2, 2, 1, None), (1, 5, 3, None)]),
+        )
+        .unwrap();
+        admit(
+            &mut state,
+            side,
+            &record(&[(2, 2, 2, None), (1, 5, 2, None)]),
+        )
+        .unwrap();
+        let error = admit(
+            &mut state,
+            side,
+            &record(&[(2, 4, 1, None), (1, 5, 1, None)]),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofDuplicateIdentity,
+                ..
+            }
+        ));
+        assert_eq!(state.state_rows(), 5);
+    }
+}
+
+#[test]
 fn test_duplicate_inside_one_batch_installs_no_partial_run() {
     let declaration = spec(0, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
