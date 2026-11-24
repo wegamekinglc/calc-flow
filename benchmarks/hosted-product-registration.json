@@ -8,7 +8,7 @@
       "price"
     ],
     "fixture_and_driver_source": "1fb04897d1a5bd964431c7d54d5a146bf6624d62",
-    "operator": "StreamJoinOperator projected band run path, admitted-row cursor on each ingress",
+    "operator": "StreamJoinOperator projected band run path, compact-payload routing on both inputs",
     "public_entry": "benchmarks.engine_stream.stream_program('interval_join').to_project()",
     "schema": [
       "timestamp[us, UTC]",
@@ -24,12 +24,13 @@
     "symmetric_bounds_micros": 5000000
   },
   "baseline": {
-    "artifact": 14878859887,
-    "artifact_digest": "sha256:4f5cf981d43b82d2f5740397762897fb1409e144b5a01a0cac883e5f01264979",
-    "job": 138132581261,
-    "requested_sha": "788631a5bc40dce2f5e79b1cc4a023f58efa4049",
-    "tree": "36e0aadb2fdbf189bf314a99778f28835a5a99f7",
-    "workflow_run": 45300709283
+    "artifact": 14897014496,
+    "artifact_digest": "sha256:f37ff1db4a53b48b5f728400ae486e827aceed8379c9728cd830785900fd80ad",
+    "checkout": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+    "job": 138283593607,
+    "requested_sha": "ba5471bbe5b18aee129f6461bbdf96c5237e3c24",
+    "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2",
+    "workflow_run": 45342562023
   },
   "budget_allocation_seconds": {
     "interval_hosted": 300,
@@ -41,20 +42,18 @@
   "budget_seconds": 300,
   "candidate_identity": "dispatch binds one official CI head SHA and artifact ID",
   "case": "engines/1000000/calc-flow-stream-1t/interval_join",
+  "change": "The admitted morsel already carries a compact payload. Route it directly while preserving sparse source row IDs and the retain mask.",
   "oracle_scope": "Sort both tables by (sequence,right_sequence); verify all pair identities exactly; check all product values at rtol=atol=1e-10 and retain max_abs_error. Check native arrival order separately in Rust tests.",
   "output_rows": 10998080,
   "overall_budget_seconds": 600,
   "pairs_per_round": 10,
   "processing_goal_ms": 350,
-  "registered_utc": "2026-11-24T04:31:48.991031+00:00",
+  "registered_utc": "2026-11-24T12:09:16.684549+00:00",
   "requested_baseline_product": {
     "all_changed_paths": [
-      "docs/benchmark-suite.md",
-      "docs/plans/2026-11-23-incremental-performance.md",
-      "scripts/benchmark_suite/legacy.py",
-      "scripts/test_benchmark_normalize.py"
+      "docs/plans/2026-11-23-incremental-performance.md"
     ],
-    "plan_main": "8ce0b7c8303918821fec24654c36f1d99113de21"
+    "plan_main": "85af0b53e0a38e19cb472aff18c1ccfd84048912"
   },
   "reserved_cleanup_seconds": 45,
   "rounds": 2,
@@ -63,7 +62,7 @@
     ".github/workflows/benchmarks.yml": "eb0c37acb746efc390b5ad3360a92e425056b673b797bd4f95664256a4369574",
     "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
     "benchmarks/engine_stream.py": "1f37cfa730c111793ca0ce698e5722074592ac1e3a5b97206bd9e71fd84ee70f",
-    "benchmarks/hosted-interval-cursor.md": "3cba52ecbd76828e1281472d051f08f156439f241ee6a349144aa19def72d422",
+    "benchmarks/hosted-interval-cursor.md": "83487019c498cb25ecf26e9c878a92eda49019a039ef3b5f7cfca1f17033138d",
     "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
     "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
     "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
