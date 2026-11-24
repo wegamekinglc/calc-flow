@@ -755,22 +755,35 @@ impl Probe {
         self.count
     }
 
-    fn windows(
-        &self,
-        range: std::ops::Range<usize>,
-    ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + Clone {
-        let spans = if range.is_empty() {
+    fn selected_spans(&self, range: &std::ops::Range<usize>) -> &[ProbeSpan] {
+        if range.is_empty() {
             &self.spans[..0]
-        } else if range == (0..self.count) {
-            &self.spans[..]
+        } else if *range == (0..self.count) {
+            &self.spans
         } else {
             let start = self
                 .spans
                 .partition_point(|span| span.first + span.matches() <= range.start);
             let end = self.spans.partition_point(|span| span.first < range.end);
             &self.spans[start..end]
+        }
+    }
+
+    fn contiguous_input(&self, range: &std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+        let [span] = self.selected_spans(range) else {
+            return None;
         };
-        spans
+        (span.positions.len() > 1).then(|| {
+            let start = usize::from(span.positions.start) + (range.start - span.first);
+            start..start + range.len()
+        })
+    }
+
+    fn windows(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + Clone {
+        self.selected_spans(&range)
             .iter()
             .flat_map(move |span| span.windows(range.clone()))
     }
@@ -1717,6 +1730,11 @@ impl Prepared {
         let projection = output.projection;
         let left_width = output.left_width;
         let count = range.len();
+        let contiguous = output.product.and_then(|product| {
+            self.probe
+                .contiguous_input(&range)
+                .map(|positions| (product, positions))
+        });
         let windows = self.probe.windows(range);
         let incoming_windows = windows.clone();
         let incoming = LazyCell::new(|| {
@@ -1739,12 +1757,20 @@ impl Prepared {
         });
         let column = |logical: usize, data_type: &DataType| {
             let left = logical < left_width;
+            let index = if left { logical } else { logical - left_width };
             let gather = if left == self.incoming_is_left {
+                if let Some((product, positions)) = &contiguous {
+                    let slice = self
+                        .incoming
+                        .payload
+                        .column(index)
+                        .slice(positions.start, count);
+                    return Ok(product.contiguous_column(logical, slice));
+                }
                 incoming.as_ref()
             } else {
                 opposite.as_ref()
             };
-            let index = if left { logical } else { logical - left_width };
             output_gather::column(gather, index, data_type)
         };
         let columns = if let Some(product) = output.product {
@@ -2149,6 +2175,12 @@ fn test_probe_clips_sparse_fanout_and_singleton_runs_at_output_boundaries() {
         }
     }
     assert_eq!(probe.spans.len(), 5);
+    assert_eq!(probe.contiguous_input(&(0..2)), Some(1..3));
+    assert_eq!(probe.contiguous_input(&(1..3)), None);
+    assert_eq!(probe.contiguous_input(&(2..2)), None);
+    assert_eq!(probe.contiguous_input(&(2..3)), None);
+    assert_eq!(probe.contiguous_input(&(5..6)), None);
+    assert_eq!(probe.contiguous_input(&(8..10)), Some(8..10));
 }
 
 #[cfg(test)]
