@@ -1,0 +1,38 @@
+{
+  "join": {
+    "baseline": {
+      "commit": "92230f68c9024a053f2e7c74185c3a98f5003917",
+      "tree": "1f9f37a8c0bb0203e4b6f5661345e25b11471cb6",
+      "binary_sha256": "c30bb4984ba02802b432dd1d41252de47c2337c15d59b091066f4e38969e5f35",
+      "harness_sha256": "136e6c0874c9ec041019b01476e664042f2a81961be01d411ba09b8a3dd923d6",
+      "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
+    },
+    "candidate": {
+      "commit": "0b6f2971ac2bedd31fe515f099bd2342ec5e8d34",
+      "tree": "4960cd6bafae9d9a106fc5c5627affe6ecca322e",
+      "binary_sha256": "9edd96e50e09ab6301faec75e2ffdb3dbc79bc7c8bef91f781738f97868b1d67",
+      "harness_sha256": "136e6c0874c9ec041019b01476e664042f2a81961be01d411ba09b8a3dd923d6",
+      "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
+    }
+  },
+  "asof": {
+    "baseline": {
+      "commit": "92230f68c9024a053f2e7c74185c3a98f5003917",
+      "tree": "1f9f37a8c0bb0203e4b6f5661345e25b11471cb6",
+      "binary_sha256": "8e55026314aaea60e926e362bdd62507cb29da20b0c7d1685df9f8c7db4c466d",
+      "harness_sha256": "836c1aadd8464de70de3cb6b496349e0b21542156195b3afd14367ad164451e9",
+      "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
+    },
+    "candidate": {
+      "commit": "b076010b9df3ffe8065360274589f5d697675dc8",
+      "tree": "5d45596f7daa166c20b6ddfd7d604338a25fa064",
+      "binary_sha256": "0ccbb303f07adc5ce7f268d516866a8ca768020e7f03624118e179bd6407ff31",
+      "harness_sha256": "836c1aadd8464de70de3cb6b496349e0b21542156195b3afd14367ad164451e9",
+      "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
+    }
+  },
+  "superseded_before_preflight": {
+    "asof": "ea8671ace8eefa4525bf2a0c93a4ddfbb8286383",
+    "reason": "test-only checked integer conversion before any preflight or sample"
+  }
+}
