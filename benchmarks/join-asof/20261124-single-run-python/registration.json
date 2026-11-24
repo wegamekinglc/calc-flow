@@ -1,0 +1,74 @@
+{
+  "baseline": {
+    "artifact": 14878859887,
+    "artifact_digest": "sha256:4f5cf981d43b82d2f5740397762897fb1409e144b5a01a0cac883e5f01264979",
+    "job": 138132581261,
+    "requested_sha": "788631a5bc40dce2f5e79b1cc4a023f58efa4049",
+    "tree": "36e0aadb2fdbf189bf314a99778f28835a5a99f7",
+    "workflow_run": 45300709283
+  },
+  "baseline_equivalence": {
+    "all_changed_paths": [
+      "docs/benchmark-suite.md",
+      "docs/plans/2026-11-23-incremental-performance.md",
+      "scripts/benchmark_suite/legacy.py",
+      "scripts/test_benchmark_normalize.py"
+    ],
+    "plan_main": "8ce0b7c8303918821fec24654c36f1d99113de21"
+  },
+  "budget_seconds": 480,
+  "candidate": {
+    "artifact": 14892540031,
+    "requested_sha": "05d4b677e8c44e4138178d763387c11ae7361110"
+  },
+  "candidate_identity": "workflow dispatch selects one official PR head SHA and artifact ID before the job starts",
+  "case": "python/public-stream-asof/single-run-six-column",
+  "fixture": {
+    "left_rows": 1024,
+    "matches": 764,
+    "missing_left_key_at_us": 1022,
+    "output_columns": [
+      "left__key",
+      "left__time",
+      "left__seq",
+      "right__key",
+      "right__time",
+      "right__seq"
+    ],
+    "right_rows": 510,
+    "tolerance_us": 2,
+    "unmatched": 260
+  },
+  "fresh_workers": 44,
+  "job": 138232363397,
+  "pairs_per_round": 10,
+  "registered_utc": "2026-11-24T04:44:48.936931+00:00",
+  "reserved_cleanup_seconds": 45,
+  "rounds": 2,
+  "run": "45331130307",
+  "side_order": [
+    "baseline",
+    "candidate"
+  ],
+  "source_hashes": {
+    ".github/workflows/benchmarks.yml": "2a4e189c7da5b750fa4fedfd8683527cdd6b20aa349c7c368c2dbd7d6d7a6186",
+    "benchmarks/hosted-asof-protocol.md": "ce1fa5c4587750602c8bb15058ee632829bf7b908e6185fd0b45231a27c4d242",
+    "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
+    "benchmarks/public_asof_projection.py": "c674f3539d871de0d522c1b63378be88f8af19cbe1ba110b2648762ab0eb92ce",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+    "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",
+    "scripts/benchmark_suite/release.py": "f5523d3fc3436449aae9d697457c462c383cdbfd55f7144d9997478f96a44307",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/hosted_asof_projection.py": "a1b1a99a3db4d00e67bb07b8b711dec3e46b5634129082988dfe9ca589971235",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd",
+    "scripts/test_hosted_asof_projection.py": "326a649289194f8fd7ae71c1e0f5e0183b80766c9f60528ab76b437361b6d232",
+    "scripts/test_public_asof_projection.py": "485cc766b40dcb76e9d01f2a6686a76e46800495e8719f5bf6602d58008e102c",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+  },
+  "start_epoch": 1795496890.0,
+  "total_python_budget_seconds": 600,
+  "warmups_per_side_per_round": 1,
+  "workflow": "29f43d28d8f5e6a3f523db0c8393580867f00c9b"
+}

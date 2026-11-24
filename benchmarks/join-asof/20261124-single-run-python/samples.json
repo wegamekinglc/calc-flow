@@ -1,0 +1,1368 @@
+{
+  "observations": [
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 32243962
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24853759
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 23972741
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 25867021
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24566846
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 23102820
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 24161302
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 25875155
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 23537475
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 23885016
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 23438559
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24158840
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24337963
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 24086803
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 24047225
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24500893
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24987509
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 24216183
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 9,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 24231494
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 9,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 22931218
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 10,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "candidate",
+      "stream_ns": 24269050
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 10,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 1,
+      "side": "baseline",
+      "stream_ns": 23643233
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 23726398
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 24904983
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 23964478
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23323635
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23366008
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 23970838
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 25513930
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23832104
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 24440764
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 23885387
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 23628759
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23550504
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 24626818
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 24791700
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 24271966
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23601799
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23878226
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 24515985
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 9,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 23695358
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 9,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 24903755
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "4e4be872dc333851ac30820a125fb5dc701f41e1611fa0e2f9d6c1eba35bd2fe",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 10,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "candidate",
+      "stream_ns": 23636086
+    },
+    {
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "0c3b1bb2c94e7b281fa2faf7de060e6afcaec4a658d8fb42feb045c16596dc2f",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 10,
+      "proof": {
+        "columns": [
+          "left__key",
+          "left__time",
+          "left__seq",
+          "right__key",
+          "right__time",
+          "right__seq"
+        ],
+        "matched": 764,
+        "rows": 1024,
+        "unmatched": 260
+      },
+      "round": 2,
+      "side": "baseline",
+      "stream_ns": 24003546
+    }
+  ]
+}
