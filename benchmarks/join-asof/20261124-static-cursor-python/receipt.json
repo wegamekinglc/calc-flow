@@ -1,0 +1,23 @@
+{
+  "workflow_run": 45330742944,
+  "workflow_attempt": 1,
+  "job": 138231099030,
+  "job_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45330742944/job/138231099030",
+  "job_started_at": "2026-11-24T05:06:55Z",
+  "job_completed_at": "2026-11-24T05:07:38Z",
+  "job_wall_seconds": 43,
+  "evidence_artifact": 14892455394,
+  "evidence_zip_sha256": "67ca2f73690ed0437426106951744b4791cd0186214269efe83573fa0d25d3f6",
+  "evidence_zip_bytes": 3264,
+  "archived_members_sha256": {
+    "baseline/release.json": "6dcdcb5f7a554007e6dc3af8a86aea4c29fe617c61603d1df1bf4e836886889f",
+    "candidate/release.json": "a015395df142b60aabd9d9c5c1754cf7585b62e92e8822e06b343ccfcc3dfbae",
+    "outcome.json": "c8accc3bbee416e4d0dab5b82c9284f855df69d16eb186cb5723ce0ede0d7a9a",
+    "registration.json": "66f55e2bfa6e43a18223fb662db3bc00537a08701c5ee5f95f7de21a0834b95a"
+  },
+  "comparison_status": "stopped_before_worker_install_and_resource_preflight",
+  "completed_warmup_runs": 0,
+  "completed_formal_pairs": 0,
+  "completed_full_output_validations": 0,
+  "resource_observations": 0
+}
