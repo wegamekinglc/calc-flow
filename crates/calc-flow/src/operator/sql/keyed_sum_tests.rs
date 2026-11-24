@@ -245,9 +245,11 @@ async fn test_full_sum_key_charge_needs_no_group_scratch_and_rolls_back() {
     let keyed = plan.keyed_sum.as_ref().unwrap();
     let keys = [
         Arc::new(Int64Array::from_iter_values(0..4096)) as ArrayRef,
-        Arc::new(StringArray::from_iter(
-            (0..4096).map(|i| [None, Some("a"), Some("longer label")][i % 3]),
-        )) as ArrayRef,
+        Arc::new(
+            (0..4096)
+                .map(|i| [None, Some("a"), Some("longer label")][i % 3])
+                .collect::<StringArray>(),
+        ) as ArrayRef,
     ];
     let values = Arc::new(Int64Array::from(vec![1; 4096])) as ArrayRef;
     let mut seed = keyed.begin(None).unwrap();
