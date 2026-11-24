@@ -1,0 +1,964 @@
+{
+  "observations": [
+    {
+      "delivery_ns": 505172,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 537622,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 554153,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 517555,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 523988,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 498259,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 519767,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 565212,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 509678,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 527251,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 540136,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 532931,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 515449,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 508688,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 552520,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 528145,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 529977,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 486276,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 541969,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 9,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 515170,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 9,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 522273,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 10,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 517814,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 10,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 1,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 544925,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 506564,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 0,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 501515,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 570393,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 1,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 548823,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 496295,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 2,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 512536,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 508649,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 3,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 545206,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 548994,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 4,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 547952,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 502437,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 5,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 585602,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 529017,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 6,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 570304,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    },
+    {
+      "delivery_ns": 539596,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 7,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 533845,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "e1a874bb275a89faa4ae38750343d3118b424b42325ec48107ad49e9ce610d68",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "candidate"
+    },
+    {
+      "delivery_ns": 618284,
+      "environment": {
+        "cpu_affinity": [
+          2
+        ],
+        "logical_cpus": 4,
+        "native_sha256": "43ca88b5f1fe10ac3876538b2d12b5e332eb53a63abf29b0b02056ccd6b2ed53",
+        "numpy": "2.5.2",
+        "platform": "Linux-7.0.0-1020-azure-x86_64-with-glibc2.43",
+        "pyarrow": "24.0.0",
+        "python": "3.13.18",
+        "tokio_worker_threads": "1"
+      },
+      "pair": 8,
+      "proof": {
+        "matched": 5,
+        "pending_at_cut": 1,
+        "rows": 8,
+        "unmatched": 3
+      },
+      "round": 2,
+      "side": "baseline"
+    }
+  ]
+}

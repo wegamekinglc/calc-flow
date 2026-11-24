@@ -1,0 +1,5 @@
+{
+  "elapsed_since_job_start_seconds": 67.13684678077698,
+  "error": "ExceptionGroup('unhandled errors in a TaskGroup', [ValueError(\"sparse changelog resource gate: {'cpu': 2, 'cpu_busy': 100.0, 'siblings': [3], 'sibling_busy': 57.6, 'host_busy': 39.65, 'available_bytes': 15756554240, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}\")])",
+  "state": "stopped"
+}

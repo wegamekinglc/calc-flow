@@ -1,0 +1,23 @@
+{
+  "archived_sha256": {
+    "baseline/release.json": "1383ab47213cda04a144479977b3c8fe03e960c2a7769691fd2862b42ae605f6",
+    "candidate/release.json": "2243e0f878393770c8690b1fe69dfe47ac3615cbe228c0b885af7d0bf24b78f8",
+    "outcome.json": "2aeb520931ef8ccb9dee021f375b7b7527bef3c501c5b5e8416eb136a55b010e",
+    "protocol.md": "42fa1b07f02be752cc3fb7f77bd519b7047f8cf8755048b495bacd1ca0def9c9",
+    "registration.json": "a0a83c63cda437aa36bb205c26b635420849251845fd7abdf1c2cb8e99095e73",
+    "resources.jsonl": "644ab329d79b96fc32707088a2fbc92a5af69cf7973bbc10d3b4840435342414",
+    "samples.json": "e4ddf47445dc6c8f863b33e23db5099f8d5c3031f12f80dc90a48f3fea47eefa"
+  },
+  "artifact_id": 14918669019,
+  "artifact_sha256": "25baf137aeb137936dae445a589d81c4c055f693cf8ffb59b60e29d1bc85b9f2",
+  "job_id": 138440112514,
+  "run_id": 45392649688,
+  "source_paths": {
+    "baseline/release.json": "baseline/release.json",
+    "candidate/release.json": "candidate/release.json",
+    "outcome.json": "outcome.json",
+    "registration.json": "registration.json",
+    "resources.jsonl": "resources.jsonl",
+    "samples.json": "partial.json"
+  }
+}
