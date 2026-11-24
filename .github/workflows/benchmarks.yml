@@ -1,6 +1,15 @@
 name: Benchmarks
 on:
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Candidate Linux CI head SHA
+        required: true
+        type: string
+      candidate_wheel_artifact:
+        description: Candidate python-distributions artifact ID
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read
@@ -8,7 +17,7 @@ jobs:
   public-stream:
     name: Public stream evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 9
     env:
       RAYON_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
@@ -25,6 +34,8 @@ jobs:
       - name: Register clock and verify sealed artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+          CANDIDATE_ARTIFACT: ${{ inputs.candidate_wheel_artifact }}
         run: python -m scripts.hosted_static_product acquire
       - name: Install locked runtime dependencies
         run: |

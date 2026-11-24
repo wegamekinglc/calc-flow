@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from scripts.hosted_static_product_state import CASE_ID, ROWS, validate_static_sample
 
@@ -36,6 +40,50 @@ def complete():
 
 
 class StaticProductTest(unittest.TestCase):
+    def test_acquisition_binds_requested_candidate_before_sealing(self):
+        from scripts import hosted_static_product as controller
+
+        base = {"requested_sha": "a" * 40, "artifact": 8, "artifact_digest": "base"}
+        candidate = {"requested_sha": "b" * 40, "artifact": 9}
+        env = {
+            "GITHUB_REPOSITORY": "owner/repo",
+            "GITHUB_RUN_ID": "1",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_SHA": "c" * 40,
+            "CANDIDATE_SHA": candidate["requested_sha"],
+            "CANDIDATE_ARTIFACT": str(candidate["artifact"]),
+        }
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = root / "config.json"
+            config.write_text(json.dumps({"baseline": base, "source_hashes": {}}))
+            job = {
+                "name": "Public stream evidence",
+                "id": 7,
+                "started_at": "2026-11-24T00:00:00Z",
+            }
+            with (
+                patch.dict("os.environ", env),
+                patch.object(controller, "OUT", root),
+                patch.object(controller, "CONFIG", config),
+                patch.object(
+                    controller, "_api", return_value=json.dumps({"jobs": [job]})
+                ),
+                patch.object(controller, "load_release"),
+                patch.object(
+                    controller, "seal", return_value={"artifact_digest": "base"}
+                ) as seal,
+            ):
+                controller.acquire()
+            self.assertEqual(
+                json.loads((root / "registration.json").read_text())["candidate"],
+                candidate,
+            )
+            self.assertEqual(
+                [call.args[1:3] for call in seal.call_args_list],
+                [(8, "a" * 40), (9, "b" * 40)],
+            )
+
     def test_observation_requires_exact_outputs_and_causal_state(self):
         self.assertEqual(CASE_ID, "engines/1000000/calc-flow-stream-1t/join")
         proof = complete()

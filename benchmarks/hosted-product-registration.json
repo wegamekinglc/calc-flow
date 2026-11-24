@@ -1,62 +1,50 @@
 {
   "baseline": {
-    "artifact": 14814749622,
-    "artifact_digest": "sha256:04a35ae3d06badc77540d3c8aa36eccd3ed3be706e85d647bdd30a2f9e48a1aa",
-    "checkout": "644f8f1555b666f0d7303b2302139eb4551f9d2e",
-    "image": "ubuntu-26.04",
-    "image_version": "20261116.202.1",
-    "job": 137650772030,
-    "parents": [
-      "2e6cd4c50bca10788c9f286400f645dd4ceb135e",
-      "347e993ce1903be51616f8840e551ecad4b18f48"
-    ],
-    "requested_sha": "644f8f1555b666f0d7303b2302139eb4551f9d2e",
-    "tree": "9ac046cb2dd416a396be7332d39d898ad44e88ae",
-    "workflow_run": 45161312235
+    "artifact": 14878859887,
+    "artifact_digest": "sha256:4f5cf981d43b82d2f5740397762897fb1409e144b5a01a0cac883e5f01264979",
+    "job": 138132581261,
+    "requested_sha": "788631a5bc40dce2f5e79b1cc4a023f58efa4049",
+    "tree": "36e0aadb2fdbf189bf314a99778f28835a5a99f7",
+    "workflow_run": 45300709283
   },
-  "budget_seconds": 240,
-  "candidate": {
-    "artifact": 14816313513,
-    "artifact_digest": "sha256:5f91dab3d56561e65ca63f4f686b409efd91a59deac50d8a4a7182e1dacdbb8d",
-    "checkout": "b0a1e1a4a96a8538b8f35a497a143ce46b10dfc7",
-    "image": "ubuntu-26.04",
-    "image_version": "20261116.202.1",
-    "job": 137669641336,
-    "parents": [
-      "644f8f1555b666f0d7303b2302139eb4551f9d2e",
-      "f660df7d0e73eb3d94bc90c1d2e72e1c3f1b785f"
-    ],
-    "requested_sha": "f660df7d0e73eb3d94bc90c1d2e72e1c3f1b785f",
-    "tree": "66cdb938364abe22d360c98659c3405c1b8fc02d",
-    "workflow_run": 45167558817
-  },
-  "candidate_pr": 683,
+  "budget_seconds": 540,
+  "candidate_identity": "dispatch binds one official CI head SHA and artifact ID",
   "case": "engines/1000000/calc-flow-stream-1t/join",
   "dimension_rows": 64,
   "fact_rows": 1000000,
   "output_rows": 1000000,
-  "overall_budget_seconds": 300,
-  "previous_registration": {
-    "artifact": 14818126205,
-    "artifact_sha256": "a790b8f25a87cee8bc4b73cffe6c7f6f72967f32879bd1fa8caa1f3cdc1fc7d4",
-    "formal_pairs": 0,
-    "job_seconds": 37,
-    "run": 45171625875,
-    "validated_warmups": 0,
-    "workflow_sha": "de547eebb6b8a90a970065b104d39d6e3a621d54"
-  },
+  "overall_budget_seconds": 600,
+  "pairs_per_round": 10,
   "processing_goal_ms": 30,
-  "registered_utc": "2026-11-23T12:15:52.332496+00:00",
+  "registered_utc": "2026-11-24T04:27:49.151865+00:00",
+  "requested_baseline_product": {
+    "all_changed_paths": [
+      "docs/benchmark-suite.md",
+      "docs/plans/2026-11-23-incremental-performance.md",
+      "scripts/benchmark_suite/legacy.py",
+      "scripts/test_benchmark_normalize.py"
+    ],
+    "plan_main": "8ce0b7c8303918821fec24654c36f1d99113de21"
+  },
+  "reserved_cleanup_seconds": 45,
+  "rounds": 2,
   "source_hashes": {
-    ".github/workflows/benchmarks.yml": "7091293a735e06a3c666d436a1b91b6da959b6103b821b310af67b636e639abc",
+    ".github/workflows/benchmarks.yml": "41f2d3d3cab977612be53661adc364eb35e428d00fbec30ead350702bcb67c52",
     "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
     "benchmarks/engine_stream.py": "4bfcbc72f2d71d3ea224a062af63fc9831e68b791f3c5643d0df33cda9912a29",
-    "benchmarks/hosted-product-protocol.md": "fb69054a71ac592b0227c0bd1043ac528d2d4ce0993338196f12806674fac791",
+    "benchmarks/hosted-product-protocol.md": "642910626b36b5a974c24afc97e3325a44dd4fa7e9f2d4eca8d9e4a20aec08d2",
+    "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
     "scripts/benchmark_suite/measure.py": "b9bfc765b8b6088fa3b971cf02ddf08bd54598c40c2f9533d41cc5f9e631099c",
-    "scripts/hosted_static_product.py": "160c1acacb1297b9994bb8c1f134293257d132e80606175d302cdd11d9425014",
+    "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",
+    "scripts/benchmark_suite/release.py": "f5523d3fc3436449aae9d697457c462c383cdbfd55f7144d9997478f96a44307",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/hosted_static_product.py": "a7311b3d5b6bb35b6fadcbdc965e6ac8e2a47c0e23b1aef0e39ce9510d18f1c2",
     "scripts/hosted_static_product_state.py": "83a6f02d80374e9e5ef74187c4d262ad9a3d38f513d22539e0e764f40000f19b",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
     "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd",
-    "scripts/test_hosted_static_product.py": "8a49d02362bf803d28e8e4451f9b73e95c93c68335a656b8365266b7f19d8f29"
-  }
+    "scripts/test_hosted_static_product.py": "b9081d87df2fe8235af4f21a0d240445b801e2491e654c5f15220d26eafd0dfa",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+  },
+  "warmups_per_arm_per_round": 1
 }

@@ -1,4 +1,4 @@
-"""Single-core public static dimension Join for the Float64 product candidate."""
+"""Single-core public static dimension Join for the admitted-row iterator."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def case():
     return chosen
 
 
-BUDGET = 240
+BUDGET = 540
 SIDES = ("baseline", "candidate")
 CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
 OUT = ROOT / "target/hosted-evidence"
@@ -54,6 +54,10 @@ def acquire() -> None:
     started = datetime.fromisoformat(job["started_at"]).timestamp()
     record = {
         **registration,
+        "candidate": {
+            "requested_sha": os.environ["CANDIDATE_SHA"],
+            "artifact": int(os.environ["CANDIDATE_ARTIFACT"]),
+        },
         "workflow_sha": os.environ["GITHUB_SHA"],
         "job": job["id"],
         "workflow_run": run,
@@ -74,9 +78,11 @@ def acquire() -> None:
         manifest = seal(
             repository, requested["artifact"], requested["requested_sha"], OUT / side
         )
-        for key in ("artifact_digest", "workflow_run", "job", "checkout", "tree"):
-            if requested[key] != manifest[key]:
-                raise ValueError(f"unexpected {side} build attribute {key}")
+        if (
+            side == "baseline"
+            and requested["artifact_digest"] != manifest["artifact_digest"]
+        ):
+            raise ValueError("unexpected published baseline")
         load_release(OUT / side / "release.json")
 
 
