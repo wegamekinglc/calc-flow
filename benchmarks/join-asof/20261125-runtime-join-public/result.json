@@ -1,0 +1,15 @@
+{
+  "outcome": {
+    "elapsed": 8.467042407952249,
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 20.6, 'siblings': [1], 'sibling_busy': 0.0, 'host_busy': 6.225, 'available_bytes': 30950002688, 'major_faults': 323, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 2, 'cpu_busy': 67.6, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 6.225, 'available_bytes': 30950002688, 'major_faults': 323, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 6, 'cpu_busy': 0.0, 'siblings': [7], 'sibling_busy': 0.0, 'host_busy': 6.225, 'available_bytes': 30950002688, 'major_faults': 323, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 8, 'cpu_busy': 7.0, 'siblings': [9], 'sibling_busy': 0.0, 'host_busy': 6.225, 'available_bytes': 30950002688, 'major_faults': 323, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}]\")])",
+    "state": "stopped"
+  },
+  "resources": {
+    "intervals": 2,
+    "max_host_busy": 6.225,
+    "max_sibling_busy": 0.0,
+    "min_available_bytes": 30950002688,
+    "violations": 1
+  },
+  "result": null
+}
