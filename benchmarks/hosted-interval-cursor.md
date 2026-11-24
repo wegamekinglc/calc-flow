@@ -26,3 +26,5 @@ for settlement and the artifact inside each hosted job. Earlier complete jobs
 took 46 and 126 seconds respectively. Builds estimated 20–30 minutes each
 are separate. Stop once on any failed oracle, deadline, provenance or resource
 check and preserve all completed observations.
+
+The first compact route candidate cd879969 regressed the static case in both rounds. This comparison is reserved for a new implementation that bypasses per-row staging for a contiguous admitted segment. The reference remains the verified pre-change main runtime. Register both workload arms before measuring and require a complete static comparison before clearing the earlier regression.

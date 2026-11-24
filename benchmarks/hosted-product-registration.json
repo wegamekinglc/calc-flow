@@ -42,13 +42,14 @@
   "budget_seconds": 300,
   "candidate_identity": "dispatch binds one official CI head SHA and artifact ID",
   "case": "engines/1000000/calc-flow-stream-1t/interval_join",
-  "change": "The admitted morsel already carries a compact payload. Route it directly while preserving sparse source row IDs and the retain mask.",
+  "change": "Route contiguous admitted ranges in bulk and retain general sparse and crossed-record routing.",
   "oracle_scope": "Sort both tables by (sequence,right_sequence); verify all pair identities exactly; check all product values at rtol=atol=1e-10 and retain max_abs_error. Check native arrival order separately in Rust tests.",
   "output_rows": 10998080,
   "overall_budget_seconds": 600,
   "pairs_per_round": 10,
+  "prior_candidate": "cd879969d1840da16f89514996f508b6b9baee64",
   "processing_goal_ms": 350,
-  "registered_utc": "2026-11-24T12:09:16.684549+00:00",
+  "registered_utc": "2026-11-24T12:51:54.248724+00:00",
   "requested_baseline_product": {
     "all_changed_paths": [
       "docs/plans/2026-11-23-incremental-performance.md"
@@ -62,7 +63,7 @@
     ".github/workflows/benchmarks.yml": "eb0c37acb746efc390b5ad3360a92e425056b673b797bd4f95664256a4369574",
     "benchmarks/engine_comparison.py": "b9b1b7c346492fdb7ab3d5d1810968551bad52417a95126d4ccb3eab89d6ca11",
     "benchmarks/engine_stream.py": "1f37cfa730c111793ca0ce698e5722074592ac1e3a5b97206bd9e71fd84ee70f",
-    "benchmarks/hosted-interval-cursor.md": "83487019c498cb25ecf26e9c878a92eda49019a039ef3b5f7cfca1f17033138d",
+    "benchmarks/hosted-interval-cursor.md": "7a19c8f22e52a8fcf20b7f7893839762ac0f19c49d4cde6580f3427a51d5ca22",
     "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
     "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
     "scripts/benchmark_suite/measure.py": "264f336b466c8530d45b801227e94464b97f04416780cdeccfb14d8eed4e8db1",
