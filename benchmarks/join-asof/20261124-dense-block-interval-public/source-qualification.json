@@ -1,0 +1,99 @@
+{
+  "changes_from_last_pre_sample_candidate": [
+    {
+      "diff": "@@ -1078,8 +1078,43 @@ mod tests {\n             })\n             .collect::<Vec<_>>();\n         let routed = u64::try_from(rows).unwrap();\n-        // Only the first left morsel crosses the two source records.\n-        assert_eq!(visits, [(1, 0), (0, 0), (routed, MORSEL_ROWS as u64)]);\n+        // The test operator installs legacy row payloads on every input segment.\n+        assert_eq!(visits, [(1, 1), (0, 0), (routed, routed)]);\n+\n+        let batch = Batch::table(\n+            vec![left.slice(0, split), left.slice(split, rows - split)],\n+            BatchMetadata::default(),\n+        )\n+        .unwrap();\n+        // With borrowed records, only the first morsel crosses a segment boundary.\n+        assert_eq!(\n+            borrowed_route_visits(&mut operator, &batch),\n+            (3, MORSEL_ROWS)\n+        );\n+    }\n+\n+    #[cfg(feature = \"benchmark-internals\")]\n+    fn borrowed_route_visits(operator: &mut StreamJoinOperator, batch: &Batch) -> (usize, usize) {\n+        let mut admitted = AdmittedBatch::reserve(operator, batch).unwrap();\n+        let mut start = 0;\n+        for record in batch.table_payload().unwrap().batches() {\n+            let segment = admitted.begin_record(start as u64, start);\n+            for offset in 0..record.num_rows() {\n+                admitted.push_ready(segment, offset, EventTime::from_micros(0), true);\n+            }\n+            start += record.num_rows();\n+        }\n+        let mut core = RunCore::new(operator).unwrap();\n+        let mut visits = 0;\n+        let chunks = route(\n+            &admitted,\n+            &[0],\n+            &mut core.keys,\n+            &mut || Ok(()),\n+            Some(&mut visits),\n+        )\n+        .unwrap();\n+        (chunks.len(), visits)\n     }\n \n     #[test]",
+      "path": "crates/calc-flow/src/operator/join/production.rs"
+    }
+  ],
+  "changes_from_registered_intermediate": [
+    {
+      "diff": "@@ -146,6 +146,7 @@ impl<'a> GroupView<'a> {\n         AdmittedRef {\n             record: self.payload_at(offset),\n             row_id: self.segment.row_id_base + physical as u64,\n+            #[cfg(test)]\n             event_time: EventTime::from_micros(self.batch.times.get(position)),\n             retain: self.batch.retained.get(position),\n         }\n@@ -721,6 +722,7 @@ impl<'a> From<&'a RowPayload> for PayloadRef<'a> {\n \n pub(super) struct AdmittedRef<'a> {\n     pub(super) record: PayloadRef<'a>,\n+    #[cfg(test)]\n     pub(super) event_time: EventTime,\n     pub(super) row_id: u64,\n     pub(super) retain: bool,",
+      "path": "crates/calc-flow/src/operator/join/admitted.rs"
+    },
+    {
+      "diff": "@@ -1078,8 +1078,43 @@ mod tests {\n             })\n             .collect::<Vec<_>>();\n         let routed = u64::try_from(rows).unwrap();\n-        // Only the first left morsel crosses the two source records.\n-        assert_eq!(visits, [(1, 0), (0, 0), (routed, MORSEL_ROWS as u64)]);\n+        // The test operator installs legacy row payloads on every input segment.\n+        assert_eq!(visits, [(1, 1), (0, 0), (routed, routed)]);\n+\n+        let batch = Batch::table(\n+            vec![left.slice(0, split), left.slice(split, rows - split)],\n+            BatchMetadata::default(),\n+        )\n+        .unwrap();\n+        // With borrowed records, only the first morsel crosses a segment boundary.\n+        assert_eq!(\n+            borrowed_route_visits(&mut operator, &batch),\n+            (3, MORSEL_ROWS)\n+        );\n+    }\n+\n+    #[cfg(feature = \"benchmark-internals\")]\n+    fn borrowed_route_visits(operator: &mut StreamJoinOperator, batch: &Batch) -> (usize, usize) {\n+        let mut admitted = AdmittedBatch::reserve(operator, batch).unwrap();\n+        let mut start = 0;\n+        for record in batch.table_payload().unwrap().batches() {\n+            let segment = admitted.begin_record(start as u64, start);\n+            for offset in 0..record.num_rows() {\n+                admitted.push_ready(segment, offset, EventTime::from_micros(0), true);\n+            }\n+            start += record.num_rows();\n+        }\n+        let mut core = RunCore::new(operator).unwrap();\n+        let mut visits = 0;\n+        let chunks = route(\n+            &admitted,\n+            &[0],\n+            &mut core.keys,\n+            &mut || Ok(()),\n+            Some(&mut visits),\n+        )\n+        .unwrap();\n+        (chunks.len(), visits)\n     }\n \n     #[test]",
+      "path": "crates/calc-flow/src/operator/join/production.rs"
+    }
+  ],
+  "direct_tree_diff": [],
+  "official_builds": {
+    "baseline": {
+      "artifact": 14918393624,
+      "artifact_digest": "sha256:c046d951f299036f70a46fc89e00455bb9e4f3892e1417f657e9b3b1d2cb0e52",
+      "build_completed_at": "2026-11-24T12:20:16Z",
+      "build_started_at": "2026-11-24T11:57:31Z",
+      "checkout": "f0bb1c7bb5c2aa1450a5be6ac9da4c015c5c842d",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138427152678,
+      "requested_sha": "a21d3eed7088795763f511d9aed2fd81920e8201",
+      "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68",
+      "workflow_run": 45388900446
+    },
+    "candidate": {
+      "artifact": 14924728799,
+      "artifact_digest": "sha256:87a0b74e871fa3b21c365145220ed77992fa638ea64265f409e11701aa0d0e11",
+      "build_completed_at": "2026-11-24T13:35:34Z",
+      "build_started_at": "2026-11-24T13:13:06Z",
+      "checkout": "f1aed6080d1289c62ea94be7535db80be0234906",
+      "image": "ubuntu-26.04",
+      "image_version": "20261116.202.1",
+      "job": 138469727934,
+      "requested_sha": "8abc1d00038623b7f13cd73f1575c958e9848876",
+      "tree": "8b7810b36a9b806afb7063db13f6eb98a7043852",
+      "workflow_run": 45400956803
+    }
+  },
+  "product": {
+    "A": {
+      "parents": [
+        "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+        "a21d3eed7088795763f511d9aed2fd81920e8201"
+      ],
+      "sha": "f0bb1c7bb5c2aa1450a5be6ac9da4c015c5c842d",
+      "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68"
+    },
+    "B": {
+      "parents": [
+        "1c1b25a4dfdb705dfb174edc32337d912f5f87dc"
+      ],
+      "sha": "8abc1d00038623b7f13cd73f1575c958e9848876",
+      "tree": "8b7810b36a9b806afb7063db13f6eb98a7043852"
+    },
+    "base": {
+      "parents": [
+        "85af0b53e0a38e19cb472aff18c1ccfd84048912",
+        "a21d3eed7088795763f511d9aed2fd81920e8201"
+      ],
+      "sha": "dc1fd149032c586aeb5334095f6862d935b1c8fd",
+      "tree": "d44249d5436e5bd4929e943f248a73d8b7a8bb68"
+    },
+    "ci_merge": {
+      "parents": [
+        "dc1fd149032c586aeb5334095f6862d935b1c8fd",
+        "8abc1d00038623b7f13cd73f1575c958e9848876"
+      ],
+      "sha": "f1aed6080d1289c62ea94be7535db80be0234906",
+      "tree": "8b7810b36a9b806afb7063db13f6eb98a7043852"
+    },
+    "interval": {
+      "parents": [
+        "49e025860668c64fd3e430ff79e7f7fde2983663"
+      ],
+      "sha": "816ecdf53a5d5c8f81ebbce91435220408b2bb43",
+      "tree": "dc7a84b9f1d112eb30d54878c02b23e84fdac554"
+    },
+    "static": {
+      "parents": [
+        "747e3966fdcb2ca2731ed31a9512e4fe6374566b"
+      ],
+      "sha": "cea3974c22610932270700c1ac7f4469922c7f37",
+      "tree": "27be571671210c5833ac54eb807fe77af5450a52"
+    }
+  },
+  "registered_intermediate_candidate": "10be139582dd8dcc2fde72d43704634e474ae156",
+  "retired_before_dispatch": [
+    "10be139582dd8dcc2fde72d43704634e474ae156",
+    "1c1b25a4dfdb705dfb174edc32337d912f5f87dc"
+  ]
+}
