@@ -2,21 +2,72 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import sys
 from pathlib import Path
 
-from scripts.benchmark_suite.catalog import CONTRACT
+from scripts.benchmark_suite.catalog import CONTRACT, LEGACY_SCALES
 from scripts.benchmark_suite.dependency_migrations import dependency_migration_problem
-from scripts.benchmark_suite.identity import IDENTITIES, validate_component
+from scripts.benchmark_suite.identity import (
+    IDENTITIES,
+    validate_component,
+    validate_identity,
+)
 from scripts.benchmark_suite.normalize import pytest_rows, read_json
 from scripts.benchmark_suite.process import ROOT, child_environment, command, install
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import comparison, validate_shards
 from scripts.toolkit import sha256_file
+
+_SOURCE_CHANGE = "benchmark benchmark_source_sha256 changed; no timing classification"
+# Commit 83088c5d removed an obsolete profile label from an untimed plan assertion.
+_ROLLING_EXPLAIN_SOURCES = {
+    "baseline": "9abc1fc9a800ee545bc70c83b7c5550e0323f49eb34959b2d3f699a0d0b6fd4f",
+    "candidate": "947f95f5b2093dd36a83a2f12cbcfeff76f56b72a992cabdcb57515dc847ed9a",
+}
+_ROLLING_SYMBOLIC_SUPPORT = (
+    "ed5f917ac167a31ca29e28e31c362dd2795ab9b045db136b060ed3426bcd03f9"
+)
+_ROLLING_EXPLAIN_CASES = frozenset(
+    f"benchmarks/test_rolling_kernel.py::test_rolling_kernel_{indicator}[{scale}]"
+    for indicator in ("sma20", "dual_sma")
+    for scale in LEGACY_SCALES
+)
+
+
+def _reviewed_rolling_explain(name: str, blocks: dict) -> bool:
+    return name in _ROLLING_EXPLAIN_CASES and all(
+        _matches_rolling_source(block[name]["metadata"], expected)
+        for side, expected in _ROLLING_EXPLAIN_SOURCES.items()
+        for block in blocks[side]
+    )
+
+
+def _matches_rolling_source(metadata: dict, expected: str) -> bool:
+    try:
+        validate_identity(metadata)
+    except ValueError:
+        return False
+    support = metadata.get("benchmark_support_sha256")
+    return (
+        metadata.get("benchmark_source_sha256") == expected
+        and metadata.get("benchmark_symbolic_support_sha256")
+        == _ROLLING_SYMBOLIC_SUPPORT
+        and isinstance(support, str)
+        and re.fullmatch(r"[0-9a-f]{64}", support) is not None
+    )
+
+
+def _pytest_source_hashes(source: Path, name: str) -> dict:
+    benchmark = source / name.split("::", 1)[0]
+    hashes = {"benchmark_source_sha256": sha256_file(benchmark)}
+    if name in _ROLLING_EXPLAIN_CASES:
+        hashes["benchmark_symbolic_support_sha256"] = sha256_file(
+            source / "benchmarks/symbolic_support.py"
+        )
+    return hashes
 
 
 def pytest_arguments(family: str) -> list[str]:
@@ -56,9 +107,7 @@ async def _pytest_run(shard: dict, source: Path, site: Path, output: Path) -> di
             "metadata": {
                 **row["metadata"],
                 "benchmark_support_sha256": sha256_file(ROOT / "benchmarks/support.py"),
-                "benchmark_source_sha256": hashlib.sha256(
-                    (source / name.split("::", 1)[0]).read_bytes()
-                ).hexdigest(),
+                **_pytest_source_hashes(source, name),
             },
         }
         for name, row in rows.items()
@@ -143,7 +192,16 @@ def _block_row(shard: dict, name: str, descriptor: dict, blocks: dict) -> dict:
             ),
         }
     problem = block_problem(name, blocks, rust=shard["family"] == "rust")
-    if problem:
+    if (
+        problem == _SOURCE_CHANGE
+        and shard["family"] == "python"
+        and _reviewed_rolling_explain(name, blocks)
+    ):
+        row["metadata"] = {
+            **row["metadata"],
+            "rolling_explain_source_sha256": _ROLLING_EXPLAIN_SOURCES.copy(),
+        }
+    elif problem:
         return {**row, "status": "error", "error": problem}
     row = {
         **row,
@@ -209,13 +267,15 @@ def _matching_fingerprints_problem(
         "machine_fingerprint",
         "dependency_fingerprint",
         "workload_fingerprint",
-        "benchmark_source_sha256",
         "benchmark_support_sha256",
     ):
         if key == "dependency_fingerprint" and not check_dependency:
             continue
         if any(row.get(key) != metadata[0].get(key) for row in metadata):
             return f"benchmark {key} changed; no timing classification"
+    source = metadata[0].get("benchmark_source_sha256")
+    if any(row.get("benchmark_source_sha256") != source for row in metadata):
+        return _SOURCE_CHANGE
     return None
 
 
