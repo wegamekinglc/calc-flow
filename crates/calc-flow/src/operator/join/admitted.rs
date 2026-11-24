@@ -146,6 +146,7 @@ impl<'a> GroupView<'a> {
         AdmittedRef {
             record: self.payload_at(offset),
             row_id: self.segment.row_id_base + physical as u64,
+            #[cfg(test)]
             event_time: EventTime::from_micros(self.batch.times.get(position)),
             retain: self.batch.retained.get(position),
         }
@@ -721,6 +722,7 @@ impl<'a> From<&'a RowPayload> for PayloadRef<'a> {
 
 pub(super) struct AdmittedRef<'a> {
     pub(super) record: PayloadRef<'a>,
+    #[cfg(test)]
     pub(super) event_time: EventTime,
     pub(super) row_id: u64,
     pub(super) retain: bool,
