@@ -532,12 +532,15 @@ fn test_duplicate_and_row_limit_refusal_roll_back_new_key_births() {
 
 #[test]
 fn test_ordered_interleaved_identity_admission_is_linear_on_both_sides() {
-    const KEYS: usize = 64;
+    const KEYS: i64 = 64;
     const ROWS: usize = 1024;
     let input = |start: usize| {
         record(
             &(start..start + ROWS)
-                .map(|i| ((i % KEYS) as i64, (i / KEYS) as i64, i as i64, Some("p")))
+                .map(|i| {
+                    let sequence = i64::try_from(i).unwrap();
+                    (sequence % KEYS, sequence / KEYS, sequence, Some("p"))
+                })
                 .collect::<Vec<_>>(),
         )
     };
