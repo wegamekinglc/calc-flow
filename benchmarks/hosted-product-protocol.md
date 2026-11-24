@@ -28,10 +28,12 @@ alternating pairs follow the maintained exact paired median intervals and 5%
 rule, after one excluded warmup per arm and round. Report both intervals,
 pooled p50 and p95, and the separate absolute public p50 goal of 30 ms.
 
-Reserve ten minutes for this case, including 60 seconds for off-runner
-qualification and nine minutes from job start through final upload. Reserve
-45 seconds of the hosted window for cleanup. Product wheel builds take
-roughly 20–30 minutes each, separately. Enforce the three-second CPU/sibling,
-paging and available-memory preflight and one-second monitoring throughout
-collection. Stop on a deadline, provenance, oracle or resource failure. Run
-this registration once and retain partial results.
+The two public cursor workloads share a ten-minute total budget. The static
+job has a three-minute wall limit, the interval job five minutes, and
+off-runner qualification and cleanup share at most one minute. The remaining
+minute is unallocated. Keep 45 seconds within each hosted limit for cleanup.
+Previous complete hosted jobs, including receipt upload, took 46 seconds and
+126 seconds respectively. Product wheel builds take roughly 20–30 minutes
+each separately. Enforce the three-second CPU/sibling, paging and memory
+preflight and one-second monitoring throughout collection. Stop on any
+deadline, provenance, oracle or resource failure. Run each registration once.

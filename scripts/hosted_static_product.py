@@ -29,7 +29,7 @@ def case():
     return chosen
 
 
-BUDGET = 540
+BUDGET = 180
 SIDES = ("baseline", "candidate")
 CONFIG = ROOT / "benchmarks/hosted-product-registration.json"
 OUT = ROOT / "target/hosted-evidence"

@@ -17,7 +17,7 @@ jobs:
   public-stream:
     name: Public stream evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 3
     env:
       RAYON_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
