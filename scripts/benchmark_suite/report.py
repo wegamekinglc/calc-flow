@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import statistics
 from collections import Counter
+from dataclasses import dataclass
 
 from scripts.benchmark_suite.catalog import (
     CAPABILITIES,
@@ -171,7 +172,7 @@ def _milliseconds(value: float | None) -> str:
     return "—" if value is None else f"{value * 1000:.6f}"
 
 
-def _result_row(case: dict) -> list[object]:
+def _result_row(case: dict, result: dict | None) -> list[object]:
     dimensions = f"N={case.get('rows', '—')}"
     if "history_rows" in case:
         dimensions += f", H0={case['history_rows']}"
@@ -179,13 +180,12 @@ def _result_row(case: dict) -> list[object]:
     if "dependency_migration" in case.get("metadata", {}):
         scope += " (cross-dependency release)"
     prefix = [case["id"], dimensions, scope]
-    if case["status"] != "ok":
+    if result is None:
         return [
             *prefix,
             *("—" for _ in range(7)),
             "error",
         ]
-    result = comparison(case)
     changes = (
         ", ".join(f"{value:+.2f}%" for value in result["round_min_changes"]) or "—"
     )
@@ -214,20 +214,48 @@ def _paired_cell(intervals: list[dict]) -> str:
     )
 
 
+@dataclass(frozen=True)
+class BenchmarkReport:
+    markdown: str
+    evidence_errors: list[str]
+    regressions: list[str]
+
+    @property
+    def errors(self) -> list[str]:
+        """Keep the complete list of blocking reasons for summary.json consumers."""
+        return [
+            *self.evidence_errors,
+            *(f"{name}: repeated regression exceeds +5%" for name in self.regressions),
+        ]
+
+
 def render_report(
     cases: list[dict],
     errors: list[str],
     baseline: str | None = None,
     rust_baseline: str | None = None,
 ) -> str:
+    return build_report(cases, errors, baseline, rust_baseline).markdown
+
+
+def build_report(
+    cases: list[dict],
+    errors: list[str],
+    baseline: str | None = None,
+    rust_baseline: str | None = None,
+) -> BenchmarkReport:
     rows = []
     metrics = []
+    regressions = []
     failures = list(errors)
     for case in sorted(cases, key=lambda item: item["id"]):
         target = metrics if case.get("kind") == "metric" else rows
-        formatted, problems = _format_case(case)
+        formatted, problem, regressed = _format_case(case)
         target.append(formatted)
-        failures.extend(problems)
+        if regressed:
+            regressions.append(case["id"])
+        if problem is not None:
+            failures.append(problem)
     header = [
         "Case",
         "Dimensions",
@@ -328,28 +356,43 @@ def render_report(
                     ),
                 ]
             )
+    if regressions:
+        parts.extend(
+            [
+                "",
+                "## Confirmed performance regressions",
+                "",
+                *(f"- {_cell(name)}" for name in regressions),
+            ]
+        )
+    failures = list(dict.fromkeys(failures))
     if failures:
         parts.extend(
             [
                 "",
                 "## Incomplete or invalid evidence",
                 "",
-                *[f"- {_cell(e)}" for e in dict.fromkeys(failures)],
+                *[f"- {_cell(e)}" for e in failures],
             ]
         )
-    return "\n".join(parts) + "\n"
+    return BenchmarkReport("\n".join(parts) + "\n", failures, regressions)
 
 
-def _format_case(case: dict) -> tuple[list[object], list[str]]:
-    formatter = _metric_row if case.get("kind") == "metric" else _result_row
-    failures = []
-    if case["status"] != "ok":
-        failures.append(f"{case['id']}: {case.get('error', 'failed')}")
-    try:
-        return formatter(case), failures
-    except (KeyError, TypeError, ValueError) as error:
-        failures.append(f"{case.get('id')}: {error}")
-        return formatter({**case, "status": "error", "error": str(error)}), failures
+def _format_case(case: dict) -> tuple[list[object], str | None, bool]:
+    metric = case.get("kind") == "metric"
+    if case["status"] == "ok":
+        try:
+            if metric:
+                return _metric_row(case), None, False
+            result = comparison(case)
+            return _result_row(case, result), None, result["verdict"] == "regression"
+        except (KeyError, TypeError, ValueError) as error:
+            problem = str(error)
+    else:
+        problem = case.get("error", "failed")
+    invalid = {**case, "status": "error"}
+    row = _metric_row(invalid) if metric else _result_row(invalid, None)
+    return row, f"{case['id']}: {problem}", False
 
 
 def _metric_row(case: dict) -> list[object]:

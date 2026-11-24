@@ -11,30 +11,11 @@ from scripts.benchmark_suite.catalog import get_shard, shard_cases, shards
 from scripts.benchmark_suite.normalize import read_json
 from scripts.benchmark_suite.refs import describe_baseline
 from scripts.benchmark_suite.report import (
-    comparison,
-    render_report,
+    build_report,
     table,
-    validate_metric,
     validate_shards,
 )
 from scripts.benchmark_suite.validation import validate_fragment, validate_shape
-
-
-def case_failures(cases: list[dict]) -> list[str]:
-    failures = []
-    for case in cases:
-        if case["status"] != "ok":
-            failures.append(f"{case['id']}: {case.get('error', 'failed')}")
-            continue
-        try:
-            if case.get("kind") == "metric":
-                validate_metric(case)
-                continue
-            if comparison(case)["verdict"] == "regression":
-                failures.append(f"{case['id']}: repeated regression exceeds +5%")
-        except (KeyError, TypeError, ValueError) as error:
-            failures.append(f"{case['id']}: {error}")
-    return failures
 
 
 def unavailable_cases(shard: dict, error: str, received: list[dict] = ()) -> list[dict]:
@@ -115,7 +96,6 @@ def collect(
     for name in sorted(set(expected) - set(received)):
         cases.extend(unavailable_cases(get_shard(name), "shard artifact is missing"))
     errors.extend(_duplicate_cases(cases))
-    errors.extend(case_failures(cases))
     return cases, errors, reports
 
 
@@ -198,15 +178,25 @@ def summarize(args: argparse.Namespace) -> int:
     baseline, baseline_errors = _baseline(args)
     rust_baseline, rust_errors = _rust_baseline(args)
     errors = [*baseline_errors, *rust_errors, *errors]
+    result = build_report(cases, errors, baseline, rust_baseline)
     report = (
-        render_report(cases, errors, baseline, rust_baseline)
+        result.markdown
         + "\n"
         + _provenance(reports, args.expected_base, args.expected_head)
     )
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "summary.md").write_text(report, encoding="utf-8")
     (args.output / "summary.json").write_text(
-        json.dumps({"cases": cases, "errors": errors}, indent=2, allow_nan=False)
+        json.dumps(
+            {
+                "cases": cases,
+                "errors": result.errors,
+                "evidence_errors": result.evidence_errors,
+                "regressions": result.regressions,
+            },
+            indent=2,
+            allow_nan=False,
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -219,4 +209,4 @@ def summarize(args: argparse.Namespace) -> int:
             )
         with args.github_summary.open("a", encoding="utf-8") as output:
             output.write(report)
-    return int(bool(errors))
+    return int(bool(result.errors))

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from scripts.benchmark_suite.catalog import CONTRACT, get_shard, shards
 from scripts.benchmark_suite.provenance import harness_sha256
-from scripts.benchmark_suite.report import render_report
+from scripts.benchmark_suite.report import build_report
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,16 +73,10 @@ async def run_shard(args: argparse.Namespace) -> int:
     (output / "results.json").write_text(
         json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
-    rendered = render_report(report["cases"], report["errors"])
-    (output / "summary.md").write_text(rendered, encoding="utf-8")
-    print(rendered, end="")
-    bad_cases = [
-        case
-        for case in report["cases"]
-        if case["status"] != "ok"
-        or case.get("result", {}).get("verdict") == "regression"
-    ]
-    return int(bool(report["errors"] or bad_cases))
+    result = build_report(report["cases"], report["errors"])
+    (output / "summary.md").write_text(result.markdown, encoding="utf-8")
+    print(result.markdown, end="")
+    return int(bool(result.errors))
 
 
 def main() -> int:

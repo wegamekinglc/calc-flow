@@ -1112,6 +1112,12 @@ filtering is applied. Build, measurement and summary artifacts retain raw
 JSON/JSONL samples, original runner formats, stdout/stderr, release/native and
 harness hashes, exact source refs and environment identities for 30 days.
 
+The Markdown report lists confirmed performance regressions and evidence errors
+under separate headings. In the consolidated `summary.json`, `regressions`
+contains the case IDs that exceeded the paired gate and `evidence_errors`
+contains validation or collection failures. The existing `errors` field
+includes all blocking reasons. Either category produces a failing exit status.
+
 Engine/warm worker requests retain separate `request-*.started.json` and
 completed/failed records, including side, zero-based round/sample, phase and
 the original release manifest. Warmup uses `sample: null`. Each validated
