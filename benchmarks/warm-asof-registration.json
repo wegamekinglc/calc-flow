@@ -1,0 +1,57 @@
+{
+  "baseline": {
+    "artifact": 14897014496,
+    "artifact_digest": "sha256:f37ff1db4a53b48b5f728400ae486e827aceed8379c9728cd830785900fd80ad",
+    "checkout": "ed6a4a66efead800d5d0870fc0dbd0acd482614a",
+    "job": 138283593607,
+    "requested_sha": "ba5471bbe5b18aee129f6461bbdf96c5237e3c24",
+    "tree": "02148c811872cf7348bbe0d6c0cb35ef9ea69eb2",
+    "workflow_run": 45342562023
+  },
+  "baseline_equivalence": {
+    "all_changed_paths": [
+      "docs/plans/2026-11-23-incremental-performance.md"
+    ],
+    "plan_main": "85af0b53e0a38e19cb472aff18c1ccfd84048912"
+  },
+  "budget_seconds": 480,
+  "candidate_identity": "dispatch binds the final reviewed candidate head and official CI artifact before any workers",
+  "case": "python/public-stream-asof/ready-prefix-eight",
+  "fixture": {
+    "left_rows": 10,
+    "matches": 5,
+    "pending": 1,
+    "prefix_rows": 8,
+    "right_update_rows": 4,
+    "tolerance_us": 2,
+    "unmatched": 3
+  },
+  "fresh_workers": 44,
+  "pairs_per_round": 10,
+  "registered_utc": "2026-11-24T11:50:25.819458+00:00",
+  "reserved_cleanup_seconds": 45,
+  "rounds": 2,
+  "side_order": [
+    "baseline",
+    "candidate"
+  ],
+  "source_hashes": {
+    ".github/workflows/benchmarks.yml": "fcf84d8aedc56881937be2d77df513b25faf342b4c9b184f897652c566b78a10",
+    "benchmarks/join_asof_acceptance.py": "e10ab964fd7c16df68dac60f20281b6c44254022312410375d170f19432497f9",
+    "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
+    "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
+    "benchmarks/warm-asof-protocol.md": "cdae4ff95eee8d3576895172da500cabe07953e6d0406f1895bbfb18dc746cd0",
+    "benchmarks/warm_asof_latency.py": "dc0fc6ab293b60ac53cbfb79788c3e2b50e57c7a097635f7362d65e67b197271",
+    "python/tests/test_warm_asof_latency_benchmark.py": "190b3e5b78a2146a587c5c5bfa7b36eaea90a335ac787340ff42cdd03a0b7ceb",
+    "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",
+    "scripts/benchmark_suite/release.py": "f5523d3fc3436449aae9d697457c462c383cdbfd55f7144d9997478f96a44307",
+    "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
+    "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
+    "scripts/hosted_warm_asof.py": "013602f9645a2c8233dd57975bb5ed5b0c42e9254b566a0c3bafc69af3e30789",
+    "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
+    "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
+  },
+  "total_python_budget_seconds": 600,
+  "warmups_per_side_per_round": 1
+}
