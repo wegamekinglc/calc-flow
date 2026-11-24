@@ -6,7 +6,7 @@ on:
         description: Candidate Linux CI head SHA
         required: true
         type: string
-      candidate_artifact:
+      candidate_wheel_artifact:
         description: Candidate python-distributions artifact ID
         required: true
         type: string
@@ -14,10 +14,10 @@ permissions:
   contents: read
   actions: read
 jobs:
-  public-warm-sql:
-    name: Public warm sparse update
+  public-asof-projection:
+    name: Public ASOF projection
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 8
     env:
       RAYON_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
@@ -35,24 +35,24 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-          CANDIDATE_ARTIFACT: ${{ inputs.candidate_artifact }}
-        run: python -m scripts.hosted_sparse_update acquire
+          CANDIDATE_ARTIFACT: ${{ inputs.candidate_wheel_artifact }}
+        run: python -m scripts.hosted_asof_projection acquire
       - name: Install locked runtime dependencies
         run: |
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python --require-hashes benchmarks/requirements.lock
-      - name: Measure the public open sparse SQL graph
-        run: target/benchmark-venv/bin/python -m scripts.hosted_sparse_update measure
+      - name: Measure the public single-run ASOF stream
+        run: target/benchmark-venv/bin/python -m scripts.hosted_asof_projection measure
       - name: Preserve stopped or completed evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: public-warm-update-${{ github.run_id }}-${{ github.run_attempt }}
+          name: public-asof-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            target/public-warm-update/*.json
-            target/public-warm-update/*.jsonl
-            target/public-warm-update/*/release.json
-            target/public-warm-update/*/install.log
-            target/public-warm-update/workers/
+            target/public-asof/*.json
+            target/public-asof/*.jsonl
+            target/public-asof/*/release.json
+            target/public-asof/*/install.log
+            target/public-asof/workers/
           if-no-files-found: error
           retention-days: 90

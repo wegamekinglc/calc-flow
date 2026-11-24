@@ -1,9 +1,8 @@
-"""Compare full snapshot latency on two official grouped SUM wheels."""
+"""Measure a single-run public ASOF stream using two official Linux wheels."""
 
 from __future__ import annotations
 
 import asyncio
-import gzip
 import json
 import os
 import statistics
@@ -17,12 +16,12 @@ from scripts.benchmark_suite.process import ROOT, child_environment, command, in
 from scripts.benchmark_suite.release import load_release
 from scripts.benchmark_suite.report import _paired_verdict
 from scripts.benchmark_suite.statistics import paired_round
-from scripts.sparse_changelog_ci import FIXTURE, _resource
+from scripts.sparse_changelog_ci import _resource
 from scripts.sparse_changelog_wheels import _api, seal
 from scripts.toolkit import linear_percentile, sha256_file, write_json
 
-OUT = ROOT / "target/public-warm-update"
-CONFIG = ROOT / "benchmarks/hosted-sparse-update-registration.json"
+OUT = ROOT / "target/public-asof"
+CONFIG = ROOT / "benchmarks/hosted-asof-registration.json"
 SIDES = ("baseline", "candidate")
 
 
@@ -38,12 +37,19 @@ def schedule():
 
 
 def verify_worker(data: dict, cpu: int, native: str) -> None:
-    if data["mode"] != "snapshot" or data["output_rows"] != [10_000] * 21:
-        raise ValueError("wrong mode or incomplete sparse output")
-    if len(data["update_ns"]) != 20 or any(
-        type(v) is not int or v <= 0 for v in data["update_ns"]
-    ):
-        raise ValueError("missing warm update clocks")
+    if data["proof"] != {
+        "rows": 1024,
+        "matched": 764,
+        "unmatched": 260,
+        "columns": [
+            f"{side}__{field}"
+            for side in ("left", "right")
+            for field in ("key", "time", "seq")
+        ],
+    }:
+        raise ValueError("ASOF output proof differs")
+    if type(data["stream_ns"]) is not int or data["stream_ns"] <= 0:
+        raise ValueError("invalid ASOF stream clock")
     env = data["environment"]
     if (env["cpu_affinity"], env["tokio_worker_threads"], env["native_sha256"]) != (
         [cpu],
@@ -60,7 +66,7 @@ def acquire() -> None:
     jobs = json.loads(
         _api(repo, f"actions/runs/{run}/attempts/{attempt}/jobs?per_page=100")
     )["jobs"]
-    (job,) = (j for j in jobs if j["name"] == "Public warm sparse update")
+    (job,) = (j for j in jobs if j["name"] == "Public ASOF projection")
     started = datetime.fromisoformat(job["started_at"]).timestamp()
     candidate = {
         "requested_sha": os.environ["CANDIDATE_SHA"],
@@ -89,8 +95,9 @@ def acquire() -> None:
             raise ValueError("unexpected published baseline")
 
 
-async def workers(cpu: int, sites: dict, releases: dict, fixture: Path) -> list[dict]:
+async def workers(cpu: int, sites: dict, releases: dict) -> list[dict]:
     observations = []
+    initial_environment = None
     for group, pair, side in schedule():
         target = OUT / "workers" / f"r{group}-p{pair}-{side}.json"
         env = child_environment(sites[side], tokio_threads=1, polars_threads=1)
@@ -98,9 +105,7 @@ async def workers(cpu: int, sites: dict, releases: dict, fixture: Path) -> list[
             [
                 sys.executable,
                 "-m",
-                "benchmarks.sparse_warm_update",
-                "snapshot",
-                str(fixture),
+                "benchmarks.public_asof_projection",
                 str(target),
             ],
             cwd=ROOT,
@@ -110,6 +115,11 @@ async def workers(cpu: int, sites: dict, releases: dict, fixture: Path) -> list[
         )
         observation = read(target)
         verify_worker(observation, cpu, releases[side]["native_sha256"])
+        environment = dict(observation["environment"])
+        environment.pop("native_sha256")
+        if initial_environment is not None and environment != initial_environment:
+            raise ValueError("ASOF worker environments differ")
+        initial_environment = environment
         observations.append({"round": group, "pair": pair, "side": side, **observation})
         write_json(OUT / "partial.json", {"observations": observations})
     return observations
@@ -120,16 +130,15 @@ def summarize(observations: list[dict]) -> dict:
     pooled, by_round = {}, {}
     for side in SIDES:
         samples = [o for o in formal if o["side"] == side]
-        values = [v / 1000 for o in samples for v in o["update_ns"]]
-        if len(values) != 400:
-            raise ValueError("an arm has fewer than 400 warm update clocks")
+        values = [o["stream_ns"] / 1_000_000 for o in samples]
+        if len(values) != 20:
+            raise ValueError("expected twenty public stream clocks per wheel")
         pooled[side] = {
-            "p50_us": statistics.median(values),
-            "p95_us": linear_percentile(values, 0.95),
+            "p50_ms": statistics.median(values),
+            "p95_ms": linear_percentile(values, 0.95),
         }
         by_round[side] = [
-            [statistics.median(o["update_ns"]) for o in samples if o["round"] == r]
-            for r in (1, 2)
+            [o["stream_ns"] for o in samples if o["round"] == r] for r in (1, 2)
         ]
     intervals = [
         paired_round(a, b) for a, b in zip(*(by_round[m] for m in SIDES), strict=True)
@@ -153,12 +162,10 @@ async def observe() -> None:
         site = await install(release, OUT / side)
         verify_package_files(Path(release["wheel_path"]), site)
         sites[side] = site
-    fixture = OUT / "sparse.arrow"
-    fixture.write_bytes(gzip.decompress(FIXTURE.read_bytes()))
     cpu = await _resource(OUT / "resources.jsonl", None)
     os.sched_setaffinity(0, {cpu})
     async with asyncio.TaskGroup() as tasks:
-        acquire_workers = tasks.create_task(workers(cpu, sites, releases, fixture))
+        acquire_workers = tasks.create_task(workers(cpu, sites, releases))
         while not acquire_workers.done():
             await _resource(OUT / "resources.jsonl", cpu)
     write_json(OUT / "result.json", summarize(acquire_workers.result()))

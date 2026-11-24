@@ -1,13 +1,13 @@
-"""The public sparse experiment requires full paired, correctly sized workers."""
+"""The public ASOF experiment requires complete pairs and correct output proof."""
 
 from __future__ import annotations
 
 import unittest
 
 
-class WarmUpdateTest(unittest.TestCase):
+class AsofPairTest(unittest.TestCase):
     def test_fresh_worker_schedule_and_proof(self):
-        from scripts.hosted_sparse_update import schedule, verify_worker
+        from scripts.hosted_asof_projection import schedule, verify_worker
 
         rows = list(schedule())
         self.assertEqual(len(rows), 44)
@@ -22,9 +22,20 @@ class WarmUpdateTest(unittest.TestCase):
             )
             self.assertEqual(pairings[1:], pairings[1:3] * 5)
         obs = {
-            "mode": "snapshot",
-            "update_ns": [1] * 20,
-            "output_rows": [10000] * 21,
+            "proof": {
+                "rows": 1024,
+                "matched": 764,
+                "unmatched": 260,
+                "columns": [
+                    "left__key",
+                    "left__time",
+                    "left__seq",
+                    "right__key",
+                    "right__time",
+                    "right__seq",
+                ],
+            },
+            "stream_ns": 3,
             "environment": {
                 "cpu_affinity": [0],
                 "native_sha256": "native",
@@ -33,9 +44,9 @@ class WarmUpdateTest(unittest.TestCase):
         }
         verify_worker(obs, 0, "native")
         for field, value in [
-            ("update_ns", [1] * 19),
-            ("output_rows", [10000] + [160] * 20),
-            ("mode", "changelog"),
+            ("stream_ns", 0),
+            ("proof", {**obs["proof"], "matched": 763}),
+            ("proof", {**obs["proof"], "columns": []}),
         ]:
             with self.assertRaises(ValueError):
                 verify_worker({**obs, field: value}, 0, "native")
