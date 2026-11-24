@@ -690,6 +690,81 @@ fn fanout_state(rows: usize) -> (RunState, Incoming) {
 }
 
 #[test]
+fn test_chunked_interval_output_reads_only_projected_match_coordinates() {
+    let mut reads = Vec::new();
+    for projection in [&[3][..], &[1], &[], &[1, 3]] {
+        let mut state = RunState::new(
+            "projected-interval",
+            JoinStateLimits::new(100, 1_000_000, 100).unwrap(),
+            JoinTimeBounds::from_micros(1, 1).unwrap(),
+        )
+        .unwrap();
+        let schema = output_schema();
+        state
+            .apply(
+                JoinSide::Left,
+                fanout_input(8, 0, true),
+                &schema,
+                Some(&[1, 3]),
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap();
+        let fields: Vec<_> = projection
+            .iter()
+            .map(|&index| Arc::clone(&schema.fields()[index / 2]))
+            .collect();
+        let schema = Arc::new(Schema::new(fields));
+        let probe = incoming(
+            &record(&[1; 11], &(100..111).collect::<Vec<_>>()),
+            (0..11).collect(),
+            vec![GroupId::new(0).unwrap(); 11],
+            &[11; 11],
+            &(0..11).collect::<Vec<_>>(),
+            vec![false; 11],
+            11,
+        );
+        super::output_gather::COORDINATE_READS.set(0);
+        let mut batches = Vec::new();
+        let allocations = allocation_counter::measure(|| {
+            batches = state
+                .apply(
+                    JoinSide::Right,
+                    probe,
+                    &schema,
+                    Some(projection),
+                    2,
+                    EdgeBudget::new(7, 1_000_000).unwrap(),
+                )
+                .unwrap();
+        });
+        let visits = super::output_gather::COORDINATE_READS.get();
+        println!("projection {projection:?} reads={visits} allocations={allocations:?}");
+        reads.push(visits);
+        assert_projected_fanout(&batches, projection);
+    }
+    // Eight retained rows for each incoming row span 22 windows across 13 chunks.
+    assert_eq!(reads, [22, 88, 0, 110]);
+}
+
+fn assert_projected_fanout(batches: &[Batch], projection: &[usize]) {
+    assert_eq!(sequences(batches), (0..13).collect::<Vec<_>>());
+    for (chunk, batch) in batches.iter().enumerate() {
+        let rows = chunk * 7..((chunk + 1) * 7).min(88);
+        assert_eq!(batch.num_rows(), rows.len());
+        assert_eq!(output_record(batch).num_columns(), projection.len());
+        for (ordinal, &index) in projection.iter().enumerate() {
+            let expected: Vec<_> = rows
+                .clone()
+                .map(|row| if index < 2 { row % 8 } else { 100 + row / 8 })
+                .map(|value| i64::try_from(value).unwrap())
+                .collect();
+            assert_eq!(values(batch, ordinal), expected);
+        }
+    }
+}
+
+#[test]
 fn test_chunked_run_gather_reads_each_incoming_match_span_once() {
     let (mut state, right) = fanout_state_with_rows(8, 11);
     super::output_gather::COORDINATE_READS.set(0);

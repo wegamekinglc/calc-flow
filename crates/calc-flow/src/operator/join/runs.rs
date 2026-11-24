@@ -19,6 +19,7 @@ use datafusion::arrow::{
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 use std::{
+    cell::LazyCell,
     collections::{BTreeMap, BTreeSet},
     mem::size_of,
     sync::Arc,
@@ -1744,33 +1745,34 @@ impl Prepared {
         let left_width = output.left_width;
         let count = range.len();
         let windows = self.probe.windows(range);
-        let incoming = output_gather::SideGather::repeated(
-            self.incoming.payload.columns(),
-            windows
-                .clone()
-                .map(|(position, window)| (self.incoming.physical[position], window.len())),
-            count,
-        );
+        let incoming_windows = windows.clone();
+        let incoming = LazyCell::new(|| {
+            output_gather::SideGather::repeated(
+                self.incoming.payload.columns(),
+                incoming_windows
+                    .map(|(position, window)| (self.incoming.physical[position], window.len())),
+                count,
+            )
+        });
         let side = payloads.side;
-        let opposite = output_gather::SideGather::with_capacity(
-            windows
-                .flat_map(|(position, window)| {
-                    side.buckets[&self.incoming.groups[position]].active()[window].iter()
-                })
-                .map(|entry| payloads.payload(entry.locator)),
-            count,
-        );
-        let (left, right) = if self.incoming_is_left {
-            (incoming, opposite)
-        } else {
-            (opposite, incoming)
-        };
+        let opposite = LazyCell::new(|| {
+            output_gather::SideGather::with_capacity(
+                windows
+                    .flat_map(|(position, window)| {
+                        side.buckets[&self.incoming.groups[position]].active()[window].iter()
+                    })
+                    .map(|entry| payloads.payload(entry.locator)),
+                count,
+            )
+        });
         let column = |logical: usize, data_type: &DataType| {
-            let (gather, index) = if logical < left_width {
-                (left.as_ref(), logical)
+            let left = logical < left_width;
+            let gather = if left == self.incoming_is_left {
+                incoming.as_ref()
             } else {
-                (right.as_ref(), logical - left_width)
+                opposite.as_ref()
             };
+            let index = if left { logical } else { logical - left_width };
             output_gather::column(gather, index, data_type)
         };
         let columns = if let Some(product) = output.product {
