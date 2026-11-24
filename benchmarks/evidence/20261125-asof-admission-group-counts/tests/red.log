@@ -1,0 +1,21 @@
+   Compiling calc-flow v2026.11.14 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/perf-asof-ordered-probes-nov25/crates/calc-flow)
+    Finished `test` profile [unoptimized] target(s) in 1m 29s
+     Running unittests src/lib.rs (../staged-perf-ec402c59/asof-prefix-stage/target/rust-work/debug/deps/calc_flow-b00921f8a4af2e7c)
+
+running 1 test
+
+thread 'operator::asof::columnar::tests::test_fresh_charge_counts_each_group_locator_once_on_both_sides' (74058) panicked at crates/calc-flow/src/operator/asof/columnar/tests.rs:515:5:
+assertion `left == right` failed
+  left: [2048, 2048]
+ right: [1024, 1024]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test operator::asof::columnar::tests::test_fresh_charge_counts_each_group_locator_once_on_both_sides ... FAILED
+
+failures:
+
+failures:
+    operator::asof::columnar::tests::test_fresh_charge_counts_each_group_locator_once_on_both_sides
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3291 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p calc-flow --lib`

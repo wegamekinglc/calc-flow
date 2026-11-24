@@ -1,0 +1,31 @@
+   Compiling calc-flow v2026.11.14 (/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/perf-asof-ordered-probes-nov25/crates/calc-flow)
+    Finished `test` profile [unoptimized] target(s) in 2m 30s
+     Running tests/stream_asof_join_state.rs (../staged-perf-ec402c59/asof-prefix-stage/target/rust-work/debug/deps/stream_asof_join_state-da30b8eb7e548324)
+
+running 24 tests
+test invalid_flat_payload_parameters_are_rejected_at_declaration ... ok
+test duplicate_identity_precedes_even_unavailable_identity_workspace ... ok
+test empty_input_and_eof_require_no_identity_state_budget ... ok
+test late_error_precedes_duplicate_and_keeps_admission_atomic ... ok
+test nested_payload_without_bounded_materialization_accounting_is_rejected ... ok
+test duplicate_in_batch_is_rejected_atomically ... ok
+test expired_payload_retains_on_time_identity_until_own_watermark ... ok
+test a_second_ipc_schema_is_rejected_before_arrow_conversion ... ok
+test malformed_ipc_schema_is_rejected_before_arrow_schema_conversion ... ok
+test failed_restore_is_atomic_and_reset_does_not_mutate_shared_segments ... ok
+test cancellation_interrupts_unacknowledged_asof_delivery ... ok
+test malformed_ipc_body_length_is_rejected_before_body_allocation ... ok
+test terminal_restore_rejects_new_input ... ok
+test restored_identity_only_encoding_is_validated_without_payload ... ok
+test state_rows_are_shared_and_rejected_batch_leaves_no_prefix ... ok
+test wide_admission_reserves_workspace_before_committing_state ... ok
+test unmatched_fixed_binary_output_respects_workspace_limit ... ok
+test malformed_metadata_does_not_copy_unbounded_error_values ... ok
+test flat_payload_types_roundtrip_through_checkpoint_and_arrow_output ... ok
+test repeated_snapshot_restore_keeps_pending_and_terminal_does_not_flush ... ok
+test tiny_slice_does_not_retain_its_large_utf8_backing_allocation ... ok
+test repeated_wide_candidate_is_finalized_in_bounded_chunks ... ok
+test direct_checkpoint_rebases_nonincreasing_epochs_for_cold_restore ... ok
+test schema_metadata_is_reserved_before_encoding_and_after_duplicate_validation ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s

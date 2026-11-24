@@ -1,0 +1,3 @@
+On published parent 7d166c8f, red-capacity.log shows a singleton locator column held 64 bytes, including after partial commit, when the projection accounted for 16. The mixed restored run held 6279 bytes against a projection of 6071 persistent plus 112 staging.
+The additional failure in the exploratory red log tested the private ColumnarState::restore helper as a public budget validator. The public decoded_snapshot_checked/validate_restored_state boundary owns that validation. The final checkpoint regression verifies byte-identical preservation of explicitly declared historical spare capacity. It introduces no change to checkpoint decoding or validation.
+Final runtime tree cec8e19a4b73137b659dbdf616e349a6b58351c3. The final 34-test capture is green-capacity.log.

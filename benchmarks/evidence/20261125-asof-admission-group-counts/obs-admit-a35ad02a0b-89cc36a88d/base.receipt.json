@@ -1,0 +1,97 @@
+{
+  "case": "admit",
+  "commit": "a35ad02a0b065a91505b94304abb6c67e3ac5644",
+  "tree": "2fbba39095e95b03cd1a53984f2659d2dfbc0323",
+  "source": "983a61efa086762cc88314b2a85231e79172ae41",
+  "harness_sha256": "4ccd266514c2d34c33e35c79072d9c046eadbf84c5271d5778c9fb3e9f3071c7",
+  "binary_sha256": "ff64f1828c5356412f5bede8a02c5d361493aaaf4ce0adee0babc868d829e0d8",
+  "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+  "cargo": [
+    "cargo",
+    "build",
+    "--profile",
+    "bench",
+    "--locked",
+    "-p",
+    "calc-flow",
+    "--example",
+    "stage_admit",
+    "--message-format=json"
+  ],
+  "wall_seconds": 541.2841296789702,
+  "artifacts": {
+    "calc_flow": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow#2026.11.14",
+      "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/Cargo.toml",
+      "target": {
+        "kind": [
+          "lib"
+        ],
+        "crate_types": [
+          "lib"
+        ],
+        "name": "calc_flow",
+        "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/src/lib.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": true,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [],
+      "filenames": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/libcalc_flow-ca57eaad0d747368.rlib",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/libcalc_flow-ca57eaad0d747368.rmeta"
+      ],
+      "executable": null,
+      "fresh": false
+    },
+    "stage_admit": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow#2026.11.14",
+      "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/Cargo.toml",
+      "target": {
+        "kind": [
+          "example"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "stage_admit",
+        "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/examples/stage_admit.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": false
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [],
+      "filenames": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/examples/stage_admit"
+      ],
+      "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/examples/stage_admit",
+      "fresh": false
+    }
+  },
+  "settings": {
+    "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo",
+    "CARGO_BUILD_JOBS": "2",
+    "RUSTFLAGS": null,
+    "CARGO_PROFILE_BENCH_LTO": null,
+    "CARGO_ENCODED_RUSTFLAGS": null
+  }
+}
