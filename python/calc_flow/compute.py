@@ -57,21 +57,23 @@ def _normalized_table_batch(data: TableData, table: pa.Table | pa.RecordBatch) -
     if table.schema.metadata is not None or any(
         field.metadata is not None for field in table.schema
     ):
-        # Symbolic schemas omit Arrow metadata; rewrap the same column buffers.
-        schema = pa.schema([field.remove_metadata() for field in table.schema])
-        if table.num_columns:
-            normalized = pa.Table.from_arrays(table.columns, schema=schema)
-        else:
-            # RecordBatch metadata replacement preserves zero-column row counts.
-            batches = table.to_batches() if isinstance(table, pa.Table) else [table]
-            normalized = pa.Table.from_batches(
-                [batch.replace_schema_metadata(None) for batch in batches],
-                schema=schema,
-            )
         return Batch.from_pyarrow(
-            normalized, metadata=data.metadata if isinstance(data, Batch) else None
+            _without_arrow_metadata(table),
+            metadata=data.metadata if isinstance(data, Batch) else None,
         )
     return data if isinstance(data, Batch) else Batch.from_pyarrow(table)
+
+
+def _without_arrow_metadata(table: pa.Table | pa.RecordBatch) -> pa.Table:
+    # Symbolic schemas omit Arrow metadata; rewrap the same column buffers.
+    schema = pa.schema([field.remove_metadata() for field in table.schema])
+    if table.num_columns:
+        return pa.Table.from_arrays(table.columns, schema=schema)
+    # RecordBatch metadata replacement preserves zero-column row counts.
+    batches = table.to_batches() if isinstance(table, pa.Table) else [table]
+    return pa.Table.from_batches(
+        [batch.replace_schema_metadata(None) for batch in batches], schema=schema
+    )
 
 
 def _input_kind(value: TableExpr | ArrayExpr | Parameter[object]) -> str:
