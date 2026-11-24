@@ -1270,15 +1270,40 @@ mod rolling_history {
             );
             if observation.started == 0 {
                 assert_eq!(observation.parallel_rows, 0);
-                assert!(
-                    !matches!(case, Case::WarmRowsMean),
-                    "warm Rows control must use real lanes"
-                );
+                if matches!(case, Case::WarmRowsMean) {
+                    verify_warm_rows_serial(rolling);
+                }
             } else {
                 assert!(observation.started >= 2);
                 assert!(observation.parallel_rows >= 64_000);
             }
             Some((observation, metrics))
+        }
+    }
+
+    fn verify_warm_rows_serial(metrics: &serde_json::Value) {
+        let rows = counts(metrics, "numeric_rows");
+        let serial = counts(metrics, "numeric_serial_calls");
+        assert!(
+            rows.into_iter()
+                .zip(serial)
+                .all(|(rows, calls)| rows == 0 || calls > 0)
+        );
+        for name in [
+            "numeric_general_calls",
+            "numeric_parallel_calls",
+            "parallel_fallback_no_work_client",
+            "parallel_fallback_small_batch",
+            "parallel_fallback_unsupported_plan",
+            "parallel_fallback_cpu_limit",
+            "parallel_fallback_prepared_ineligible",
+            "parallel_fallback_lane_partition_rejected",
+            "parallel_fallback_owner_busy",
+            "parallel_fallback_owner_already_used",
+            "parallel_fallback_generation_exhausted",
+            "parallel_fallback_scratch_unrepresentable",
+        ] {
+            assert_eq!(counts(metrics, name), [0; 3], "{name}");
         }
     }
 
