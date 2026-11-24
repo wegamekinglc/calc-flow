@@ -1,46 +1,55 @@
 {
-  "budget_seconds": 240,
-  "case": "python/public-sparse-sum/live-100-row-update",
+  "baseline": {
+    "artifact": 14878859887,
+    "artifact_digest": "sha256:4f5cf981d43b82d2f5740397762897fb1409e144b5a01a0cac883e5f01264979",
+    "job": 138132581261,
+    "requested_sha": "788631a5bc40dce2f5e79b1cc4a023f58efa4049",
+    "tree": "36e0aadb2fdbf189bf314a99778f28835a5a99f7",
+    "workflow_run": 45300709283
+  },
+  "baseline_equivalence": {
+    "all_changed_paths": [
+      "docs/benchmark-suite.md",
+      "docs/plans/2026-11-23-incremental-performance.md",
+      "scripts/benchmark_suite/legacy.py",
+      "scripts/test_benchmark_normalize.py"
+    ],
+    "plan_main": "8ce0b7c8303918821fec24654c36f1d99113de21"
+  },
+  "budget_seconds": 540,
+  "candidate_identity": "workflow dispatch selects one official PR head SHA and artifact ID before the job starts",
+  "case": "python/public-keyed-sum/cumulative-snapshot-of-10000-groups",
   "fixture_sha256": "641effd7042bd3d0cd1be8f3fef6e6b5d7d726b47c71eaf761a6ec76f10ff3e0",
   "fresh_workers": 44,
-  "mode_order": [
-    "snapshot",
-    "changelog"
-  ],
   "pairs_per_round": 10,
-  "proposed_changelog_p50_us": 1000,
-  "registered_utc": "2026-11-23T12:24:17.784356+00:00",
-  "release": {
-    "artifact": 14814749622,
-    "artifact_digest": "sha256:04a35ae3d06badc77540d3c8aa36eccd3ed3be706e85d647bdd30a2f9e48a1aa",
-    "checkout": "644f8f1555b666f0d7303b2302139eb4551f9d2e",
-    "image": "ubuntu-26.04",
-    "image_version": "20261116.202.1",
-    "job": 137650772030,
-    "native_sha256": "20c86791d68be72fbb08e7dd1b0381c05ae8d24d1f325d55a06dca0ef94988a0",
-    "tree": "9ac046cb2dd416a396be7332d39d898ad44e88ae",
-    "wheel_sha256": "c5892033dcbf1acd41826a27e9b79ffbed4b6a5d1cdd6c48c7fd88a9ff512afb",
-    "workflow_run": 45161312235
-  },
+  "registered_utc": "2026-11-24T04:17:32.210523+00:00",
   "reserved_cleanup_seconds": 45,
   "rounds": 2,
+  "side_order": [
+    "baseline",
+    "candidate"
+  ],
+  "snapshot_rows_per_worker": 210000,
   "source_hashes": {
-    ".github/workflows/benchmarks.yml": "38dacef8c3421cb064960e7d5dd12e7bfc4d74515ca1536fbaab2b377ecc4bf1",
-    "benchmarks/hosted-sparse-update-protocol.md": "d54a4d949b16012ca91611cf6c7428f0ae960b5f5ca56d5abc834e7573918712",
+    ".github/workflows/benchmarks.yml": "a33ae51e07684f16c4247d19b3cebba2603b30e09624a64353e8c9daed111ecc",
+    "benchmarks/hosted-sparse-update-protocol.md": "cd5873211c1126561cf410516631f2288718c74438fbdb99140e8af0fc4ce8e9",
+    "benchmarks/native_release_identity.py": "4545ad3bcdbbe033307a9286d3cdcca69fc7455273a36c41c8b4e57e34bc4ce0",
     "benchmarks/requirements.lock": "e869942cf583aaa683a18a42b2ccd3b190066d14c8930dcfd2b104b8d6b192c3",
     "benchmarks/sparse_changelog.py": "39913d58868fea05b84e70e60b340c3bfc0879a38832c3d9667d1a5de8516463",
     "benchmarks/sparse_warm_update.py": "885ef8c94f7a3b7382c5fcc75f5418a32602cd58bda360049c201eff5a6d4c29",
     "benchmarks/sum-state/public-sparse-changelog-20261123/sparse.arrow.gz": "742ac1b18cfa1b2a58403a0c3cf31e84f8a41c3434e5f58912cef1b6934fabd1",
     "python/tests/test_sparse_changelog_benchmark.py": "7a00f77500d042f284b5da2d3d7d6f4fd2c7bab99ee99b68a6e4c5bb68b197ab",
     "scripts/benchmark_suite/process.py": "dffd33e2cb0dfedf1a99f9583fe012b1cb9693a6afd952de903998d5a1deb03c",
+    "scripts/benchmark_suite/release.py": "f5523d3fc3436449aae9d697457c462c383cdbfd55f7144d9997478f96a44307",
     "scripts/benchmark_suite/report.py": "0daf6c205c2cc733813d2c658c6541d811f8324b502c2f2982a09de5a8dd9ff2",
     "scripts/benchmark_suite/statistics.py": "c84b6065a7c8ca0ee0d123377df3750c7fd82e2eb0f50443af33161117757bcd",
-    "scripts/hosted_sparse_update.py": "8dfec15ad979659af2b65e266dee626c59a65c1b9dc69a457d26563a112ec708",
+    "scripts/hosted_sparse_update.py": "5acab00d19b266bbcd818c5f1ab1f85907e6952fc3f3bda06025e07626c7dec8",
     "scripts/sparse_changelog_ci.py": "a3fe78cd3ee5b7e792ef62c91047c20710a3ba04400d3af7cb0ccd93a4894294",
     "scripts/sparse_changelog_wheels.py": "8ee5e99dd66c5f2aafd741a9b3d09b831e05a11751ab4ff091505be5eacf74bd",
-    "scripts/test_hosted_sparse_update.py": "2fd9291ed79f08ae7680bbe08213131a8406cf251d90191f370f647b01b70bb2"
+    "scripts/test_hosted_sparse_update.py": "f9fff9fa0326e69596129835528572d37750d76cc1fe15b116783f3b98d9a8ff",
+    "scripts/toolkit.py": "ef8ad17c43ea4a974e5e01a3fcaf1aec7a70e19b88286db8b82c4dcde2945d56"
   },
-  "total_python_budget_seconds": 300,
-  "units_per_worker": 20,
-  "warmups_per_mode_per_round": 1
+  "total_python_budget_seconds": 600,
+  "updates_per_worker": 20,
+  "warmups_per_side_per_round": 1
 }

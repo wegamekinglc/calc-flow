@@ -1,4 +1,4 @@
-"""Collect two public sparse SQL emission modes on one official wheel."""
+"""Compare full snapshot latency on two official grouped SUM wheels."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from scripts.toolkit import linear_percentile, sha256_file, write_json
 
 OUT = ROOT / "target/public-warm-update"
 CONFIG = ROOT / "benchmarks/hosted-sparse-update-registration.json"
-MODES = ("snapshot", "changelog")
+SIDES = ("baseline", "candidate")
 
 
 def read(path: Path) -> dict:
@@ -33,16 +33,12 @@ def read(path: Path) -> dict:
 def schedule():
     for group in (1, 2):
         for pair in range(11):
-            for mode in MODES if pair == 0 or pair % 2 else MODES[::-1]:
-                yield group, pair, mode
+            for side in SIDES if pair == 0 or pair % 2 else SIDES[::-1]:
+                yield group, pair, side
 
 
-def verify_worker(data: dict, mode: str, cpu: int, native: str) -> None:
-    if (
-        data["mode"] != mode
-        or data["output_rows"]
-        != [10_000] + [160 if mode == "changelog" else 10_000] * 20
-    ):
+def verify_worker(data: dict, cpu: int, native: str) -> None:
+    if data["mode"] != "snapshot" or data["output_rows"] != [10_000] * 21:
         raise ValueError("wrong mode or incomplete sparse output")
     if len(data["update_ns"]) != 20 or any(
         type(v) is not int or v <= 0 for v in data["update_ns"]
@@ -66,10 +62,15 @@ def acquire() -> None:
     )["jobs"]
     (job,) = (j for j in jobs if j["name"] == "Public warm sparse update")
     started = datetime.fromisoformat(job["started_at"]).timestamp()
+    candidate = {
+        "requested_sha": os.environ["CANDIDATE_SHA"],
+        "artifact": int(os.environ["CANDIDATE_ARTIFACT"]),
+    }
     write_json(
         OUT / "registration.json",
         {
             **config,
+            "candidate": candidate,
             "workflow": os.environ["GITHUB_SHA"],
             "run": run,
             "job": job["id"],
@@ -79,36 +80,26 @@ def acquire() -> None:
     )
     if any(sha256_file(ROOT / p) != h for p, h in config["source_hashes"].items()):
         raise ValueError("registered observer source changed")
-    wheel = config["release"]
-    manifest = seal(repo, wheel["artifact"], wheel["checkout"], OUT / "release")
-    if any(
-        wheel[k] != manifest[k]
-        for k in (
-            "artifact_digest",
-            "job",
-            "workflow_run",
-            "tree",
-            "checkout",
-            "image",
-            "image_version",
-            "wheel_sha256",
-            "native_sha256",
-        )
-    ):
-        raise ValueError("unexpected published wheel")
+    for side, wheel in (("baseline", config["baseline"]), ("candidate", candidate)):
+        manifest = seal(repo, wheel["artifact"], wheel["requested_sha"], OUT / side)
+        if (
+            side == "baseline"
+            and manifest["artifact_digest"] != wheel["artifact_digest"]
+        ):
+            raise ValueError("unexpected published baseline")
 
 
-async def workers(cpu: int, site: Path, native: str, fixture: Path) -> list[dict]:
+async def workers(cpu: int, sites: dict, releases: dict, fixture: Path) -> list[dict]:
     observations = []
-    env = child_environment(site, tokio_threads=1, polars_threads=1)
-    for group, pair, mode in schedule():
-        target = OUT / "workers" / f"r{group}-p{pair}-{mode}.json"
+    for group, pair, side in schedule():
+        target = OUT / "workers" / f"r{group}-p{pair}-{side}.json"
+        env = child_environment(sites[side], tokio_threads=1, polars_threads=1)
         await command(
             [
                 sys.executable,
                 "-m",
                 "benchmarks.sparse_warm_update",
-                mode,
+                "snapshot",
                 str(fixture),
                 str(target),
             ],
@@ -118,8 +109,8 @@ async def workers(cpu: int, site: Path, native: str, fixture: Path) -> list[dict
             timeout=25,
         )
         observation = read(target)
-        verify_worker(observation, mode, cpu, native)
-        observations.append({"round": group, "pair": pair, **observation})
+        verify_worker(observation, cpu, releases[side]["native_sha256"])
+        observations.append({"round": group, "pair": pair, "side": side, **observation})
         write_json(OUT / "partial.json", {"observations": observations})
     return observations
 
@@ -127,21 +118,21 @@ async def workers(cpu: int, site: Path, native: str, fixture: Path) -> list[dict
 def summarize(observations: list[dict]) -> dict:
     formal = [o for o in observations if o["pair"]]
     pooled, by_round = {}, {}
-    for mode in MODES:
-        samples = [o for o in formal if o["mode"] == mode]
+    for side in SIDES:
+        samples = [o for o in formal if o["side"] == side]
         values = [v / 1000 for o in samples for v in o["update_ns"]]
         if len(values) != 400:
             raise ValueError("an arm has fewer than 400 warm update clocks")
-        pooled[mode] = {
+        pooled[side] = {
             "p50_us": statistics.median(values),
             "p95_us": linear_percentile(values, 0.95),
         }
-        by_round[mode] = [
+        by_round[side] = [
             [statistics.median(o["update_ns"]) for o in samples if o["round"] == r]
             for r in (1, 2)
         ]
     intervals = [
-        paired_round(a, b) for a, b in zip(*(by_round[m] for m in MODES), strict=True)
+        paired_round(a, b) for a, b in zip(*(by_round[m] for m in SIDES), strict=True)
     ]
     return {
         "pooled": pooled,
@@ -151,17 +142,23 @@ def summarize(observations: list[dict]) -> dict:
 
 
 async def observe() -> None:
-    manifest = load_release(OUT / "release/release.json")
-    site = await install(manifest, OUT / "release")
-    verify_package_files(Path(manifest["wheel_path"]), site)
+    releases = {side: load_release(OUT / side / "release.json") for side in SIDES}
+    base, candidate = (releases[side] for side in SIDES)
+    if any(base[k] != candidate[k] for k in ("image", "image_version")):
+        raise ValueError("wheel build images differ")
+    if base["native_sha256"] == candidate["native_sha256"]:
+        raise ValueError("expected distinct native builds")
+    sites = {}
+    for side, release in releases.items():
+        site = await install(release, OUT / side)
+        verify_package_files(Path(release["wheel_path"]), site)
+        sites[side] = site
     fixture = OUT / "sparse.arrow"
     fixture.write_bytes(gzip.decompress(FIXTURE.read_bytes()))
     cpu = await _resource(OUT / "resources.jsonl", None)
     os.sched_setaffinity(0, {cpu})
     async with asyncio.TaskGroup() as tasks:
-        acquire_workers = tasks.create_task(
-            workers(cpu, site, manifest["native_sha256"], fixture)
-        )
+        acquire_workers = tasks.create_task(workers(cpu, sites, releases, fixture))
         while not acquire_workers.done():
             await _resource(OUT / "resources.jsonl", cpu)
     write_json(OUT / "result.json", summarize(acquire_workers.result()))

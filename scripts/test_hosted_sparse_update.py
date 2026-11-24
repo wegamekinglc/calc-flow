@@ -16,26 +16,26 @@ class WarmUpdateTest(unittest.TestCase):
                 [mode for r, p, mode in rows if r == group and p == pair]
                 for pair in range(11)
             ]
-            self.assertEqual(pairings[0], ["snapshot", "changelog"])
+            self.assertEqual(pairings[0], ["baseline", "candidate"])
             self.assertEqual(
-                pairings[1:3], [["snapshot", "changelog"], ["changelog", "snapshot"]]
+                pairings[1:3], [["baseline", "candidate"], ["candidate", "baseline"]]
             )
             self.assertEqual(pairings[1:], pairings[1:3] * 5)
         obs = {
-            "mode": "changelog",
+            "mode": "snapshot",
             "update_ns": [1] * 20,
-            "output_rows": [10000] + [160] * 20,
+            "output_rows": [10000] * 21,
             "environment": {
                 "cpu_affinity": [0],
                 "native_sha256": "native",
                 "tokio_worker_threads": "1",
             },
         }
-        verify_worker(obs, "changelog", 0, "native")
+        verify_worker(obs, 0, "native")
         for field, value in [
             ("update_ns", [1] * 19),
-            ("output_rows", [10000] * 21),
-            ("mode", "snapshot"),
+            ("output_rows", [10000] + [160] * 20),
+            ("mode", "changelog"),
         ]:
             with self.assertRaises(ValueError):
-                verify_worker({**obs, field: value}, "changelog", 0, "native")
+                verify_worker({**obs, field: value}, 0, "native")

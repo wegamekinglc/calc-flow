@@ -1,7 +1,32 @@
-# Public Python warm grouped SUM update
+# Public full snapshot GroupBy latency
 
-This study compares cumulative snapshot and first-touch changelog output on the same released engine. Both arms use the official wheel from main 644f8f1555b666f0d7303b2302139eb4551f9d2e, the product source measured in the separate native Rust example. Use one fresh hosted VM, one CPU and one Tokio worker. The compressed sparse.arrow fixture and public query come from the maintained whole-stream study. Every fresh worker seeds a running TableExpr.stream with 10,000 groups and sends twenty 100-row updates. Only one update is outstanding. Time immediately before enqueuing the already formed Arrow table until that table’s public output returns from the async iterator. Seed, compilation, termination, cleanup, snapshots and independent result validation occur outside each update clock. Hold every original output until natural EOF and reject any extra table. Each changelog must reconstruct positions after every prefix, including exact operation and key order. Each complete snapshot must match the independent first-seen position values and key order. The expected output is 210,000 snapshot rows or 13,200 change rows.
+Compare the Linux CI baseline and candidate wheels on one hosted Linux VM. Both
+run the snapshot arm of the warm integer SUM study from 3becc56d. The source
+is the sealed composite-key sparse Arrow fixture. Populate 10,000 groups,
+then submit twenty 100-row batches. Start each clock immediately before
+enqueue and stop after the full cumulative snapshot is received at the public
+Python iterator. Validate all 21 snapshots, including column types, row order
+and each aggregate against the independent Python grouped sum after natural EOF.
 
-Use one fresh Python interpreter per observation. Run two rounds, each with an excluded warm process per mode and ten adjacent alternating-order pairs. Include all 20 update clocks per process. Each process median is one paired observation for the exact 97.85% median interval and maintained 5% rule. Separately describe pooled p50 and p95 from the 400 formal updates per mode. The proposed absolute Python warm changelog target is p50 at most 1 ms. The earlier 15-ms Python target describes a complete fresh graph. The native 250-µs target uses its own Rust public boundary.
+Use one Python process for each observation with one available CPU and one
+Tokio worker. Exclude one warm process per side and round. Within each of
+two rounds, alternate the order of ten adjacent baseline/candidate pairs.
+Report pooled p50 and p95 for 400 append-to-Arrow observations per side and
+the two exact paired median intervals over per-process medians. Apply the
+maintained five-percent verdict. Improvements in full snapshot reservation
+are only one component of this public latency. The 15 ms whole-task target
+uses a separate fresh changelog workload.
 
-Reserve 300 seconds for this Python case, including up to 60 seconds for local functional qualification and at most 240 seconds from hosted job start through upload and cleanup. Reserve 45 seconds within the hosted window for cleanup. The native experiment reserved 240 seconds independently. Setup, wheel provenance, lockfile dependencies, fresh workers, oracles and host qualification count toward the respective budgets. Run once. Stop on any oracle, provenance, resource or time failure with completed observations retained. Use the original three-second preflight and one-second whole-host resource guard for sibling load, paging and available memory. Bind all package, worker, workflow and collector sources before dispatch.
+Baseline product tree is the official Linux CI wheel of main 788631a5.
+Main 8ce0b7c8 changes two Markdown files and two benchmark comparator files
+from that commit. The workflow dispatch inputs bind the candidate head SHA
+and Linux CI artifact ID before startup. Verify both official package and
+native hashes, real checkout trees, matching build images, the dependency
+lock, workload sources, fixture and row-by-row results. Stop if the CPU,
+sibling, memory or paging limits in the maintained sampler are violated.
+
+Reserve 600 seconds total, including 60 seconds for off-runner setup,
+validation and cleanup, with a nine-minute wall limit from hosted job start
+and 45 seconds of that reserved for artifact upload and worker settlement.
+Wheel compilation runs independently in product CI, estimated 20–30 minutes
+per build. This is a single registration and a single measurement dispatch.
