@@ -295,6 +295,24 @@ impl KeyedSum {
     }
 }
 
+const RETRACT: &str = "retract";
+const UPSERT: &str = "upsert";
+
+pub(super) fn operation_bytes(upserts: usize, retracts: usize) -> Result<usize> {
+    let bytes = super::checked_bytes(
+        0,
+        [(upserts, UPSERT.len()), (retracts, RETRACT.len())],
+        "keyed SUM",
+    )?;
+    i32::try_from(bytes).map_err(|_| {
+        super::df_error(
+            "keyed SUM",
+            "changelog operation tags exceed Arrow Utf8 offsets",
+        )
+    })?;
+    Ok(bytes)
+}
+
 impl Transaction {
     #[cfg(test)]
     pub(super) fn change_log_bytes(&self) -> usize {
@@ -621,12 +639,13 @@ impl Transaction {
         check()?;
         self.undo.sort_unstable_by_key(|(group, _)| *group);
         let mut bytes = 0;
+        let mut retracts = 0;
+        let mut upserts = 0;
         self.changed_groups(&mut check, |state, group, previous, _| {
-            bytes = charge(
-                bytes,
-                state.keys.output_charge(&[group])?,
-                1 + usize::from(previous.is_some()),
-            )?;
+            let retract = usize::from(previous.is_some());
+            bytes = charge(bytes, state.keys.output_charge(&[group])?, 1 + retract)?;
+            retracts += retract;
+            upserts += 1;
             Ok(())
         })?;
         check()?;
@@ -638,19 +657,21 @@ impl Transaction {
         }
         // This transaction owns all writes until commit or rollback; both passes see the same versions.
         reserve(bytes)?;
-        let mut versions = Vec::new();
+        let tag_bytes = operation_bytes(upserts, retracts)?;
+        let rows = upserts + retracts;
+        let mut versions = Vec::with_capacity(rows.min(MORSEL_ROWS));
         let mut records = Vec::new();
-        let mut operations = super::StringBuilder::with_capacity(0, 0);
+        let mut operations = super::StringBuilder::with_capacity(rows, tag_bytes);
         self.changed_groups(&mut check, |state, group, previous, current| {
             if versions.len() + 1 + usize::from(previous.is_some()) > MORSEL_ROWS {
                 state.flush_versions(schema, &mut versions, &mut records)?;
             }
             if let Some(previous) = previous {
                 versions.push((group, previous));
-                operations.append_value("retract");
+                operations.append_value(RETRACT);
             }
             versions.push((group, current));
-            operations.append_value("upsert");
+            operations.append_value(UPSERT);
             Ok(())
         })?;
         check()?;
