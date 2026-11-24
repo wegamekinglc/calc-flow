@@ -1078,8 +1078,43 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let routed = u64::try_from(rows).unwrap();
-        // Only the first left morsel crosses the two source records.
-        assert_eq!(visits, [(1, 0), (0, 0), (routed, MORSEL_ROWS as u64)]);
+        // The test operator installs legacy row payloads on every input segment.
+        assert_eq!(visits, [(1, 1), (0, 0), (routed, routed)]);
+
+        let batch = Batch::table(
+            vec![left.slice(0, split), left.slice(split, rows - split)],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        // With borrowed records, only the first morsel crosses a segment boundary.
+        assert_eq!(
+            borrowed_route_visits(&mut operator, &batch),
+            (3, MORSEL_ROWS)
+        );
+    }
+
+    #[cfg(feature = "benchmark-internals")]
+    fn borrowed_route_visits(operator: &mut StreamJoinOperator, batch: &Batch) -> (usize, usize) {
+        let mut admitted = AdmittedBatch::reserve(operator, batch).unwrap();
+        let mut start = 0;
+        for record in batch.table_payload().unwrap().batches() {
+            let segment = admitted.begin_record(start as u64, start);
+            for offset in 0..record.num_rows() {
+                admitted.push_ready(segment, offset, EventTime::from_micros(0), true);
+            }
+            start += record.num_rows();
+        }
+        let mut core = RunCore::new(operator).unwrap();
+        let mut visits = 0;
+        let chunks = route(
+            &admitted,
+            &[0],
+            &mut core.keys,
+            &mut || Ok(()),
+            Some(&mut visits),
+        )
+        .unwrap();
+        (chunks.len(), visits)
     }
 
     #[test]
