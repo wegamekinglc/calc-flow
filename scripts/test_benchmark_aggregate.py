@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import copy
 import io
 import json
@@ -10,9 +11,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.benchmark_suite.__main__ import parse_args
+from scripts.benchmark_suite.__main__ import parse_args, run_shard
 from scripts.benchmark_suite.aggregate import (
-    case_failures,
     collect,
     summarize,
     validate_fragment,
@@ -25,6 +25,7 @@ from scripts.benchmark_suite.catalog import (
     worker_thread_count,
 )
 from scripts.benchmark_suite.provenance import harness_sha256
+from scripts.benchmark_suite.report import build_report
 from scripts.benchmark_suite.validation import _validate_catalog_cases
 from scripts.test_benchmark_suite import measured_case
 
@@ -111,6 +112,81 @@ class BenchmarkAggregateTests(unittest.TestCase):
                 (root / "summary/summary.json").read_text(encoding="utf-8")
             )["errors"]
         return status, markdown.splitlines(), errors
+
+    def test_valid_regression_fails_separately_from_invalid_evidence(self):
+        slower = measured_case(id="slow", candidate=[[1.2] * 10] * 2)
+        broken = measured_case(id="broken", status="error", error="worker stopped")
+        for rows in ([slower], [slower, broken]):
+            with self.subTest(count=len(rows)), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args = argparse.Namespace(
+                    input=root,
+                    output=root,
+                    github_summary=None,
+                    expected_base=BASE,
+                    expected_head=HEAD,
+                    expected_rust_base=RUST,
+                    baseline_kind="release",
+                    baseline_ref=TAG,
+                )
+                with (
+                    patch(
+                        "scripts.benchmark_suite.aggregate.collect",
+                        return_value=(rows, [], []),
+                    ),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(summarize(args), 1)
+                report = json.loads((root / "summary.json").read_text())
+                self.assertEqual(report["regressions"], ["slow"])
+                invalid = ["broken: worker stopped"] if broken in rows else []
+                self.assertEqual(report["evidence_errors"], invalid)
+                self.assertIn("slow: repeated regression exceeds +5%", report["errors"])
+                markdown = (root / "summary.md").read_text()
+                self.assertIn("## Confirmed performance regressions", markdown)
+                self.assertEqual(
+                    "## Incomplete or invalid evidence" in markdown, bool(invalid)
+                )
+                if invalid:
+                    section = markdown.split("## Incomplete or invalid evidence")[
+                        1
+                    ].split("## ")[0]
+                    self.assertIn("broken: worker stopped", section)
+                    self.assertNotIn("slow", section)
+
+    def test_shard_exit_and_summary_follow_samples_over_cached_verdict(self):
+        for seconds, cached, expected in (
+            (1.2, "no-confirmed-regression", 1),
+            (1.0, "regression", 0),
+        ):
+            with self.subTest(cached=cached), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                row = measured_case(
+                    candidate=[[seconds] * 10] * 2, result={"verdict": cached}
+                )
+                args = argparse.Namespace(
+                    shard="engines-10",
+                    baseline=root,
+                    candidate=root,
+                    baseline_source=root,
+                    output=root,
+                )
+                with (
+                    patch(
+                        "scripts.benchmark_suite.release.load_release", return_value={}
+                    ),
+                    patch(
+                        "scripts.benchmark_suite.measure.measure_shard",
+                        return_value={"cases": [row], "errors": []},
+                    ),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(asyncio.run(run_shard(args)), expected)
+                markdown = (root / "summary.md").read_text()
+                self.assertEqual(
+                    "## Confirmed performance regressions" in markdown, bool(expected)
+                )
+                self.assertNotIn("## Incomplete or invalid evidence", markdown)
 
     def test_complete_report_header_states_the_resolved_baseline(self):
         status, lines, errors = self.summarize_without_artifacts("release", TAG)
@@ -262,16 +338,16 @@ class BenchmarkAggregateTests(unittest.TestCase):
                 baseline_value=0,
                 candidate_value=value,
             )
-            self.assertTrue(case_failures([row]))
+            self.assertTrue(build_report([row], []).errors)
 
     def test_gate_rederives_intervals_instead_of_trusting_stored_verdict(self):
         row = measured_case(
             candidate=[[1.1] * 10] * 2,
             result={"verdict": "no-confirmed-regression", "round_intervals": []},
         )
-        self.assertIn("regression", case_failures([row])[0])
+        self.assertIn("regression", build_report([row], []).errors[0])
         row = measured_case(result={"verdict": "regression"})
-        self.assertEqual(case_failures([row]), [])
+        self.assertEqual(build_report([row], []).errors, [])
 
     def test_wrong_comparison_kind_is_not_a_historical_pass(self):
         report = fragment()
