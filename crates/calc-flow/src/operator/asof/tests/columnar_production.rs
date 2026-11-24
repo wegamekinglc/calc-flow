@@ -59,6 +59,60 @@ fn right_sequences(messages: &[crate::StreamMessage]) -> Vec<Option<i64>> {
 }
 
 #[tokio::test]
+async fn test_watermark_finds_a_sorted_asof_prefix_without_scanning_every_row() {
+    let (mut operator, _) = fixture();
+    let schema = operator.schemas[0].clone();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    let batch = |rows: &[(&str, i64, i64)]| {
+        Batch::table(vec![indexed_input(&schema, rows)], BatchMetadata::default()).unwrap()
+    };
+    operator
+        .process_data("right", batch(&[("A", 31, 999)]), &context, &mut output)
+        .await
+        .unwrap();
+    let rows = (0..96)
+        .rev()
+        .map(|sequence| ("A", sequence / 2, sequence))
+        .collect::<Vec<_>>();
+    for run in rows.chunks(48) {
+        operator
+            .process_data("left", batch(run), &context, &mut output)
+            .await
+            .unwrap();
+    }
+    columnar::take_finality_probes();
+    operator
+        .on_ingress_progress_with_output("left", &progress_context(&job, 32, 80), &mut output)
+        .await
+        .unwrap();
+    let probes = columnar::take_finality_probes();
+    let messages = output.drain("output");
+    assert_eq!(messages.len(), 1);
+    let data = messages[0].as_data().unwrap().table_payload().unwrap();
+    let sequences = data.batches()[0]
+        .column_by_name("left__seq")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(sequences.values().as_ref(), (0..64).collect::<Vec<_>>());
+    assert_eq!(
+        right_sequences(&messages),
+        (0..64)
+            .map(|row| (row >= 62).then_some(999))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(operator.status.pending_left_rows, 32);
+    println!("ASOF readiness timestamp probes for 64 ready of 96: {probes}");
+    assert!(
+        probes <= 12,
+        "expected a bounded search, got {probes} probes"
+    );
+}
+
+#[tokio::test]
 async fn test_columnar_checkpoint_restores_partial_prefix_and_continues() {
     let (mut operator, _) = fixture();
     let schema = operator.schemas[0].clone();
@@ -599,16 +653,31 @@ async fn test_columnar_output_scratch_preflight_precedes_selection() {
         .await
         .unwrap();
     operator.runtime_pool = Arc::new(GreedyMemoryPool::new(1));
-    columnar::take_selections();
-    let error = operator.on_end(&context, &mut output).await.unwrap_err();
-    assert!(matches!(
-        error,
-        CalcFlowError::OperatorReason {
-            reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
-            ..
-        }
-    ));
-    assert_eq!(columnar::take_selections(), 0);
-    assert_eq!(operator.status.pending_left_rows, 16);
-    assert!(output.drain("output").is_empty());
+    let progress = progress_context(&job, 101, 16);
+    for ended in [false, true] {
+        columnar::take_selections();
+        columnar::take_finality_probes();
+        let result = if ended {
+            operator.on_end(&context, &mut output).await
+        } else {
+            operator
+                .on_ingress_progress_with_output("left", &progress, &mut output)
+                .await
+        };
+        assert!(matches!(
+            result.unwrap_err(),
+            CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofWorkspaceLimitExceeded,
+                ..
+            }
+        ));
+        assert_eq!(columnar::take_selections(), 0);
+        let probes = columnar::take_finality_probes();
+        assert!(
+            probes <= if ended { 0 } else { 2 },
+            "shrinking the prefix took {probes} probes"
+        );
+        assert_eq!(operator.status.pending_left_rows, 16);
+        assert!(output.drain("output").is_empty());
+    }
 }

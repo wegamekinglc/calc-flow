@@ -63,33 +63,28 @@ impl StreamAsofJoinOperator {
     }
 
     fn prepare_output(
-        &mut self,
+        &self,
         frontier: Option<i64>,
         ended: bool,
         context: &dyn KernelContext,
     ) -> Result<Option<PreparedOutput>> {
-        let mut limit = context.output_budget().max_rows;
-        loop {
+        let mut count =
+            self.state
+                .finalizable_len(frontier, ended, context.output_budget().max_rows);
+        while count > 0 {
             context.check_cancelled()?;
-            let count = self.state.finalizable_len(frontier, ended, limit);
-            if count == 0 {
-                return Ok(None);
-            }
-            match self.prepare_selected_output(count, frontier, ended, context) {
+            match self.prepare_selected_output(count, context) {
                 Ok(output) => return Ok(Some(output)),
-                Err(error) if count > 1 && retryable(&error) => {
-                    limit = count / 2;
-                }
+                Err(error) if count > 1 && retryable(&error) => count /= 2,
                 Err(error) => return Err(error),
             }
         }
+        Ok(None)
     }
 
     fn prepare_selected_output(
         &self,
         count: usize,
-        frontier: Option<i64>,
-        ended: bool,
         context: &dyn KernelContext,
     ) -> Result<PreparedOutput> {
         let columns = self.outputs[0]
@@ -101,8 +96,7 @@ impl StreamAsofJoinOperator {
             u64::try_from(self.state.selection_scratch_charge(count, columns))
                 .expect("ASOF selection charge fits u64"),
         )?;
-        let selection = self.state.select(frontier, ended, count)?;
-        debug_assert_eq!(selection.len(), count);
+        let selection = self.state.select_prefix(count);
         let workspace = self.reserve_workspace(
             u64::try_from(
                 self.state
