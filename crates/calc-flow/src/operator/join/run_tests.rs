@@ -27,23 +27,22 @@ fn record(keys: &[i64], values: &[i64]) -> RecordBatch {
 
 fn incoming(
     record: &RecordBatch,
-    physical: Vec<usize>,
     groups: Vec<GroupId>,
     times: &[i64],
     row_ids: &[u64],
     retain: Vec<bool>,
     next_row_id: u64,
 ) -> Incoming {
-    Incoming::new(
-        record.clone(),
-        physical,
-        groups,
+    let input = RouteInput::new(
+        record,
+        &[],
         times.iter().copied().map(EventTime::from_micros).collect(),
         row_ids.to_vec(),
         datafusion::arrow::array::BooleanArray::from(retain),
         next_row_id,
     )
-    .unwrap()
+    .unwrap();
+    Incoming::new(input, groups).unwrap()
 }
 
 fn state(match_limit: u64) -> RunState {
@@ -89,7 +88,6 @@ fn test_run_probe_orders_locators_by_time_then_physical_row_id() {
     let left = record(&[1, 1, 1], &[10, 11, 12]);
     let left = incoming(
         &left,
-        vec![0, 1, 2],
         vec![GroupId::new(0).unwrap(); 3],
         &[20, 10, 20],
         &[0, 1, 2],
@@ -111,7 +109,6 @@ fn test_run_probe_orders_locators_by_time_then_physical_row_id() {
     let right = record(&[1, 1], &[100, 101]);
     let right = incoming(
         &right,
-        vec![0, 1],
         vec![GroupId::new(0).unwrap(); 2],
         &[20, 10],
         &[0, 1],
@@ -143,7 +140,6 @@ fn test_prepared_outputs_release_unretained_input_before_commit() {
     let key = Arc::downgrade(right.column(0));
     let input = incoming(
         &right,
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[0],
@@ -175,7 +171,6 @@ fn test_later_morsel_sequence_overflow_fails_before_emission() {
     state.restore_counters([3, 0], u64::MAX - 3, 0);
     let second = incoming(
         &record(&[1], &[200]),
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[1],
@@ -212,7 +207,6 @@ fn test_stale_unmatched_morsel_cannot_rewind_row_ids() {
     let prepare = |state: &mut RunState, row_id| {
         let input = incoming(
             &row,
-            vec![0],
             vec![GroupId::new(0).unwrap()],
             &[10],
             &[row_id],
@@ -303,15 +297,7 @@ fn test_probe_storage_after_many_retired_runs() {
         let left = record(&[1], &[8]);
         let group = GroupId::new(0).unwrap();
         for row in 0..=retired {
-            let batch = incoming(
-                &left,
-                vec![0],
-                vec![group],
-                &[10],
-                &[row],
-                vec![true],
-                row + 1,
-            );
+            let batch = incoming(&left, vec![group], &[10], &[row], vec![true], row + 1);
             state
                 .apply_checked(JoinSide::Left, batch, output, &mut || Ok(()))
                 .unwrap();
@@ -321,7 +307,6 @@ fn test_probe_storage_after_many_retired_runs() {
         }
         let probe = incoming(
             &record(&[1; 3], &[21, 22, 23]),
-            vec![0, 1, 2],
             vec![group; 3],
             &[10; 3],
             &[0, 1, 2],
@@ -358,7 +343,6 @@ fn test_retained_run_shares_dense_input_buffers() {
         .unwrap();
     let left = incoming(
         &record,
-        vec![0, 1],
         vec![GroupId::new(0).unwrap(); 2],
         &[10, 20],
         &[0, 1],
@@ -395,7 +379,6 @@ fn test_match_limit_rejects_before_run_or_frontier_commit() {
     let left = record(&[1, 1, 1], &[10, 11, 12]);
     let left = incoming(
         &left,
-        vec![0, 1, 2],
         vec![GroupId::new(0).unwrap(); 3],
         &[20, 10, 20],
         &[0, 1, 2],
@@ -417,7 +400,6 @@ fn test_match_limit_rejects_before_run_or_frontier_commit() {
     let right = record(&[1], &[100]);
     let right = incoming(
         &right,
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[20],
         &[0],
@@ -445,15 +427,7 @@ fn test_match_limit_rejects_before_run_or_frontier_commit() {
 fn test_probe_cursor_memory_is_bounded_by_the_morsel() {
     fn bytes(group: GroupId) -> u64 {
         let mut state = state(10);
-        let left = incoming(
-            &record(&[1], &[8]),
-            vec![0],
-            vec![group],
-            &[10],
-            &[0],
-            vec![true],
-            1,
-        );
+        let left = incoming(&record(&[1], &[8]), vec![group], &[10], &[0], vec![true], 1);
         let schema = output_schema();
         let output = RunOutputContext::new(&schema, Some(&[1, 3]), 2, EdgeBudget::default());
         state
@@ -461,7 +435,6 @@ fn test_probe_cursor_memory_is_bounded_by_the_morsel() {
             .unwrap();
         let right = incoming(
             &record(&[1; 3], &[21, 22, 23]),
-            vec![0, 1, 2],
             vec![group; 3],
             &[10; 3],
             &[0, 1, 2],
@@ -497,7 +470,6 @@ fn test_sparse_cursor_handles_time_reversal_and_missing_keys() {
     let output = RunOutputContext::new(&schema, Some(&[1, 3]), 2, EdgeBudget::default());
     let left = incoming(
         &record(&[1; 2], &[8, 9]),
-        vec![0, 1],
         vec![group; 2],
         &[10, 15],
         &[0, 1],
@@ -508,8 +480,7 @@ fn test_sparse_cursor_handles_time_reversal_and_missing_keys() {
         .apply_checked(JoinSide::Left, left, output, &mut || Ok(()))
         .unwrap();
     let right = incoming(
-        &record(&[2, 1, 1, 1], &[22, 99, 21, 23]),
-        vec![2, 0, 3],
+        &record(&[1, 2, 1], &[21, 22, 23]),
         vec![group, missing, group],
         &[15, 15, 10],
         &[0, 1, 2],
@@ -531,17 +502,17 @@ fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
         KeySchema::groupable(vec![Arc::new(Field::new("key", DataType::Int64, false))]).unwrap(),
         runtime.incremental_reservation("join-run-test"),
     );
-    let left_record = record(&[1, 9, 1], &[10, 99, 11]);
+    let left_record = record(&[1, 1], &[10, 11]);
     let left = Incoming::route(
         RouteInput::new(
             &left_record,
             &[0],
-            vec![0, 2],
             vec![EventTime::from_micros(10), EventTime::from_micros(10)],
             vec![0, 2],
             datafusion::arrow::array::BooleanArray::from(vec![true, false]),
             3,
-        ),
+        )
+        .unwrap(),
         &mut keys,
         &mut || Ok(()),
     )
@@ -565,12 +536,12 @@ fn test_shared_key_routing_preserves_sparse_ids_and_skips_retention_work() {
         RouteInput::new(
             &right_record,
             &[0],
-            vec![0],
             vec![EventTime::from_micros(10)],
             vec![0],
             datafusion::arrow::array::BooleanArray::from(vec![false]),
             1,
-        ),
+        )
+        .unwrap(),
         &mut keys,
         &mut || Ok(()),
     )
@@ -595,7 +566,6 @@ fn test_retained_row_and_byte_limits_reject_the_whole_run() {
     let make_incoming = || {
         incoming(
             &source,
-            vec![0, 1],
             vec![GroupId::new(0).unwrap(); 2],
             &[10, 10],
             &[0, 1],
@@ -661,7 +631,6 @@ pub(super) fn fanout_input(rows: usize, first_value: i64, retain: bool) -> Incom
         .collect::<Vec<_>>();
     incoming(
         &record(&vec![1; rows], &values),
-        (0..rows).collect(),
         vec![GroupId::new(0).unwrap(); rows],
         &vec![10; rows],
         &(0..rows as u64).collect::<Vec<_>>(),
@@ -717,7 +686,6 @@ fn test_chunked_interval_output_reads_only_projected_match_coordinates() {
         let schema = Arc::new(Schema::new(fields));
         let probe = incoming(
             &record(&[1; 11], &(100..111).collect::<Vec<_>>()),
-            (0..11).collect(),
             vec![GroupId::new(0).unwrap(); 11],
             &[11; 11],
             &(0..11).collect::<Vec<_>>(),
@@ -940,7 +908,6 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
         let record = complex_left(label, value);
         let left = incoming(
             &record,
-            vec![0],
             vec![GroupId::new(0).unwrap()],
             &[10],
             &[row_id],
@@ -961,7 +928,6 @@ fn test_multi_owner_take_interleave_preserves_dictionary_and_nested_payloads() {
     let right_record = record(&[1], &[100]);
     let right = incoming(
         &right_record,
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[0],
@@ -1029,7 +995,6 @@ pub(super) fn eviction_state() -> RunState {
         let record = record(&[1, 1], &values);
         let left = incoming(
             &record,
-            vec![0, 1],
             vec![GroupId::new(0).unwrap(); 2],
             &times,
             &[first_id, first_id + 1],
@@ -1064,7 +1029,6 @@ fn test_tiny_ordered_append_merges_without_visiting_every_old_identity() {
         let rows = times.len();
         let batch = incoming(
             &record(&vec![1; rows], values),
-            (0..rows).collect(),
             vec![group; rows],
             times,
             ids,
@@ -1130,7 +1094,6 @@ fn test_prefix_eviction_and_snapshot_continue_bitwise() {
     let make_right = || {
         incoming(
             &right_record,
-            vec![0],
             vec![GroupId::new(0).unwrap()],
             &[20],
             &[0],
@@ -1187,7 +1150,6 @@ fn test_cancellation_before_morsel_leaves_run_state_unchanged() {
     let source = record(&[1], &[10]);
     let left = incoming(
         &source,
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[0],
@@ -1219,7 +1181,6 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
     let left_record = record(&[1], &[10]);
     let left = incoming(
         &left_record,
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[0],
@@ -1239,8 +1200,7 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
     let right_record = record(&[1, 1], &[100, 101]);
     let make_right = |row| {
         incoming(
-            &right_record,
-            vec![row],
+            &right_record.slice(row, 1),
             vec![GroupId::new(0).unwrap()],
             &[10],
             &[row as u64],
@@ -1267,7 +1227,6 @@ fn test_production_morsels_share_one_atomic_match_limit_and_commit() {
     let mut accepted = make_state(100);
     let left = incoming(
         &left_record,
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[0],
@@ -1318,7 +1277,6 @@ fn test_morsel_preparation_chains_across_unretained_rows() {
     let make_left = |value, time, row_id, retain| {
         incoming(
             &record(&[1], &[value]),
-            vec![0],
             vec![GroupId::new(0).unwrap()],
             &[time],
             &[row_id],
@@ -1343,7 +1301,6 @@ fn test_morsel_preparation_chains_across_unretained_rows() {
 
     let right = incoming(
         &record(&[1], &[100]),
-        vec![0],
         vec![GroupId::new(0).unwrap()],
         &[10],
         &[0],
@@ -1369,7 +1326,6 @@ fn test_batch_merge_sorts_out_of_order_runs_like_sequential_appends() {
     let first = || {
         incoming(
             &record(&[1, 1], &[20, 10]),
-            vec![0, 1],
             vec![GroupId::new(0).unwrap(); 2],
             &[20, 10],
             &[0, 1],
@@ -1380,7 +1336,6 @@ fn test_batch_merge_sorts_out_of_order_runs_like_sequential_appends() {
     let second = || {
         incoming(
             &record(&[1], &[15]),
-            vec![0],
             vec![GroupId::new(0).unwrap()],
             &[15],
             &[2],
@@ -1440,9 +1395,8 @@ fn test_run_interval_large_batch_emits_every_match() {
                     .collect::<Vec<_>>();
                 Incoming::route(
                     RouteInput::new(
-                        &record,
+                        &record.slice(start, end - start),
                         &[0],
-                        (start..end).collect(),
                         times,
                         (start..end).map(|row| row as u64).collect(),
                         datafusion::arrow::array::BooleanArray::from(
@@ -1451,7 +1405,7 @@ fn test_run_interval_large_batch_emits_every_match() {
                                 .collect::<Vec<_>>(),
                         ),
                         end as u64,
-                    ),
+                    )?,
                     keys,
                     &mut || Ok(()),
                 )
@@ -1605,7 +1559,6 @@ fn test_eviction_releases_locator_indexes_for_a_small_live_tail() {
     let ids: Vec<_> = (0..ROWS).map(|i| u64::try_from(i).unwrap()).collect();
     let left = incoming(
         &record(&vec![0; ROWS], &times),
-        (0..ROWS).collect(),
         vec![equal_key; ROWS],
         &times,
         &ids,
@@ -1632,7 +1585,6 @@ fn test_eviction_releases_locator_indexes_for_a_small_live_tail() {
     let mut restored = RunState::restore(state.snapshot()).unwrap();
     let right = incoming(
         &record(&[0], &[99]),
-        vec![0],
         vec![equal_key],
         &retained_times[..1],
         &[0],
@@ -1653,4 +1605,93 @@ fn test_eviction_releases_locator_indexes_for_a_small_live_tail() {
     assert_eq!(values(&matched[0], 1), [99]);
     eprintln!("eviction {ROWS} -> {KEEP} retained bytes {before} -> {after}");
     assert!(after < before / 16, "retained {after} of {before} bytes");
+}
+
+#[test]
+fn test_dense_routing_retains_only_key_groups_for_compact_input() {
+    let runtime = DataFusionRuntime::new(DataFusionConfig::default()).unwrap();
+    let mut keys = KeyStore::new(
+        KeySchema::groupable(vec![Arc::new(Field::new("key", DataType::Int64, false))]).unwrap(),
+        runtime.incremental_reservation("compact-route"),
+    );
+    let rows = MORSEL_ROWS;
+    let n = i64::try_from(rows).unwrap();
+    let record = record(&vec![1; rows], &(0..n).collect::<Vec<_>>());
+    drop(
+        keys.route_with_limit_cached(&[record.column(0).clone()], usize::MAX, &mut || Ok(()))
+            .unwrap(),
+    );
+    let times = vec![EventTime::from_micros(10); rows];
+    let ids = (0..u64::try_from(rows).unwrap())
+        .map(|row| row * 2)
+        .collect::<Vec<_>>();
+    let next = ids.last().unwrap() + 2;
+    let retain = datafusion::arrow::array::BooleanArray::from(vec![true; rows]);
+    let mut routed = None;
+    let allocations = allocation_counter::measure(|| {
+        routed = Some(
+            Incoming::route(
+                RouteInput::new(&record, &[0], times, ids, retain, next).unwrap(),
+                &mut keys,
+                &mut || Ok(()),
+            )
+            .unwrap(),
+        );
+    });
+    let mut state = RunState::new(
+        "compact-route",
+        JoinStateLimits::new(8192, 16 << 20, 8192).unwrap(),
+        JoinTimeBounds::from_micros(0, 0).unwrap(),
+    )
+    .unwrap();
+    state
+        .apply(
+            JoinSide::Left,
+            routed.unwrap(),
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    assert_eq!(state.rows(JoinSide::Left), rows);
+    assert_eq!(state.next_row_id(JoinSide::Left), next);
+    assert!(
+        state
+            .locators(JoinSide::Left)
+            .into_iter()
+            .map(|(_, _, id, _, _)| id)
+            .eq((0..next).step_by(2))
+    );
+    let probe = incoming(
+        &record.slice(0, 1),
+        vec![GroupId::new(0).unwrap()],
+        &[10],
+        &[9],
+        vec![false],
+        10,
+    );
+    let output = state
+        .apply(
+            JoinSide::Right,
+            probe,
+            &output_schema(),
+            Some(&[1, 3]),
+            2,
+            EdgeBudget::default(),
+        )
+        .unwrap();
+    let matches = output
+        .iter()
+        .flat_map(|batch| values(batch, 0))
+        .collect::<Vec<_>>();
+    assert_eq!(matches, (0..n).collect::<Vec<_>>());
+    assert!(
+        output
+            .iter()
+            .flat_map(|batch| values(batch, 1))
+            .all(|value| value == 0)
+    );
+    eprintln!("Compact Join morsel routing {allocations:?}");
+    assert!(allocations.bytes_current <= i64::try_from(rows * size_of::<GroupId>()).unwrap() + 256);
 }

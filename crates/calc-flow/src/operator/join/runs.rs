@@ -110,7 +110,6 @@ impl LocatorEntry {
 pub(super) struct RouteInput<'a> {
     payload: &'a RecordBatch,
     key_indices: &'a [usize],
-    physical: Vec<usize>,
     times: Vec<EventTime>,
     row_ids: Vec<u64>,
     retain: BooleanArray,
@@ -121,29 +120,36 @@ impl<'a> RouteInput<'a> {
     pub(super) fn new(
         payload: &'a RecordBatch,
         key_indices: &'a [usize],
-        physical: Vec<usize>,
         times: Vec<EventTime>,
         row_ids: Vec<u64>,
         retain: BooleanArray,
         next_row_id: u64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let rows = payload.num_rows();
+        if rows > MORSEL_ROWS
+            || times.len() != rows
+            || row_ids.len() != rows
+            || retain.len() != rows
+            || retain.null_count() != 0
+            || row_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || row_ids.last().is_some_and(|last| next_row_id <= *last)
+        {
+            return Err(run_error("invalid admitted run columns or row-ID frontier"));
+        }
+        Ok(Self {
             payload,
             key_indices,
-            physical,
             times,
             row_ids,
             retain,
             next_row_id,
-        }
+        })
     }
 }
 
-/// One admitted input morsel. Physical positions preserve the source payload;
-/// group, time, ID and retain columns use admitted positions.
+/// Payload and metadata use compact positions. Row IDs preserve source order.
 pub(super) struct Incoming {
     payload: RecordBatch,
-    physical: Vec<usize>,
     groups: Vec<GroupId>,
     times: Vec<EventTime>,
     row_ids: Vec<u64>,
@@ -152,36 +158,17 @@ pub(super) struct Incoming {
 }
 
 impl Incoming {
-    pub(super) fn new(
-        payload: RecordBatch,
-        physical: Vec<usize>,
-        groups: Vec<GroupId>,
-        times: Vec<EventTime>,
-        row_ids: Vec<u64>,
-        retain: BooleanArray,
-        next_row_id: u64,
-    ) -> Result<Self> {
-        let rows = physical.len();
-        if rows > MORSEL_ROWS
-            || groups.len() != rows
-            || times.len() != rows
-            || row_ids.len() != rows
-            || retain.len() != rows
-            || retain.null_count() != 0
-            || physical.iter().any(|&row| row >= payload.num_rows())
-            || row_ids.windows(2).any(|pair| pair[0] >= pair[1])
-            || row_ids.last().is_some_and(|last| next_row_id <= *last)
-        {
+    pub(super) fn new(input: RouteInput<'_>, groups: Vec<GroupId>) -> Result<Self> {
+        if groups.len() != input.payload.num_rows() {
             return Err(run_error("invalid admitted run columns or row-ID frontier"));
         }
         Ok(Self {
-            payload,
-            physical,
+            payload: input.payload.clone(),
             groups,
-            times,
-            row_ids,
-            retain,
-            next_row_id,
+            times: input.times,
+            row_ids: input.row_ids,
+            retain: input.retain,
+            next_row_id: input.next_row_id,
         })
     }
 
@@ -190,78 +177,22 @@ impl Incoming {
         keys: &mut KeyStore,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Self> {
-        let RouteInput {
-            payload,
-            key_indices,
-            physical,
-            times,
-            row_ids,
-            retain,
-            next_row_id,
-        } = input;
-        let rows = physical.len();
-        if rows > MORSEL_ROWS
-            || times.len() != rows
-            || row_ids.len() != rows
-            || retain.len() != rows
-            || retain.null_count() != 0
-            || physical.iter().any(|&row| row >= payload.num_rows())
-            || row_ids.windows(2).any(|pair| pair[0] >= pair[1])
-            || row_ids.last().is_some_and(|last| next_row_id <= *last)
-        {
-            return Err(run_error("invalid admitted run columns or row-ID frontier"));
-        }
-        let dense = physical.len() == payload.num_rows()
-            && physical
-                .iter()
-                .enumerate()
-                .all(|(index, &row)| index == row);
-        let arrays = if dense {
-            key_indices
-                .iter()
-                .map(|&index| payload.column(index).clone())
-                .collect()
-        } else {
-            let source_rows = physical
-                .iter()
-                .map(|&row| u64::try_from(row).map_err(|_| run_error("source row exceeds u64")))
-                .collect::<Result<Vec<_>>>()?;
-            let source_rows = UInt64Array::from(source_rows);
-            key_indices
-                .iter()
-                .map(|&index| {
-                    take(payload.column(index).as_ref(), &source_rows, None)
-                        .map_err(|error| run_error(format!("key take failed: {error}")))
-                })
-                .collect::<Result<Vec<_>>>()?
-        };
+        let arrays = input
+            .key_indices
+            .iter()
+            .map(|&index| input.payload.column(index).clone())
+            .collect::<Vec<_>>();
         if arrays.iter().any(|array| array.null_count() != 0) {
             return Err(run_error("Join run routing received a null key"));
         }
         let cut = keys.cut();
-        match keys
-            .route_with_limit_cached(&arrays, usize::MAX, check)
-            .and_then(|groups| {
-                Self::new(
-                    payload.clone(),
-                    physical,
-                    groups,
-                    times,
-                    row_ids,
-                    retain,
-                    next_row_id,
-                )
-            }) {
-            Ok(incoming) => Ok(incoming),
-            Err(error) => {
-                keys.rollback(cut);
-                Err(error)
-            }
-        }
+        keys.route_with_limit_cached(&arrays, usize::MAX, check)
+            .and_then(|groups| Self::new(input, groups))
+            .inspect_err(|_| keys.rollback(cut))
     }
 
     fn len(&self) -> usize {
-        self.physical.len()
+        self.payload.num_rows()
     }
 
     fn retained(&self, row: usize) -> bool {
@@ -269,7 +200,7 @@ impl Incoming {
     }
 
     fn payload_at(&self, row: usize) -> PayloadRef<'_> {
-        PayloadRef::Record(&self.payload, self.physical[row])
+        PayloadRef::Record(&self.payload, row)
     }
 }
 
@@ -361,17 +292,14 @@ impl Run {
         if selected.is_empty() {
             return Ok(None);
         }
-        let dense = selected.len() == incoming.payload.num_rows()
-            && selected
-                .iter()
-                .enumerate()
-                .all(|(index, &row)| incoming.physical[row] == index);
-        let columns = if dense {
+        let columns = if selected.len() == incoming.len() {
             incoming.payload.columns().to_vec()
         } else {
-            let source_rows = UInt64Array::from_iter_values(selected.iter().map(|&row| {
-                u64::try_from(incoming.physical[row]).expect("validated usize fits u64")
-            }));
+            let source_rows = UInt64Array::from_iter_values(
+                selected
+                    .iter()
+                    .map(|&row| u64::try_from(row).expect("validated morsel row fits u64")),
+            );
             incoming
                 .payload
                 .columns()
@@ -1762,8 +1690,7 @@ impl Prepared {
         let incoming = LazyCell::new(|| {
             output_gather::SideGather::repeated(
                 self.incoming.payload.columns(),
-                incoming_windows
-                    .map(|(position, window)| (self.incoming.physical[position], window.len())),
+                incoming_windows.map(|(position, window)| (position, window.len())),
                 count,
             )
         });

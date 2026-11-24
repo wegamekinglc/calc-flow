@@ -187,12 +187,11 @@ impl RunCore {
         let input = RouteInput::new(
             record,
             &compiled.left_key_indices,
-            (0..rows).collect(),
             times,
             (first..next).collect(),
             BooleanArray::from(vec![true; rows]),
             next,
-        );
+        )?;
         let incoming = Incoming::route(input, &mut self.keys, &mut || Ok(()))
             .inspect_err(|_| self.keys.rollback(cut))?;
         Ok((incoming, next))
@@ -370,14 +369,13 @@ impl RunCore {
                     RouteInput::new(
                         &view,
                         keys,
-                        vec![0],
                         vec![row.event_time],
                         vec![row.row_id],
                         BooleanArray::from(vec![true]),
                         row.row_id
                             .checked_add(1)
                             .ok_or_else(|| counter_overflow(&operator.name, "restored row_id"))?,
-                    ),
+                    )?,
                     &mut core.keys,
                     &mut || Ok(()),
                 )?;
@@ -905,15 +903,7 @@ fn route(
                 .ok_or_else(|| counter_overflow("Join runs", "row_id"))?;
             let retain = BooleanArray::from(rows.iter().map(|row| row.retain).collect::<Vec<_>>());
             Incoming::route(
-                RouteInput::new(
-                    &payload,
-                    key_indices,
-                    (0..rows.len()).collect(),
-                    times,
-                    row_ids,
-                    retain,
-                    next_row_id,
-                ),
+                RouteInput::new(&payload, key_indices, times, row_ids, retain, next_row_id)?,
                 keys,
                 check,
             )
