@@ -1,0 +1,25 @@
+{
+  "archived_sha256": {
+    "baseline/release.json": "6dcdcb5f7a554007e6dc3af8a86aea4c29fe617c61603d1df1bf4e836886889f",
+    "candidate/release.json": "f0710dcb6ef3000bb7c03c9d08be588161863b29386ac0222d9d06ed9507fa73",
+    "outcome.json": "e75f6d4f885bf9b4993529a1885fb061183557db74aba1002bf4674ac3e4b769",
+    "protocol.md": "cd5873211c1126561cf410516631f2288718c74438fbdb99140e8af0fc4ce8e9",
+    "registration.json": "856837935226779417bf89ca2164a6beb4049cd91388632ce140d2b294beeedd",
+    "resources.jsonl": "89003effe89ff7cfbfd2c441696161b5c46527a2d8e2a9711a3114dd52ec2b30",
+    "result.json": "674bc3fa4c570bd2be03ff184060c30089a8d824e1cfc9fb9ca437179238c2f5",
+    "samples.json": "a4e13a0790d4968f469544df14c7429ed72686ce62ab4db0629f86cdd7cee261"
+  },
+  "artifact_id": 14891751538,
+  "artifact_sha256": "ec77264c2609e653a77fb1d4bcf3c8226ae3d441a8afb7872d53fbba0d60003f",
+  "job_id": 138228977561,
+  "run_id": 45330092961,
+  "source_paths": {
+    "baseline/release.json": "baseline/release.json",
+    "candidate/release.json": "candidate/release.json",
+    "outcome.json": "outcome.json",
+    "registration.json": "registration.json",
+    "resources.jsonl": "resources.jsonl",
+    "result.json": "result.json",
+    "samples.json": "partial.json"
+  }
+}

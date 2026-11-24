@@ -1,0 +1,18 @@
+{
+  "artifact": 14891650970,
+  "artifact_digest": "sha256:f703e69ad07aecbb3a559d4b6350e7380ae6e1cc86ac3aa6748bd7df27556668",
+  "build_profile": "release",
+  "checkout": "0b1468c8fdecc0066c59159ca6be0fd9e2a0a4aa",
+  "contract": "benchmark-release-v1",
+  "git_clean": true,
+  "git_sha": "0b1468c8fdecc0066c59159ca6be0fd9e2a0a4aa",
+  "image": "ubuntu-26.04",
+  "image_version": "20261116.202.1",
+  "job": 138221469308,
+  "native_sha256": "4ab86c68c619d2f937366f1ee76b9d4b59c0dc1323695a7c9bbb1ad28317280e",
+  "requested_sha": "e16d702263b39c7d20f40fc037af658f40a6e44c",
+  "tree": "82ead9db7e66e0ca8447342445a029eb2ce23890",
+  "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+  "wheel_sha256": "83794c2bfcac478e36284d5790fd6e75f5ac8ab90874da632e8402dc96dc007c",
+  "workflow_run": 45327680245
+}
