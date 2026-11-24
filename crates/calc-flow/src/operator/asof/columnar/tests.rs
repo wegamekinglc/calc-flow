@@ -239,6 +239,47 @@ fn test_columnar_restore_rejects_forged_run_charges() {
 }
 
 #[test]
+fn test_ordered_historical_probes_bound_dense_steps_and_sparse_jumps() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 << 20));
+    let declaration = spec(1, 12_000, 16 << 20);
+    let mut state = state(&declaration, &pool);
+    let rows = (0..2048)
+        .flat_map(|time| (0..4).map(move |key| (key, time * 2, time, None)))
+        .collect::<Vec<_>>();
+    admit(&mut state, 1, &record(&rows)).unwrap();
+    let probes = (0..128)
+        .chain(2000..2016)
+        .flat_map(|time| (0..4).map(move |key| (key, time * 2 + 1, time, None)))
+        .collect::<Vec<_>>();
+    admit(&mut state, 0, &record(&probes)).unwrap();
+
+    super::state::CANDIDATE_TIME_READS.set(0);
+    let selection = select(&state, None, true, probes.len());
+    let reads = super::state::CANDIDATE_TIME_READS.replace(0);
+    let output = state
+        .materialize(&selection, &output_schema(&declaration), None)
+        .unwrap();
+    assert_eq!(selection.matched(), probes.len());
+    assert_eq!(output.column(0), output.column(4));
+    assert_eq!(output.column(2), output.column(6));
+    // Four adjacent reads per probe, plus one logarithmic jump per key.
+    assert!(
+        reads <= 4 * probes.len() + 4 * 16,
+        "{reads} timestamp reads"
+    );
+
+    #[cfg(feature = "benchmark-internals")]
+    {
+        state.set_legacy_latest_lookup_for_benchmark(true);
+        let _ = super::state::take_latest_binary_searches();
+        let legacy = select(&state, None, true, probes.len());
+        assert_eq!(super::state::take_latest_binary_searches(), probes.len());
+        assert_eq!(legacy.right, selection.right);
+        assert_eq!(legacy.right_validity, selection.right_validity);
+    }
+}
+
+#[test]
 fn test_candidate_reuses_visible_tail_time_at_inclusive_tolerance() {
     let declaration = spec(1, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
