@@ -401,6 +401,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_deferred_left_admits_new_symbol_in_short_record_and_restores() {
+        let (left, right) = static_inputs();
+        let replace_symbol = |record: RecordBatch, index: usize| {
+            let mut columns = record.columns().to_vec();
+            columns[index] = Arc::new(StringArray::from(vec!["new"]));
+            RecordBatch::try_new(record.schema(), columns).unwrap()
+        };
+        let left = vec![left.slice(0, 1), replace_symbol(left.slice(1, 1), 2)];
+        let mut operator = static_operator(true);
+        let job = StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        );
+        let context = hot_context(&job);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                Batch::table(left, BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 2);
+        let cut = native_snapshot(&mut operator).await;
+        let mut restored = static_operator(true);
+        restored.restore(&cut).unwrap();
+        let probe = Batch::table(vec![replace_symbol(right, 0)], BatchMetadata::default()).unwrap();
+        for mut owner in [operator, restored] {
+            owner
+                .process_data("right", probe.clone(), &context, &mut collector)
+                .await
+                .unwrap();
+            assert_eq!(static_pairs(&collector.drain("output"), true), [(1, 6.0)]);
+        }
+    }
+
+    #[tokio::test]
     async fn hot_multi_accumulates_same_side_batches_before_joining() {
         for fused in [false, true] {
             let mut operator = static_operator(fused);
