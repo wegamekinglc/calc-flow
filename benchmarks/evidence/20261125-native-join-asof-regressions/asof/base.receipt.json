@@ -1,0 +1,99 @@
+{
+  "case": "asof",
+  "commit": "92230f68c9024a053f2e7c74185c3a98f5003917",
+  "tree": "1f9f37a8c0bb0203e4b6f5661345e25b11471cb6",
+  "source": "a92f615b1f5b21871a2437d242ec209d35dc76a0",
+  "harness_sha256": "836c1aadd8464de70de3cb6b496349e0b21542156195b3afd14367ad164451e9",
+  "binary_sha256": "8e55026314aaea60e926e362bdd62507cb29da20b0c7d1685df9f8c7db4c466d",
+  "lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+  "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8\n",
+  "cargo": [
+    "cargo",
+    "build",
+    "--profile",
+    "bench",
+    "--locked",
+    "-p",
+    "calc-flow",
+    "--example",
+    "stage_asof",
+    "--example",
+    "stage_join",
+    "--message-format=json"
+  ],
+  "wall_seconds": 1330.6673517200397,
+  "artifacts": {
+    "calc_flow": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow#2026.11.14",
+      "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/Cargo.toml",
+      "target": {
+        "kind": [
+          "lib"
+        ],
+        "crate_types": [
+          "lib"
+        ],
+        "name": "calc_flow",
+        "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/src/lib.rs",
+        "edition": "2024",
+        "doc": true,
+        "doctest": true,
+        "test": true
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [],
+      "filenames": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/libcalc_flow-ca57eaad0d747368.rlib",
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/deps/libcalc_flow-ca57eaad0d747368.rmeta"
+      ],
+      "executable": null,
+      "fresh": false
+    },
+    "stage_asof": {
+      "reason": "compiler-artifact",
+      "package_id": "path+file:///home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow#2026.11.14",
+      "manifest_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/Cargo.toml",
+      "target": {
+        "kind": [
+          "example"
+        ],
+        "crate_types": [
+          "bin"
+        ],
+        "name": "stage_asof",
+        "src_path": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/native-runtime-bench-nov24/crates/calc-flow/examples/stage_asof.rs",
+        "edition": "2024",
+        "doc": false,
+        "doctest": false,
+        "test": false
+      },
+      "profile": {
+        "opt_level": "3",
+        "debuginfo": 0,
+        "debug_assertions": false,
+        "overflow_checks": false,
+        "test": false
+      },
+      "features": [],
+      "filenames": [
+        "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/examples/stage_asof"
+      ],
+      "executable": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo/release/examples/stage_asof",
+      "fresh": false
+    }
+  },
+  "settings": {
+    "CARGO_TARGET_DIR": "/home/wegamekinglc/dev/github/my-claude/workspace/calc-flow/target/staged-perf-ec402c59/asof-charge-release-nov24/target/cargo",
+    "CARGO_BUILD_JOBS": "2",
+    "RUSTFLAGS": null,
+    "CARGO_PROFILE_BENCH_LTO": null,
+    "CARGO_ENCODED_RUSTFLAGS": null
+  }
+}
