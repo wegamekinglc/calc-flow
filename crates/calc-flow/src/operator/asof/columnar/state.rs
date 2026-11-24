@@ -21,6 +21,8 @@ use std::{
 #[cfg(test)]
 thread_local! {
     pub(super) static ADMISSION_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static PROJECTED_GROUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static PROJECTED_COUNT_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FINALITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -156,6 +158,14 @@ impl LocatorColumn {
         self.head = 0;
         (before, self.capacity_bytes())
     }
+}
+
+enum IncomingIndexRows<'a> {
+    Fresh(&'a [RowLocator]),
+    Restored {
+        payloads: &'a [RowLocator],
+        identities: &'a [RowLocator],
+    },
 }
 
 struct PreparedRun {
@@ -367,18 +377,33 @@ impl ColumnarState {
         &self,
         side: usize,
         run: &Run,
-        payloads: &[RowLocator],
-        identities: &[RowLocator],
+        rows: &IncomingIndexRows<'_>,
     ) -> Result<usize> {
-        let counts = |locators: &[RowLocator]| {
-            let mut counts = BTreeMap::<usize, usize>::new();
-            for locator in locators {
-                *counts.entry(run.group(*locator).index()).or_default() += 1;
+        let mut counts = BTreeMap::<usize, [usize; 2]>::new();
+        let mut count = |rows: &[RowLocator], column: usize| {
+            for locator in rows {
+                #[cfg(test)]
+                PROJECTED_GROUP_VISITS.set(PROJECTED_GROUP_VISITS.get() + 1);
+                let entry = counts.entry(run.group(*locator).index()).or_default();
+                #[cfg(test)]
+                PROJECTED_COUNT_UPDATES.set(PROJECTED_COUNT_UPDATES.get() + 1);
+                entry[column] += 1;
             }
-            counts
         };
-        let payload_counts = counts(payloads);
-        let identity_counts = counts(identities);
+        let (payload_rows, identity_rows) = match rows {
+            IncomingIndexRows::Fresh(rows) => {
+                count(rows, 0);
+                (rows.len(), rows.len())
+            }
+            IncomingIndexRows::Restored {
+                payloads,
+                identities,
+            } => {
+                count(payloads, 0);
+                count(identities, 1);
+                (payloads.len(), identities.len())
+            }
+        };
         let mut projected = self.index_bytes;
         if self.key_ranks.len() != self.keys.len() {
             projected = projected
@@ -386,24 +411,20 @@ impl ColumnarState {
                 .and_then(|bytes| bytes.checked_add(self.keys.len() * size_of::<u32>()))
                 .ok_or_else(|| self.state_limit())?;
         }
-        if side == 0 && !identities.is_empty() {
+        if side == 0 && identity_rows != 0 {
             projected = projected
                 .checked_sub(self.pending.capacity_bytes())
                 .and_then(|bytes| {
-                    bytes.checked_add(
-                        (self.pending.len() + identities.len()) * size_of::<RowLocator>(),
-                    )
+                    bytes
+                        .checked_add((self.pending.len() + identity_rows) * size_of::<RowLocator>())
                 })
                 .ok_or_else(|| self.state_limit())?;
         }
-        let groups = payload_counts
-            .keys()
-            .chain(identity_counts.keys())
-            .copied()
-            .collect::<BTreeSet<_>>();
-        for group in groups {
-            let payloads = payload_counts.get(&group).copied().unwrap_or(0);
-            let identities = identity_counts.get(&group).copied().unwrap_or(0);
+        for (group, [payloads, restored_identities]) in counts {
+            let identities = match rows {
+                IncomingIndexRows::Fresh(_) => payloads,
+                IncomingIndexRows::Restored { .. } => restored_identities,
+            };
             if side == 0 {
                 if let Some(column) = self.left_by_key.get(group) {
                     projected = replace_projected_column(projected, column, identities)
@@ -429,9 +450,8 @@ impl ColumnarState {
         let run_owner_bytes = run_owners
             .checked_mul(size_of::<Run>())
             .ok_or_else(|| self.state_limit())?;
-        let transient_locator_bytes = payloads
-            .len()
-            .checked_add(identities.len())
+        let transient_locator_bytes = payload_rows
+            .checked_add(identity_rows)
             .and_then(|rows| rows.checked_mul(size_of::<RowLocator>()))
             .ok_or_else(|| self.state_limit())?;
         self.run_bytes
@@ -651,7 +671,7 @@ impl ColumnarState {
                 "stream_asof_join.limits.max_state_rows exceeded",
             ));
         }
-        let projected = self.projected_charge(side, &run, &locators, &locators)?;
+        let projected = self.projected_charge(side, &run, &IncomingIndexRows::Fresh(&locators))?;
         self.reserve_charge(projected)?;
         self.rebuild_key_order()?;
         self.left_by_key
@@ -981,7 +1001,14 @@ impl ColumnarState {
             return Err(self.state_limit());
         }
         self.validate_new_identities(side, &run, &identities)?;
-        let projected = self.projected_charge(side, &run, &payloads, &identities)?;
+        let projected = self.projected_charge(
+            side,
+            &run,
+            &IncomingIndexRows::Restored {
+                payloads: &payloads,
+                identities: &identities,
+            },
+        )?;
         self.reserve_charge(projected)?;
         self.run_bytes += run.charge();
         if side == 0 {

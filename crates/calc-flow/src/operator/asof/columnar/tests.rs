@@ -499,6 +499,81 @@ fn test_strict_finality_commits_only_the_closed_prefix_and_eof_drains() {
 }
 
 #[test]
+fn test_fresh_charge_counts_each_group_locator_once_on_both_sides() {
+    let declaration = spec(0, 4_096, 16 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 << 20));
+    let mut state = state(&declaration, &pool);
+    let rows = (0..1_024)
+        .map(|row| (row % 64, row / 64, row, None))
+        .collect::<Vec<_>>();
+    let input = record(&rows);
+    let work = [0, 1].map(|side| {
+        super::state::PROJECTED_GROUP_VISITS.set(0);
+        super::state::PROJECTED_COUNT_UPDATES.set(0);
+        admit(&mut state, side, &input).unwrap();
+        (
+            super::state::PROJECTED_GROUP_VISITS.replace(0),
+            super::state::PROJECTED_COUNT_UPDATES.replace(0),
+        )
+    });
+    assert_eq!(work, [(input.num_rows(), input.num_rows()); 2]);
+}
+
+#[test]
+fn test_restore_charge_counts_mixed_right_liveness_at_the_exact_limit() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let right = record(&[
+        (1, 18, 0, None),
+        (1, 19, 1, None),
+        (1, 20, 2, None),
+        (2, 16, 0, None),
+        (3, 25, 0, None),
+    ]);
+    let mixed_run = || {
+        let mut source = state(&spec(10, 100, 1 << 20), &pool);
+        admit(&mut source, 1, &right).unwrap();
+        source.evict(super::Progress {
+            left_watermark: Some(20),
+            right_watermark: Some(17),
+            ..super::Progress::default()
+        });
+        source.right_runs.remove(&0).unwrap()
+    };
+    let keys = record(&[(1, 0, 0, None), (2, 0, 0, None), (3, 0, 0, None)])
+        .project(&[0])
+        .unwrap();
+    let empty_index = |limit| {
+        let mut target = state(&spec(10, 100, limit), &pool);
+        target.restore_keys(&keys).unwrap();
+        target
+    };
+    let run = mixed_run();
+    let key_bytes = empty_index(1 << 20).persistent_bytes();
+    // Three payload and four identity locators each need one index and one staging slot.
+    let bytes = key_bytes
+        + run.charge()
+        + size_of::<super::run::Run>()
+        + 2 * (3 + 4) * size_of::<super::RowLocator>();
+    let limit = u64::try_from(bytes).unwrap();
+    let mut short = empty_index(limit - 1);
+    assert!(matches!(
+        short.restore_run(1, 0, run),
+        Err(crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofStateLimitExceeded,
+            ..
+        })
+    ));
+    assert_eq!(short.persistent_bytes(), key_bytes);
+    assert_eq!(short.state_rows(), 0);
+
+    let mut exact = empty_index(limit);
+    exact.restore_run(1, 0, mixed_run()).unwrap();
+    assert_eq!(exact.state_rows(), 5);
+    assert_eq!(exact.identity_only_rows(), 2);
+    assert_eq!(exact.right_payload_rows(), 3);
+}
+
+#[test]
 fn test_admission_after_partial_commit_reuses_reclaimed_capacity() {
     let declaration = spec(0, 2_000, 16 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 << 20));
