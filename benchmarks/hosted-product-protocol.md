@@ -19,7 +19,7 @@ interval joins have a different fanout and output shape.
 Use a dedicated GitHub-hosted Linux runner, one CPU, one Tokio thread and
 one shared hash-locked dependency environment. The dispatch binds the
 candidate SHA and release artifact before acquisition. Baseline wheel
-ba5471bb matches all product sources at 85af0b53. Verify the actual checkout
+a21d3eed matches the complete tree of dc1fd149. Verify the actual checkout
 trees, official Linux artifact and installed file hashes, same wheel build
 image and version, and distinct native module hashes. Two rounds of ten
 alternating pairs follow the maintained exact paired median intervals and 5%
@@ -37,3 +37,5 @@ preflight and one-second monitoring throughout collection. Stop on any
 deadline, provenance, oracle or resource failure. Run each registration once.
 
 The first compact route candidate cd879969 regressed the static case in both rounds. This comparison is reserved for a new implementation that bypasses per-row staging for a contiguous admitted segment. The reference remains the verified pre-change main runtime. Register both workload arms before measuring and require a complete static comparison before clearing the earlier regression.
+
+Candidate 10be1395 integrates main after #720. Its control is now the official a21d3eed release wheel, whose complete checkout tree d44249d5 equals main dc1fd149 exactly. This supersedes the preliminary baseline selection before any dispatch, warmup or sample of this corrected implementation.
