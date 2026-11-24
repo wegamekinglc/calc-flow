@@ -32,6 +32,9 @@ impl ColumnarState {
         side: usize,
         columns: impl Iterator<Item = usize> + Clone,
     ) -> Result<usize> {
+        if columns.clone().next().is_none() {
+            return Ok(0);
+        }
         let (locators, validity) = if side == 0 {
             (&selection.left, None)
         } else {
@@ -39,9 +42,6 @@ impl ColumnarState {
         };
         let unmatched = validity.map_or(0, |bits| locators.len() - bits.count_set_bits());
         let mut total = self.column_overhead(side, columns.clone(), locators.len(), unmatched)?;
-        if total == 0 {
-            return Ok(0);
-        }
         for (run, rows) in selected_rows(locators, validity) {
             let record = self
                 .run(side, run)
