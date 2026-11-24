@@ -271,6 +271,93 @@ ASOF 的全部淘汰用例发现了独立的状态保留问题。最后一个身
 新版可读取旧 v11 快照。从新版排空快照恢复需要包含此修复的读取器。
 [ASOF 淘汰、预算与恢复](https://github.com/wegamekinglc/calc-flow/pull/709)
 
+## 分组与连接的后续实测
+
+**完整分组快照。** 对整数 SUM，每个新键进入状态时记录该键的输出预留字节数，
+事务回滚同步撤销，恢复时从键重建总量。对 4,096 个已存在的可空复合键，
+一次完整快照的键内存预估从 11 次临时分配、32,752 请求字节降为零。
+按所选组输出时继续计算这些组的实际键宽。这个计数覆盖申请输出内存之前的一次预估；
+完整快照仍需生成所有输出行。
+[整数 SUM 实现与恢复校验](https://github.com/wegamekinglc/calc-flow/pull/712)
+
+在 Python 公开流上，先建立 10,000 个两列分组键，再提交 20 个百行批次。
+每个 worker 核对 210,000 个输出行；每个 wheel 正式计时 400 次，从投递更新到收到
+完整 Arrow 快照。p50 从 720.098 降至 699.206 µs（−2.90%），p95 从 806.082 降至
+763.461 µs。按每组 worker 的中位数配对，两轮区间分别为 [−3.78%, −1.66%]、
+[−5.89%, −1.26%]。两轮均观察到延迟下降，未达到仓库 5% 的改善判定门槛。
+[Python 测量协议、原始样本和主机资源记录](https://github.com/wegamekinglc/calc-flow/tree/939fb715a2614a46f4b3ee1c63fe2f049c135a3c/benchmarks/sum-state/20261124-full-snapshot-python)
+
+**等值 Join 的投影与小批输入。** 在 Rust 中，8 个驻留行与 11 个输入行产生 88 对、
+分 13 块交付。仅投影输入侧时，读取的行坐标从 110 降到 22；仅投影驻留侧时降到 88；
+后续只需要字面量时降到零。两侧都投影的对照在两版上均读取 110 个坐标。
+左侧先到时，计算每个键的待处理行数可省去逐行保存的临时位置。4,096 行、4 个字符串键的
+申请量从 214,632 降至 67,160 字节，状态计费两版均为 504,424 字节。
+已有键之后的单行批次现在也可引入新键，检查点恢复后能得到同一匹配结果。
+[按投影读取坐标](https://github.com/wegamekinglc/calc-flow/pull/713) ·
+[延迟左侧输入及恢复](https://github.com/wegamekinglc/calc-flow/pull/714)
+
+Python 的流输入适配层现在沿用已做 schema 和预算检查的 Arrow 表。
+64 行对 64 行的公开等值 Join 绑定 8 个左侧原生批次和 1 个右侧原生批次，
+对这 9 个对象的 Arrow 导出由 18 次降至 9 次，逐行校验全部结果。
+[Python 输入导出与元数据测试](https://github.com/wegamekinglc/calc-flow/pull/711)
+
+**等值与区间 Join 的分段读取。** 逐行迭代以前只在单元测试构建中保留当前分段；
+生产构建对同一分段的下一行仍会重新定位。用公开 Rust 有限区间连接提交含空记录、
+空时间和有效行的五个左侧 Arrow 记录，核对闭区间上界处的 64 对结果。
+同一生产路径的分段定位从 65 次降至 3 次。
+[生产构建的观测及独立结果校验](https://github.com/wegamekinglc/calc-flow/pull/715)
+
+同一提交的两项公开 Python 实验分别预登记了百万事实行对 64 行维表，以及两侧
+各百万行、预期 10,998,080 对匹配的区间连接。官方基线和候选 wheel 的构建镜像
+分别为 Ubuntu 26.04 的 20261116.202.1 与 20261116.88.1，实验均在预热前停止。
+两个场景各完成零对，30 ms 和 350 ms 的公开 p50 目标本次均未评估。
+[静态 Join 的构建身份与停止记录](https://github.com/wegamekinglc/calc-flow/tree/722bd93aae4bf7edd944f9554fbc5097a2cf6ad9/benchmarks/join-asof/20261124-static-cursor-python) ·
+[区间 Join 的构建身份与停止记录](https://github.com/wegamekinglc/calc-flow/tree/1053b12c515491651507070316d3c0c38800bd4b/benchmarks/join-asof/20261124-interval-cursor-python)
+
+## 向后 ASOF Join
+
+RisingWave 对每个等值键保存按不等式键排序的映射，同一不等式键下再按主键区分。
+在匹配端给出包含或排除端点的边界后，可直接检索邻近时间。Calc Flow 的右侧桶
+已经按时间保存行位置：最新记录满足上界时直接使用，否则用二分查找上界，
+再检查容差下界。同时间多行使用本项目的序列规则。这里先优化选出右行后每批
+都要承担的输出预算和 Arrow 列构造成本。
+[RisingWave 索引及边界查找](https://github.com/risingwavelabs/risingwave/blob/bc563ec0330a6db01788959d249aee2126061d0d/src/stream/src/executor/join/asof_join.rs#L95-L141) ·
+[RisingWave 调用方的区间端点](https://github.com/risingwavelabs/risingwave/blob/bc563ec0330a6db01788959d249aee2126061d0d/src/stream/src/executor/asof_join.rs#L649-L694) ·
+[Calc Flow 候选行选择](../../crates/calc-flow/src/operator/asof/columnar/state.rs)
+
+**输出列构造。** 对每侧各一个保留数据段，六个字段可共享两组 Arrow 行索引。
+右侧缺失匹配复用有效性位图。在 1,024 行、6 列的结果构造中，Rust 临时分配从
+87 次降至 29 次，累计申请从 109,611 降至 58,984 字节，峰值从 84,049 降至
+58,688 字节。测试逐字段校验了同一时间戳的不同序列、容差边界和未匹配行；
+多个来源段另有交错读取和恢复测试。
+[ASOF 取列与原生分配观测](https://github.com/wegamekinglc/calc-flow/pull/716)
+
+独立的 Python 公开流用 1,024 个左探测行和 510 个右行，构造与入流、EOF、
+输出交付、关闭及最终的 Arrow 拼接均计时。44 个进程各自校验六列和全部
+764 个匹配、260 个未匹配行。正式样本的 p50 为 23.988 → 24.214 ms，
+p95 为 24.828 → 25.867 ms。两轮配对中位数分别为 +2.86%、−2.03%，
+区间 [−1.46%, +7.09%] 和 [−2.76%, +2.33%] 均跨零，公开延迟结论不确定。
+[Python 公开 ASOF 的原始样本与构建身份](https://github.com/wegamekinglc/calc-flow/tree/36bd0bc19aed8be8b6366341338f56e646d535f0/benchmarks/join-asof/20261124-single-run-python)
+
+**输出预算。** 选出的行按输入侧和所属数据段各归集一次，该侧的所有投影列共享行位置。
+在另一个 512 行用例中，左右各有两个来源段，256 行匹配；整型、时间、变长字符串
+以及未匹配右行的预留分别核算。八列合计在两版上都是 34,452 字节。
+计算这项预留的临时分配从 113 次降至 28 次，累计请求从 51,712 降至 12,896 字节，
+峰值从 5,616 降至 5,488 字节。两侧依次处理，只需同时保存一侧的临时行位置。
+[预算实现、独立计算与检查点续跑](https://github.com/wegamekinglc/calc-flow/pull/717)
+
+优化构建使用仓库的 `balanced_512`。先接收 512 个左行和 512 个右行，再推进水位，
+计至收集器接收全部输出、完成提交与淘汰。每个 worker 都预先逐行核对八列。
+最终提交 `cfce5309` 和基线分别测量 20 次。Rust 的 p50 从 65.918 降至 59.397 µs
+（−9.89%），p95 从 76.269 降至 69.279 µs。两轮配对中位数的区间分别为
+[−19.86%, +2.07%]、[−11.16%, −4.67%]。第一轮跨零，仓库判定为
+`no-confirmed-regression`；达到预登记的 10% 降幅需 p50 ≤59.326 µs。
+
+此前实现 `476431f3` 的独立实测为 p50 65.184 → 59.024 µs（−9.45%），两轮区间均
+达到 5% 改善判定。Windows Clippy 促使最终实现改为借用投影迭代器，优化构建的
+机器码也发生变化。上段记录了这一修改后的配对结果。两个提交各自保留完整样本。
+[Rust 两次发布构建、原始样本及复算脚本](https://github.com/wegamekinglc/calc-flow/tree/905567f37284c2369fee137ec69bdb21253df63d/benchmarks/join-asof/20261124-native-output-budget)
+
 ## 后续小阶段与验收目标
 
 1. **Python 单行推送。** 在既有双均线负载中，把 PyO3 调用继续划分为 Rust 执行、
@@ -284,6 +371,17 @@ ASOF 的全部淘汰用例发现了独立的状态保留问题。最后一个身
 3. **Join 从探测到交付。** 对百万行事实表与 64 行维表的公开 Python 用例，
    分别定位探测、输出投影和最终 Arrow 拼接。Rust 侧独立测量构造与探测，
    再判断驻留列的分配优化能否降低全程延迟。Python 目标仍为 p50 ≤30 ms。
-   百万行区间连接另行核对匹配对数与乘积。左反连接在活动水位越界后分九个块
-   释放 257 个未匹配左行，此负载的 p50 目标为 Rust ≤1 ms、Python ≤5 ms。
+   两侧百万行的区间连接目标为公开 p50 ≤350 ms，验收时核对 10,998,080 对匹配
+   的身份与乘积。活动水位越界后交付 257 个未匹配左行的左反连接已达到
+   Rust ≤1 ms、Python ≤5 ms 的独立目标。
    [Join 处理与输出](../../crates/calc-flow/src/operator/join/production.rs)
+4. **GroupBy 小批更新。** 保留整数 SUM 的全量快照和变更输出两套时钟。
+   后续分别定位 Rust 的结果列构造与 Python 等待下一张 Arrow 表的耗时。
+   对预热 10,000 组后追加百行的变更输出，继续追踪 Rust 250 µs、Python 1 ms
+   的 p50；Python 21 批完整变更任务的目标仍为 15 ms。
+   [分组状态与输出预算](../../crates/calc-flow/src/operator/sql/keyed_sum.rs)
+5. **ASOF 小批探测和交付。** 对 Rust 分开测量右侧候选选择和水位完成时的结果构造；
+   Python 再以已启动并就绪的流，测量小批入队到收到结果的热态延迟。保留上面含启动与
+   EOF 的公开用例作为对照。下一阶段以各自同负载的基线 p50 降低 10% 为目标，继续逐行校验
+   时间相等的决胜顺序、容差边界和未匹配行。
+   [ASOF 水位与输出提交](../../crates/calc-flow/src/operator/asof/finalize.rs)
