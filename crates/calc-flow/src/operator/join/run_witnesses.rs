@@ -191,9 +191,15 @@ pub(super) fn retain_unwitnessed(incoming: &mut Incoming, probe: &Probe) {
     if probe.spans.is_empty() {
         return;
     }
-    let mut witnessed = probe.spans.iter().peekable();
+    let mut witnessed = probe
+        .spans
+        .iter()
+        .flat_map(|span| span.positions.clone())
+        .peekable();
     let retained = BooleanBuffer::collect_bool(incoming.len(), |row| {
-        let has_witness = witnessed.next_if(|span| span.position == row).is_some();
+        let has_witness = witnessed
+            .next_if(|&position| usize::from(position) == row)
+            .is_some();
         !has_witness && incoming.retained(row)
     });
     incoming.retain = BooleanArray::new(retained, None);

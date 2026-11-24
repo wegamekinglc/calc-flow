@@ -72,7 +72,8 @@ pub(super) struct RowLocator {
     witnessed: bool,
 }
 
-const _: () = assert!(MORSEL_ROWS <= u16::MAX as usize + 1);
+// Probe spans store the exclusive end of a morsel-local input range.
+const _: () = assert!(MORSEL_ROWS <= u16::MAX as usize);
 const _: () = assert!(size_of::<RowLocator>() == size_of::<(RunId, u32)>());
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -660,8 +661,33 @@ impl SideUpdate {
 
 struct ProbeSpan {
     first: usize,
-    position: usize,
+    positions: std::ops::Range<u16>,
     window: std::ops::Range<usize>,
+}
+
+impl ProbeSpan {
+    // A span holds one fanout window or consecutive single hits at the same bucket offset.
+    fn matches(&self) -> usize {
+        self.window.len() + (self.positions.len() - 1)
+    }
+
+    fn windows(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + Clone {
+        let start = range.start.saturating_sub(self.first);
+        let end = (range.end - self.first).min(self.matches());
+        let position = usize::from(self.positions.start);
+        let (positions, window) = if self.window.len() == 1 {
+            (position + start..position + end, self.window.clone())
+        } else {
+            (
+                position..position + 1,
+                self.window.start + start..self.window.start + end,
+            )
+        };
+        positions.map(move |position| (position, window.clone()))
+    }
 }
 
 #[derive(Default)]
@@ -708,11 +734,20 @@ impl Probe {
             .count
             .checked_add(window.len())
             .ok_or_else(|| run_error("match count overflowed"))?;
-        self.spans.push(ProbeSpan {
-            first,
-            position,
-            window,
-        });
+        let position = u16::try_from(position).expect("input position fits a Join morsel");
+        if window.len() == 1
+            && let Some(span) = self.spans.last_mut()
+            && span.positions.end == position
+            && span.window == window
+        {
+            span.positions.end += 1;
+        } else {
+            self.spans.push(ProbeSpan {
+                first,
+                positions: position..position + 1,
+                window,
+            });
+        }
         Ok(())
     }
 
@@ -724,23 +759,20 @@ impl Probe {
         &self,
         range: std::ops::Range<usize>,
     ) -> impl Iterator<Item = (usize, std::ops::Range<usize>)> + Clone {
-        let spans = if range == (0..self.count) {
+        let spans = if range.is_empty() {
+            &self.spans[..0]
+        } else if range == (0..self.count) {
             &self.spans[..]
         } else {
             let start = self
                 .spans
-                .partition_point(|span| span.first + span.window.len() <= range.start);
+                .partition_point(|span| span.first + span.matches() <= range.start);
             let end = self.spans.partition_point(|span| span.first < range.end);
             &self.spans[start..end]
         };
-        spans.iter().map(move |span| {
-            let start = range.start.saturating_sub(span.first);
-            let end = (range.end - span.first).min(span.window.len());
-            (
-                span.position,
-                span.window.start + start..span.window.start + end,
-            )
-        })
+        spans
+            .iter()
+            .flat_map(move |span| span.windows(range.clone()))
     }
 }
 
@@ -2062,6 +2094,61 @@ fn test_left_semi_repeated_right_windows_scan_eligibility_once_per_batch() {
         .collect();
     assert_eq!(values, (0..64).collect::<Vec<i64>>());
     assert_eq!(ELIGIBILITY_READS.get(), 64);
+}
+
+#[cfg(test)]
+#[test]
+fn test_probe_compacts_consecutive_single_matches() {
+    let mut probe = Probe::default();
+    let cost = allocation_counter::measure(|| {
+        for position in 0..MORSEL_ROWS {
+            probe.push(position, 0..1).unwrap();
+        }
+    });
+    assert_eq!(probe.len(), MORSEL_ROWS);
+    assert!(
+        probe
+            .windows(513..2_715)
+            .eq((513..2_715).map(|position| (position, 0..1)))
+    );
+    assert_eq!(
+        probe.windows(MORSEL_ROWS - 1..MORSEL_ROWS).next(),
+        Some((MORSEL_ROWS - 1, 0..1))
+    );
+    assert_eq!(probe.windows(MORSEL_ROWS..MORSEL_ROWS).next(), None);
+    println!("{} probe spans; {cost:?}", probe.spans.len());
+    assert_eq!(probe.spans.len(), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn test_probe_clips_sparse_fanout_and_singleton_runs_at_output_boundaries() {
+    let rows = [
+        (1, 2..3),
+        (2, 2..3),
+        (5, 2..3),
+        (5, 7..8),
+        (6, 8..11),
+        (7, 4..5),
+        (8, 4..5),
+        (9, 4..5),
+    ];
+    let mut probe = Probe::default();
+    let mut expected = Vec::new();
+    for (position, window) in rows {
+        probe.push(position, window.clone()).unwrap();
+        expected.extend(window.map(|entry| (position, entry)));
+    }
+    for start in 0..=expected.len() {
+        for end in start..=expected.len() {
+            let result = probe
+                .windows(start..end)
+                .flat_map(|(position, window)| window.map(move |entry| (position, entry)))
+                .collect::<Vec<_>>();
+            assert_eq!(result, expected[start..end]);
+        }
+    }
+    assert_eq!(probe.spans.len(), 5);
 }
 
 #[cfg(test)]
