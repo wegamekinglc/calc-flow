@@ -28,3 +28,5 @@ are separate. Stop once on any failed oracle, deadline, provenance or resource
 check and preserve all completed observations.
 
 The first compact route candidate cd879969 regressed the static case in both rounds. This comparison is reserved for a new implementation that bypasses per-row staging for a contiguous admitted segment. The reference remains the verified pre-change main runtime. Register both workload arms before measuring and require a complete static comparison before clearing the earlier regression.
+
+Candidate 10be1395 integrates main after #720. Its control is now the official a21d3eed release wheel, whose complete checkout tree d44249d5 equals main dc1fd149 exactly. This supersedes the preliminary baseline selection before any dispatch, warmup or sample of this corrected implementation.
