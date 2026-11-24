@@ -14,7 +14,7 @@ fn test_asof_charge_shares_grouped_rows_across_output_columns() {
             .collect::<Vec<_>>();
         admit(&mut state, 0, &record(&rows)).unwrap();
     }
-    let selection = state.select(None, true, 512).unwrap();
+    let selection = select(&state, None, true, 512);
     assert_eq!((selection.len(), selection.matched()), (512, 256));
 
     // Two 256-row left runs. Each right run supplies 128 matches, followed

@@ -883,25 +883,31 @@ fn route(
     key_indices: &[usize],
     keys: &mut KeyStore,
     check: &mut dyn FnMut() -> Result<()>,
-    #[cfg(feature = "benchmark-internals")] visits: Option<&mut usize>,
+    #[cfg(feature = "benchmark-internals")] mut visits: Option<&mut usize>,
 ) -> Result<Vec<Incoming>> {
-    let mut remaining = admitted.iter();
-    #[cfg(feature = "benchmark-internals")]
-    {
-        remaining = remaining.count_visits(visits);
-    }
-    (0..admitted.len().div_ceil(MORSEL_ROWS))
-        .map(|_| {
-            let rows = remaining.by_ref().take(MORSEL_ROWS).collect::<Vec<_>>();
-            let payload = morsel(&rows)?;
-            let times = rows.iter().map(|row| row.event_time).collect();
-            let row_ids = rows.iter().map(|row| row.row_id).collect::<Vec<_>>();
+    (0..admitted.len())
+        .step_by(MORSEL_ROWS)
+        .map(|start| {
+            let range = start..start.saturating_add(MORSEL_ROWS).min(admitted.len());
+            let (payload, row_ids) = if let Some((record, first)) = admitted.dense_record(&range) {
+                let ids = (0..range.len())
+                    .map(|offset| first + offset as u64)
+                    .collect::<Vec<_>>();
+                (record, ids)
+            } else {
+                let rows = admitted.iter_range(range.clone());
+                #[cfg(feature = "benchmark-internals")]
+                let rows = rows.count_visits(visits.as_deref_mut());
+                let rows = rows.collect::<Vec<_>>();
+                (morsel(&rows)?, rows.iter().map(|row| row.row_id).collect())
+            };
             let next_row_id = row_ids
                 .last()
                 .expect("nonempty morsel")
                 .checked_add(1)
                 .ok_or_else(|| counter_overflow("Join runs", "row_id"))?;
-            let retain = BooleanArray::from(rows.iter().map(|row| row.retain).collect::<Vec<_>>());
+            let times = admitted.event_times(range.clone());
+            let retain = admitted.retain_mask(range);
             Incoming::route(
                 RouteInput::new(&payload, key_indices, times, row_ids, retain, next_row_id)?,
                 keys,
@@ -1072,7 +1078,95 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let routed = u64::try_from(rows).unwrap();
-        assert_eq!(visits, [(1, 1), (0, 0), (routed, routed)]);
+        // Only the first left morsel crosses the two source records.
+        assert_eq!(visits, [(1, 0), (0, 0), (routed, MORSEL_ROWS as u64)]);
+    }
+
+    #[test]
+    fn test_dense_routing_avoids_staging_each_admitted_row() {
+        use crate::{
+            BatchMetadata, EdgeBudget, JoinStateLimits, JoinTimeBounds, OperatorMetadata,
+            StreamJoinSpec,
+        };
+        const ROWS: usize = 1024;
+        const SKIP: usize = 3;
+        let n = ROWS + SKIP;
+        let record = RecordBatch::try_from_iter([
+            ("key", Arc::new(Int64Array::from(vec![1; n])) as ArrayRef),
+            (
+                "ts",
+                Arc::new(TimestampMicrosecondArray::from_iter_values(
+                    0..i64::try_from(n).unwrap(),
+                )) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let spec = StreamJoinSpec::inner(
+            ["key"],
+            ["key"],
+            "ts",
+            "ts",
+            JoinTimeBounds::from_micros(0, 0).unwrap(),
+            JoinStateLimits::new(4096, 8 << 20, 4096).unwrap(),
+        )
+        .unwrap();
+        let mut operator =
+            StreamJoinOperator::new("compact", record.schema(), record.schema(), spec).unwrap();
+        let mut core = RunCore::new(&mut operator).unwrap();
+        let batch = Batch::table(vec![record.clone()], BatchMetadata::default()).unwrap();
+        let mut admitted = AdmittedBatch::reserve(&mut operator, &batch).unwrap();
+        let segment = admitted.begin_record(50, 0);
+        for i in SKIP..n {
+            admitted.push_ready(
+                segment,
+                i,
+                EventTime::from_micros(i64::try_from(i).unwrap()),
+                i % 3 != 1,
+            );
+        }
+        core.keys
+            .route_with_limit_cached(
+                &[record.column(0).slice(SKIP, ROWS)],
+                usize::MAX,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        let mut routed = Vec::new();
+        let cost = allocation_counter::measure(|| {
+            routed = route(
+                &admitted,
+                &[0],
+                &mut core.keys,
+                &mut || Ok(()),
+                #[cfg(feature = "benchmark-internals")]
+                None,
+            )
+            .unwrap();
+        });
+        assert_eq!(routed.len(), 1);
+        core.state
+            .apply(
+                JoinSide::Left,
+                routed.pop().unwrap(),
+                operator.output_ports()[0].schema().unwrap(),
+                None,
+                2,
+                EdgeBudget::default(),
+            )
+            .unwrap();
+        let expected = (SKIP..n)
+            .filter(|i| i % 3 != 1)
+            .map(|i| (i64::try_from(i).unwrap(), 50 + i as u64));
+        assert!(
+            core.state
+                .locators(JoinSide::Left)
+                .into_iter()
+                .map(|(_, time, id, _, _)| (time, id))
+                .eq(expected)
+        );
+        assert_eq!(core.state.next_row_id(JoinSide::Left), 50 + n as u64);
+        eprintln!("routing {ROWS} dense rows: {cost:?}");
+        assert!(cost.bytes_max < (ROWS * size_of::<AdmittedRef>()) as u64);
     }
 
     #[test]

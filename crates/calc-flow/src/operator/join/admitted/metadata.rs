@@ -1,4 +1,4 @@
-#[cfg(test)]
+use datafusion::arrow::{array::BooleanArray, buffer::BooleanBuffer};
 use std::ops::Range;
 
 use super::super::columnar_quantum::Quantum;
@@ -61,14 +61,14 @@ impl<T: Copy + Default, const N: usize> Values<T, N> {
             }
         }
     }
-    pub(super) fn get(&self, index: usize) -> T {
+    pub(super) fn as_slice(&self) -> &[T] {
         match self {
-            Self::Inline { values, len } => {
-                assert!(index < *len);
-                values[index]
-            }
-            Self::Heap(values) => values[index],
+            Self::Inline { values, len } => &values[..*len],
+            Self::Heap(values) => values,
         }
+    }
+    pub(super) fn get(&self, index: usize) -> T {
+        self.as_slice()[index]
     }
     fn set(&mut self, index: usize, value: T) {
         match self {
@@ -148,6 +148,15 @@ impl RetainBits {
         assert!(index < self.len);
         self.words.get(index / 64) & (1_u64 << (index % 64)) != 0
     }
+    pub(super) fn array(&self, range: Range<usize>) -> BooleanArray {
+        let words = &self.words.as_slice()[range.start / 64..range.end.div_ceil(64)];
+        let bytes = words.iter().map(|word| word.to_le()).collect();
+        BooleanArray::new(
+            BooleanBuffer::new(bytes, range.start % 64, range.len()),
+            None,
+        )
+    }
+
     /// Retained bits for a window of at most 64 rows; bit `i` marks row
     /// `start + i`. Windows may straddle two words.
     #[cfg(test)]
