@@ -183,7 +183,7 @@ def _result_row(case: dict, result: dict | None) -> list[object]:
     if result is None:
         return [
             *prefix,
-            *("—" for _ in range(7)),
+            *(["—"] * 7),
             "error",
         ]
     changes = (
@@ -256,6 +256,29 @@ def build_report(
             regressions.append(case["id"])
         if problem is not None:
             failures.append(problem)
+    failures = list(dict.fromkeys(failures))
+    parts = [
+        *_result_tables(cases, rows, metrics, baseline, rust_baseline),
+        *_variant_sections(cases),
+        *_finding_section("Confirmed performance regressions", regressions),
+        *_finding_section("Incomplete or invalid evidence", failures),
+    ]
+    return BenchmarkReport("\n".join(parts) + "\n", failures, regressions)
+
+
+def _finding_section(title: str, items: list[str]) -> list[str]:
+    if not items:
+        return []
+    return ["", f"## {title}", "", *(f"- {_cell(item)}" for item in items)]
+
+
+def _result_tables(
+    cases: list[dict],
+    rows: list,
+    metrics: list,
+    baseline: str | None,
+    rust_baseline: str | None,
+) -> list[str]:
     header = [
         "Case",
         "Dimensions",
@@ -318,6 +341,11 @@ def build_report(
                 cross_library,
             ]
         )
+    return parts
+
+
+def _variant_sections(cases: list[dict]) -> list[str]:
+    parts = []
     for variant, title in (
         ("small-batch", "Small-batch native variants"),
         ("checkpoint-recovery", "Checkpoint lifecycle variants"),
@@ -356,26 +384,7 @@ def build_report(
                     ),
                 ]
             )
-    if regressions:
-        parts.extend(
-            [
-                "",
-                "## Confirmed performance regressions",
-                "",
-                *(f"- {_cell(name)}" for name in regressions),
-            ]
-        )
-    failures = list(dict.fromkeys(failures))
-    if failures:
-        parts.extend(
-            [
-                "",
-                "## Incomplete or invalid evidence",
-                "",
-                *[f"- {_cell(e)}" for e in failures],
-            ]
-        )
-    return BenchmarkReport("\n".join(parts) + "\n", failures, regressions)
+    return parts
 
 
 def _format_case(case: dict) -> tuple[list[object], str | None, bool]:
