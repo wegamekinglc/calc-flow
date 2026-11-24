@@ -1,9 +1,9 @@
 """Measure public ASOF delivery after an untimed warm delivery on the same stream.
 
 Run one worker with `python -m benchmarks.warm_asof_latency OUTPUT.json` in
-the environment of the release wheel. Each observation times a four-row right
-batch and its advancing watermark through receipt of the eight eligible left
-rows. One later probe remains pending until the next watermark.
+a Python 3.11+ environment with the release wheel. Each observation times a
+four-row right batch and its advancing watermark through receipt of eight eligible
+left rows. One later probe remains pending until the next watermark.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from time import perf_counter_ns
 import pyarrow as pa
 
 import calc_flow as cf
-from benchmarks.join_asof_acceptance import await_asof_frontier
+from benchmarks.asof_frontier import await_asof_frontier
 from scripts.toolkit import worker_environment, write_json
 
 INPUT = pa.schema(
@@ -91,30 +91,56 @@ def _query() -> cf.TableExpr:
     )
 
 
-async def observe() -> dict:
+def _watermark(micros: int) -> cf.Watermark:
+    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    return cf.Watermark(epoch + timedelta(microseconds=micros))
+
+
+async def _pending_at(stream, micros: int, expected: int) -> int:
+    status = await await_asof_frontier(stream.job, micros)
+    (join,) = status["stream_asof_joins"].values()
+    pending = join["pending_left_rows"]
+    if pending != expected or join["left"]["ended"] or join["right"]["ended"]:
+        raise ValueError(
+            f"ASOF frontier {micros} requires {expected} pending and open inputs"
+        )
+    return pending
+
+
+async def _warm(stream, queues, end) -> None:
     probes = [0, *range(8, 17)]
     left = pa.table([[9 if t == 12 else 1 for t in probes], probes, probes], INPUT)
     warm = pa.table([[1], [0], [0]], INPUT)
-    update = pa.table([[1] * 4, [8, 8, 12, 12], [1, 2, 3, 4]], INPUT)
-    warm_expected = pa.table([[1], [0], [0], [1], [0], [0]], OUTPUT)
+    expected = pa.table([[1], [0], [0], [1], [0], [0]], OUTPUT)
+    queues["left"].put_nowait(left)
+    queues["left"].put_nowait(end)
+    queues["right"].put_nowait(warm)
+    queues["right"].put_nowait(_watermark(1))
+    check_rows(await _receive(stream, 1), expected)
+    await _pending_at(stream, 0, 9)
+
+
+async def _finish(stream, queues, end) -> None:
     tail = pa.table([[1], [16], [16], [None], [None], [None]], OUTPUT)
+    queues["right"].put_nowait(end)
+    check_rows(await _receive(stream, 1), tail)
+    for queue in queues.values():
+        queue.put_nowait(None)
+    async for _ in stream:
+        raise ValueError("ASOF produced an unexpected output at EOF")
+
+
+async def observe() -> dict:
+    update = pa.table([[1] * 4, [8, 8, 12, 12], [1, 2, 3, 4]], INPUT)
     expected = prefix_oracle()
-    epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-    first, cut, end = (
-        cf.Watermark(epoch + timedelta(microseconds=t)) for t in (1, 16, 17)
-    )
+    cut, end = _watermark(16), _watermark(17)
     queues = {name: asyncio.Queue() for name in ("left", "right")}
     async with _query().stream(
         {name: _feed(q) for name, q in queues.items()},
         watermarks={name: cf.SourceProvidedWatermarks() for name in queues},
         config=cf.StreamRuntimeConfig(checkpointing=False),
     ) as stream:
-        queues["left"].put_nowait(left)
-        queues["left"].put_nowait(end)
-        queues["right"].put_nowait(warm)
-        queues["right"].put_nowait(first)
-        check_rows(await _receive(stream, 1), warm_expected)
-
+        await _warm(stream, queues, end)
         started = perf_counter_ns()
         queues["right"].put_nowait(update)
         queues["right"].put_nowait(cut)
@@ -122,17 +148,8 @@ async def observe() -> dict:
         elapsed = perf_counter_ns() - started
 
         check_rows(prefix, expected)
-        status = await await_asof_frontier(stream.job, 15)
-        (join,) = status["stream_asof_joins"].values()
-        pending = join["pending_left_rows"]
-        if pending != 1 or any(join[side]["ended"] for side in queues):
-            raise ValueError("ASOF cut requires one pending row and both inputs open")
-        queues["right"].put_nowait(end)
-        check_rows(await _receive(stream, 1), tail)
-        for queue in queues.values():
-            queue.put_nowait(None)
-        async for _ in stream:
-            raise ValueError("ASOF produced an unexpected output at EOF")
+        pending = await _pending_at(stream, 15, 1)
+        await _finish(stream, queues, end)
 
     nulls = expected["right__key"].null_count
     return {

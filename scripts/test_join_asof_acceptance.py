@@ -27,9 +27,7 @@ class AcceptanceBoundaryTests(unittest.IsolatedAsyncioTestCase):
                 _benchmark_dispatch_frontier=Mock(side_effect=(None, 10))
             ),
         )
-        with patch(
-            "benchmarks.join_asof_acceptance.asyncio.sleep", new=AsyncMock()
-        ) as sleep:
+        with patch("benchmarks.asof_frontier.asyncio.sleep", new=AsyncMock()) as sleep:
             await await_asof_frontier(job, 10, output_node_id="result")
         sleep.assert_awaited_once_with(0.001)
         self.assertEqual(job._inner._benchmark_dispatch_frontier.call_count, 2)
@@ -50,9 +48,7 @@ class AcceptanceBoundaryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         job = SimpleNamespace(status=lambda: next(observations))
-        with patch(
-            "benchmarks.join_asof_acceptance.asyncio.sleep", new=AsyncMock()
-        ) as sleep:
+        with patch("benchmarks.asof_frontier.asyncio.sleep", new=AsyncMock()) as sleep:
             status = await await_asof_frontier(job, 10)
         self.assertEqual(
             status["stream_asof_joins"]["join"]["output_watermark_micros"], 10

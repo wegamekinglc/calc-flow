@@ -17,6 +17,12 @@ def test_clock_only_covers_prefix_submission_and_delivery(monkeypatch):
     original = latency.check_rows
     put = asyncio.Queue.put_nowait
     receive = latency._receive
+    frontier = latency.await_asof_frontier
+
+    async def published(job, micros):
+        status = await frontier(job, micros)
+        events.append(f"published {micros}")
+        return status
 
     def submit(queue, item):
         if isinstance(item, pa.Table) and item.num_rows == 4:
@@ -40,18 +46,21 @@ def test_clock_only_covers_prefix_submission_and_delivery(monkeypatch):
         return original(tables, expected)
 
     monkeypatch.setattr(asyncio.Queue, "put_nowait", submit)
+    monkeypatch.setattr(latency, "await_asof_frontier", published)
     monkeypatch.setattr(latency, "_receive", read)
     monkeypatch.setattr(latency, "perf_counter_ns", clock)
     monkeypatch.setattr(latency, "check_rows", check)
     result = asyncio.run(asyncio.wait_for(latency.observe(), 8))
     assert events == [
         1,
+        "published 0",
         "clock",
         "right batch",
         "right cut",
         "prefix delivered",
         "clock",
         8,
+        "published 15",
         1,
     ]
     assert result == {

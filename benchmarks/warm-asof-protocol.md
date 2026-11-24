@@ -4,8 +4,9 @@ Use the maintained Python worker from the benchmark branch. One active
 `TableExpr.stream` has two open sources, source-provided watermarks, and
 checkpointing disabled. Preload ten left rows at 0 and 8–16 µs, with an
 absent key at 12. The left watermark is 17. Right data and a watermark
-of 1 first deliver the 0 µs warm-up, and all nine later probes remain
-pending. Build the input and oracle Arrow tables outside the clock.
+of 1 first deliver the 0 µs warm-up. Before starting the clock, wait
+for the published ASOF output frontier at 0 µs and verify nine pending
+probes with both sources open. Build input and oracle tables outside the clock.
 
 Start just before enqueuing the four-row right batch followed by the
 right watermark at 16. Stop when eight left rows have reached the public
