@@ -1211,3 +1211,91 @@ fn test_projection_interleaves_multiple_owners_and_explicit_unmatched_validity()
 }
 
 mod charge;
+
+#[test]
+fn test_complete_asof_runs_share_columns_and_preserve_multi_run_order() {
+    let declaration = spec(0, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    for side in [0, 1] {
+        admit(
+            &mut state,
+            side,
+            &record(&[(1, 0, 0, None), (1, 1, 1, Some("A"))]),
+        )
+        .unwrap();
+        admit(&mut state, side, &record(&[(1, 2, 2, Some("B"))])).unwrap();
+    }
+    let schema = output_schema(&declaration).project(&[3, 7]).unwrap();
+    let schema = Arc::new(schema);
+    let columns = [(0, 3), (1, 3)];
+    let first = select(&state, None, true, 2);
+    let output = state.materialize(&first, &schema, Some(&columns)).unwrap();
+    for (side, locators) in [&first.left, &first.right].into_iter().enumerate() {
+        let owner = state.run(side, locators[0].run).payload_record().unwrap();
+        assert!(Arc::ptr_eq(output.column(side), owner.column(3)));
+    }
+    let all = select(&state, None, true, 3);
+    let output = state.materialize(&all, &schema, Some(&columns)).unwrap();
+    let expected = StringArray::from(vec![None, Some("A"), Some("B")]);
+    for column in output.columns() {
+        assert_eq!(
+            column.as_any().downcast_ref::<StringArray>().unwrap(),
+            &expected
+        );
+    }
+}
+
+#[test]
+fn test_restored_asof_projection_releases_unselected_ipc_payload() {
+    let declaration = spec(0, 100, 32 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32 << 20));
+    let mut source = state(&declaration, &pool);
+    let wide = "x".repeat(1 << 20);
+    admit(&mut source, 0, &record(&[(1, 1, 9, Some(&wide))])).unwrap();
+    let snapshot = source.capture(32 << 20).unwrap();
+    let mut restored = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &snapshot,
+    )
+    .unwrap();
+    let schema = Arc::new(output_schema(&declaration).project(&[2]).unwrap());
+    let selected = select(&restored, None, true, 1);
+    let output = restored
+        .materialize(&selected, &schema, Some(&[(0, 2)]))
+        .unwrap();
+    let input = restored
+        .run(0, selected.left[0].run)
+        .payload_record()
+        .unwrap();
+    let allocation = input.column(2).to_data().buffers()[0].data_ptr();
+    assert_eq!(
+        allocation,
+        input.column(3).to_data().buffers()[1].data_ptr()
+    );
+    assert_ne!(
+        allocation,
+        output.column(0).to_data().buffers()[0].data_ptr()
+    );
+    assert_eq!(
+        output
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0),
+        9
+    );
+
+    restored.commit(&selected).unwrap();
+    admit(&mut restored, 0, &record(&[(2, 3, 11, None)])).unwrap();
+    let fresh = select(&restored, None, true, 1);
+    let output = restored
+        .materialize(&fresh, &schema, Some(&[(0, 2)]))
+        .unwrap();
+    let input = restored.run(0, fresh.left[0].run).payload_record().unwrap();
+    assert!(Arc::ptr_eq(input.column(2), output.column(0)));
+}
