@@ -414,6 +414,19 @@ impl Run {
         self.sequences.value(locator.row as usize)
     }
 
+    pub(super) fn has_unique_aligned_times(&self, right: &Self, pending: &[RowLocator]) -> bool {
+        if pending.len() != self.rows()
+            || self.times() != right.times()
+            || self.groups() != right.groups()
+        {
+            return false;
+        }
+        // Pending covers the whole run in time/key/sequence order, so equal key-time pairs are adjacent.
+        !pending.windows(2).any(|pair| {
+            self.group(pair[0]) == self.group(pair[1]) && self.time(pair[0]) == self.time(pair[1])
+        })
+    }
+
     pub(super) fn same_identity(&self, left: RowLocator, right: RowLocator) -> bool {
         self.group(left) == self.group(right)
             && self.time(left) == self.time(right)

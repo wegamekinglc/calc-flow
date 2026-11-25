@@ -1381,17 +1381,7 @@ impl ColumnarState {
         }
         let (_, left) = self.left_runs.first_key_value()?;
         let (&id, right) = self.right_runs.first_key_value()?;
-        if pending.len() != left.rows()
-            || left.times() != right.times()
-            || left.groups() != right.groups()
-        {
-            return None;
-        }
-        // Pending covers the whole run in time/key/sequence order, so equal key-time pairs are adjacent.
-        let tied = pending.windows(2).any(|pair| {
-            left.group(pair[0]) == left.group(pair[1]) && left.time(pair[0]) == left.time(pair[1])
-        });
-        (!tied).then_some(id)
+        left.has_unique_aligned_times(right, pending).then_some(id)
     }
 
     /// Builds a selection for an already verified pending prefix.
