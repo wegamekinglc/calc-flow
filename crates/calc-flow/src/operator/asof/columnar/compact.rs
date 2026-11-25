@@ -19,17 +19,7 @@ pub(super) fn compact_accepted(
 ) -> Result<RecordBatch> {
     let full = selected_rows == record.num_rows()
         && u32::try_from(selected_rows.saturating_sub(1)).is_ok()
-        && record.columns().iter().all(|column| {
-            column.null_count() == 0
-                && (column.data_type().is_primitive()
-                    || matches!(
-                        column.data_type(),
-                        DataType::Utf8
-                            | DataType::LargeUtf8
-                            | DataType::Binary
-                            | DataType::LargeBinary
-                    ))
-        });
+        && record.columns().iter().all(can_copy_full_column);
     let columns = if full {
         record
             .columns()
@@ -59,6 +49,15 @@ pub(super) fn compact_accepted(
             .collect::<Result<_>>()?
     };
     RecordBatch::try_new(record.schema(), columns).map_err(|error| arrow_error(&error))
+}
+
+fn can_copy_full_column(column: &ArrayRef) -> bool {
+    column.null_count() == 0
+        && (column.data_type().is_primitive()
+            || matches!(
+                column.data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary | DataType::LargeBinary
+            ))
 }
 
 fn copy_full_column(column: &dyn Array) -> Result<ArrayRef> {
