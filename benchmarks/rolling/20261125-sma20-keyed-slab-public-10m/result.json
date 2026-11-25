@@ -1,0 +1,18 @@
+{
+  "outcome": {
+    "elapsed": 48.97797523101326,
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 98.0, 'siblings': [1], 'sibling_busy': 11.0, 'host_busy': 16.509375, 'available_bytes': 27496349696, 'major_faults': 340, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}]\")])",
+    "state": "stopped"
+  },
+  "resources": {
+    "bad_intervals": 1,
+    "completed_formal_single_arm_samples": 19,
+    "completed_warmups": 2,
+    "controller_wall_including_interpreter_seconds": 49.1,
+    "intervals": 41,
+    "worker_results_without_controller_acceptance": [
+      "measurement/round-0/baseline/worker-request-0012.json"
+    ]
+  },
+  "result": null
+}
