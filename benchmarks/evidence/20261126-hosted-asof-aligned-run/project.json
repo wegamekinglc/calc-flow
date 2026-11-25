@@ -1,0 +1,408 @@
+{
+  "data_sources": [],
+  "description": "",
+  "format_version": 3,
+  "graph": {
+    "datafusion": {
+      "batch_size": 8192,
+      "collect_diagnostics": true,
+      "enable_rolling_rewrite": true,
+      "max_partitions": 32,
+      "min_rows_per_partition": 65536,
+      "parallelism_mode": "fixed",
+      "small_rows_threshold": 10001,
+      "target_partitions": 1
+    },
+    "edges": [
+      {
+        "source_node": "quotes",
+        "source_port": "output",
+        "target_node": "cf_stream_asof_join_0a6cc5d6090a0ddf",
+        "target_port": "left"
+      },
+      {
+        "source_node": "reference",
+        "source_port": "output",
+        "target_node": "cf_stream_asof_join_0a6cc5d6090a0ddf",
+        "target_port": "right"
+      },
+      {
+        "source_node": "cf_stream_asof_join_0a6cc5d6090a0ddf",
+        "source_port": "output",
+        "target_node": "result",
+        "target_port": "input"
+      }
+    ],
+    "name": "suite-stream",
+    "nodes": [
+      {
+        "id": "quotes",
+        "input_ports": [
+          {
+            "kind": "table",
+            "name": "input",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "price",
+                "nullable": false
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "expression": "",
+          "filter": null,
+          "kind": "expression",
+          "select": [
+            "\"event_time\"",
+            "\"sequence\"",
+            "\"symbol\"",
+            "\"price\""
+          ],
+          "udfs": []
+        },
+        "output_ports": [
+          {
+            "kind": "table",
+            "name": "output",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "price",
+                "nullable": false
+              }
+            ]
+          }
+        ],
+        "position": null
+      },
+      {
+        "id": "reference",
+        "input_ports": [
+          {
+            "kind": "table",
+            "name": "input",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "price",
+                "nullable": false
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "expression": "",
+          "filter": null,
+          "kind": "expression",
+          "select": [
+            "\"event_time\"",
+            "\"sequence\"",
+            "\"symbol\"",
+            "\"price\""
+          ],
+          "udfs": []
+        },
+        "output_ports": [
+          {
+            "kind": "table",
+            "name": "output",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "price",
+                "nullable": false
+              }
+            ]
+          }
+        ],
+        "position": null
+      },
+      {
+        "id": "cf_stream_asof_join_0a6cc5d6090a0ddf",
+        "input_ports": [
+          {
+            "kind": "table",
+            "name": "left",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "price",
+                "nullable": false
+              }
+            ]
+          },
+          {
+            "kind": "table",
+            "name": "right",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "price",
+                "nullable": false
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "kind": "stream_asof_join",
+          "spec": {
+            "late_policy": "error",
+            "left": {
+              "event_time": "event_time",
+              "keys": [
+                "symbol"
+              ],
+              "prefix": "left",
+              "sequence_by": [
+                "sequence"
+              ]
+            },
+            "limits": {
+              "max_state_bytes": 1073741824,
+              "max_state_rows": 2000128
+            },
+            "right": {
+              "event_time": "event_time",
+              "keys": [
+                "symbol"
+              ],
+              "prefix": "right",
+              "sequence_by": [
+                "sequence"
+              ]
+            },
+            "tolerance_micros": 0
+          }
+        },
+        "output_ports": [
+          {
+            "kind": "table",
+            "name": "output",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "left__event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "left__sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "left__symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "left__price",
+                "nullable": false
+              },
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "right__event_time",
+                "nullable": true
+              },
+              {
+                "data_type": "uint64",
+                "name": "right__sequence",
+                "nullable": true
+              },
+              {
+                "data_type": "string",
+                "name": "right__symbol",
+                "nullable": true
+              },
+              {
+                "data_type": "float64",
+                "name": "right__price",
+                "nullable": true
+              }
+            ]
+          }
+        ],
+        "position": null
+      },
+      {
+        "id": "result",
+        "input_ports": [
+          {
+            "kind": "table",
+            "name": "input",
+            "required": true,
+            "schema": [
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "left__event_time",
+                "nullable": false
+              },
+              {
+                "data_type": "uint64",
+                "name": "left__sequence",
+                "nullable": false
+              },
+              {
+                "data_type": "string",
+                "name": "left__symbol",
+                "nullable": false
+              },
+              {
+                "data_type": "float64",
+                "name": "left__price",
+                "nullable": false
+              },
+              {
+                "data_type": "timestamp[us, UTC]",
+                "name": "right__event_time",
+                "nullable": true
+              },
+              {
+                "data_type": "uint64",
+                "name": "right__sequence",
+                "nullable": true
+              },
+              {
+                "data_type": "string",
+                "name": "right__symbol",
+                "nullable": true
+              },
+              {
+                "data_type": "float64",
+                "name": "right__price",
+                "nullable": true
+              }
+            ]
+          }
+        ],
+        "operator": {
+          "expression": "",
+          "filter": null,
+          "kind": "expression",
+          "select": [
+            "\"left__sequence\" AS \"sequence\"",
+            "\"right__price\" AS \"value\""
+          ],
+          "udfs": []
+        },
+        "output_ports": [],
+        "position": null
+      }
+    ]
+  },
+  "id": "suite-stream",
+  "name": "suite-stream",
+  "runtime": {
+    "mode": "stream",
+    "options": {
+      "checkpoint_interval_ms": 30000,
+      "max_batch_bytes": 67108864,
+      "max_batch_rows": 10000
+    }
+  },
+  "sinks": [],
+  "sources": [],
+  "state": {
+    "retention": 3,
+    "root": ".calc-flow-state"
+  }
+}

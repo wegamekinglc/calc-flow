@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-aligned-10m]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -560,5 +560,106 @@ jobs:
             target/benchmark-results/**/*.log
             target/benchmark-results/**/*.md
             !target/benchmark-results/**/site/**
+          if-no-files-found: error
+          retention-days: 30
+
+  asof-aligned-products:
+    if: inputs.mode == 'asof-aligned-10m'
+    runs-on: ubuntu-latest
+    timeout-minutes: 125
+    strategy:
+      fail-fast: false
+      matrix:
+        surface: [rust, python]
+        source: [release, parent, candidate]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/build-cache
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      PYTHONPATH: ${{ github.workspace }}
+      STUDY: benchmarks/evidence/20261126-hosted-asof-aligned-run
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
+      - run: |
+          (cd "$STUDY" && sha256sum --quiet --check registered.sha256)
+          uv venv target/study-venv
+          uv pip sync --python target/study-venv/bin/python --require-hashes benchmarks/requirements.lock
+      - name: Build a sealed exact-revision product
+        run: |
+          target/study-venv/bin/python "$STUDY/hosted.py" build "${{ matrix.surface }}" "${{ matrix.source }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: asof-product-${{ matrix.surface }}-${{ matrix.source }}
+          path: |
+            target/products/job-*
+            target/products/*-build.*
+            target/products/*.whl
+            target/products/*.json
+            target/products/*.log
+          if-no-files-found: error
+          retention-days: 14
+
+  asof-aligned-compare:
+    if: inputs.mode == 'asof-aligned-10m'
+    needs: asof-aligned-products
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        surface: [rust, python]
+        baseline: [release, parent]
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      STUDY: benchmarks/evidence/20261126-hosted-asof-aligned-run
+      ASOF_CGROUP: asof-aligned-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: |
+          (cd "$STUDY" && sha256sum --quiet --check registered.sha256)
+          uv venv target/study-venv
+          uv pip sync --python target/study-venv/bin/python --require-hashes benchmarks/requirements.lock
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: asof-product-${{ matrix.surface }}-${{ matrix.baseline }}
+          path: target/products/${{ matrix.baseline }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: asof-product-${{ matrix.surface }}-candidate
+          path: target/products/candidate
+      - name: Measure one pair of exact products on its dedicated runner
+        timeout-minutes: 10
+        run: |
+          mkdir -p target/evidence
+          git rev-parse HEAD > target/evidence/registration.txt
+          lscpu --json > target/evidence/topology.json
+          cat /proc/self/status > target/evidence/controller.txt
+          sudo mkdir "/sys/fs/cgroup/$ASOF_CGROUP"
+          echo "$$" | sudo tee "/sys/fs/cgroup/$ASOF_CGROUP/cgroup.procs" >/dev/null
+          exec target/study-venv/bin/python "$STUDY/hosted.py" compare "${{ matrix.surface }}" "${{ matrix.baseline }}"
+      - name: Seal raw results without installed packages or executables
+        if: always()
+        run: |
+          tar -C target --exclude='*/site' --exclude='evidence/job-??????????' -czf target/asof-raw.tar.gz evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: asof-10m-${{ matrix.surface }}-${{ matrix.baseline }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/asof-raw.tar.gz
           if-no-files-found: error
           retention-days: 30
