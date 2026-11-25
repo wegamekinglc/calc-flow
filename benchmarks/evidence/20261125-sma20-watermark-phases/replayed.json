@@ -1,0 +1,1337 @@
+{
+  "verified_oracles": 44,
+  "max_abs_error": 8.526512829121202e-14,
+  "public_ms": {
+    "baseline": {
+      "p50": 329.40704949999997,
+      "p95": 356.82249205
+    },
+    "candidate": {
+      "p50": 518.326529,
+      "p95": 562.39523595
+    }
+  },
+  "rounds": [
+    {
+      "median": 57.33623798334756,
+      "low": 44.32599631742229,
+      "high": 59.83461552134419
+    },
+    {
+      "median": 58.7427559384178,
+      "low": 50.80751360180613,
+      "high": 70.7949685711256
+    }
+  ],
+  "verdict": "regression",
+  "terminal": {
+    "data": {
+      "arrow_output": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "budget_preparation": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "callback": [
+        {
+          "baseline_median_ms": 42.1495025,
+          "candidate_median_ms": 41.513197,
+          "paired_delta_median_ms": -0.24360949999999804,
+          "paired_delta_mean_ms": -0.5505267000000004
+        },
+        {
+          "baseline_median_ms": 41.2250245,
+          "candidate_median_ms": 43.8678965,
+          "paired_delta_median_ms": 0.3089410000000008,
+          "paired_delta_mean_ms": 2.5142069
+        }
+      ],
+      "entity_resolution": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "history_maintenance": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "input_validation": [
+        {
+          "baseline_median_ms": 9.206681499999998,
+          "candidate_median_ms": 9.5373525,
+          "paired_delta_median_ms": -0.041140499999999136,
+          "paired_delta_mean_ms": -0.16382179999999985
+        },
+        {
+          "baseline_median_ms": 9.224727,
+          "candidate_median_ms": 8.970774500000001,
+          "paired_delta_median_ms": -0.32281349999999964,
+          "paired_delta_mean_ms": -0.9455454999999997
+        }
+      ],
+      "numeric_update": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "ordering_proof": [
+        {
+          "baseline_median_ms": 32.595642999999995,
+          "candidate_median_ms": 31.860045999999997,
+          "paired_delta_median_ms": -0.32234050000000103,
+          "paired_delta_mean_ms": -0.4134823000000008
+        },
+        {
+          "baseline_median_ms": 31.78735,
+          "candidate_median_ms": 33.9838455,
+          "paired_delta_median_ms": 1.8055399999999988,
+          "paired_delta_mean_ms": 3.4356261000000012
+        }
+      ],
+      "other": [
+        {
+          "baseline_median_ms": 0.0561795,
+          "candidate_median_ms": 0.070958,
+          "paired_delta_median_ms": 0.0175555,
+          "paired_delta_mean_ms": 0.026777400000000003
+        },
+        {
+          "baseline_median_ms": 0.0516785,
+          "candidate_median_ms": 0.071813,
+          "paired_delta_median_ms": 0.021401999999999997,
+          "paired_delta_mean_ms": 0.0241263
+        }
+      ],
+      "send_wait": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "state_preparation": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ]
+    },
+    "watermark": {
+      "arrow_output": [
+        {
+          "baseline_median_ms": 0.094636,
+          "candidate_median_ms": 0.0533805,
+          "paired_delta_median_ms": -0.040015499999999996,
+          "paired_delta_mean_ms": -0.037541
+        },
+        {
+          "baseline_median_ms": 0.0908445,
+          "candidate_median_ms": 0.0548095,
+          "paired_delta_median_ms": -0.037873500000000004,
+          "paired_delta_mean_ms": -0.034981
+        }
+      ],
+      "budget_preparation": [
+        {
+          "baseline_median_ms": 0.09670999999999999,
+          "candidate_median_ms": 0.0649295,
+          "paired_delta_median_ms": -0.03251999999999999,
+          "paired_delta_mean_ms": -0.0238511
+        },
+        {
+          "baseline_median_ms": 0.1012115,
+          "candidate_median_ms": 0.066803,
+          "paired_delta_median_ms": -0.032785499999999995,
+          "paired_delta_mean_ms": -0.0336288
+        }
+      ],
+      "callback": [
+        {
+          "baseline_median_ms": 280.6241065,
+          "candidate_median_ms": 463.744937,
+          "paired_delta_median_ms": 184.730397,
+          "paired_delta_mean_ms": 182.638141
+        },
+        {
+          "baseline_median_ms": 280.39433399999996,
+          "candidate_median_ms": 474.1849925,
+          "paired_delta_median_ms": 185.3060955,
+          "paired_delta_mean_ms": 204.6797781
+        }
+      ],
+      "entity_resolution": [
+        {
+          "baseline_median_ms": 56.316302,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": -56.316302,
+          "paired_delta_mean_ms": -61.6209289
+        },
+        {
+          "baseline_median_ms": 57.363479,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": -57.363479,
+          "paired_delta_mean_ms": -60.4975228
+        }
+      ],
+      "history_maintenance": [
+        {
+          "baseline_median_ms": 1.6840235,
+          "candidate_median_ms": 0.16846650000000002,
+          "paired_delta_median_ms": -1.512348,
+          "paired_delta_mean_ms": -1.5305849
+        },
+        {
+          "baseline_median_ms": 1.6913345,
+          "candidate_median_ms": 0.17019,
+          "paired_delta_median_ms": -1.503612,
+          "paired_delta_mean_ms": -1.515823
+        }
+      ],
+      "input_validation": [
+        {
+          "baseline_median_ms": 0.0187045,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": -0.0187045,
+          "paired_delta_mean_ms": -0.0199434
+        },
+        {
+          "baseline_median_ms": 0.018384,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": -0.018384,
+          "paired_delta_mean_ms": -0.018228
+        }
+      ],
+      "numeric_update": [
+        {
+          "baseline_median_ms": 218.58347750000001,
+          "candidate_median_ms": 307.31278599999996,
+          "paired_delta_median_ms": 89.84562900000002,
+          "paired_delta_mean_ms": 90.9953472
+        },
+        {
+          "baseline_median_ms": 220.061964,
+          "candidate_median_ms": 313.384547,
+          "paired_delta_median_ms": 90.54312649999999,
+          "paired_delta_mean_ms": 106.2080627
+        }
+      ],
+      "ordering_proof": [
+        {
+          "baseline_median_ms": 0.008426,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": -0.008426,
+          "paired_delta_mean_ms": -0.0083965
+        },
+        {
+          "baseline_median_ms": 0.008517,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": -0.008517,
+          "paired_delta_mean_ms": -0.009697
+        }
+      ],
+      "other": [
+        {
+          "baseline_median_ms": 1.0116525,
+          "candidate_median_ms": 154.3358935,
+          "paired_delta_median_ms": 153.3416855,
+          "paired_delta_mean_ms": 155.1558998
+        },
+        {
+          "baseline_median_ms": 0.9860815,
+          "candidate_median_ms": 158.132554,
+          "paired_delta_median_ms": 157.13234749999998,
+          "paired_delta_mean_ms": 160.878906
+        }
+      ],
+      "send_wait": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "state_preparation": [
+        {
+          "baseline_median_ms": 0.273802,
+          "candidate_median_ms": 0.0026555,
+          "paired_delta_median_ms": -0.27104449999999997,
+          "paired_delta_mean_ms": -0.2718602
+        },
+        {
+          "baseline_median_ms": 0.3001315,
+          "candidate_median_ms": 0.0027605,
+          "paired_delta_median_ms": -0.29700750000000004,
+          "paired_delta_mean_ms": -0.29731
+        }
+      ]
+    },
+    "end": {
+      "arrow_output": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "budget_preparation": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "callback": [
+        {
+          "baseline_median_ms": 0.003856,
+          "candidate_median_ms": 0.003489,
+          "paired_delta_median_ms": -0.00046849999999999995,
+          "paired_delta_mean_ms": -0.00040659999999999996
+        },
+        {
+          "baseline_median_ms": 0.0039475,
+          "candidate_median_ms": 0.0035455,
+          "paired_delta_median_ms": -0.00040649999999999974,
+          "paired_delta_mean_ms": -0.0004808999999999999
+        }
+      ],
+      "entity_resolution": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "history_maintenance": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "input_validation": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "numeric_update": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "ordering_proof": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "other": [
+        {
+          "baseline_median_ms": 0.003856,
+          "candidate_median_ms": 0.003489,
+          "paired_delta_median_ms": -0.00046849999999999995,
+          "paired_delta_mean_ms": -0.00040659999999999996
+        },
+        {
+          "baseline_median_ms": 0.0039475,
+          "candidate_median_ms": 0.0035455,
+          "paired_delta_median_ms": -0.00040649999999999974,
+          "paired_delta_mean_ms": -0.0004808999999999999
+        }
+      ],
+      "send_wait": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ],
+      "state_preparation": [
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        },
+        {
+          "baseline_median_ms": 0.0,
+          "candidate_median_ms": 0.0,
+          "paired_delta_median_ms": 0.0,
+          "paired_delta_mean_ms": 0.0
+        }
+      ]
+    }
+  },
+  "work_counter_ranges": {
+    "baseline": {
+      "data": {
+        "cancelled": [
+          0,
+          0
+        ],
+        "copied_entities": [
+          0,
+          0
+        ],
+        "failed": [
+          0,
+          0
+        ],
+        "history_append_rows_prepared": [
+          0,
+          0
+        ],
+        "history_charge_columnar_chunks": [
+          0,
+          0
+        ],
+        "history_charge_scalar_rows": [
+          0,
+          0
+        ],
+        "history_evict_rows_prepared": [
+          0,
+          0
+        ],
+        "history_rows_materialized": [
+          0,
+          0
+        ],
+        "input_rows": [
+          10000000,
+          10000000
+        ],
+        "interrupted": [
+          0,
+          0
+        ],
+        "numeric_general_calls": [
+          0,
+          0
+        ],
+        "numeric_lanes_started": [
+          0,
+          0
+        ],
+        "numeric_parallel_calls": [
+          0,
+          0
+        ],
+        "numeric_parallel_rows": [
+          0,
+          0
+        ],
+        "numeric_rows": [
+          0,
+          0
+        ],
+        "numeric_serial_calls": [
+          0,
+          0
+        ],
+        "order_proof_rows": [
+          10000000,
+          10000000
+        ],
+        "output_chunks_prepared": [
+          0,
+          0
+        ],
+        "output_rows_prepared": [
+          0,
+          0
+        ],
+        "parallel_fallback_cpu_limit": [
+          0,
+          0
+        ],
+        "parallel_fallback_generation_exhausted": [
+          0,
+          0
+        ],
+        "parallel_fallback_lane_partition_rejected": [
+          0,
+          0
+        ],
+        "parallel_fallback_no_work_client": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_already_used": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_busy": [
+          0,
+          0
+        ],
+        "parallel_fallback_prepared_ineligible": [
+          0,
+          0
+        ],
+        "parallel_fallback_scratch_unrepresentable": [
+          0,
+          0
+        ],
+        "parallel_fallback_small_batch": [
+          0,
+          0
+        ],
+        "parallel_fallback_unsupported_plan": [
+          0,
+          0
+        ],
+        "resolved_rows": [
+          0,
+          0
+        ],
+        "scalar_value_conversions": [
+          0,
+          0
+        ],
+        "started": [
+          10,
+          10
+        ],
+        "succeeded": [
+          10,
+          10
+        ],
+        "touched_entities": [
+          0,
+          0
+        ]
+      },
+      "watermark": {
+        "cancelled": [
+          0,
+          0
+        ],
+        "copied_entities": [
+          576,
+          576
+        ],
+        "failed": [
+          0,
+          0
+        ],
+        "history_append_rows_prepared": [
+          12800,
+          12800
+        ],
+        "history_charge_columnar_chunks": [
+          1216,
+          1216
+        ],
+        "history_charge_scalar_rows": [
+          0,
+          0
+        ],
+        "history_evict_rows_prepared": [
+          11520,
+          11520
+        ],
+        "history_rows_materialized": [
+          0,
+          0
+        ],
+        "input_rows": [
+          0,
+          0
+        ],
+        "interrupted": [
+          0,
+          0
+        ],
+        "numeric_general_calls": [
+          0,
+          0
+        ],
+        "numeric_lanes_started": [
+          0,
+          0
+        ],
+        "numeric_parallel_calls": [
+          0,
+          0
+        ],
+        "numeric_parallel_rows": [
+          0,
+          0
+        ],
+        "numeric_rows": [
+          10000000,
+          10000000
+        ],
+        "numeric_serial_calls": [
+          10,
+          10
+        ],
+        "order_proof_rows": [
+          0,
+          0
+        ],
+        "output_chunks_prepared": [
+          10,
+          10
+        ],
+        "output_rows_prepared": [
+          10000000,
+          10000000
+        ],
+        "parallel_fallback_cpu_limit": [
+          10,
+          10
+        ],
+        "parallel_fallback_generation_exhausted": [
+          0,
+          0
+        ],
+        "parallel_fallback_lane_partition_rejected": [
+          0,
+          0
+        ],
+        "parallel_fallback_no_work_client": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_already_used": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_busy": [
+          0,
+          0
+        ],
+        "parallel_fallback_prepared_ineligible": [
+          0,
+          0
+        ],
+        "parallel_fallback_scratch_unrepresentable": [
+          0,
+          0
+        ],
+        "parallel_fallback_small_batch": [
+          0,
+          0
+        ],
+        "parallel_fallback_unsupported_plan": [
+          0,
+          0
+        ],
+        "resolved_rows": [
+          10000000,
+          10000000
+        ],
+        "scalar_value_conversions": [
+          640,
+          640
+        ],
+        "started": [
+          10,
+          10
+        ],
+        "succeeded": [
+          10,
+          10
+        ],
+        "touched_entities": [
+          640,
+          640
+        ]
+      },
+      "end": {
+        "cancelled": [
+          0,
+          0
+        ],
+        "copied_entities": [
+          0,
+          0
+        ],
+        "failed": [
+          0,
+          0
+        ],
+        "history_append_rows_prepared": [
+          0,
+          0
+        ],
+        "history_charge_columnar_chunks": [
+          0,
+          0
+        ],
+        "history_charge_scalar_rows": [
+          0,
+          0
+        ],
+        "history_evict_rows_prepared": [
+          0,
+          0
+        ],
+        "history_rows_materialized": [
+          0,
+          0
+        ],
+        "input_rows": [
+          0,
+          0
+        ],
+        "interrupted": [
+          0,
+          0
+        ],
+        "numeric_general_calls": [
+          0,
+          0
+        ],
+        "numeric_lanes_started": [
+          0,
+          0
+        ],
+        "numeric_parallel_calls": [
+          0,
+          0
+        ],
+        "numeric_parallel_rows": [
+          0,
+          0
+        ],
+        "numeric_rows": [
+          0,
+          0
+        ],
+        "numeric_serial_calls": [
+          0,
+          0
+        ],
+        "order_proof_rows": [
+          0,
+          0
+        ],
+        "output_chunks_prepared": [
+          0,
+          0
+        ],
+        "output_rows_prepared": [
+          0,
+          0
+        ],
+        "parallel_fallback_cpu_limit": [
+          0,
+          0
+        ],
+        "parallel_fallback_generation_exhausted": [
+          0,
+          0
+        ],
+        "parallel_fallback_lane_partition_rejected": [
+          0,
+          0
+        ],
+        "parallel_fallback_no_work_client": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_already_used": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_busy": [
+          0,
+          0
+        ],
+        "parallel_fallback_prepared_ineligible": [
+          0,
+          0
+        ],
+        "parallel_fallback_scratch_unrepresentable": [
+          0,
+          0
+        ],
+        "parallel_fallback_small_batch": [
+          0,
+          0
+        ],
+        "parallel_fallback_unsupported_plan": [
+          0,
+          0
+        ],
+        "resolved_rows": [
+          0,
+          0
+        ],
+        "scalar_value_conversions": [
+          0,
+          0
+        ],
+        "started": [
+          1,
+          1
+        ],
+        "succeeded": [
+          1,
+          1
+        ],
+        "touched_entities": [
+          0,
+          0
+        ]
+      }
+    },
+    "candidate": {
+      "data": {
+        "cancelled": [
+          0,
+          0
+        ],
+        "copied_entities": [
+          0,
+          0
+        ],
+        "failed": [
+          0,
+          0
+        ],
+        "history_append_rows_prepared": [
+          0,
+          0
+        ],
+        "history_charge_columnar_chunks": [
+          0,
+          0
+        ],
+        "history_charge_scalar_rows": [
+          0,
+          0
+        ],
+        "history_evict_rows_prepared": [
+          0,
+          0
+        ],
+        "history_rows_materialized": [
+          0,
+          0
+        ],
+        "input_rows": [
+          10000000,
+          10000000
+        ],
+        "interrupted": [
+          0,
+          0
+        ],
+        "numeric_general_calls": [
+          0,
+          0
+        ],
+        "numeric_lanes_started": [
+          0,
+          0
+        ],
+        "numeric_parallel_calls": [
+          0,
+          0
+        ],
+        "numeric_parallel_rows": [
+          0,
+          0
+        ],
+        "numeric_rows": [
+          0,
+          0
+        ],
+        "numeric_serial_calls": [
+          0,
+          0
+        ],
+        "order_proof_rows": [
+          10000000,
+          10000000
+        ],
+        "output_chunks_prepared": [
+          0,
+          0
+        ],
+        "output_rows_prepared": [
+          0,
+          0
+        ],
+        "parallel_fallback_cpu_limit": [
+          0,
+          0
+        ],
+        "parallel_fallback_generation_exhausted": [
+          0,
+          0
+        ],
+        "parallel_fallback_lane_partition_rejected": [
+          0,
+          0
+        ],
+        "parallel_fallback_no_work_client": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_already_used": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_busy": [
+          0,
+          0
+        ],
+        "parallel_fallback_prepared_ineligible": [
+          0,
+          0
+        ],
+        "parallel_fallback_scratch_unrepresentable": [
+          0,
+          0
+        ],
+        "parallel_fallback_small_batch": [
+          0,
+          0
+        ],
+        "parallel_fallback_unsupported_plan": [
+          0,
+          0
+        ],
+        "resolved_rows": [
+          0,
+          0
+        ],
+        "scalar_value_conversions": [
+          0,
+          0
+        ],
+        "started": [
+          10,
+          10
+        ],
+        "succeeded": [
+          10,
+          10
+        ],
+        "touched_entities": [
+          0,
+          0
+        ]
+      },
+      "watermark": {
+        "cancelled": [
+          0,
+          0
+        ],
+        "copied_entities": [
+          0,
+          0
+        ],
+        "failed": [
+          0,
+          0
+        ],
+        "history_append_rows_prepared": [
+          0,
+          0
+        ],
+        "history_charge_columnar_chunks": [
+          0,
+          0
+        ],
+        "history_charge_scalar_rows": [
+          0,
+          0
+        ],
+        "history_evict_rows_prepared": [
+          0,
+          0
+        ],
+        "history_rows_materialized": [
+          0,
+          0
+        ],
+        "input_rows": [
+          0,
+          0
+        ],
+        "interrupted": [
+          0,
+          0
+        ],
+        "numeric_general_calls": [
+          0,
+          0
+        ],
+        "numeric_lanes_started": [
+          0,
+          0
+        ],
+        "numeric_parallel_calls": [
+          0,
+          0
+        ],
+        "numeric_parallel_rows": [
+          0,
+          0
+        ],
+        "numeric_rows": [
+          10000000,
+          10000000
+        ],
+        "numeric_serial_calls": [
+          10,
+          10
+        ],
+        "order_proof_rows": [
+          0,
+          0
+        ],
+        "output_chunks_prepared": [
+          10,
+          10
+        ],
+        "output_rows_prepared": [
+          10000000,
+          10000000
+        ],
+        "parallel_fallback_cpu_limit": [
+          0,
+          0
+        ],
+        "parallel_fallback_generation_exhausted": [
+          0,
+          0
+        ],
+        "parallel_fallback_lane_partition_rejected": [
+          0,
+          0
+        ],
+        "parallel_fallback_no_work_client": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_already_used": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_busy": [
+          0,
+          0
+        ],
+        "parallel_fallback_prepared_ineligible": [
+          0,
+          0
+        ],
+        "parallel_fallback_scratch_unrepresentable": [
+          0,
+          0
+        ],
+        "parallel_fallback_small_batch": [
+          0,
+          0
+        ],
+        "parallel_fallback_unsupported_plan": [
+          0,
+          0
+        ],
+        "resolved_rows": [
+          10000000,
+          10000000
+        ],
+        "scalar_value_conversions": [
+          0,
+          0
+        ],
+        "started": [
+          10,
+          10
+        ],
+        "succeeded": [
+          10,
+          10
+        ],
+        "touched_entities": [
+          640,
+          640
+        ]
+      },
+      "end": {
+        "cancelled": [
+          0,
+          0
+        ],
+        "copied_entities": [
+          0,
+          0
+        ],
+        "failed": [
+          0,
+          0
+        ],
+        "history_append_rows_prepared": [
+          0,
+          0
+        ],
+        "history_charge_columnar_chunks": [
+          0,
+          0
+        ],
+        "history_charge_scalar_rows": [
+          0,
+          0
+        ],
+        "history_evict_rows_prepared": [
+          0,
+          0
+        ],
+        "history_rows_materialized": [
+          0,
+          0
+        ],
+        "input_rows": [
+          0,
+          0
+        ],
+        "interrupted": [
+          0,
+          0
+        ],
+        "numeric_general_calls": [
+          0,
+          0
+        ],
+        "numeric_lanes_started": [
+          0,
+          0
+        ],
+        "numeric_parallel_calls": [
+          0,
+          0
+        ],
+        "numeric_parallel_rows": [
+          0,
+          0
+        ],
+        "numeric_rows": [
+          0,
+          0
+        ],
+        "numeric_serial_calls": [
+          0,
+          0
+        ],
+        "order_proof_rows": [
+          0,
+          0
+        ],
+        "output_chunks_prepared": [
+          0,
+          0
+        ],
+        "output_rows_prepared": [
+          0,
+          0
+        ],
+        "parallel_fallback_cpu_limit": [
+          0,
+          0
+        ],
+        "parallel_fallback_generation_exhausted": [
+          0,
+          0
+        ],
+        "parallel_fallback_lane_partition_rejected": [
+          0,
+          0
+        ],
+        "parallel_fallback_no_work_client": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_already_used": [
+          0,
+          0
+        ],
+        "parallel_fallback_owner_busy": [
+          0,
+          0
+        ],
+        "parallel_fallback_prepared_ineligible": [
+          0,
+          0
+        ],
+        "parallel_fallback_scratch_unrepresentable": [
+          0,
+          0
+        ],
+        "parallel_fallback_small_batch": [
+          0,
+          0
+        ],
+        "parallel_fallback_unsupported_plan": [
+          0,
+          0
+        ],
+        "resolved_rows": [
+          0,
+          0
+        ],
+        "scalar_value_conversions": [
+          0,
+          0
+        ],
+        "started": [
+          1,
+          1
+        ],
+        "succeeded": [
+          1,
+          1
+        ],
+        "touched_entities": [
+          0,
+          0
+        ]
+      }
+    }
+  },
+  "resources": {
+    "intervals": 123,
+    "cpu": 4,
+    "min_available_bytes": 15825514496,
+    "max_sibling_busy": 23.0
+  }
+}

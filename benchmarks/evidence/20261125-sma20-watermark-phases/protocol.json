@@ -1,0 +1,41 @@
+{
+  "case": "engines/10000000/calc-flow-stream-1t/sma20",
+  "harness_sha": "72072c1dc6c0874b79ccd8ce78103c97caec623d",
+  "case_count": 1,
+  "rows": 10000000,
+  "entities": 64,
+  "rows_per_input": 1000000,
+  "rounds": 2,
+  "alternating_pairs_per_round": 10,
+  "warmups_per_arm_per_round": 1,
+  "active_seconds": 210,
+  "hard_budget_seconds": 240,
+  "build_seconds": 0,
+  "arms": {
+    "baseline": {
+      "product": "release-1114",
+      "comparison_sha": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+      "qualification": "setup-release",
+      "tree": "a0af88816baffb0f46529177d250e64365bc3372",
+      "git_sha": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+      "wheel_sha256": "4feb259bf9f52455098b8387a9255139b49e902f91a8c800df08555c1adef811",
+      "native_sha256": "b9bdfe96903e8641c3606f3d5af8b8f464ea1bf3b29167e0eda76d91ba71ea9a",
+      "source_sha256": "89a899dc9a348cb40dceee85a2de5b9070be2115916d6f695614f3beda12e4c9",
+      "cargo_lock_sha256": "d2b0e0ea1469156fffda9aa0fa5d80fae1d9d1cb1437c63256c7e584141bd5e5"
+    },
+    "candidate": {
+      "product": "round3-asof",
+      "comparison_sha": "72072c1dc6c0874b79ccd8ce78103c97caec623d",
+      "qualification": "setup-main",
+      "tree": "cec8e19a4b73137b659dbdf616e349a6b58351c3",
+      "git_sha": "89cc36a88d7905c955ecdf7584b185c262b31e2b",
+      "wheel_sha256": "3e4baa81bf19be699042557efcad2be2deeebc024dc72714ab558b05cccb842c",
+      "native_sha256": "f854ca4d61da4d733f8fbbf424a6bde50ac17b1f560fb965bcb45a47747d64a6",
+      "source_sha256": "210deaf9b332a721b02f745e15741a1a5a2da99a092a78c1f0de5bf41e2e1f90",
+      "cargo_lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
+    }
+  },
+  "public_clock": "maintained ready-to-Arrow; 24h managed journal, cold per sample, explicit source watermarks, enqueue + sink delivery + concat",
+  "diagnostic_clock": "cumulative rolling_metrics by data, watermark, end; one post-clock pre-EOF snapshot, one terminal snapshot after the maintained oracle",
+  "stop": "one attempt; resource, oracle, provenance, timeout or status failure aborts without a timing verdict"
+}
