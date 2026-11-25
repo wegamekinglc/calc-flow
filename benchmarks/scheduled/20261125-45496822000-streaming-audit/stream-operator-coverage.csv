@@ -1,0 +1,29 @@
+backend,scenario,reason,catalog_cap_rows,largest_tested_default_input,measured_at_10m,default_case_at_largest,largest_default_verdict,additional_10m_variants
+calc-flow-stream,projection,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/projection,inconclusive,batch-1024
+calc-flow-stream,filter,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/filter,inconclusive,
+calc-flow-stream,group_by,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/group_by,no-confirmed-regression,
+calc-flow-stream,join,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/join,no-confirmed-regression,batch-1024
+calc-flow-stream,interval_join,catalog cap,1000000,1000000,False,engines/1000000/calc-flow-stream/interval_join,improved,
+calc-flow-stream,sma20,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/sma20,regression,
+calc-flow-stream,dual_sma,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/dual_sma,regression,
+calc-flow-stream,average,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/average,regression,
+calc-flow-stream,argmax64,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/argmax64,regression,
+calc-flow-stream,argmax256,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/argmax256,regression,
+calc-flow-stream,unique64,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/unique64,inconclusive,
+calc-flow-stream,cs_mean,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/cs_mean,inconclusive,
+calc-flow-stream,window_sum,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/window_sum,no-confirmed-regression,
+calc-flow-stream,asof_join,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream/asof_join,regression,batch-1024
+calc-flow-stream-1t,projection,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/projection,no-confirmed-regression,batch-1024
+calc-flow-stream-1t,filter,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/filter,no-confirmed-regression,
+calc-flow-stream-1t,group_by,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/group_by,no-confirmed-regression,
+calc-flow-stream-1t,join,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/join,no-confirmed-regression,batch-1024
+calc-flow-stream-1t,interval_join,catalog cap,1000000,1000000,False,engines/1000000/calc-flow-stream-1t/interval_join,improved,
+calc-flow-stream-1t,sma20,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/sma20,regression,
+calc-flow-stream-1t,dual_sma,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/dual_sma,regression,
+calc-flow-stream-1t,average,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/average,regression,
+calc-flow-stream-1t,argmax64,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/argmax64,regression,
+calc-flow-stream-1t,argmax256,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/argmax256,regression,
+calc-flow-stream-1t,unique64,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/unique64,regression,
+calc-flow-stream-1t,cs_mean,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/cs_mean,no-confirmed-regression,
+calc-flow-stream-1t,window_sum,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/window_sum,no-confirmed-regression,
+calc-flow-stream-1t,asof_join,largest declared engine scale,,10000000,True,engines/10000000/calc-flow-stream-1t/asof_join,regression,batch-1024
