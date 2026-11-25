@@ -1,0 +1,11 @@
+# Public ten-million-row rolling argmax
+
+The scheduled managed single-thread argmax256 workload consumed ten batches of one million rows with 64 keys. The timed interval begins with ready source enqueue and ends with complete Arrow delivery and concatenation. Baseline 7012b5b409553df04e29e6d7f9a11abf919cbf93 and candidate 5edc4cde06dadb6aa571bf5702b1a0573fabe5a7 used independent portable release wheels, the same compiler, interpreter, locked Python dependencies and thread settings. The candidate specializes grouped Float64 row-window argmax in the Rust rolling kernel. [Wheel identities](wheel-identities.json)
+
+This comparison tests the complete candidate product against the unmodified 11.14 release. Each native product uses its original Cargo.lock. Versions of form_urlencoded, url and libz-sys changed, and the core added a direct edge to the already-locked smallvec. The main comparison tests the individual change with matching Cargo.lock.
+
+The acquisition stopped after 1 completed warmups and 0 formal single-arm samples. The stop interval recorded 0 major faults, 1525 swapped pages and 0.0% sibling utilization. No paired verdict was established. The original archive retains any worker-local responses completed during cancellation.
+
+The Linux WSL2 host exposed 32 logical CPUs and 16 SMT groups. Each worker used one Tokio thread and one physical core, chosen during the three-second preflight. Each one-second interval checked every selected core's SMT sibling, host utilization, memory, swap and major faults. This run recorded 9 intervals and took 16.099 seconds within the controller and 16.21 seconds including interpreter startup and exit, against the 190-second limit. [Result and resources](result.json)
+
+Each independent comparison reserved up to 190 seconds; shared installation and qualification were bounded by 20 seconds. Shared qualification of all three installations took 10.220 seconds in total. Full runtime and worker startup remained in each monitored acquisition. Release builds were accounted separately. The [original evidence archive](raw-evidence.tar.gz) contains every recorded worker response, condition, qualification record, build manifest and build log. Its [receipt](receipt.json) includes a hash and byte count for each original file.
