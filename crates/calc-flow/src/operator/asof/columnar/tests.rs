@@ -1083,6 +1083,35 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
 }
 
 #[test]
+fn expired_payload_prefix_keeps_identities_without_copying_locators() {
+    let declaration = spec(0, 4_096, 8 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32 << 20));
+    let mut state = state(&declaration, &pool);
+    let rows = (0..2_048)
+        .map(|i| (i % 4, i, i, Some("right")))
+        .collect::<Vec<_>>();
+    admit(&mut state, 1, &record(&rows)).unwrap();
+
+    let allocations = allocation_counter::measure(|| {
+        let retired = state.evict(super::Progress {
+            left_watermark: Some(2_048),
+            ..super::Progress::default()
+        });
+        assert_eq!((retired.payloads, retired.identities), (2_048, 0));
+    });
+    assert_eq!(
+        (state.state_rows(), state.identity_only_rows()),
+        (2_048, 2_048)
+    );
+    assert_eq!(state.right_payload_rows(), 0);
+    assert!(
+        allocations.bytes_total <= 2_048,
+        "payload retirement allocated {} bytes with all identities live",
+        allocations.bytes_total
+    );
+}
+
+#[test]
 fn fully_expired_right_runs_retire_without_copying_locator_columns() {
     let declaration = spec(5, 8_192, 8 << 20);
     for cleared_identities in [false, true] {
