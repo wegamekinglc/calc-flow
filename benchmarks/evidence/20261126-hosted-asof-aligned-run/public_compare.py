@@ -94,7 +94,7 @@ async def run(args):
         "baseline": {
             RELEASE: "d2b0e0ea1469156fffda9aa0fa5d80fae1d9d1cb1437c63256c7e584141bd5e5",
             parent_sha: parent_lock,
-        }[args.baseline_sha],
+        }[RELEASE],
         "candidate": parent_lock,
     }
     if {
@@ -148,7 +148,11 @@ async def run(args):
         validate_environment(
             env, release, backend="calc-flow-stream", polars_threads=4, tokio_threads=4
         )
-        sites[side] = (site, ROOT / "target/post-timer-worker")
+        sites[side] = (site, ROOT / ("target/worker-" + os.environ["ASOF_MODE"]))
+    if os.environ["ASOF_MODE"] == "trace":
+        from trace_requests import enable
+
+        enable()
     cpus = await observe_cpus(args.output)
     os.sched_setaffinity(0, set(cpus))
     async with asyncio.TaskGroup() as group:

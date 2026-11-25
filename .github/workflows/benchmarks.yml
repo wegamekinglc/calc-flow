@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-aligned-10m]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-residual-10m]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -564,15 +564,17 @@ jobs:
           retention-days: 30
 
   asof-aligned-products:
-    if: inputs.mode == 'asof-aligned-10m'
+    if: inputs.mode == 'asof-residual-10m'
     runs-on: ubuntu-latest
     timeout-minutes: 125
     strategy:
       fail-fast: false
       matrix:
         surface: [rust, python]
-        source: [release, parent, candidate]
+        source: [release, candidate]
     env:
+      ASOF_MODE: trace
+      ASOF_BUILD: "1"
       CARGO_TARGET_DIR: ${{ github.workspace }}/target/build-cache
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -608,15 +610,14 @@ jobs:
           retention-days: 14
 
   asof-aligned-compare:
-    if: inputs.mode == 'asof-aligned-10m'
+    if: inputs.mode == 'asof-residual-10m'
     needs: asof-aligned-products
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         surface: [rust, python]
-        baseline: [release, parent]
     env:
       PYTHONPATH: ${{ github.workspace }}
       STUDY: benchmarks/evidence/20261126-hosted-asof-aligned-run
@@ -636,14 +637,18 @@ jobs:
           uv pip sync --python target/study-venv/bin/python --require-hashes benchmarks/requirements.lock
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: asof-product-${{ matrix.surface }}-${{ matrix.baseline }}
-          path: target/products/${{ matrix.baseline }}
+          name: asof-product-${{ matrix.surface }}-release
+          path: target/products-trace/release
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: asof-product-${{ matrix.surface }}-candidate
-          path: target/products/candidate
-      - name: Measure one pair of exact products on its dedicated runner
-        timeout-minutes: 10
+          path: target/products-trace/candidate
+      - name: Verify uninstrumented products from run 45691470579
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: target/study-venv/bin/python "$STUDY/download_prior.py" "${{ matrix.surface }}"
+      - name: Measure plain then traced products on one dedicated runner
+        timeout-minutes: 19
         run: |
           mkdir -p target/evidence
           git rev-parse HEAD > target/evidence/registration.txt
@@ -651,15 +656,18 @@ jobs:
           cat /proc/self/status > target/evidence/controller.txt
           sudo mkdir "/sys/fs/cgroup/$ASOF_CGROUP"
           echo "$$" | sudo tee "/sys/fs/cgroup/$ASOF_CGROUP/cgroup.procs" >/dev/null
-          exec target/study-venv/bin/python "$STUDY/hosted.py" compare "${{ matrix.surface }}" "${{ matrix.baseline }}"
+          for mode in plain trace; do
+            ASOF_MODE="$mode" target/study-venv/bin/python "$STUDY/hosted.py" compare "${{ matrix.surface }}" release
+          done
+          target/study-venv/bin/python "$STUDY/phase_replay.py" "target/evidence/trace" "${{ matrix.surface }}"
       - name: Seal raw results without installed packages or executables
         if: always()
         run: |
-          tar -C target --exclude='*/site' --exclude='evidence/job-??????????' -czf target/asof-raw.tar.gz evidence
+          tar -C target --exclude='*/site' --exclude='*/job-??????????' -czf target/asof-raw.tar.gz evidence
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: asof-10m-${{ matrix.surface }}-${{ matrix.baseline }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: asof-residual-10m-${{ matrix.surface }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/asof-raw.tar.gz
           if-no-files-found: error
           retention-days: 30

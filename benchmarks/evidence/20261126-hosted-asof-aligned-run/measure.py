@@ -91,7 +91,8 @@ async def run(case, head, directory):
     ):
         if (
             field == "lock_sha256"
-            and BASE == "7012b5b409553df04e29e6d7f9a11abf919cbf93"
+            and os.environ["ASOF_PRODUCT_BASE"]
+            == "7012b5b409553df04e29e6d7f9a11abf919cbf93"
         ):
             continue  # preserve the two revisions' own frozen lock files
         if builds["base"][1][field] != builds["head"][1][field]:
@@ -106,7 +107,14 @@ async def run(case, head, directory):
             "case": case,
             "processor": platform.uname()._asdict(),
             "protocol_sha256": sha(ROOT / "protocol.md"),
-            "adapter_sha256": sha(ROOT / ("stage_" + case + ".rs")),
+            "adapter_sha256": sha(
+                ROOT
+                / (
+                    "trace_job.rs"
+                    if os.environ["ASOF_MODE"] == "trace"
+                    else "stage_job.rs"
+                )
+            ),
         },
     )
     cpus = select_cpus()

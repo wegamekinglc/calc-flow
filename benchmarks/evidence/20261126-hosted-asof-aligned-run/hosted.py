@@ -16,8 +16,17 @@ from scripts.toolkit import sha256_file
 
 ROOT = Path(os.environ["GITHUB_WORKSPACE"])
 STUDY = Path(__file__).resolve().parent
-OUT = ROOT / "target" / "products"
-RAW = ROOT / "target" / "evidence"
+OUT = (
+    ROOT
+    / "target"
+    / (
+        "products"
+        if os.environ.get("ASOF_BUILD")
+        else "products-" + os.environ["ASOF_MODE"]
+    )
+)
+MODE = os.environ["ASOF_MODE"]
+RAW = ROOT / "target" / "evidence" / MODE
 REFS = {
     "release": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
     "parent": "f069199b25cd7893879df799a2d44e95d6a9cbad",
@@ -39,10 +48,47 @@ def checkout(path, sha):
     )
 
 
+def verified_revision(src, name):
+    origin = REFS[name]
+    checkout(src, origin)
+    if os.environ["ASOF_MODE"] == "plain":
+        return origin
+    patch = gzip.decompress((STUDY / f"{name}.patch.gz").read_bytes())
+    command("git", "apply", "--check", input=patch, cwd=src)
+    command("git", "apply", input=patch, cwd=src)
+    command("git", "add", "crates/calc-flow/src/operator/asof", cwd=src)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_DATE": "2026-11-26T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-11-26T00:00:00Z",
+    }
+    command(
+        "git",
+        "-c",
+        "user.name=ASOF study",
+        "-c",
+        "user.email=benchmark@localhost",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-qm",
+        "Trace ordered ASOF admission and watermark phases",
+        cwd=src,
+        env=env,
+    )
+
+    def git(ref):
+        return subprocess.check_output(
+            ["git", "rev-parse", ref], cwd=src, text=True
+        ).strip()
+
+    assert git("HEAD^") == origin
+    return git("HEAD")
+
+
 def build(surface, name):
-    sha = REFS[name]
     src = ROOT / "target/product-source"
-    checkout(src, sha)
+    sha = verified_revision(src, name)
     OUT.mkdir()
     if surface == "rust":
         command(sys.executable, STUDY / "build.py", src, sha, "job")
@@ -62,7 +108,7 @@ def build(surface, name):
 
 
 def compare(surface, name):
-    assert name in ("release", "parent") and surface in ("rust", "python")
+    assert name == "release" and surface in ("rust", "python")
     base, head = REFS[name], REFS["candidate"]
     RAW.mkdir(exist_ok=True)
     for f in (
@@ -70,15 +116,26 @@ def compare(surface, name):
         *STUDY.glob("*.rs"),
         *STUDY.glob("*.md"),
         STUDY / "project.json",
+        STUDY / "plain-artifacts.json",
         STUDY / "registered.sha256",
-        STUDY / "worker.patch.gz",
+        *STUDY.glob("*.patch.gz"),
     ):
         shutil.copy2(f, RAW)
+    revisions = {}
     checkouts = {}
     for side in (name, "candidate"):
-        checkout_path = ROOT / "target" / ("source-" + side)
-        checkout(checkout_path, REFS[side])
+        checkout_path = ROOT / "target" / ("source-" + MODE + "-" + side)
+        revisions[side] = verified_revision(checkout_path, side)
         checkouts[side] = checkout_path
+    base, head = revisions[name], revisions["candidate"]
+    (RAW / "bound.json").write_text(
+        json.dumps(
+            dict(
+                mode=MODE, products={s: REFS[s] for s in revisions}, revisions=revisions
+            )
+        )
+    )
+    os.environ["ASOF_PRODUCT_BASE"] = REFS[name]
     if surface == "rust":
         for side, sha in ((name, base), ("candidate", head)):
             for f in (OUT / side).glob("*"):
@@ -100,13 +157,23 @@ def compare(surface, name):
                 ).strip()
             )
             assert receipt["lock_sha256"] == sha256_file(checkouts[side] / "Cargo.lock")
-            assert receipt["harness_sha256"] == sha256_file(RAW / "stage_job.rs")
+            assert receipt["harness_sha256"] == sha256_file(
+                RAW / ("trace_job.rs" if MODE == "trace" else "stage_job.rs")
+            )
+        if MODE == "trace":
+            os.environ["CALC_FLOW_ASOF_ADMISSION_TRACE"] = str(RAW / "phases.jsonl")
+            os.environ["CALC_FLOW_ASOF_WATERMARK_TRACE"] = str(RAW / "phases.jsonl")
         command(sys.executable, RAW / "measure.py", "job", head, base)
         command(sys.executable, RAW / "verify.py", next(RAW.glob("obs-job-*")))
     else:
-        worker = ROOT / "target/post-timer-worker"
+        worker = ROOT / ("target/worker-" + MODE)
         checkout(worker, head)
-        patch = gzip.decompress((STUDY / "worker.patch.gz").read_bytes())
+        patch = gzip.decompress(
+            (
+                STUDY
+                / ("worker.patch.gz" if MODE == "plain" else "trace-worker.patch.gz")
+            ).read_bytes()
+        )
         command("git", "apply", "--check", input=patch, cwd=worker)
         command("git", "apply", input=patch, cwd=worker)
         command(
