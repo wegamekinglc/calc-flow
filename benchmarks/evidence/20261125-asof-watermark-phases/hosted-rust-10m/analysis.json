@@ -1,0 +1,531 @@
+{
+  "source": "https://github.com/wegamekinglc/calc-flow/actions/runs/45627258042",
+  "artifact_id": 15032894576,
+  "digest": "sha256:1b6cc0048e2efcf8dffd06576992821a93788f1861c6b363459fe33552652f26",
+  "plain": {
+    "verification": {
+      "state": "stopped",
+      "case": "job",
+      "observations": 20,
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [ValueError(\"sparse changelog resource gate: {'cpu': 2, 'cpu_busy': 98.0, 'siblings': [3], 'sibling_busy': 6.0, 'host_busy': 50.625, 'available_bytes': 15130476544, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}\")])"
+    },
+    "outcome": {
+      "state": "stopped",
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [ValueError(\"sparse changelog resource gate: {'cpu': 2, 'cpu_busy': 98.0, 'siblings': [3], 'sibling_busy': 6.0, 'host_busy': 50.625, 'available_bytes': 15130476544, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}\")])",
+      "wall_seconds": 32.5751051430002
+    },
+    "accepted_warmups": 2,
+    "accepted_formal_arms": 18
+  },
+  "trace": {
+    "verification": {
+      "state": "stopped",
+      "case": "job",
+      "observations": 13,
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [ValueError(\"sparse changelog resource gate: {'cpu': 2, 'cpu_busy': 100.0, 'siblings': [3], 'sibling_busy': 4.0, 'host_busy': 50.175, 'available_bytes': 15244431360, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}\")])"
+    },
+    "outcome": {
+      "state": "stopped",
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [ValueError(\"sparse changelog resource gate: {'cpu': 2, 'cpu_busy': 100.0, 'siblings': [3], 'sibling_busy': 4.0, 'host_busy': 50.175, 'available_bytes': 15244431360, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}\")])",
+      "wall_seconds": 22.23200535900014
+    },
+    "accepted_warmups": 2,
+    "accepted_formal_arms": 11,
+    "trace_inventory": [
+      {
+        "round": 1,
+        "pair": 0,
+        "side": "base",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 39238,
+            "right_eviction_ns": 360,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 664652666,
+            "right_eviction_ns": 94252090,
+            "state_bytes_delta": -1577800400,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 56385,
+            "right_eviction_ns": 3945,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 4526,
+            "right_eviction_ns": 1673,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 0,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 107769,
+            "right_eviction_ns": 104705,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 297527144,
+            "right_eviction_ns": 47946209,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 982182,
+            "right_eviction_ns": 944885,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 7431,
+            "right_eviction_ns": 60,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 1,
+        "side": "base",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 41080,
+            "right_eviction_ns": 360,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 656813258,
+            "right_eviction_ns": 93876428,
+            "state_bytes_delta": -1577800400,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 60778,
+            "right_eviction_ns": 4407,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 4556,
+            "right_eviction_ns": 1912,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 1,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 106858,
+            "right_eviction_ns": 103163,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 291022540,
+            "right_eviction_ns": 43276146,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 985687,
+            "right_eviction_ns": 949624,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 7570,
+            "right_eviction_ns": 80,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 2,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 109291,
+            "right_eviction_ns": 106006,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 313348802,
+            "right_eviction_ns": 46372642,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 931871,
+            "right_eviction_ns": 897028,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 6760,
+            "right_eviction_ns": 91,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 2,
+        "side": "base",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 39238,
+            "right_eviction_ns": 361,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 666134591,
+            "right_eviction_ns": 94528789,
+            "state_bytes_delta": -1577800400,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 60981,
+            "right_eviction_ns": 3896,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 4647,
+            "right_eviction_ns": 1813,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 3,
+        "side": "base",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 43153,
+            "right_eviction_ns": 521,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 659031314,
+            "right_eviction_ns": 94319100,
+            "state_bytes_delta": -1577800400,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 60469,
+            "right_eviction_ns": 4826,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 4707,
+            "right_eviction_ns": 1913,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 3,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 118786,
+            "right_eviction_ns": 114970,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 292011267,
+            "right_eviction_ns": 44406818,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 1012655,
+            "right_eviction_ns": 975853,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 7281,
+            "right_eviction_ns": 70,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 4,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 117954,
+            "right_eviction_ns": 114749,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 289641472,
+            "right_eviction_ns": 41072017,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 955614,
+            "right_eviction_ns": 920899,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 7190,
+            "right_eviction_ns": 60,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 4,
+        "side": "base",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 40320,
+            "right_eviction_ns": 391,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 659504609,
+            "right_eviction_ns": 94376000,
+            "state_bytes_delta": -1577800400,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 58929,
+            "right_eviction_ns": 4959,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 4307,
+            "right_eviction_ns": 1724,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 5,
+        "side": "base",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 38097,
+            "right_eviction_ns": 370,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 662899715,
+            "right_eviction_ns": 94173130,
+            "state_bytes_delta": -1577800400,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 57116,
+            "right_eviction_ns": 4747,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 4638,
+            "right_eviction_ns": 2032,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 5,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 108130,
+            "right_eviction_ns": 104274,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 314746916,
+            "right_eviction_ns": 49784642,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 1101128,
+            "right_eviction_ns": 1068007,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 7591,
+            "right_eviction_ns": 60,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      },
+      {
+        "round": 1,
+        "pair": 6,
+        "side": "head",
+        "callbacks": 23,
+        "emitting": 10,
+        "ended": 2,
+        "by_role": {
+          "empty_no_frontier": {
+            "count": 1,
+            "wall_ns": 104755,
+            "right_eviction_ns": 101560,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "emitting": {
+            "count": 10,
+            "wall_ns": 300373661,
+            "right_eviction_ns": 48693329,
+            "state_bytes_delta": -1785313800,
+            "payloads_retired": 10000000
+          },
+          "empty_frontier": {
+            "count": 10,
+            "wall_ns": 942525,
+            "right_eviction_ns": 905059,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          },
+          "empty_ended": {
+            "count": 2,
+            "wall_ns": 7802,
+            "right_eviction_ns": 70,
+            "state_bytes_delta": 0,
+            "payloads_retired": 0
+          }
+        }
+      }
+    ]
+  }
+}
