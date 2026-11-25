@@ -1,0 +1,94 @@
+{
+  "native-release": {
+    "replay": {
+      "state": "stopped",
+      "case": "job",
+      "observations": 9,
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 32.0, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}, {'cpu': 4, 'cpu_busy': 45.9, 'siblings': [5], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}, {'cpu': 16, 'cpu_busy': 8.3, 'siblings': [17], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}, {'cpu': 20, 'cpu_busy': 20.2, 'siblings': [21], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}]\")])"
+    },
+    "outcome": {
+      "state": "stopped",
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 32.0, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}, {'cpu': 4, 'cpu_busy': 45.9, 'siblings': [5], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}, {'cpu': 16, 'cpu_busy': 8.3, 'siblings': [17], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}, {'cpu': 20, 'cpu_busy': 20.2, 'siblings': [21], 'sibling_busy': 0.0, 'host_busy': 3.571875, 'available_bytes': 30577618944, 'major_faults': 7, 'swap_pages': 15738, 'swap_in_pages': 1, 'swap_out_pages': 15737, 'suitable': False}]\")])",
+      "wall_seconds": 13.271074204998513
+    }
+  },
+  "python-release": {
+    "outcome": {
+      "elapsed": 29.57972479000091,
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 29.4, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 3.475, 'available_bytes': 27674075136, 'major_faults': 2, 'swap_pages': 9654, 'swap_in_pages': 8, 'swap_out_pages': 9646, 'suitable': False}, {'cpu': 4, 'cpu_busy': 16.2, 'siblings': [5], 'sibling_busy': 0.0, 'host_busy': 3.475, 'available_bytes': 27674075136, 'major_faults': 2, 'swap_pages': 9654, 'swap_in_pages': 8, 'swap_out_pages': 9646, 'suitable': False}, {'cpu': 16, 'cpu_busy': 16.8, 'siblings': [17], 'sibling_busy': 0.0, 'host_busy': 3.475, 'available_bytes': 27674075136, 'major_faults': 2, 'swap_pages': 9654, 'swap_in_pages': 8, 'swap_out_pages': 9646, 'suitable': False}, {'cpu': 20, 'cpu_busy': 39.0, 'siblings': [21], 'sibling_busy': 0.0, 'host_busy': 3.475, 'available_bytes': 27674075136, 'major_faults': 2, 'swap_pages': 9654, 'swap_in_pages': 8, 'swap_out_pages': 9646, 'suitable': False}]\")])",
+      "state": "stopped"
+    },
+    "completed_requests": {
+      "prepare": 2,
+      "sample": 10
+    },
+    "rejected_intervals": [
+      {
+        "epoch": 1795613099.441724,
+        "preflight": false,
+        "cores": [
+          {
+            "cpu": 2,
+            "cpu_busy": 29.4,
+            "siblings": [
+              3
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 3.475,
+            "available_bytes": 27674075136,
+            "major_faults": 2,
+            "swap_pages": 9654,
+            "swap_in_pages": 8,
+            "swap_out_pages": 9646,
+            "suitable": false
+          },
+          {
+            "cpu": 4,
+            "cpu_busy": 16.2,
+            "siblings": [
+              5
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 3.475,
+            "available_bytes": 27674075136,
+            "major_faults": 2,
+            "swap_pages": 9654,
+            "swap_in_pages": 8,
+            "swap_out_pages": 9646,
+            "suitable": false
+          },
+          {
+            "cpu": 16,
+            "cpu_busy": 16.8,
+            "siblings": [
+              17
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 3.475,
+            "available_bytes": 27674075136,
+            "major_faults": 2,
+            "swap_pages": 9654,
+            "swap_in_pages": 8,
+            "swap_out_pages": 9646,
+            "suitable": false
+          },
+          {
+            "cpu": 20,
+            "cpu_busy": 39.0,
+            "siblings": [
+              21
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 3.475,
+            "available_bytes": 27674075136,
+            "major_faults": 2,
+            "swap_pages": 9654,
+            "swap_in_pages": 8,
+            "swap_out_pages": 9646,
+            "suitable": false
+          }
+        ]
+      }
+    ]
+  }
+}
