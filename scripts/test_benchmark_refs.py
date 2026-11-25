@@ -139,6 +139,21 @@ class BenchmarkRefsTests(unittest.TestCase):
             ],
         )
 
+    def test_dispatch_can_reproduce_scheduled_release_and_rust_baselines(self):
+        variables = environment(event="workflow_dispatch")
+        variables["BENCHMARK_SCHEDULED_BASELINE"] = "true"
+        resolved, _ = self.resolve(
+            variables, [TAG, RELEASE, PARENT, RELEASE, HEAD, PARENT]
+        )
+        self.assertEqual(fields(resolved), (RELEASE, HEAD, "release", TAG, PARENT))
+
+    def test_manual_scheduled_baseline_preserves_explicit_sha_precedence(self):
+        variables = environment(event="workflow_dispatch", base=BASE)
+        variables["BENCHMARK_SCHEDULED_BASELINE"] = "true"
+        resolved, argv = self.resolve(variables, [BASE, HEAD])
+        self.assertEqual(fields(resolved), (BASE, HEAD, "explicit", BASE, BASE))
+        self.assertNotIn(LATEST_RELEASE, argv)
+
     def test_schedule_on_the_release_commit_uses_the_first_parent(self):
         resolved, argv = self.resolve(
             environment(event="schedule"), [TAG, HEAD, PARENT, PARENT, HEAD]

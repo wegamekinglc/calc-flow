@@ -85,7 +85,10 @@ def _implicit_baseline(event: str, head: str) -> tuple[str, str, str, str]:
     # shard compiles the candidate bench file against the baseline source, so
     # it keeps the first parent: a release checkout predates bench-file APIs
     # the candidate harness imports.
-    if event == "schedule":
+    if event == "schedule" or (
+        event == "workflow_dispatch"
+        and os.environ.get("BENCHMARK_SCHEDULED_BASELINE") == "true"
+    ):
         tag = latest_release_tag()
         if tag is not None:
             release = git_revision(f"refs/tags/{tag}^{{commit}}")

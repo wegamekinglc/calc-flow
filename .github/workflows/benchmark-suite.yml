@@ -12,8 +12,13 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      scheduled_baseline:
+        description: Use the scheduled release and Rust baselines unless a SHA is supplied
+        type: boolean
+        default: false
+        required: false
       baseline_sha:
-        description: Full baseline commit SHA (defaults to the first parent)
+        description: Full baseline commit SHA to override the selected baseline
         type: string
         default: ""
         required: false
@@ -49,9 +54,8 @@ jobs:
         env:
           BENCHMARK_BASE_SHA: ${{ inputs.baseline_sha || github.event.pull_request.base.sha || github.event.before }}
           BENCHMARK_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          # Without an explicit base, schedules compare against the newest
-          # reachable calc-flow-python-v* release; other events use HEAD^.
           BENCHMARK_EVENT: ${{ github.event_name }}
+          BENCHMARK_SCHEDULED_BASELINE: ${{ inputs.scheduled_baseline }}
         run: python -m scripts.benchmark_suite refs --github-output "$GITHUB_OUTPUT"
       - name: Discover every benchmark shard
         id: catalog

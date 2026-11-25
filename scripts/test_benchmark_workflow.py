@@ -388,6 +388,18 @@ class BenchmarkWorkflowTests(unittest.TestCase):
             1
         ].split("      - name:", 1)[0]
         self.assertIn("BENCHMARK_EVENT: ${{ github.event_name }}", refs)
+        dispatch = suite.split("  workflow_dispatch:\n", 1)[1].split("permissions:", 1)[
+            0
+        ]
+        option = dispatch.split("      scheduled_baseline:\n", 1)[1].split(
+            "      baseline_sha:", 1
+        )[0]
+        self.assertIn("type: boolean", option)
+        self.assertIn("default: false", option)
+        self.assertIn(
+            "BENCHMARK_SCHEDULED_BASELINE: ${{ inputs.scheduled_baseline }}", refs
+        )
+
         self.assertIn(
             "BENCHMARK_BASE_SHA: ${{ inputs.baseline_sha || "
             "github.event.pull_request.base.sha || github.event.before }}",
