@@ -253,6 +253,98 @@ fn test_columnar_restore_rejects_forged_run_charges() {
 }
 
 #[test]
+fn test_aligned_exact_runs_match_physical_rows_in_pending_order_without_index_probes() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let declaration = spec(5, 1024, 1 << 20);
+    let mut state = state(&declaration, &pool);
+    // Physical row order differs from the pending order within each timestamp.
+    let rows = (0..64)
+        .flat_map(|time| [3, 1, 2, 0].map(|key| (key, time, time, None)))
+        .collect::<Vec<_>>();
+    let probes = rows
+        .iter()
+        .map(|&(key, time, seq, value)| (key, time, seq + 100, value))
+        .collect::<Vec<_>>();
+    admit(&mut state, 1, &record(&rows)).unwrap();
+    admit(&mut state, 0, &record(&probes)).unwrap();
+
+    super::state::CANDIDATE_TIME_READS.set(0);
+    let selection = select(&state, None, true, probes.len());
+    let reads = super::state::CANDIDATE_TIME_READS.replace(0);
+    assert_eq!(selection.matched(), probes.len());
+    assert_eq!(
+        selection.right[..4]
+            .iter()
+            .map(|row| row.row)
+            .collect::<Vec<_>>(),
+        [3, 1, 2, 0]
+    );
+    let output = state
+        .materialize(&selection, &output_schema(&declaration), None)
+        .unwrap();
+    assert_eq!(output.column(0), output.column(4));
+    assert_eq!(output.column(1), output.column(5));
+    assert_eq!(
+        reads, 0,
+        "aligned runs should need no per-key timestamp probes"
+    );
+}
+
+#[test]
+fn test_aligned_time_ties_still_choose_the_highest_right_sequence() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let declaration = spec(0, 100, 1 << 20);
+    let mut state = state(&declaration, &pool);
+    let rows = record(&[
+        (1, 10, 9, None),
+        (2, 10, 1, None),
+        (1, 10, 3, None),
+        (2, 11, 1, None),
+    ]);
+    admit(&mut state, 0, &rows).unwrap();
+    admit(&mut state, 1, &rows).unwrap();
+    let selection = select(&state, None, true, 4);
+    assert_eq!(selection.matched(), 4);
+    assert_eq!(
+        selection
+            .right
+            .iter()
+            .map(|row| row.row)
+            .collect::<Vec<_>>(),
+        [0, 0, 1, 3]
+    );
+}
+
+#[test]
+fn test_aligned_runs_exclude_retired_right_payloads() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let declaration = spec(0, 100, 1 << 20);
+    let mut state = state(&declaration, &pool);
+    let rows = record(&[
+        (1, 5, 1, None),
+        (1, 8, 2, None),
+        (1, 10, 3, None),
+        (1, 12, 4, None),
+    ]);
+    admit(&mut state, 1, &rows).unwrap();
+    assert_eq!(
+        state
+            .evict(super::Progress {
+                left_watermark: Some(10),
+                ..Default::default()
+            })
+            .payloads,
+        2
+    );
+    admit(&mut state, 0, &rows).unwrap();
+    let selection = select(&state, None, true, 4);
+    assert_eq!(
+        selection.right_validity.iter().collect::<Vec<_>>(),
+        [false, false, true, true]
+    );
+}
+
+#[test]
 fn test_ordered_historical_probes_bound_dense_steps_and_sparse_jumps() {
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 << 20));
     let declaration = spec(1, 12_000, 16 << 20);

@@ -6,6 +6,7 @@ use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS, VARIABLE
 use crate::{Result, StreamingFailureReason};
 use datafusion::arrow::{
     array::{Array, ArrayRef, StringArray},
+    buffer::BooleanBuffer,
     compute::{SortColumn, lexsort_to_indices},
     datatypes::SchemaRef,
     record_batch::RecordBatch,
@@ -1367,11 +1368,38 @@ impl ColumnarState {
             .saturating_add(4096)
     }
 
+    fn aligned_right_run(&self, pending: &[RowLocator]) -> Option<u64> {
+        #[cfg(feature = "benchmark-internals")]
+        if self.legacy_latest_lookup {
+            return None;
+        }
+        if pending.len() != self.right_payloads
+            || self.left_runs.len() != 1
+            || self.right_runs.len() != 1
+        {
+            return None;
+        }
+        let (_, left) = self.left_runs.first_key_value()?;
+        let (&id, right) = self.right_runs.first_key_value()?;
+        left.has_unique_aligned_times(right, pending).then_some(id)
+    }
+
     /// Builds a selection for an already verified pending prefix.
     pub(in crate::operator::asof) fn select_prefix(&self, count: usize) -> Selection {
         #[cfg(test)]
         SELECTIONS.with(|count| count.set(count.get() + 1));
         let left = self.pending.rows()[..count].to_vec();
+        if let Some(run) = self.aligned_right_run(&left) {
+            let right = left
+                .iter()
+                .map(|row| RowLocator { run, row: row.row })
+                .collect();
+            return Selection {
+                left,
+                right,
+                right_validity: BooleanBuffer::new_set(count),
+            };
+        }
         let mut right = Vec::with_capacity(count);
         let mut validity = Vec::with_capacity(count);
         let groups = self.right_by_key.len();
