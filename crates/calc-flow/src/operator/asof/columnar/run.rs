@@ -377,6 +377,26 @@ impl Run {
         self.sequences.value(locator.row as usize)
     }
 
+    pub(super) fn compare_left_rows<K: Ord>(
+        &self,
+        left: usize,
+        other: &Self,
+        right: usize,
+        key_order: impl Fn(GroupId) -> K,
+    ) -> std::cmp::Ordering {
+        self.times[left]
+            .cmp(&other.times[right])
+            .then_with(|| key_order(self.groups[left]).cmp(&key_order(other.groups[right])))
+            .then_with(|| self.sequences.value(left).cmp(other.sequences.value(right)))
+    }
+
+    pub(super) fn strictly_ordered_left<K: Ord>(&self, key_order: impl Fn(GroupId) -> K) -> bool {
+        (1..self.rows()).all(|row| {
+            self.compare_left_rows(row - 1, self, row, &key_order)
+                .is_lt()
+        })
+    }
+
     pub(super) fn has_unique_aligned_times(&self, right: &Self, pending: &[RowLocator]) -> bool {
         if pending.len() != self.rows()
             || self.times() != right.times()

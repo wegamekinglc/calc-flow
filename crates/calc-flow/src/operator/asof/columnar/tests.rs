@@ -1114,12 +1114,23 @@ fn test_ordered_interleaved_identity_admission_is_linear_on_both_sides() {
     for side in 0..2 {
         let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 25));
         let mut state = state(&spec, &pool);
+        super::state::PENDING_COMPARISONS.set(0);
         admit(&mut state, side, &input(0)).unwrap();
+        let initial_pending = super::state::PENDING_COMPARISONS.replace(0);
         super::state::ADMISSION_IDENTITY_COMPARISONS.set(0);
         super::state::INDEX_IDENTITY_COMPARISONS.set(0);
         admit(&mut state, side, &input(ROWS)).unwrap();
         let comparisons = super::state::ADMISSION_IDENTITY_COMPARISONS.replace(0);
-        assert_eq!(comparisons, ROWS, "one comparison per row for side {side}");
+        if side == 0 {
+            let appended_pending = super::state::PENDING_COMPARISONS.replace(0);
+            assert_eq!(
+                (initial_pending, appended_pending, comparisons),
+                (0, 1, 0),
+                "ordered left rows should need only the resident merge boundary"
+            );
+        } else {
+            assert_eq!(comparisons, ROWS, "one comparison per right row");
+        }
         let index_comparisons = super::state::INDEX_IDENTITY_COMPARISONS.replace(0);
         let columns = if side == 0 { 1 } else { 2 };
         assert!(
@@ -1128,6 +1139,39 @@ fn test_ordered_interleaved_identity_admission_is_linear_on_both_sides() {
         );
         assert_eq!(state.state_rows(), 2 * ROWS);
     }
+}
+
+#[test]
+fn test_left_run_order_is_checked_against_typed_ranks_when_keys_are_added() {
+    let declaration = spec(0, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    admit(&mut state, 0, &record(&[(9, 0, 0, None)])).unwrap();
+    // New keys arrive in increasing birth order but decreasing signed key order.
+    admit(
+        &mut state,
+        0,
+        &record(&[(9, 1, 0, None), (-2, 1, 0, None), (-3, 1, 0, None)]),
+    )
+    .unwrap();
+    super::state::PENDING_COMPARISONS.set(0);
+    admit(
+        &mut state,
+        0,
+        &record(&[(-3, 2, 3, None), (-3, 2, 4, None), (9, 2, 0, None)]),
+    )
+    .unwrap();
+    assert_eq!(super::state::PENDING_COMPARISONS.replace(0), 1);
+    let selected = select(&state, None, true, 100);
+    let output = state
+        .materialize(&selected, &output_schema(&declaration), None)
+        .unwrap();
+    let keys = output
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(keys.values().as_ref(), [9, -3, -2, 9, -3, -3, 9]);
 }
 
 #[test]
