@@ -43,7 +43,7 @@ for r in coverage:
         text+=['区间 Join 的目录上限为 '+f"{int(r['catalog_cap_rows']):,}"+' 行，应用其最大实际规模的结果。该四线程用例的判定为 `'+r['largest_default_verdict']+'`。[算子覆盖清单](stream-operator-coverage.csv)','']
 top=sorted([r for r in reg if r['surface']=='python-public-managed-stream' and r['primary_fixture_rows']=='10000000'],key=lambda r:float(r['candidate_p50_ms'])-float(r['baseline_p50_ms']),reverse=True)[:8]
 if top:
-    text+=['## 千万行回退的绝对耗时差','','对所有配置按 p50 绝对差降序排列，列出增加最多的用例。','']
+    text+=['## 千万行回退的绝对耗时差','','表中按 p50 耗时增量对千万行已确认回退的流式用例降序排列。','']
     text+=table(['用例','增加毫秒','相对变化'],[[r['case_id'],f"{float(r['candidate_p50_ms'])-float(r['baseline_p50_ms']):,.2f}",shift(r)] for r in top])
     text+=['']
 text+=['## Rust 核心与小批延迟','','原生 Rust 分片中的父提交比较用于查找近期变化。直接对照 11.14 的原生 Rust 单水位与千万行整作业另有固定适配器和逐行校验。[ASOF 单水位与输出分段](https://github.com/wegamekinglc/calc-flow/tree/d26860e433df4d33bbcb92ba23cfc5849bc671a7/benchmarks/evidence/20261125-asof-watermark-phases/output-charge-followup) · [原生四线程千万行对照](https://github.com/wegamekinglc/calc-flow/tree/f1728a86cf24c83b25c1d6ff4188a4b58b3fef0a/benchmarks/evidence/20261125-asof-watermark-phases/dense-projection-native-4t)','']
