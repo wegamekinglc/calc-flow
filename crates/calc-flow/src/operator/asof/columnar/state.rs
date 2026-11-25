@@ -244,6 +244,8 @@ pub(in crate::operator::asof) struct ColumnarState {
     right_payloads: usize,
     right_identity_only: usize,
     pub(super) next_run: u64,
+    // Older runs may share a single IPC allocation across all payload columns.
+    pub(super) first_fresh_run: u64,
 }
 
 fn compare_identity(runs: &BTreeMap<u64, Run>, left: RowLocator, right: RowLocator) -> Ordering {
@@ -335,6 +337,7 @@ impl ColumnarState {
             right_payloads: 0,
             right_identity_only: 0,
             next_run: 0,
+            first_fresh_run: 0,
         })
     }
 
@@ -1027,6 +1030,7 @@ impl ColumnarState {
     }
 
     pub(in crate::operator::asof) fn finish_restore(&mut self, next_run: u64) {
+        self.first_fresh_run = next_run;
         self.next_run = next_run;
         self.sync_reservation();
     }
