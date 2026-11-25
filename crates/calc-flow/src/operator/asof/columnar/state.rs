@@ -178,6 +178,33 @@ enum IncomingIndexRows<'a> {
     },
 }
 
+impl IncomingIndexRows<'_> {
+    fn group_counts(&self, run: &Run) -> BTreeMap<usize, [usize; 2]> {
+        let mut counts = BTreeMap::<usize, [usize; 2]>::new();
+        let mut count = |rows: &[RowLocator], column: usize| {
+            for locator in rows {
+                #[cfg(test)]
+                PROJECTED_GROUP_VISITS.set(PROJECTED_GROUP_VISITS.get() + 1);
+                let entry = counts.entry(run.group(*locator).index()).or_default();
+                #[cfg(test)]
+                PROJECTED_COUNT_UPDATES.set(PROJECTED_COUNT_UPDATES.get() + 1);
+                entry[column] += 1;
+            }
+        };
+        match self {
+            IncomingIndexRows::Fresh(locators) => count(locators, 0),
+            IncomingIndexRows::Restored {
+                payloads,
+                identities,
+            } => {
+                count(payloads, 0);
+                count(identities, 1);
+            }
+        }
+        counts
+    }
+}
+
 struct PreparedRun {
     run: Run,
     workspace: MemoryReservation,
@@ -496,7 +523,8 @@ impl ColumnarState {
                 remaining -= 1;
             }
         }
-        let columns = if side == 0 { 1 } else { 2 };
+        // Right rows are indexed once for payloads and once for identities.
+        let columns = 1 + usize::from(side == 1);
         locators
             .len()
             .checked_mul(columns * size_of::<RowLocator>())
@@ -523,52 +551,22 @@ impl ColumnarState {
         rows: &IncomingIndexRows<'_>,
         mut projected: usize,
     ) -> Result<usize> {
-        let mut counts = BTreeMap::<usize, [usize; 2]>::new();
-        let mut count = |rows: &[RowLocator], column: usize| {
-            for locator in rows {
-                #[cfg(test)]
-                PROJECTED_GROUP_VISITS.set(PROJECTED_GROUP_VISITS.get() + 1);
-                let entry = counts.entry(run.group(*locator).index()).or_default();
-                #[cfg(test)]
-                PROJECTED_COUNT_UPDATES.set(PROJECTED_COUNT_UPDATES.get() + 1);
-                entry[column] += 1;
-            }
-        };
-        match rows {
-            IncomingIndexRows::Fresh(locators) => count(locators, 0),
-            IncomingIndexRows::Restored {
-                payloads,
-                identities,
-            } => {
-                count(payloads, 0);
-                count(identities, 1);
-            }
-        }
-        for (group, [payloads, restored_identities]) in counts {
+        let empty = RightBucket::default();
+        for (group, [payloads, restored_identities]) in rows.group_counts(run) {
             let identities = match rows {
                 IncomingIndexRows::Fresh(_) => payloads,
                 IncomingIndexRows::Restored { .. } => restored_identities,
             };
-            if side == 0 {
-                if let Some(column) = self.left_by_key.get(group) {
-                    projected = replace_projected_column(projected, column, identities)
-                        .ok_or_else(|| self.state_limit())?;
-                } else {
-                    projected = projected
-                        .checked_add(identities * size_of::<RowLocator>())
-                        .ok_or_else(|| self.state_limit())?;
-                }
-            } else if let Some(bucket) = self.right_by_key.get(group) {
-                projected = replace_projected_column(projected, &bucket.payloads, payloads)
-                    .and_then(|bytes| {
-                        replace_projected_column(bytes, &bucket.identities, identities)
-                    })
-                    .ok_or_else(|| self.state_limit())?;
+            let next = if side == 0 {
+                let column = self.left_by_key.get(group).unwrap_or(&empty.identities);
+                replace_projected_column(projected, column, identities)
             } else {
-                projected = projected
-                    .checked_add((payloads + identities) * size_of::<RowLocator>())
-                    .ok_or_else(|| self.state_limit())?;
-            }
+                let bucket = self.right_by_key.get(group).unwrap_or(&empty);
+                replace_projected_column(projected, &bucket.payloads, payloads).and_then(|bytes| {
+                    replace_projected_column(bytes, &bucket.identities, identities)
+                })
+            };
+            projected = next.ok_or_else(|| self.state_limit())?;
         }
         Ok(projected)
     }
