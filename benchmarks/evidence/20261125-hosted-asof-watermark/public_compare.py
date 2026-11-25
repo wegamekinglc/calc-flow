@@ -27,7 +27,7 @@ from scripts.toolkit import linear_percentile, sha256_file, write_json
 
 ROOT = Path(os.environ["GITHUB_WORKSPACE"])
 STUDY = Path(__file__).resolve().parent
-ROWS = 10_000_000
+ROWS = 1_000_000
 SIDES = ("baseline", "candidate")
 
 
@@ -63,7 +63,11 @@ async def observe_cpus(output, selected=None):
         selected = sorted(
             min(i for i in group if i in available) for group in least[:1]
         )
-        if len(selected) != 1:
+        if os.environ["ASOF_CPU_MASK"] == "runner":
+            if len(available) != 4:
+                raise RuntimeError(f"expected scheduled four-CPU mask, got {available}")
+            selected = available
+        elif len(selected) != 1:
             raise RuntimeError("a physical core is required")
     free = psutil.virtual_memory().available
     stats = [
@@ -235,7 +239,7 @@ def main():
             "epoch": time.time(),
             "sha": args.sha,
             "scenario": args.scenario,
-            "budget": 240,
+            "budget": 125,
         },
     )
     state = {"state": "completed"}
@@ -243,9 +247,9 @@ def main():
         if os.environ.get("ASOF_COLLECT_TRACE") == "1":
             from attach_asof_trace import trace_workers
             with trace_workers():
-                asyncio.run(asyncio.wait_for(run(args), timeout=235))
+                asyncio.run(asyncio.wait_for(run(args), timeout=123))
         else:
-            asyncio.run(asyncio.wait_for(run(args), timeout=235))
+            asyncio.run(asyncio.wait_for(run(args), timeout=123))
     except BaseException as exc:
         state = {"state": "stopped", "error": repr(exc)}
         raise

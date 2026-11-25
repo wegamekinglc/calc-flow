@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-watermark-10m, asof-wheel-watermark-10m]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-watermark-10m, asof-wheel-affinity-1m]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -37,7 +37,7 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: benchmarks-${{ github.ref }}${{ inputs.mode == 'asof-wheel-watermark-10m' && '-wheel-study' || '' }}
+  group: benchmarks-${{ github.ref }}${{ inputs.mode == 'asof-wheel-affinity-1m' && '-wheel-study' || '' }}
   cancel-in-progress: false
 jobs:
   sql-datafusion-paired:
@@ -612,9 +612,9 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  asof-wheel-watermark-10m:
-    name: Installed Python ASOF release and watermark phases at 10M
-    if: inputs.mode == 'asof-wheel-watermark-10m'
+  asof-wheel-affinity-1m:
+    name: ASOF installed wheels at 1M with one or four visible CPUs
+    if: inputs.mode == 'asof-wheel-affinity-1m'
     runs-on: ubuntu-latest
     timeout-minutes: 150
     env:
@@ -639,16 +639,11 @@ jobs:
           lscpu --json > "$STUDY/wheel-cpu.json"
           git rev-parse HEAD > "$STUDY/wheel-registration.txt"
           (cd "$STUDY" && sha256sum --check wheel-registered.sha256)
-      - name: Build the two traced release wheels
-        timeout-minutes: 120
-        run: target/benchmark-venv/bin/python "$STUDY/wheel_study.py" build
-      - name: Verify sealed benchmark suite wheels
+      - name: Verify sealed wheels and replay both affinity settings
+        timeout-minutes: 7
         env:
           GH_TOKEN: ${{ github.token }}
-        run: target/benchmark-venv/bin/python "$STUDY/wheel_study.py" download
-      - name: Measure installed ASOF products and exclusive watermark clocks
-        timeout-minutes: 9
-        run: target/benchmark-venv/bin/python "$STUDY/wheel_study.py" measure
+        run: target/benchmark-venv/bin/python "$STUDY/wheel_affinity.py"
       - name: Package observations and partial progress
         if: always()
         run: python "$STUDY/package_wheel.py"
@@ -656,7 +651,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: hosted-asof-wheel-10m-${{ github.run_id }}-${{ github.run_attempt }}
+          name: hosted-asof-affinity-1m-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/wheel-study-raw.tar.gz
           if-no-files-found: error
           retention-days: 30
