@@ -14,7 +14,7 @@ The baseline is the exact registered main 4e4ce4d75137ffca2f089c30efd29553ace92f
 | 1     | -0.10%        | [-1.98%, +9.54%] |
 | 2     | +0.63%        | [-1.99%, +4.05%] |
 
-The maintained verdict was **inconclusive**. Two rounds each completed ten alternating AB/BA pairs after four excluded warmups. Every invocation validated all ten million ordered sequence identities and rolling means outside timing against the independent per-key NumPy oracle. The leading nineteen rows per key require missing results; each run contains 9,998,784 finite outputs and 1,216 warmup values. The largest observed absolute error was 2.842e-14.
+The maintained verdict was **inconclusive**. Two rounds each completed ten alternating AB/BA pairs after four excluded warmups. Every invocation validated all ten million sequence identities and rolling means after sorting by sequence outside timing against the independent per-key NumPy oracle. The leading nineteen rows per key require missing results; each run contains 9,998,784 finite outputs and 1,216 warmup values. The largest observed absolute error was 2.842e-14.
 
 The Linux WSL2 host exposed 32 logical CPUs and 16 SMT groups. Each worker used one Tokio thread and one physical core, chosen during the three-second preflight. Each one-second interval checked every selected core's SMT sibling, host utilization, memory, swap and major faults. This run recorded 79 intervals and took 84.896 seconds within the controller and 84.98 seconds including interpreter startup and exit, against the 180-second limit. [Result and resources](result.json)
 
