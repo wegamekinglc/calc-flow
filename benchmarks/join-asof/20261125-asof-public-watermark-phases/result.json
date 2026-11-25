@@ -1,0 +1,4191 @@
+{
+  "bad_intervals": 0,
+  "completed_formal_samples": 40,
+  "completed_warmups": 4,
+  "outcome": {
+    "elapsed": 21.686219210969284,
+    "state": "completed"
+  },
+  "outer_clock": {
+    "base_p50": 0.0613226865,
+    "change_percent": 229.06516171629238,
+    "head_max": 0.26772562,
+    "head_min": 0.180648826,
+    "head_p50": 0.2017915975,
+    "head_p95": 0.22510191965000004,
+    "round_changes": [
+      218.61422188416003,
+      226.85525155404378
+    ],
+    "round_intervals": [
+      {
+        "coverage": 0.978515625,
+        "high": 258.5431641370359,
+        "low": 189.10671031930067,
+        "median": 218.61422188416003
+      },
+      {
+        "coverage": 0.978515625,
+        "high": 249.84397666773708,
+        "low": 205.8255630452031,
+        "median": 226.85525155404378
+      }
+    ],
+    "round_min_changes": [
+      220.74721240211835,
+      222.7952077403024
+    ],
+    "rows_per_second": 4955607.727918403,
+    "samples": 20,
+    "verdict": "regression"
+  },
+  "outer_elapsed": 21.78,
+  "phase_summary": {
+    "all": {
+      "arrow_output_ns": {
+        "baseline": {
+          "max": 0.041726,
+          "min": 0.017101,
+          "p50": 0.029332999999999998,
+          "p95": 0.0346276
+        },
+        "candidate": {
+          "max": 34.710158,
+          "min": 26.236906,
+          "p50": 29.480788,
+          "p95": 32.52752635
+        },
+        "paired_median_delta_per_round": [
+          29.448847999999998,
+          29.442788
+        ],
+        "paired_pooled_median_delta": 29.448847999999998
+      },
+      "callbacks": {
+        "baseline": {
+          "max": 5,
+          "min": 5,
+          "p50": 5.0,
+          "p95": 5.0
+        },
+        "candidate": {
+          "max": 5,
+          "min": 5,
+          "p50": 5.0,
+          "p95": 5.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "emit_ns": {
+        "baseline": {
+          "max": 0.019914,
+          "min": 0.007316,
+          "p50": 0.0087325,
+          "p95": 0.011959650000000006
+        },
+        "candidate": {
+          "max": 0.021017,
+          "min": 0.015192,
+          "p50": 0.016811,
+          "p95": 0.0203235
+        },
+        "paired_median_delta_per_round": [
+          0.007579000000000001,
+          0.0084485
+        ],
+        "paired_pooled_median_delta": 0.008020500000000002
+      },
+      "emitted_delta": {
+        "baseline": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "candidate": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "evicted_delta": {
+        "baseline": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "candidate": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "left_commit_ns": {
+        "baseline": {
+          "max": 0.030908,
+          "min": 0.016252,
+          "p50": 0.0258595,
+          "p95": 0.030159400000000003
+        },
+        "candidate": {
+          "max": 9.8202,
+          "min": 8.240987,
+          "p50": 8.540561,
+          "p95": 9.700185549999999
+        },
+        "paired_median_delta_per_round": [
+          8.422469,
+          8.545855
+        ],
+        "paired_pooled_median_delta": 8.521679500000001
+      },
+      "matched_delta": {
+        "baseline": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "candidate": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "matching_ns": {
+        "baseline": {
+          "max": 13.728146,
+          "min": 5.944808,
+          "p50": 8.819365999999999,
+          "p95": 12.419394650000001
+        },
+        "candidate": {
+          "max": 24.547023,
+          "min": 16.038382,
+          "p50": 18.448230000000002,
+          "p95": 22.98716765
+        },
+        "paired_median_delta_per_round": [
+          10.321907999999999,
+          9.494479000000002
+        ],
+        "paired_pooled_median_delta": 9.844399000000001
+      },
+      "residual_ns": {
+        "baseline": {
+          "max": 0.026045,
+          "min": 0.009873,
+          "p50": 0.0126225,
+          "p95": 0.02580845
+        },
+        "candidate": {
+          "max": 0.041383,
+          "min": 0.021921,
+          "p50": 0.0281625,
+          "p95": 0.0390593
+        },
+        "paired_median_delta_per_round": [
+          0.0181025,
+          0.012248
+        ],
+        "paired_pooled_median_delta": 0.015669000000000002
+      },
+      "right_eviction_ns": {
+        "baseline": {
+          "max": 11.169423,
+          "min": 7.942913,
+          "p50": 9.0434035,
+          "p95": 10.230899
+        },
+        "candidate": {
+          "max": 10.587122,
+          "min": 8.571886,
+          "p50": 9.168193,
+          "p95": 10.386038350000002
+        },
+        "paired_median_delta_per_round": [
+          -0.22431800000000024,
+          0.5486789999999999
+        ],
+        "paired_pooled_median_delta": 0.32502549999999975
+      },
+      "tickets_0": {
+        "baseline": {
+          "max": 1,
+          "min": 1,
+          "p50": 1.0,
+          "p95": 1.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          -1.0,
+          -1.0
+        ],
+        "paired_pooled_median_delta": -1.0
+      },
+      "tickets_1": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_2": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_3": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_4": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_5": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "wall_ns": {
+        "baseline": {
+          "max": 22.902279,
+          "min": 14.50974,
+          "p50": 17.4835225,
+          "p95": 21.956763950000003
+        },
+        "candidate": {
+          "max": 79.327193,
+          "min": 61.691022,
+          "p50": 65.64874950000001,
+          "p95": 73.00972245
+        },
+        "paired_median_delta_per_round": [
+          46.981344,
+          47.668294
+        ],
+        "paired_pooled_median_delta": 47.668294
+      }
+    },
+    "emitting": {
+      "arrow_output_ns": {
+        "baseline": {
+          "max": 0.041726,
+          "min": 0.017101,
+          "p50": 0.029332999999999998,
+          "p95": 0.0346276
+        },
+        "candidate": {
+          "max": 34.710158,
+          "min": 26.236906,
+          "p50": 29.480788,
+          "p95": 32.52752635
+        },
+        "paired_median_delta_per_round": [
+          29.448847999999998,
+          29.442788
+        ],
+        "paired_pooled_median_delta": 29.448847999999998
+      },
+      "callbacks": {
+        "baseline": {
+          "max": 1,
+          "min": 1,
+          "p50": 1.0,
+          "p95": 1.0
+        },
+        "candidate": {
+          "max": 1,
+          "min": 1,
+          "p50": 1.0,
+          "p95": 1.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "emit_ns": {
+        "baseline": {
+          "max": 0.019914,
+          "min": 0.007316,
+          "p50": 0.0087325,
+          "p95": 0.011959650000000006
+        },
+        "candidate": {
+          "max": 0.021017,
+          "min": 0.015192,
+          "p50": 0.016811,
+          "p95": 0.0203235
+        },
+        "paired_median_delta_per_round": [
+          0.007579000000000001,
+          0.0084485
+        ],
+        "paired_pooled_median_delta": 0.008020500000000002
+      },
+      "emitted_delta": {
+        "baseline": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "candidate": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "evicted_delta": {
+        "baseline": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "candidate": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "left_commit_ns": {
+        "baseline": {
+          "max": 0.030908,
+          "min": 0.016252,
+          "p50": 0.0258595,
+          "p95": 0.030159400000000003
+        },
+        "candidate": {
+          "max": 9.8202,
+          "min": 8.240987,
+          "p50": 8.540561,
+          "p95": 9.700185549999999
+        },
+        "paired_median_delta_per_round": [
+          8.422469,
+          8.545855
+        ],
+        "paired_pooled_median_delta": 8.521679500000001
+      },
+      "matched_delta": {
+        "baseline": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "candidate": {
+          "max": 1000000,
+          "min": 1000000,
+          "p50": 1000000.0,
+          "p95": 1000000.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "matching_ns": {
+        "baseline": {
+          "max": 13.72568,
+          "min": 5.942506,
+          "p50": 8.8172455,
+          "p95": 12.4178815
+        },
+        "candidate": {
+          "max": 24.545573,
+          "min": 16.037293,
+          "p50": 18.447233,
+          "p95": 22.98637505
+        },
+        "paired_median_delta_per_round": [
+          10.323296,
+          9.495779
+        ],
+        "paired_pooled_median_delta": 9.845655
+      },
+      "residual_ns": {
+        "baseline": {
+          "max": 0.007317,
+          "min": 0.002195,
+          "p50": 0.0028915,
+          "p95": 0.004177250000000002
+        },
+        "candidate": {
+          "max": 0.02309,
+          "min": 0.007921,
+          "p50": 0.0090825,
+          "p95": 0.0212204
+        },
+        "paired_median_delta_per_round": [
+          0.007100499999999999,
+          0.005733500000000001
+        ],
+        "paired_pooled_median_delta": 0.0061205
+      },
+      "right_eviction_ns": {
+        "baseline": {
+          "max": 11.166242,
+          "min": 7.939704,
+          "p50": 9.039988999999998,
+          "p95": 10.22761255
+        },
+        "candidate": {
+          "max": 9.424546,
+          "min": 5.227991,
+          "p50": 5.703731,
+          "p95": 9.20445285
+        },
+        "paired_median_delta_per_round": [
+          -3.5280975000000003,
+          -1.7656465
+        ],
+        "paired_pooled_median_delta": -3.0693205
+      },
+      "tickets_0": {
+        "baseline": {
+          "max": 1,
+          "min": 1,
+          "p50": 1.0,
+          "p95": 1.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          -1.0,
+          -1.0
+        ],
+        "paired_pooled_median_delta": -1.0
+      },
+      "tickets_1": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_2": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_3": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_4": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_5": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "wall_ns": {
+        "baseline": {
+          "max": 22.887211,
+          "min": 14.493171,
+          "p50": 17.471265000000002,
+          "p95": 21.94450225
+        },
+        "candidate": {
+          "max": 75.398512,
+          "min": 58.159765,
+          "p50": 63.224554499999996,
+          "p95": 71.3774356
+        },
+        "paired_median_delta_per_round": [
+          43.7136885,
+          45.18225700000001
+        ],
+        "paired_pooled_median_delta": 45.18225700000001
+      }
+    },
+    "other": {
+      "arrow_output_ns": {
+        "baseline": {
+          "max": 0.0,
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0.0,
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "callbacks": {
+        "baseline": {
+          "max": 4,
+          "min": 4,
+          "p50": 4.0,
+          "p95": 4.0
+        },
+        "candidate": {
+          "max": 4,
+          "min": 4,
+          "p50": 4.0,
+          "p95": 4.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "emit_ns": {
+        "baseline": {
+          "max": 0.0,
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0.0,
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "emitted_delta": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "evicted_delta": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "left_commit_ns": {
+        "baseline": {
+          "max": 0.0,
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0.0,
+          "min": 0.0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "matched_delta": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "matching_ns": {
+        "baseline": {
+          "max": 0.00289,
+          "min": 0.001132,
+          "p50": 0.0021695,
+          "p95": 0.0028254
+        },
+        "candidate": {
+          "max": 0.00145,
+          "min": 0.000652,
+          "p50": 0.0009935,
+          "p95": 0.0011906500000000001
+        },
+        "paired_median_delta_per_round": [
+          -0.0011510000000000001,
+          -0.0013135
+        ],
+        "paired_pooled_median_delta": -0.001236
+      },
+      "residual_ns": {
+        "baseline": {
+          "max": 0.02336,
+          "min": 0.007244,
+          "p50": 0.008938999999999999,
+          "p95": 0.018959600000000004
+        },
+        "candidate": {
+          "max": 0.032185,
+          "min": 0.013964,
+          "p50": 0.0178425,
+          "p95": 0.02256150000000001
+        },
+        "paired_median_delta_per_round": [
+          0.009796000000000001,
+          0.005907000000000001
+        ],
+        "paired_pooled_median_delta": 0.0084155
+      },
+      "right_eviction_ns": {
+        "baseline": {
+          "max": 0.003838,
+          "min": 0.002181,
+          "p50": 0.0029354999999999997,
+          "p95": 0.0035739
+        },
+        "candidate": {
+          "max": 4.411692,
+          "min": 0.136719,
+          "p50": 3.3969265,
+          "p95": 4.126617900000001
+        },
+        "paired_median_delta_per_round": [
+          3.507767,
+          3.3261529999999997
+        ],
+        "paired_pooled_median_delta": 3.393924
+      },
+      "tickets_0": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_1": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_2": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_3": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_4": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "tickets_5": {
+        "baseline": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "candidate": {
+          "max": 0,
+          "min": 0,
+          "p50": 0.0,
+          "p95": 0.0
+        },
+        "paired_median_delta_per_round": [
+          0.0,
+          0.0
+        ],
+        "paired_pooled_median_delta": 0.0
+      },
+      "wall_ns": {
+        "baseline": {
+          "max": 0.027711,
+          "min": 0.010991,
+          "p50": 0.0147,
+          "p95": 0.024101000000000004
+        },
+        "candidate": {
+          "max": 4.431519,
+          "min": 0.151551,
+          "p50": 3.4168165,
+          "p95": 4.144139249999999
+        },
+        "paired_median_delta_per_round": [
+          3.517803,
+          3.3309059999999997
+        ],
+        "paired_pooled_median_delta": 3.398046
+      }
+    }
+  },
+  "resources": 15,
+  "rows": [
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 36960,
+          "callbacks": 5,
+          "emit_ns": 11342,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 20969,
+          "matched_delta": 1000000,
+          "matching_ns": 7976069,
+          "residual_ns": 49418,
+          "right_eviction_ns": 8785597,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 16880355
+        },
+        "emitting": {
+          "arrow_output_ns": 36960,
+          "callbacks": 1,
+          "emit_ns": 11342,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 20969,
+          "matched_delta": 1000000,
+          "matching_ns": 7973670,
+          "residual_ns": 2498,
+          "right_eviction_ns": 8782193,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 16827632
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2399,
+          "residual_ns": 46920,
+          "right_eviction_ns": 3404,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 52723
+        }
+      },
+      "op": "prepare",
+      "request": 2,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 74.361418
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 24105,
+          "callbacks": 5,
+          "emit_ns": 7877,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 23159,
+          "matched_delta": 1000000,
+          "matching_ns": 6804899,
+          "residual_ns": 20287,
+          "right_eviction_ns": 9334969,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 16215296
+        },
+        "emitting": {
+          "arrow_output_ns": 24105,
+          "callbacks": 1,
+          "emit_ns": 7877,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 23159,
+          "matched_delta": 1000000,
+          "matching_ns": 6803206,
+          "residual_ns": 2216,
+          "right_eviction_ns": 9332788,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 16193351
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1693,
+          "residual_ns": 18071,
+          "right_eviction_ns": 2181,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21945
+        }
+      },
+      "op": "sample",
+      "request": 3,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 59.899083
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 32974,
+          "callbacks": 5,
+          "emit_ns": 9279,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 29706,
+          "matched_delta": 1000000,
+          "matching_ns": 13728146,
+          "residual_ns": 12397,
+          "right_eviction_ns": 9089777,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 22902279
+        },
+        "emitting": {
+          "arrow_output_ns": 32974,
+          "callbacks": 1,
+          "emit_ns": 9279,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 29706,
+          "matched_delta": 1000000,
+          "matching_ns": 13725680,
+          "residual_ns": 3355,
+          "right_eviction_ns": 9086217,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 22887211
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2466,
+          "residual_ns": 9042,
+          "right_eviction_ns": 3560,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15068
+        }
+      },
+      "op": "sample",
+      "request": 4,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 70.45378600000001
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 28532,
+          "callbacks": 5,
+          "emit_ns": 8119,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 27476,
+          "matched_delta": 1000000,
+          "matching_ns": 10940542,
+          "residual_ns": 10340,
+          "right_eviction_ns": 8665558,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 19680567
+        },
+        "emitting": {
+          "arrow_output_ns": 28532,
+          "callbacks": 1,
+          "emit_ns": 8119,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 27476,
+          "matched_delta": 1000000,
+          "matching_ns": 10939233,
+          "residual_ns": 2509,
+          "right_eviction_ns": 8663264,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 19669133
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1309,
+          "residual_ns": 7831,
+          "right_eviction_ns": 2294,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 11434
+        }
+      },
+      "op": "sample",
+      "request": 5,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 61.888659
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 28051,
+          "callbacks": 5,
+          "emit_ns": 7977,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 30908,
+          "matched_delta": 1000000,
+          "matching_ns": 7096510,
+          "residual_ns": 11358,
+          "right_eviction_ns": 10181503,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17356307
+        },
+        "emitting": {
+          "arrow_output_ns": 28051,
+          "callbacks": 1,
+          "emit_ns": 7977,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 30908,
+          "matched_delta": 1000000,
+          "matching_ns": 7094116,
+          "residual_ns": 2749,
+          "right_eviction_ns": 10178211,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17342012
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2394,
+          "residual_ns": 8609,
+          "right_eviction_ns": 3292,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 14295
+        }
+      },
+      "op": "sample",
+      "request": 6,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 63.617139
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 28664,
+          "callbacks": 5,
+          "emit_ns": 11541,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 26407,
+          "matched_delta": 1000000,
+          "matching_ns": 8966023,
+          "residual_ns": 11243,
+          "right_eviction_ns": 11169423,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 20213301
+        },
+        "emitting": {
+          "arrow_output_ns": 28664,
+          "callbacks": 1,
+          "emit_ns": 11541,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 26407,
+          "matched_delta": 1000000,
+          "matching_ns": 8963907,
+          "residual_ns": 2910,
+          "right_eviction_ns": 11166242,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 20199671
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2116,
+          "residual_ns": 8333,
+          "right_eviction_ns": 3181,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 13630
+        }
+      },
+      "op": "sample",
+      "request": 7,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 70.593839
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 33943,
+          "callbacks": 5,
+          "emit_ns": 8757,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17818,
+          "matched_delta": 1000000,
+          "matching_ns": 8672709,
+          "residual_ns": 16872,
+          "right_eviction_ns": 9362669,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 18112768
+        },
+        "emitting": {
+          "arrow_output_ns": 33943,
+          "callbacks": 1,
+          "emit_ns": 8757,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17818,
+          "matched_delta": 1000000,
+          "matching_ns": 8670584,
+          "residual_ns": 2195,
+          "right_eviction_ns": 9359697,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 18092994
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2125,
+          "residual_ns": 14677,
+          "right_eviction_ns": 2972,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 19774
+        }
+      },
+      "op": "sample",
+      "request": 8,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 64.519328
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 41726,
+          "callbacks": 5,
+          "emit_ns": 9057,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 18115,
+          "matched_delta": 1000000,
+          "matching_ns": 12189664,
+          "residual_ns": 10793,
+          "right_eviction_ns": 9499000,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21768355
+        },
+        "emitting": {
+          "arrow_output_ns": 41726,
+          "callbacks": 1,
+          "emit_ns": 9057,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 18115,
+          "matched_delta": 1000000,
+          "matching_ns": 12187148,
+          "residual_ns": 2583,
+          "right_eviction_ns": 9495765,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21754394
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2516,
+          "residual_ns": 8210,
+          "right_eviction_ns": 3235,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 13961
+        }
+      },
+      "op": "sample",
+      "request": 9,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 67.575462
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30002,
+          "callbacks": 5,
+          "emit_ns": 19914,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 25312,
+          "matched_delta": 1000000,
+          "matching_ns": 5998374,
+          "residual_ns": 16284,
+          "right_eviction_ns": 9634382,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15724268
+        },
+        "emitting": {
+          "arrow_output_ns": 30002,
+          "callbacks": 1,
+          "emit_ns": 19914,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 25312,
+          "matched_delta": 1000000,
+          "matching_ns": 5996204,
+          "residual_ns": 3138,
+          "right_eviction_ns": 9630544,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15705114
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2170,
+          "residual_ns": 13146,
+          "right_eviction_ns": 3838,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 19154
+        }
+      },
+      "op": "sample",
+      "request": 10,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 60.240826
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30906,
+          "callbacks": 5,
+          "emit_ns": 8152,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 26419,
+          "matched_delta": 1000000,
+          "matching_ns": 6500111,
+          "residual_ns": 12890,
+          "right_eviction_ns": 9428521,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 16006999
+        },
+        "emitting": {
+          "arrow_output_ns": 30906,
+          "callbacks": 1,
+          "emit_ns": 8152,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 26419,
+          "matched_delta": 1000000,
+          "matching_ns": 6497289,
+          "residual_ns": 2873,
+          "right_eviction_ns": 9425622,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15991261
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2822,
+          "residual_ns": 10017,
+          "right_eviction_ns": 2899,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15738
+        }
+      },
+      "op": "sample",
+      "request": 11,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 61.434855
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30918,
+          "callbacks": 5,
+          "emit_ns": 8708,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 29699,
+          "matched_delta": 1000000,
+          "matching_ns": 6135772,
+          "residual_ns": 11247,
+          "right_eviction_ns": 9375821,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15592165
+        },
+        "emitting": {
+          "arrow_output_ns": 30918,
+          "callbacks": 1,
+          "emit_ns": 8708,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 29699,
+          "matched_delta": 1000000,
+          "matching_ns": 6133839,
+          "residual_ns": 3023,
+          "right_eviction_ns": 9373129,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15579316
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1933,
+          "residual_ns": 8224,
+          "right_eviction_ns": 2692,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 12849
+        }
+      },
+      "op": "sample",
+      "request": 12,
+      "round": 0,
+      "side": "baseline",
+      "total_ms": 57.927652
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29484572,
+          "callbacks": 5,
+          "emit_ns": 15970,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9842488,
+          "matched_delta": 1000000,
+          "matching_ns": 20309101,
+          "residual_ns": 55512,
+          "right_eviction_ns": 9648230,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 69355873
+        },
+        "emitting": {
+          "arrow_output_ns": 29484572,
+          "callbacks": 1,
+          "emit_ns": 15970,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9842488,
+          "matched_delta": 1000000,
+          "matching_ns": 20308074,
+          "residual_ns": 38440,
+          "right_eviction_ns": 5944587,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 65634131
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1027,
+          "residual_ns": 17072,
+          "right_eviction_ns": 3703643,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3721742
+        }
+      },
+      "op": "prepare",
+      "request": 2,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 233.8213
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 34710158,
+          "callbacks": 5,
+          "emit_ns": 17804,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9820200,
+          "matched_delta": 1000000,
+          "matching_ns": 24547023,
+          "residual_ns": 41383,
+          "right_eviction_ns": 10190625,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 79327193
+        },
+        "emitting": {
+          "arrow_output_ns": 34710158,
+          "callbacks": 1,
+          "emit_ns": 17804,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9820200,
+          "matched_delta": 1000000,
+          "matching_ns": 24545573,
+          "residual_ns": 9198,
+          "right_eviction_ns": 6295579,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 75398512
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1450,
+          "residual_ns": 32185,
+          "right_eviction_ns": 3895046,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3928681
+        }
+      },
+      "op": "sample",
+      "request": 3,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 267.72562
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29463362,
+          "callbacks": 5,
+          "emit_ns": 16011,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9388797,
+          "matched_delta": 1000000,
+          "matching_ns": 19298772,
+          "residual_ns": 26571,
+          "right_eviction_ns": 10375455,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 68568968
+        },
+        "emitting": {
+          "arrow_output_ns": 29463362,
+          "callbacks": 1,
+          "emit_ns": 16011,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9388797,
+          "matched_delta": 1000000,
+          "matching_ns": 19297595,
+          "residual_ns": 7921,
+          "right_eviction_ns": 5963763,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 64137449
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1177,
+          "residual_ns": 18650,
+          "right_eviction_ns": 4411692,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 4431519
+        }
+      },
+      "op": "sample",
+      "request": 4,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 203.686623
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27428804,
+          "callbacks": 5,
+          "emit_ns": 16062,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8326203,
+          "matched_delta": 1000000,
+          "matching_ns": 17432829,
+          "residual_ns": 38937,
+          "right_eviction_ns": 9023210,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62266045
+        },
+        "emitting": {
+          "arrow_output_ns": 27428804,
+          "callbacks": 1,
+          "emit_ns": 16062,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8326203,
+          "matched_delta": 1000000,
+          "matching_ns": 17431805,
+          "residual_ns": 21122,
+          "right_eviction_ns": 5687426,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 58911422
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1024,
+          "residual_ns": 17815,
+          "right_eviction_ns": 3335784,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3354623
+        }
+      },
+      "op": "sample",
+      "request": 5,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 199.49123699999998
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29679468,
+          "callbacks": 5,
+          "emit_ns": 15192,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8475230,
+          "matched_delta": 1000000,
+          "matching_ns": 16038382,
+          "residual_ns": 26960,
+          "right_eviction_ns": 8691617,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62926849
+        },
+        "emitting": {
+          "arrow_output_ns": 29679468,
+          "callbacks": 1,
+          "emit_ns": 15192,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8475230,
+          "matched_delta": 1000000,
+          "matching_ns": 16037293,
+          "residual_ns": 8751,
+          "right_eviction_ns": 5244068,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 59460002
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1089,
+          "residual_ns": 18209,
+          "right_eviction_ns": 3447549,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3466847
+        }
+      },
+      "op": "sample",
+      "request": 6,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 200.323704
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 28936797,
+          "callbacks": 5,
+          "emit_ns": 16906,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8735205,
+          "matched_delta": 1000000,
+          "matching_ns": 18894433,
+          "residual_ns": 28093,
+          "right_eviction_ns": 8941824,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 65553258
+        },
+        "emitting": {
+          "arrow_output_ns": 28936797,
+          "callbacks": 1,
+          "emit_ns": 16906,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8735205,
+          "matched_delta": 1000000,
+          "matching_ns": 18893335,
+          "residual_ns": 8314,
+          "right_eviction_ns": 5544626,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62135183
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1098,
+          "residual_ns": 19779,
+          "right_eviction_ns": 3397198,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3418075
+        }
+      },
+      "op": "sample",
+      "request": 7,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 217.91794000000002
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27485412,
+          "callbacks": 5,
+          "emit_ns": 18513,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8240987,
+          "matched_delta": 1000000,
+          "matching_ns": 17224800,
+          "residual_ns": 26507,
+          "right_eviction_ns": 9979167,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62975386
+        },
+        "emitting": {
+          "arrow_output_ns": 27485412,
+          "callbacks": 1,
+          "emit_ns": 18513,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8240987,
+          "matched_delta": 1000000,
+          "matching_ns": 17223858,
+          "residual_ns": 9561,
+          "right_eviction_ns": 6217711,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 59196042
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 942,
+          "residual_ns": 16946,
+          "right_eviction_ns": 3761456,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3779344
+        }
+      },
+      "op": "sample",
+      "request": 8,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 185.80132899999998
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30464386,
+          "callbacks": 5,
+          "emit_ns": 16126,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8387749,
+          "matched_delta": 1000000,
+          "matching_ns": 22905070,
+          "residual_ns": 32261,
+          "right_eviction_ns": 8855204,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 70660796
+        },
+        "emitting": {
+          "arrow_output_ns": 30464386,
+          "callbacks": 1,
+          "emit_ns": 16126,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8387749,
+          "matched_delta": 1000000,
+          "matching_ns": 22904312,
+          "residual_ns": 10516,
+          "right_eviction_ns": 5280692,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 67063781
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 758,
+          "residual_ns": 21745,
+          "right_eviction_ns": 3574512,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3597015
+        }
+      },
+      "op": "sample",
+      "request": 9,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 211.96976800000002
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 32018202,
+          "callbacks": 5,
+          "emit_ns": 15777,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8343870,
+          "matched_delta": 1000000,
+          "matching_ns": 18666440,
+          "residual_ns": 32157,
+          "right_eviction_ns": 9300797,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 68377243
+        },
+        "emitting": {
+          "arrow_output_ns": 32018202,
+          "callbacks": 1,
+          "emit_ns": 15777,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8343870,
+          "matched_delta": 1000000,
+          "matching_ns": 18665389,
+          "residual_ns": 10357,
+          "right_eviction_ns": 5488649,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 64542244
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1051,
+          "residual_ns": 21800,
+          "right_eviction_ns": 3812148,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3834999
+        }
+      },
+      "op": "sample",
+      "request": 10,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 208.367368
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29498214,
+          "callbacks": 5,
+          "emit_ns": 16934,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9693869,
+          "matched_delta": 1000000,
+          "matching_ns": 21588153,
+          "residual_ns": 38921,
+          "right_eviction_ns": 8898330,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 69734421
+        },
+        "emitting": {
+          "arrow_output_ns": 29498214,
+          "callbacks": 1,
+          "emit_ns": 16934,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9693869,
+          "matched_delta": 1000000,
+          "matching_ns": 21587101,
+          "residual_ns": 23090,
+          "right_eviction_ns": 5511413,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 66330621
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1052,
+          "residual_ns": 15831,
+          "right_eviction_ns": 3386917,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3403800
+        }
+      },
+      "op": "sample",
+      "request": 11,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 220.27047299999998
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27944286,
+          "callbacks": 5,
+          "emit_ns": 16716,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8430315,
+          "matched_delta": 1000000,
+          "matching_ns": 18205475,
+          "residual_ns": 30602,
+          "right_eviction_ns": 9260770,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 63888164
+        },
+        "emitting": {
+          "arrow_output_ns": 27944286,
+          "callbacks": 1,
+          "emit_ns": 16716,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8430315,
+          "matched_delta": 1000000,
+          "matching_ns": 18204547,
+          "residual_ns": 8547,
+          "right_eviction_ns": 9087770,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 63692181
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 928,
+          "residual_ns": 22055,
+          "right_eviction_ns": 173000,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 195983
+        }
+      },
+      "op": "sample",
+      "request": 12,
+      "round": 0,
+      "side": "candidate",
+      "total_ms": 200.485878
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27526,
+          "callbacks": 5,
+          "emit_ns": 7479,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 31195,
+          "matched_delta": 1000000,
+          "matching_ns": 6690443,
+          "residual_ns": 48487,
+          "right_eviction_ns": 8758021,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15563151
+        },
+        "emitting": {
+          "arrow_output_ns": 27526,
+          "callbacks": 1,
+          "emit_ns": 7479,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 31195,
+          "matched_delta": 1000000,
+          "matching_ns": 6688497,
+          "residual_ns": 3519,
+          "right_eviction_ns": 8754248,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15512464
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1946,
+          "residual_ns": 44968,
+          "right_eviction_ns": 3773,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 50687
+        }
+      },
+      "op": "prepare",
+      "request": 2,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 62.827917
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30129,
+          "callbacks": 5,
+          "emit_ns": 9222,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 24687,
+          "matched_delta": 1000000,
+          "matching_ns": 11778276,
+          "residual_ns": 26045,
+          "right_eviction_ns": 8824292,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 20692651
+        },
+        "emitting": {
+          "arrow_output_ns": 30129,
+          "callbacks": 1,
+          "emit_ns": 9222,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 24687,
+          "matched_delta": 1000000,
+          "matching_ns": 11775917,
+          "residual_ns": 7317,
+          "right_eviction_ns": 8821468,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 20668740
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2359,
+          "residual_ns": 18728,
+          "right_eviction_ns": 2824,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 23911
+        }
+      },
+      "op": "sample",
+      "request": 3,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 61.889185
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 28376,
+          "callbacks": 5,
+          "emit_ns": 8814,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 27840,
+          "matched_delta": 1000000,
+          "matching_ns": 6487975,
+          "residual_ns": 13822,
+          "right_eviction_ns": 7942913,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 14509740
+        },
+        "emitting": {
+          "arrow_output_ns": 28376,
+          "callbacks": 1,
+          "emit_ns": 8814,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 27840,
+          "matched_delta": 1000000,
+          "matching_ns": 6485451,
+          "residual_ns": 2986,
+          "right_eviction_ns": 7939704,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 14493171
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2524,
+          "residual_ns": 10836,
+          "right_eviction_ns": 3209,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 16569
+        }
+      },
+      "op": "sample",
+      "request": 4,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 58.07705
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30841,
+          "callbacks": 5,
+          "emit_ns": 7316,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17979,
+          "matched_delta": 1000000,
+          "matching_ns": 9148212,
+          "residual_ns": 14650,
+          "right_eviction_ns": 8118306,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17337304
+        },
+        "emitting": {
+          "arrow_output_ns": 30841,
+          "callbacks": 1,
+          "emit_ns": 7316,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17979,
+          "matched_delta": 1000000,
+          "matching_ns": 9145322,
+          "residual_ns": 3178,
+          "right_eviction_ns": 8114849,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17319485
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2890,
+          "residual_ns": 11472,
+          "right_eviction_ns": 3457,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17819
+        }
+      },
+      "op": "sample",
+      "request": 5,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 55.963912
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 20338,
+          "callbacks": 5,
+          "emit_ns": 8606,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 22513,
+          "matched_delta": 1000000,
+          "matching_ns": 8572467,
+          "residual_ns": 9873,
+          "right_eviction_ns": 8805094,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17438891
+        },
+        "emitting": {
+          "arrow_output_ns": 20338,
+          "callbacks": 1,
+          "emit_ns": 8606,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 22513,
+          "matched_delta": 1000000,
+          "matching_ns": 8571335,
+          "residual_ns": 2629,
+          "right_eviction_ns": 8802479,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17427900
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1132,
+          "residual_ns": 7244,
+          "right_eviction_ns": 2615,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 10991
+        }
+      },
+      "op": "sample",
+      "request": 6,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 61.663585
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 22486,
+          "callbacks": 5,
+          "emit_ns": 7457,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 28193,
+          "matched_delta": 1000000,
+          "matching_ns": 12350513,
+          "residual_ns": 25796,
+          "right_eviction_ns": 8675616,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21110061
+        },
+        "emitting": {
+          "arrow_output_ns": 22486,
+          "callbacks": 1,
+          "emit_ns": 7457,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 28193,
+          "matched_delta": 1000000,
+          "matching_ns": 12349050,
+          "residual_ns": 2436,
+          "right_eviction_ns": 8672728,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21082350
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1463,
+          "residual_ns": 23360,
+          "right_eviction_ns": 2888,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 27711
+        }
+      },
+      "op": "sample",
+      "request": 7,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 61.210518
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 34254,
+          "callbacks": 5,
+          "emit_ns": 9258,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17229,
+          "matched_delta": 1000000,
+          "matching_ns": 9629260,
+          "residual_ns": 11550,
+          "right_eviction_ns": 8116725,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17818276
+        },
+        "emitting": {
+          "arrow_output_ns": 34254,
+          "callbacks": 1,
+          "emit_ns": 9258,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17229,
+          "matched_delta": 1000000,
+          "matching_ns": 9627195,
+          "residual_ns": 3182,
+          "right_eviction_ns": 8114029,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17805147
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2065,
+          "residual_ns": 8368,
+          "right_eviction_ns": 2696,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 13129
+        }
+      },
+      "op": "sample",
+      "request": 8,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 58.607260000000004
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 33309,
+          "callbacks": 5,
+          "emit_ns": 10289,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 28934,
+          "matched_delta": 1000000,
+          "matching_ns": 12244611,
+          "residual_ns": 10380,
+          "right_eviction_ns": 9579477,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21907000
+        },
+        "emitting": {
+          "arrow_output_ns": 33309,
+          "callbacks": 1,
+          "emit_ns": 10289,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 28934,
+          "matched_delta": 1000000,
+          "matching_ns": 12242705,
+          "residual_ns": 2723,
+          "right_eviction_ns": 9576926,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 21894886
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1906,
+          "residual_ns": 7657,
+          "right_eviction_ns": 2551,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 12114
+        }
+      },
+      "op": "sample",
+      "request": 9,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 62.617555
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 24819,
+          "callbacks": 5,
+          "emit_ns": 7321,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17152,
+          "matched_delta": 1000000,
+          "matching_ns": 9313263,
+          "residual_ns": 10869,
+          "right_eviction_ns": 8154730,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17528154
+        },
+        "emitting": {
+          "arrow_output_ns": 24819,
+          "callbacks": 1,
+          "emit_ns": 7321,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 17152,
+          "matched_delta": 1000000,
+          "matching_ns": 9311094,
+          "residual_ns": 2309,
+          "right_eviction_ns": 8151935,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 17514630
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2169,
+          "residual_ns": 8560,
+          "right_eviction_ns": 2795,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 13524
+        }
+      },
+      "op": "sample",
+      "request": 10,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 57.841179
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 17101,
+          "callbacks": 5,
+          "emit_ns": 7690,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 30120,
+          "matched_delta": 1000000,
+          "matching_ns": 5944808,
+          "residual_ns": 13440,
+          "right_eviction_ns": 8805241,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 14818400
+        },
+        "emitting": {
+          "arrow_output_ns": 17101,
+          "callbacks": 1,
+          "emit_ns": 7690,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 30120,
+          "matched_delta": 1000000,
+          "matching_ns": 5942506,
+          "residual_ns": 3169,
+          "right_eviction_ns": 8802067,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 14802653
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2302,
+          "residual_ns": 10271,
+          "right_eviction_ns": 3174,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15747
+        }
+      },
+      "op": "sample",
+      "request": 11,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 59.717541
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 25015,
+          "callbacks": 5,
+          "emit_ns": 10792,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 16252,
+          "matched_delta": 1000000,
+          "matching_ns": 6370302,
+          "residual_ns": 12848,
+          "right_eviction_ns": 8997030,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15432239
+        },
+        "emitting": {
+          "arrow_output_ns": 25015,
+          "callbacks": 1,
+          "emit_ns": 10792,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 16252,
+          "matched_delta": 1000000,
+          "matching_ns": 6368075,
+          "residual_ns": 4012,
+          "right_eviction_ns": 8993761,
+          "tickets": [
+            1,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 15417907
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 2227,
+          "residual_ns": 8836,
+          "right_eviction_ns": 3269,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 14332
+        }
+      },
+      "op": "sample",
+      "request": 12,
+      "round": 1,
+      "side": "baseline",
+      "total_ms": 58.757695999999996
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30392347,
+          "callbacks": 5,
+          "emit_ns": 14597,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8640000,
+          "matched_delta": 1000000,
+          "matching_ns": 20125327,
+          "residual_ns": 29693,
+          "right_eviction_ns": 9744254,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 68946218
+        },
+        "emitting": {
+          "arrow_output_ns": 30392347,
+          "callbacks": 1,
+          "emit_ns": 14597,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8640000,
+          "matched_delta": 1000000,
+          "matching_ns": 20124334,
+          "residual_ns": 10910,
+          "right_eviction_ns": 6080290,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 65262478
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 993,
+          "residual_ns": 18783,
+          "right_eviction_ns": 3663964,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3683740
+        }
+      },
+      "op": "prepare",
+      "request": 2,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 224.001743
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 32412651,
+          "callbacks": 5,
+          "emit_ns": 15371,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8676164,
+          "matched_delta": 1000000,
+          "matching_ns": 22428115,
+          "residual_ns": 28232,
+          "right_eviction_ns": 9116691,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 72677224
+        },
+        "emitting": {
+          "arrow_output_ns": 32412651,
+          "callbacks": 1,
+          "emit_ns": 15371,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8676164,
+          "matched_delta": 1000000,
+          "matching_ns": 22427082,
+          "residual_ns": 10362,
+          "right_eviction_ns": 5720036,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 69261666
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1033,
+          "residual_ns": 17870,
+          "right_eviction_ns": 3396655,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3415558
+        }
+      },
+      "op": "sample",
+      "request": 3,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 206.532681
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 26236906,
+          "callbacks": 5,
+          "emit_ns": 17069,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8572004,
+          "matched_delta": 1000000,
+          "matching_ns": 16248363,
+          "residual_ns": 29558,
+          "right_eviction_ns": 10587122,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 61691022
+        },
+        "emitting": {
+          "arrow_output_ns": 26236906,
+          "callbacks": 1,
+          "emit_ns": 17069,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8572004,
+          "matched_delta": 1000000,
+          "matching_ns": 16247333,
+          "residual_ns": 12718,
+          "right_eviction_ns": 7073735,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 58159765
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1030,
+          "residual_ns": 16840,
+          "right_eviction_ns": 3513387,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3531257
+        }
+      },
+      "op": "sample",
+      "request": 4,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 185.844711
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29787063,
+          "callbacks": 5,
+          "emit_ns": 19677,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8990280,
+          "matched_delta": 1000000,
+          "matching_ns": 18230020,
+          "residual_ns": 27647,
+          "right_eviction_ns": 9516028,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 66570715
+        },
+        "emitting": {
+          "arrow_output_ns": 29787063,
+          "callbacks": 1,
+          "emit_ns": 19677,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8990280,
+          "matched_delta": 1000000,
+          "matching_ns": 18229077,
+          "residual_ns": 11190,
+          "right_eviction_ns": 5404414,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62441701
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 943,
+          "residual_ns": 16457,
+          "right_eviction_ns": 4111614,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 4129014
+        }
+      },
+      "op": "sample",
+      "request": 5,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 194.82770699999998
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 30489992,
+          "callbacks": 5,
+          "emit_ns": 20287,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9036356,
+          "matched_delta": 1000000,
+          "matching_ns": 22186263,
+          "residual_ns": 29849,
+          "right_eviction_ns": 9597832,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 71360579
+        },
+        "emitting": {
+          "arrow_output_ns": 30489992,
+          "callbacks": 1,
+          "emit_ns": 20287,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 9036356,
+          "matched_delta": 1000000,
+          "matching_ns": 22185300,
+          "residual_ns": 9319,
+          "right_eviction_ns": 9424546,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 71165800
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 963,
+          "residual_ns": 20530,
+          "right_eviction_ns": 173286,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 194779
+        }
+      },
+      "op": "sample",
+      "request": 6,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 222.858567
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29807841,
+          "callbacks": 5,
+          "emit_ns": 16099,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8420264,
+          "matched_delta": 1000000,
+          "matching_ns": 21482959,
+          "residual_ns": 28868,
+          "right_eviction_ns": 9126713,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 68882744
+        },
+        "emitting": {
+          "arrow_output_ns": 29807841,
+          "callbacks": 1,
+          "emit_ns": 16099,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8420264,
+          "matched_delta": 1000000,
+          "matching_ns": 21481839,
+          "residual_ns": 8214,
+          "right_eviction_ns": 8965346,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 68699603
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 1120,
+          "residual_ns": 20654,
+          "right_eviction_ns": 161367,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 183141
+        }
+      },
+      "op": "sample",
+      "request": 7,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 192.294241
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29205641,
+          "callbacks": 5,
+          "emit_ns": 16344,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8516424,
+          "matched_delta": 1000000,
+          "matching_ns": 18857830,
+          "residual_ns": 22956,
+          "right_eviction_ns": 8762986,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 65382181
+        },
+        "emitting": {
+          "arrow_output_ns": 29205641,
+          "callbacks": 1,
+          "emit_ns": 16344,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8516424,
+          "matched_delta": 1000000,
+          "matching_ns": 18856871,
+          "residual_ns": 8136,
+          "right_eviction_ns": 5448705,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62052121
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 959,
+          "residual_ns": 14820,
+          "right_eviction_ns": 3314281,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3330060
+        }
+      },
+      "op": "sample",
+      "request": 8,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 205.033969
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27563855,
+          "callbacks": 5,
+          "emit_ns": 16106,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8491583,
+          "matched_delta": 1000000,
+          "matching_ns": 17272885,
+          "residual_ns": 26437,
+          "right_eviction_ns": 9114764,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62485630
+        },
+        "emitting": {
+          "arrow_output_ns": 27563855,
+          "callbacks": 1,
+          "emit_ns": 16106,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8491583,
+          "matched_delta": 1000000,
+          "matching_ns": 17271946,
+          "residual_ns": 8962,
+          "right_eviction_ns": 5445105,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 58797557
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 939,
+          "residual_ns": 17475,
+          "right_eviction_ns": 3669659,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3688073
+        }
+      },
+      "op": "sample",
+      "request": 9,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 189.788708
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27622317,
+          "callbacks": 5,
+          "emit_ns": 18223,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8564698,
+          "matched_delta": 1000000,
+          "matching_ns": 17351732,
+          "residual_ns": 21921,
+          "right_eviction_ns": 9329588,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62908479
+        },
+        "emitting": {
+          "arrow_output_ns": 27622317,
+          "callbacks": 1,
+          "emit_ns": 18223,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8564698,
+          "matched_delta": 1000000,
+          "matching_ns": 17350864,
+          "residual_ns": 7957,
+          "right_eviction_ns": 9192869,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62756928
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 868,
+          "residual_ns": 13964,
+          "right_eviction_ns": 136719,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 151551
+        }
+      },
+      "op": "sample",
+      "request": 10,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 180.648826
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 27599456,
+          "callbacks": 5,
+          "emit_ns": 21017,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8322063,
+          "matched_delta": 1000000,
+          "matching_ns": 17669022,
+          "residual_ns": 24939,
+          "right_eviction_ns": 8571886,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 62208383
+        },
+        "emitting": {
+          "arrow_output_ns": 27599456,
+          "callbacks": 1,
+          "emit_ns": 21017,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8322063,
+          "matched_delta": 1000000,
+          "matching_ns": 17668370,
+          "residual_ns": 8858,
+          "right_eviction_ns": 5227991,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 58847755
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 652,
+          "residual_ns": 16081,
+          "right_eviction_ns": 3343895,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 3360628
+        }
+      },
+      "op": "sample",
+      "request": 11,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 182.631506
+    },
+    {
+      "counts": {
+        "all": {
+          "arrow_output_ns": 29739204,
+          "callbacks": 5,
+          "emit_ns": 18825,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8734660,
+          "matched_delta": 1000000,
+          "matching_ns": 18015899,
+          "residual_ns": 25980,
+          "right_eviction_ns": 9209673,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 65744241
+        },
+        "emitting": {
+          "arrow_output_ns": 29739204,
+          "callbacks": 1,
+          "emit_ns": 18825,
+          "emitted_delta": 1000000,
+          "evicted_delta": 1000000,
+          "left_commit_ns": 8734660,
+          "matched_delta": 1000000,
+          "matching_ns": 18015052,
+          "residual_ns": 8967,
+          "right_eviction_ns": 9025467,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 65542175
+        },
+        "other": {
+          "arrow_output_ns": 0,
+          "callbacks": 4,
+          "emit_ns": 0,
+          "emitted_delta": 0,
+          "evicted_delta": 0,
+          "left_commit_ns": 0,
+          "matched_delta": 0,
+          "matching_ns": 847,
+          "residual_ns": 17013,
+          "right_eviction_ns": 184206,
+          "tickets": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "wall_ns": 202066
+        }
+      },
+      "op": "sample",
+      "request": 12,
+      "round": 1,
+      "side": "candidate",
+      "total_ms": 203.097317
+    }
+  ]
+}
