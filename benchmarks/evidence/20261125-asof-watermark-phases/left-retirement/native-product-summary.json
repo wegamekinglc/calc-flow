@@ -1,0 +1,90 @@
+{
+  "main": {
+    "verified": {
+      "case": "admit",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 3,
+      "verdict": "no-confirmed-regression"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "admit",
+      "cpu": 2,
+      "rounds": [
+        {
+          "median": -8.267367926461965,
+          "low": -14.099321777148678,
+          "high": -5.308202506079807,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -7.967476205675306,
+          "low": -11.689850606095032,
+          "high": -4.519594367884416,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "no-confirmed-regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 7.705865,
+          "p95": 7.993934449999999
+        },
+        "head": {
+          "p50": 7.0225905,
+          "p95": 7.40790785
+        }
+      },
+      "wall_seconds": 5.217365228920244
+    },
+    "secondary_admission_p50_ms": {
+      "base": 15.13976,
+      "head": 15.216263999999999
+    }
+  },
+  "release": {
+    "verified": {
+      "case": "admit",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 3,
+      "verdict": "inconclusive"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "admit",
+      "cpu": 2,
+      "rounds": [
+        {
+          "median": 0.7089259129283043,
+          "low": -3.0433163641838568,
+          "high": 8.047026632496411,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -1.7214645790171013,
+          "low": -4.1224485991664395,
+          "high": 4.512187741617013,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "inconclusive",
+      "pooled_ms": {
+        "base": {
+          "p50": 7.280197,
+          "p95": 7.97747015
+        },
+        "head": {
+          "p50": 7.4125060000000005,
+          "p95": 7.73677
+        }
+      },
+      "wall_seconds": 5.3304709299700335
+    },
+    "secondary_admission_p50_ms": {
+      "base": 17.635267000000002,
+      "head": 15.9001925
+    }
+  }
+}
