@@ -19,6 +19,7 @@ use std::{
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static PENDING_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static INDEX_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static ADMISSION_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PROJECTED_GROUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -201,6 +202,17 @@ impl IncomingIndexRows<'_> {
     }
 }
 
+enum LeftKeyOrder {
+    TypedRank,
+    GroupId,
+}
+
+impl LeftKeyOrder {
+    fn matches_ranks(self, ranks: &[u32]) -> bool {
+        matches!(self, Self::TypedRank) || ranks.is_sorted()
+    }
+}
+
 struct PreparedRun {
     run: Run,
     workspace: MemoryReservation,
@@ -377,7 +389,7 @@ fn compare_time_sequence(
     left_run
         .time(left)
         .cmp(&right_run.time(right))
-        .then_with(|| left_run.sequence(left).cmp(right_run.sequence(right)))
+        .then_with(|| left_run.compare_sequence(left, right_run, right))
 }
 
 fn compare_left(
@@ -386,15 +398,14 @@ fn compare_left(
     left: RowLocator,
     right: RowLocator,
 ) -> Ordering {
-    let left_run = &runs[&left.run];
-    let right_run = &runs[&right.run];
-    left_run
-        .time(left)
-        .cmp(&right_run.time(right))
-        .then_with(|| {
-            key_ranks[left_run.group(left).index()].cmp(&key_ranks[right_run.group(right).index()])
-        })
-        .then_with(|| left_run.sequence(left).cmp(right_run.sequence(right)))
+    #[cfg(test)]
+    PENDING_COMPARISONS.set(PENDING_COMPARISONS.get() + 1);
+    runs[&left.run].compare_left_rows(
+        left.row as usize,
+        &runs[&right.run],
+        right.row as usize,
+        |group| key_ranks[group.index()],
+    )
 }
 
 impl ColumnarState {
@@ -800,7 +811,9 @@ impl ColumnarState {
             next_run,
         } = prepared;
         let locators = Run::fresh_locators(run_id, run.rows());
-        let ordered_by_key = self.validate_new_identities(side, &run, &locators)?;
+        let left_order = self.left_append_order(side, &run);
+        let ordered_by_key =
+            left_order.is_some() || self.validate_new_identities(side, &run, &locators)?;
         let _workspace = self.admission_workspace(
             run.payload_record().expect("new run payload"),
             run.sequences(),
@@ -828,7 +841,9 @@ impl ColumnarState {
         if side == 0 {
             self.run_bytes += run.charge();
             self.left_runs.insert(run_id, run);
-            self.install_left(run_id, locators, ordered_by_key);
+            let pending_sorted =
+                left_order.is_some_and(|order| order.matches_ranks(&self.key_ranks));
+            self.install_left(run_id, locators, ordered_by_key, pending_sorted);
         } else {
             self.right_rows += locators.len();
             self.right_payloads += locators.len();
@@ -907,10 +922,12 @@ impl ColumnarState {
             let current =
                 SequenceColumn::from_names(&record.slice(row, 1), declaration.sequence_by())?;
             check()?;
-            if resident.rows()[start..end]
-                .iter()
-                .any(|locator| runs[&locator.run].sequence(*locator) == current.value(0))
-            {
+            if resident.rows()[start..end].iter().any(|locator| {
+                runs[&locator.run]
+                    .sequences()
+                    .compare(locator.row as usize, &current, 0)
+                    .is_eq()
+            }) {
                 return Ok(true);
             }
         }
@@ -995,6 +1012,26 @@ impl ColumnarState {
             self.right_by_key
                 .get(group)
                 .map(|bucket| &bucket.identities)
+        }
+    }
+
+    fn left_append_order(&self, side: usize, run: &Run) -> Option<LeftKeyOrder> {
+        if side != 0
+            || self
+                .pending
+                .rows()
+                .last()
+                .is_some_and(|&last| self.left_runs[&last.run].time(last) >= run.times()[0])
+        {
+            return None;
+        }
+        if self.key_ranks.len() == self.keys.len() {
+            run.strictly_ordered_left(|group| self.key_ranks[group.index()])
+                .then_some(LeftKeyOrder::TypedRank)
+        } else {
+            // Birth order proves uniqueness; only the rebuilt Arrow ranks can certify output order.
+            run.strictly_ordered_left(GroupId::index)
+                .then_some(LeftKeyOrder::GroupId)
         }
     }
 
@@ -1161,7 +1198,7 @@ impl ColumnarState {
         self.run_bytes += run.charge();
         if side == 0 {
             self.left_runs.insert(run_id, run);
-            self.install_left(run_id, identities, ordered_by_key);
+            self.install_left(run_id, identities, ordered_by_key, false);
         } else {
             self.right_rows += new_rows;
             self.right_payloads += payloads.len();
@@ -1214,7 +1251,13 @@ impl ColumnarState {
         Ok(())
     }
 
-    fn install_left(&mut self, run_id: u64, locators: Vec<RowLocator>, ordered_by_key: bool) {
+    fn install_left(
+        &mut self,
+        run_id: u64,
+        locators: Vec<RowLocator>,
+        ordered_by_key: bool,
+        pending_sorted: bool,
+    ) {
         let by_key = group_locators(&self.left_runs[&run_id], self.keys.len(), &locators);
         for (group, rows) in by_key.into_iter().enumerate() {
             if rows.is_empty() {
@@ -1231,7 +1274,7 @@ impl ColumnarState {
         let (before, after) = {
             let runs = &self.left_runs;
             let key_ranks = &self.key_ranks;
-            self.pending.merge(locators, false, |left, right| {
+            self.pending.merge(locators, pending_sorted, |left, right| {
                 compare_left(runs, key_ranks, left, right)
             })
         };
@@ -1428,40 +1471,11 @@ impl ColumnarState {
         identity_bound: i128,
     ) -> EvictionSummary {
         let mut summary = EvictionSummary::default();
+        // A run can span keys. Drop all expiring identities before detaching its last payload.
         for bucket in &mut self.right_by_key {
-            let expired = bucket.payloads.rows().partition_point(|locator| {
-                i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
-            });
-            let dominated = bucket
-                .payloads
-                .rows()
-                .partition_point(|locator| {
-                    i128::from(self.right_runs[&locator.run].time(*locator)) <= threshold
-                })
-                .saturating_sub(1);
-            let payload_count = expired.max(dominated);
             let identity_count = bucket.identities.rows().partition_point(|locator| {
                 i128::from(self.right_runs[&locator.run].time(*locator)) < identity_bound
             });
-            for &locator in &bucket.payloads.rows()[..payload_count] {
-                retire_from_run(
-                    &mut self.right_runs,
-                    &mut self.run_bytes,
-                    locator.run,
-                    |run| {
-                        let has_identity = run.has_identity(locator);
-                        if run.drop_payload(locator) {
-                            summary.payloads += 1;
-                            self.right_payloads -= 1;
-                            if has_identity {
-                                self.right_identity_only += 1;
-                            } else {
-                                self.right_rows -= 1;
-                            }
-                        }
-                    },
-                );
-            }
             #[cfg(test)]
             RETIRED_IDENTITY_LOCATORS.set(RETIRED_IDENTITY_LOCATORS.get() + identity_count);
             for &locator in &bucket.identities.rows()[..identity_count] {
@@ -1481,9 +1495,41 @@ impl ColumnarState {
                     },
                 );
             }
-            let (before, after) = bucket.payloads.drop_prefix(payload_count);
-            self.index_bytes = self.index_bytes - before + after;
             let (before, after) = bucket.identities.drop_prefix(identity_count);
+            self.index_bytes = self.index_bytes - before + after;
+        }
+        for bucket in &mut self.right_by_key {
+            let expired = bucket.payloads.rows().partition_point(|locator| {
+                i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
+            });
+            let dominated = bucket
+                .payloads
+                .rows()
+                .partition_point(|locator| {
+                    i128::from(self.right_runs[&locator.run].time(*locator)) <= threshold
+                })
+                .saturating_sub(1);
+            let payload_count = expired.max(dominated);
+            for &locator in &bucket.payloads.rows()[..payload_count] {
+                retire_from_run(
+                    &mut self.right_runs,
+                    &mut self.run_bytes,
+                    locator.run,
+                    |run| {
+                        let has_identity = run.has_identity(locator);
+                        if run.drop_payload(locator) {
+                            summary.payloads += 1;
+                            self.right_payloads -= 1;
+                            if has_identity {
+                                self.right_identity_only += 1;
+                            } else {
+                                self.right_rows -= 1;
+                            }
+                        }
+                    },
+                );
+            }
+            let (before, after) = bucket.payloads.drop_prefix(payload_count);
             self.index_bytes = self.index_bytes - before + after;
         }
         self.finish_retirement();
@@ -1596,8 +1642,8 @@ impl ColumnarState {
                 .get_mut(&locator.run)
                 .expect("selected ASOF left run");
             let before = run.charge();
-            run.drop_payload(locator);
             run.drop_identity(locator);
+            run.drop_payload(locator);
             let after = run.charge();
             self.run_bytes = self.run_bytes - before + after;
         }
