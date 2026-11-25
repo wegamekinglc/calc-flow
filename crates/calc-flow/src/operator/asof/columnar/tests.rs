@@ -1299,3 +1299,78 @@ fn test_restored_asof_projection_releases_unselected_ipc_payload() {
     let input = restored.run(0, fresh.left[0].run).payload_record().unwrap();
     assert!(Arc::ptr_eq(input.column(2), output.column(0)));
 }
+
+#[test]
+fn test_final_left_commit_retires_runs_and_preserves_restored_right_state() {
+    let declaration = spec(0, 64, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut source = state(&declaration, &pool);
+    admit(&mut source, 1, &record(&[(2, 8, 0, Some("right"))])).unwrap();
+    for time in [1, 3] {
+        admit(
+            &mut source,
+            0,
+            &record(&[(1, time, 1, None), (2, time + 1, 2, None)]),
+        )
+        .unwrap();
+    }
+    let first = select(&source, None, true, 1);
+    source.commit(&first).unwrap();
+    let saved = source.capture(1 << 20).unwrap();
+    let mut restored = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &saved,
+    )
+    .unwrap();
+    let right = restored.index_capacities();
+    let remaining = select(&restored, None, true, 3);
+    super::state::COMMITTED_ROW_VISITS.set(0);
+    restored.commit(&remaining).unwrap();
+    assert_eq!(super::state::COMMITTED_ROW_VISITS.get(), 0);
+    let after = restored.index_capacities();
+    assert_eq!(after.pending, 0);
+    assert_eq!(after.left, [0, 0]);
+    assert_eq!(after.right_identities, right.right_identities);
+    assert_eq!(after.right_payloads, right.right_payloads);
+    assert_eq!(
+        (restored.pending_left_rows(), restored.right_payload_rows()),
+        (0, 1)
+    );
+    assert!(restored.left_runs.is_empty());
+    let saved = restored.capture(1 << 20).unwrap();
+    let mut round_trip = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &saved,
+    )
+    .unwrap();
+    assert_eq!(round_trip.persistent_bytes(), restored.persistent_bytes());
+    admit(&mut round_trip, 0, &record(&[(2, 8, 0, None)])).unwrap();
+    assert_eq!(select(&round_trip, None, true, 1).matched(), 1);
+}
+
+#[test]
+fn test_duplicate_left_commit_rejects_stale_selection_without_retiring_state() {
+    let declaration = spec(0, 64, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    admit(&mut state, 1, &record(&[(1, 1, 1, None)])).unwrap();
+    admit(&mut state, 0, &record(&[(1, 1, 1, None)])).unwrap();
+    let selection = select(&state, None, true, 1);
+    state.commit(&selection).unwrap();
+    let bytes = state.persistent_bytes();
+    assert!(matches!(
+        state.commit(&selection),
+        Err(crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofProtocolError,
+            ..
+        })
+    ));
+    assert_eq!(state.persistent_bytes(), bytes);
+    assert_eq!(state.right_payload_rows(), 1);
+}

@@ -23,6 +23,7 @@ thread_local! {
     pub(super) static ADMISSION_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PROJECTED_GROUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PROJECTED_COUNT_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static COMMITTED_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FINALITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1313,14 +1314,34 @@ impl ColumnarState {
     }
 
     pub(in crate::operator::asof) fn commit(&mut self, selection: &Selection) -> Result<()> {
-        if selection.left != self.pending.rows()[..selection.len()] {
+        if !self.pending.rows().starts_with(&selection.left) {
             return Err(reason(
                 &self.name,
                 StreamingFailureReason::AsofProtocolError,
                 "ASOF output commit is not the selected pending prefix",
             ));
         }
-        for locator in selection.left.iter().copied() {
+        if selection.len() == self.pending.len() {
+            for run in std::mem::take(&mut self.left_runs).into_values() {
+                self.run_bytes -= run.charge();
+            }
+            for column in &mut self.left_by_key {
+                self.index_bytes -= column.capacity_bytes();
+                *column = LocatorColumn::default();
+            }
+        } else {
+            self.retire_left_rows(&selection.left);
+        }
+        let (before, after) = self.pending.drop_prefix(selection.len());
+        self.adjust_index(before, after);
+        self.finish_retirement();
+        Ok(())
+    }
+
+    fn retire_left_rows(&mut self, left: &[RowLocator]) {
+        for locator in left.iter().copied() {
+            #[cfg(test)]
+            COMMITTED_ROW_VISITS.set(COMMITTED_ROW_VISITS.get() + 1);
             let run = self
                 .left_runs
                 .get_mut(&locator.run)
@@ -1331,8 +1352,6 @@ impl ColumnarState {
             let after = run.charge();
             self.run_bytes = self.run_bytes - before + after;
         }
-        let (before, after) = self.pending.drop_prefix(selection.len());
-        self.adjust_index(before, after);
         let runs = &self.left_runs;
         for column in &mut self.left_by_key {
             let (before, after) = column.retain(|locator| {
@@ -1341,18 +1360,13 @@ impl ColumnarState {
             });
             self.index_bytes = self.index_bytes - before + after;
         }
-        let dead = self
-            .left_runs
-            .iter()
-            .filter(|(_, run)| !run.is_live())
-            .map(|(id, _)| *id)
-            .collect::<Vec<_>>();
-        for id in dead {
-            let run = self.left_runs.remove(&id).expect("dead ASOF left run");
-            self.run_bytes -= run.charge();
-        }
-        self.finish_retirement();
-        Ok(())
+        self.left_runs.retain(|_, run| {
+            let live = run.is_live();
+            if !live {
+                self.run_bytes -= run.charge();
+            }
+            live
+        });
     }
 
     fn finish_retirement(&mut self) {
