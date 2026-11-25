@@ -1096,11 +1096,18 @@ fn fully_expired_right_runs_retire_without_copying_locator_columns() {
         }
         admit(&mut state, 0, &record(&[(1, 10_000, 0, Some("pending"))])).unwrap();
         if cleared_identities {
-            let retired = state.evict(super::Progress {
-                right_watermark: Some(5_000),
-                ..super::Progress::default()
+            let allocations = allocation_counter::measure(|| {
+                let retired = state.evict(super::Progress {
+                    right_watermark: Some(5_000),
+                    ..super::Progress::default()
+                });
+                assert_eq!((retired.payloads, retired.identities), (0, 4_096));
             });
-            assert_eq!((retired.payloads, retired.identities), (0, 4_096));
+            assert!(
+                allocations.bytes_total <= 2_048,
+                "identity retirement allocated {} bytes with all payloads live",
+                allocations.bytes_total
+            );
         }
         let mut retired = super::EvictionSummary::default();
         let allocations = allocation_counter::measure(|| {

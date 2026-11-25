@@ -1409,33 +1409,26 @@ impl ColumnarState {
         }
         let mut summary = EvictionSummary::default();
         let mut dead_runs = BTreeSet::new();
-        for group in 0..self.right_by_key.len() {
-            let (payloads, identities) = {
-                let bucket = &self.right_by_key[group];
-                let expired = bucket.payloads.rows().partition_point(|locator| {
-                    i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
-                });
-                let dominated = bucket
-                    .payloads
-                    .rows()
-                    .partition_point(|locator| {
-                        i128::from(self.right_runs[&locator.run].time(*locator)) <= threshold
-                    })
-                    .saturating_sub(1);
-                let payload_count = expired.max(dominated);
-                let identity_count = bucket.identities.rows().partition_point(|locator| {
-                    let time = self.right_runs[&locator.run].time(*locator);
-                    progress.right_ended
-                        || progress
-                            .right_watermark
-                            .is_some_and(|watermark| time < watermark)
-                });
-                (
-                    bucket.payloads.rows()[..payload_count].to_vec(),
-                    bucket.identities.rows()[..identity_count].to_vec(),
-                )
-            };
-            for locator in payloads.iter().copied() {
+        for bucket in &mut self.right_by_key {
+            let expired = bucket.payloads.rows().partition_point(|locator| {
+                i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
+            });
+            let dominated = bucket
+                .payloads
+                .rows()
+                .partition_point(|locator| {
+                    i128::from(self.right_runs[&locator.run].time(*locator)) <= threshold
+                })
+                .saturating_sub(1);
+            let payload_count = expired.max(dominated);
+            let identity_count = bucket.identities.rows().partition_point(|locator| {
+                let time = self.right_runs[&locator.run].time(*locator);
+                progress.right_ended
+                    || progress
+                        .right_watermark
+                        .is_some_and(|watermark| time < watermark)
+            });
+            for &locator in &bucket.payloads.rows()[..payload_count] {
                 let run = self
                     .right_runs
                     .get_mut(&locator.run)
@@ -1457,7 +1450,7 @@ impl ColumnarState {
                     dead_runs.insert(locator.run);
                 }
             }
-            for locator in identities.iter().copied() {
+            for &locator in &bucket.identities.rows()[..identity_count] {
                 let run = self
                     .right_runs
                     .get_mut(&locator.run)
@@ -1477,10 +1470,9 @@ impl ColumnarState {
                     dead_runs.insert(locator.run);
                 }
             }
-            let bucket = &mut self.right_by_key[group];
-            let (before, after) = bucket.payloads.drop_prefix(payloads.len());
+            let (before, after) = bucket.payloads.drop_prefix(payload_count);
             self.index_bytes = self.index_bytes - before + after;
-            let (before, after) = bucket.identities.drop_prefix(identities.len());
+            let (before, after) = bucket.identities.drop_prefix(identity_count);
             self.index_bytes = self.index_bytes - before + after;
         }
         for run in dead_runs {
