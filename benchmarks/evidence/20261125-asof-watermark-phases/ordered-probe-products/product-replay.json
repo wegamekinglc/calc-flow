@@ -1,0 +1,213 @@
+{
+  "native-release": {
+    "replay": {
+      "case": "admit",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 3,
+      "verdict": "no-confirmed-regression"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "admit",
+      "cpu": 4,
+      "rounds": [
+        {
+          "median": -10.03587299996354,
+          "low": -18.699112778224624,
+          "high": -2.08650391529841,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -16.279581171649696,
+          "low": -17.149908003928815,
+          "high": -8.516141951661204,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "no-confirmed-regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 7.1383715,
+          "p95": 7.50039885
+        },
+        "head": {
+          "p50": 6.1635745,
+          "p95": 6.959562750000001
+        }
+      },
+      "wall_seconds": 5.0725447539989545
+    }
+  },
+  "native-previous": {
+    "replay": {
+      "case": "admit",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 3,
+      "verdict": "inconclusive"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "admit",
+      "cpu": 20,
+      "rounds": [
+        {
+          "median": -1.1326643096954858,
+          "low": -6.679970331475015,
+          "high": 1.6662802551945743,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -6.99509430059817,
+          "low": -13.729013597598794,
+          "high": 6.332467287613386,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "inconclusive",
+      "pooled_ms": {
+        "base": {
+          "p50": 6.117914,
+          "p95": 6.9033851
+        },
+        "head": {
+          "p50": 5.973805499999999,
+          "p95": 6.499920950000001
+        }
+      },
+      "wall_seconds": 5.0893429440002365
+    }
+  },
+  "python-parent-1m": {
+    "outcome": {
+      "elapsed": 18.796102358999633,
+      "state": "completed"
+    },
+    "completed_requests": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "result": {
+      "base_p50": 0.106874683,
+      "base_p95": 0.11859226025,
+      "change_percent": -0.543890268193814,
+      "cpus": [
+        2,
+        4,
+        12,
+        16
+      ],
+      "head_max": 0.130278715,
+      "head_min": 0.090574802,
+      "head_p50": 0.10629340200000001,
+      "head_p95": 0.1227808058,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        -0.20386840483507807,
+        -5.814547940752157
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": 24.233499322778364,
+          "low": -8.47768340334978,
+          "median": -0.20386840483507807
+        },
+        {
+          "coverage": 0.978515625,
+          "high": 3.660461421775829,
+          "low": -12.784201113572212,
+          "median": -5.814547940752157
+        }
+      ],
+      "round_min_changes": [
+        6.707957503729434,
+        -11.740186707794587
+      ],
+      "rows_per_second": 9407921.669493653,
+      "samples": 20,
+      "verdict": "inconclusive"
+    },
+    "verified_requests": 44
+  },
+  "python-release-10m": {
+    "outcome": {
+      "elapsed": 16.120418164999137,
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 3.0, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 4.5218750000000005, 'available_bytes': 27793391616, 'major_faults': 17, 'swap_pages': 10604, 'swap_in_pages': 5, 'swap_out_pages': 10599, 'suitable': False}, {'cpu': 4, 'cpu_busy': 12.0, 'siblings': [5], 'sibling_busy': 2.0, 'host_busy': 4.5218750000000005, 'available_bytes': 27793391616, 'major_faults': 17, 'swap_pages': 10604, 'swap_in_pages': 5, 'swap_out_pages': 10599, 'suitable': False}, {'cpu': 6, 'cpu_busy': 1.0, 'siblings': [7], 'sibling_busy': 0.0, 'host_busy': 4.5218750000000005, 'available_bytes': 27793391616, 'major_faults': 17, 'swap_pages': 10604, 'swap_in_pages': 5, 'swap_out_pages': 10599, 'suitable': False}, {'cpu': 12, 'cpu_busy': 80.2, 'siblings': [13], 'sibling_busy': 0.0, 'host_busy': 4.5218750000000005, 'available_bytes': 27793391616, 'major_faults': 17, 'swap_pages': 10604, 'swap_in_pages': 5, 'swap_out_pages': 10599, 'suitable': False}]\")])",
+      "state": "stopped"
+    },
+    "completed_requests": {
+      "prepare": 2,
+      "sample": 1
+    },
+    "rejected_intervals": [
+      {
+        "epoch": 1795609560.2514806,
+        "preflight": false,
+        "cores": [
+          {
+            "cpu": 2,
+            "cpu_busy": 3.0,
+            "siblings": [
+              3
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 4.5218750000000005,
+            "available_bytes": 27793391616,
+            "major_faults": 17,
+            "swap_pages": 10604,
+            "swap_in_pages": 5,
+            "swap_out_pages": 10599,
+            "suitable": false
+          },
+          {
+            "cpu": 4,
+            "cpu_busy": 12.0,
+            "siblings": [
+              5
+            ],
+            "sibling_busy": 2.0,
+            "host_busy": 4.5218750000000005,
+            "available_bytes": 27793391616,
+            "major_faults": 17,
+            "swap_pages": 10604,
+            "swap_in_pages": 5,
+            "swap_out_pages": 10599,
+            "suitable": false
+          },
+          {
+            "cpu": 6,
+            "cpu_busy": 1.0,
+            "siblings": [
+              7
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 4.5218750000000005,
+            "available_bytes": 27793391616,
+            "major_faults": 17,
+            "swap_pages": 10604,
+            "swap_in_pages": 5,
+            "swap_out_pages": 10599,
+            "suitable": false
+          },
+          {
+            "cpu": 12,
+            "cpu_busy": 80.2,
+            "siblings": [
+              13
+            ],
+            "sibling_busy": 0.0,
+            "host_busy": 4.5218750000000005,
+            "available_bytes": 27793391616,
+            "major_faults": 17,
+            "swap_pages": 10604,
+            "swap_in_pages": 5,
+            "swap_out_pages": 10599,
+            "suitable": false
+          }
+        ]
+      }
+    ]
+  }
+}
