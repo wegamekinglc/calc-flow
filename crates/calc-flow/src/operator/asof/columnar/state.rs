@@ -101,6 +101,10 @@ impl LocatorColumn {
         self.values.capacity() * size_of::<RowLocator>()
     }
 
+    fn spare_bytes(&self) -> usize {
+        (self.values.capacity() - self.len()) * size_of::<RowLocator>()
+    }
+
     fn drop_prefix(&mut self, count: usize) -> (usize, usize) {
         let before = self.capacity_bytes();
         assert!(count <= self.len());
@@ -411,30 +415,12 @@ impl ColumnarState {
         run: &Run,
         rows: &IncomingIndexRows<'_>,
     ) -> Result<usize> {
-        let mut counts = BTreeMap::<usize, [usize; 2]>::new();
-        let mut count = |rows: &[RowLocator], column: usize| {
-            for locator in rows {
-                #[cfg(test)]
-                PROJECTED_GROUP_VISITS.set(PROJECTED_GROUP_VISITS.get() + 1);
-                let entry = counts.entry(run.group(*locator).index()).or_default();
-                #[cfg(test)]
-                PROJECTED_COUNT_UPDATES.set(PROJECTED_COUNT_UPDATES.get() + 1);
-                entry[column] += 1;
-            }
-        };
         let (payload_rows, identity_rows) = match rows {
-            IncomingIndexRows::Fresh(rows) => {
-                count(rows, 0);
-                (rows.len(), rows.len())
-            }
+            IncomingIndexRows::Fresh(locators) => (locators.len(), locators.len()),
             IncomingIndexRows::Restored {
                 payloads,
                 identities,
-            } => {
-                count(payloads, 0);
-                count(identities, 1);
-                (payloads.len(), identities.len())
-            }
+            } => (payloads.len(), identities.len()),
         };
         let mut projected = self.index_bytes;
         if self.key_ranks.len() != self.keys.len() {
@@ -451,6 +437,112 @@ impl ColumnarState {
                         .checked_add((self.pending.len() + identity_rows) * size_of::<RowLocator>())
                 })
                 .ok_or_else(|| self.state_limit())?;
+        }
+        let resident_groups = if side == 0 {
+            self.left_by_key.len()
+        } else {
+            self.right_by_key.len()
+        };
+        projected = match rows {
+            IncomingIndexRows::Fresh(locators) if resident_groups <= locators.len() => {
+                self.project_fresh_group_charge(side, run, locators, resident_groups, projected)?
+            }
+            _ => self.project_sparse_or_restored_charge(side, run, rows, projected)?,
+        };
+        let run_owners = self.left_runs.len() + self.right_runs.len() + 1;
+        let run_owner_bytes = run_owners
+            .checked_mul(size_of::<Run>())
+            .ok_or_else(|| self.state_limit())?;
+        let transient_locator_bytes = payload_rows
+            .checked_add(identity_rows)
+            .and_then(|rows| rows.checked_mul(size_of::<RowLocator>()))
+            .ok_or_else(|| self.state_limit())?;
+        self.run_bytes
+            .checked_add(run.charge())
+            .and_then(|bytes| bytes.checked_add(projected))
+            .and_then(|bytes| bytes.checked_add(self.keys.logical_bytes()))
+            .and_then(|bytes| bytes.checked_add(run_owner_bytes))
+            .and_then(|bytes| bytes.checked_add(transient_locator_bytes))
+            .ok_or_else(|| self.state_limit())
+    }
+
+    fn project_fresh_group_charge(
+        &self,
+        side: usize,
+        run: &Run,
+        locators: &[RowLocator],
+        resident_groups: usize,
+        mut projected: usize,
+    ) -> Result<usize> {
+        // A merge with a nonempty incoming column replaces the old capacity with
+        // its live length plus the incoming rows. Each touched group reclaims its
+        // unused capacity once, regardless of how many new rows it receives.
+        let mut remaining = (0..resident_groups)
+            .filter(|&group| self.group_spare_bytes(side, group) != 0)
+            .count();
+        let mut reclaimed = BTreeSet::new();
+        for &locator in locators {
+            if remaining == 0 {
+                break;
+            }
+            #[cfg(test)]
+            PROJECTED_GROUP_VISITS.set(PROJECTED_GROUP_VISITS.get() + 1);
+            let group = run.group(locator).index();
+            let spare = self.group_spare_bytes(side, group);
+            if spare != 0 && reclaimed.insert(group) {
+                projected = projected
+                    .checked_sub(spare)
+                    .ok_or_else(|| self.state_limit())?;
+                remaining -= 1;
+            }
+        }
+        let columns = if side == 0 { 1 } else { 2 };
+        locators
+            .len()
+            .checked_mul(columns * size_of::<RowLocator>())
+            .and_then(|bytes| projected.checked_add(bytes))
+            .ok_or_else(|| self.state_limit())
+    }
+
+    fn group_spare_bytes(&self, side: usize, group: usize) -> usize {
+        if side == 0 {
+            self.left_by_key
+                .get(group)
+                .map_or(0, LocatorColumn::spare_bytes)
+        } else {
+            self.right_by_key.get(group).map_or(0, |bucket| {
+                bucket.payloads.spare_bytes() + bucket.identities.spare_bytes()
+            })
+        }
+    }
+
+    fn project_sparse_or_restored_charge(
+        &self,
+        side: usize,
+        run: &Run,
+        rows: &IncomingIndexRows<'_>,
+        mut projected: usize,
+    ) -> Result<usize> {
+        let mut counts = BTreeMap::<usize, [usize; 2]>::new();
+        let mut count = |rows: &[RowLocator], column: usize| {
+            for locator in rows {
+                #[cfg(test)]
+                PROJECTED_GROUP_VISITS.set(PROJECTED_GROUP_VISITS.get() + 1);
+                let entry = counts.entry(run.group(*locator).index()).or_default();
+                #[cfg(test)]
+                PROJECTED_COUNT_UPDATES.set(PROJECTED_COUNT_UPDATES.get() + 1);
+                entry[column] += 1;
+            }
+        };
+        match rows {
+            IncomingIndexRows::Fresh(locators) => count(locators, 0),
+            IncomingIndexRows::Restored {
+                payloads,
+                identities,
+            } => {
+                count(payloads, 0);
+                count(identities, 1);
+            }
         }
         for (group, [payloads, restored_identities]) in counts {
             let identities = match rows {
@@ -478,21 +570,7 @@ impl ColumnarState {
                     .ok_or_else(|| self.state_limit())?;
             }
         }
-        let run_owners = self.left_runs.len() + self.right_runs.len() + 1;
-        let run_owner_bytes = run_owners
-            .checked_mul(size_of::<Run>())
-            .ok_or_else(|| self.state_limit())?;
-        let transient_locator_bytes = payload_rows
-            .checked_add(identity_rows)
-            .and_then(|rows| rows.checked_mul(size_of::<RowLocator>()))
-            .ok_or_else(|| self.state_limit())?;
-        self.run_bytes
-            .checked_add(run.charge())
-            .and_then(|bytes| bytes.checked_add(projected))
-            .and_then(|bytes| bytes.checked_add(self.keys.logical_bytes()))
-            .and_then(|bytes| bytes.checked_add(run_owner_bytes))
-            .and_then(|bytes| bytes.checked_add(transient_locator_bytes))
-            .ok_or_else(|| self.state_limit())
+        Ok(projected)
     }
 
     fn reserve_charge(&self, projected: usize) -> Result<()> {
