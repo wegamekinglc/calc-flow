@@ -1,14 +1,13 @@
-use super::{RowLocator, Selection, run::Run, run::SequenceColumn};
+use super::{RowLocator, Selection, compact::compact_accepted, run::Run, run::SequenceColumn};
 use crate::operator::asof::{
     AsofJoinSide, AsofLatePolicy, StreamAsofJoinSpec, admission, arrow_error, reason,
 };
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS, VARIABLE_STEP_BYTES};
 use crate::{Result, StreamingFailureReason};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, StringArray, UInt32Array},
-    compute::{SortColumn, lexsort_to_indices, take},
+    array::{Array, ArrayRef, StringArray},
+    compute::{SortColumn, lexsort_to_indices},
     datatypes::SchemaRef,
-    error::ArrowError,
     record_batch::RecordBatch,
 };
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
@@ -611,7 +610,7 @@ impl ColumnarState {
         input: admission::ValidatedInput,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PreparedRun> {
-        let selected_rows = accepted.iter().filter(|accepted| **accepted).count();
+        let selected_rows = usize::try_from(input.accepted).expect("validated input row count");
         let (sequence_charge, encoded_extent) =
             declaration
                 .sequence_by()
@@ -631,7 +630,7 @@ impl ColumnarState {
                     .saturating_mul(super::run::sequence_tuple_copy_count([encoded_extent])),
             );
         let workspace = self.preflight_admission(record, declaration, input, preflight, check)?;
-        let compacted = compact_accepted(record, accepted)?;
+        let compacted = compact_accepted(record, accepted, selected_rows)?;
         let record = &compacted;
         let sequences = SequenceColumn::from_names(record, declaration.sequence_by())?;
         let key_arrays = declaration
@@ -1620,26 +1619,4 @@ fn replace_projected_column(
     total
         .checked_sub(column.capacity_bytes())?
         .checked_add(projected)
-}
-
-fn compact_accepted(record: &RecordBatch, accepted: &[bool]) -> Result<RecordBatch> {
-    let rows = accepted
-        .iter()
-        .enumerate()
-        .filter(|(_, accepted)| **accepted)
-        .map(|(row, _)| {
-            u32::try_from(row).map_err(|_| {
-                arrow_error(&ArrowError::InvalidArgumentError(
-                    "ASOF accepted row exceeds UInt32".into(),
-                ))
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let indices = UInt32Array::from(rows);
-    let columns = record
-        .columns()
-        .iter()
-        .map(|column| take(column.as_ref(), &indices, None).map_err(|error| arrow_error(&error)))
-        .collect::<Result<Vec<_>>>()?;
-    RecordBatch::try_new(record.schema(), columns).map_err(|error| arrow_error(&error))
 }

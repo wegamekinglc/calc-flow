@@ -1,6 +1,7 @@
 //! Shared-key columnar state and selection-driven Arrow ASOF kernels.
 
 mod checkpoint;
+mod compact;
 mod materialize;
 mod run;
 mod state;
