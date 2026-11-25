@@ -17,11 +17,11 @@ from scripts.toolkit import sha256_file
 ROOT = Path(os.environ["GITHUB_WORKSPACE"])
 STUDY = Path(__file__).resolve().parent
 OUT = ROOT / "target" / "products"
-RAW = ROOT / "target" / "evidence"
+RAW = ROOT / "target" / "evidence" / os.environ.get("ASOF_BASELINE", "candidate")
 REFS = {
     "release": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
-    "parent": "f069199b25cd7893879df799a2d44e95d6a9cbad",
-    "candidate": "e3104f444688ab3890c4b45f6098c28e052de7a8",
+    "parent": "e3104f444688ab3890c4b45f6098c28e052de7a8",
+    "candidate": "5540d317884b59c53a8a9f80ac7129b78314c694",
 }
 
 
@@ -71,12 +71,16 @@ def compare(surface, name):
         *STUDY.glob("*.md"),
         STUDY / "project.json",
         STUDY / "registered.sha256",
+        STUDY / "plain-artifacts.json",
         STUDY / "worker.patch.gz",
     ):
         shutil.copy2(f, RAW)
+    (RAW / "bound.json").write_text(
+        json.dumps(dict(baseline=base, candidate=head, workload="10M-4T-64-keys"))
+    )
     checkouts = {}
     for side in (name, "candidate"):
-        checkout_path = ROOT / "target" / ("source-" + side)
+        checkout_path = ROOT / "target" / ("source-" + name + "-" + side)
         checkout(checkout_path, REFS[side])
         checkouts[side] = checkout_path
     if surface == "rust":
@@ -104,8 +108,8 @@ def compare(surface, name):
         command(sys.executable, RAW / "measure.py", "job", head, base)
         command(sys.executable, RAW / "verify.py", next(RAW.glob("obs-job-*")))
     else:
-        worker = ROOT / "target/post-timer-worker"
-        checkout(worker, head)
+        worker = ROOT / ("target/post-timer-worker-" + name)
+        checkout(worker, REFS["parent"])
         patch = gzip.decompress((STUDY / "worker.patch.gz").read_bytes())
         command("git", "apply", "--check", input=patch, cwd=worker)
         command("git", "apply", input=patch, cwd=worker)

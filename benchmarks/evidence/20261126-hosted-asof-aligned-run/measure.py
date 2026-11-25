@@ -165,7 +165,7 @@ if __name__ == "__main__":
     start = time.monotonic()
     try:
         with asyncio.Runner() as runner:
-            result = runner.run(asyncio.wait_for(run(case, head, directory), 540))
+            result = runner.run(asyncio.wait_for(run(case, head, directory), 250))
         out = {"state": "complete", **result}
     except BaseException as error:
         out = {"state": "stopped", "error": repr(error)}

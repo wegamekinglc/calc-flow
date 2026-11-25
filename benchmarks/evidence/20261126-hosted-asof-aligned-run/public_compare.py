@@ -88,7 +88,7 @@ async def run(args):
     }
     if releases["baseline"]["native_sha256"] == releases["candidate"]["native_sha256"]:
         raise ValueError("expected independent native builds")
-    parent_sha = "f069199b25cd7893879df799a2d44e95d6a9cbad"
+    parent_sha = "e3104f444688ab3890c4b45f6098c28e052de7a8"
     parent_lock = "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
     registered_locks = {
         "baseline": {
@@ -148,7 +148,10 @@ async def run(args):
         validate_environment(
             env, release, backend="calc-flow-stream", polars_threads=4, tokio_threads=4
         )
-        sites[side] = (site, ROOT / "target/post-timer-worker")
+        sites[side] = (
+            site,
+            ROOT / ("target/post-timer-worker-" + os.environ["ASOF_BASELINE"]),
+        )
     cpus = await observe_cpus(args.output)
     os.sched_setaffinity(0, set(cpus))
     async with asyncio.TaskGroup() as group:
@@ -226,12 +229,12 @@ def main():
             "epoch": time.time(),
             "sha": args.sha,
             "scenario": args.scenario,
-            "budget": 540,
+            "budget": 250,
         },
     )
     state = {"state": "completed"}
     try:
-        asyncio.run(asyncio.wait_for(run(args), timeout=540))
+        asyncio.run(asyncio.wait_for(run(args), timeout=250))
     except BaseException as exc:
         state = {"state": "stopped", "error": repr(exc)}
         raise
