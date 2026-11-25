@@ -1,0 +1,42 @@
+{
+  "rows": [
+    {
+      "control": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+      "candidate": "e3104f444688ab3890c4b45f6098c28e052de7a8",
+      "surface": "Rust",
+      "verdict": "stopped",
+      "evidence": {
+        "state": "stopped",
+        "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 22.2, 'siblings': [3], 'sibling_busy': 90.0, 'host_busy': 7.375, 'available_bytes': 28141940736, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 4, 'cpu_busy': 24.5, 'siblings': [5], 'sibling_busy': 0.0, 'host_busy': 7.375, 'available_bytes': 28141940736, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True}, {'cpu': 16, 'cpu_busy': 19.4, 'siblings': [17], 'sibling_busy': 0.0, 'host_busy': 7.375, 'available_bytes': 28141940736, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True}, {'cpu': 20, 'cpu_busy': 46.5, 'siblings': [21], 'sibling_busy': 0.0, 'host_busy': 7.375, 'available_bytes': 28141940736, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True}]\")])",
+        "wall_seconds": 4.242389801998797
+      }
+    },
+    {
+      "control": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+      "candidate": "e3104f444688ab3890c4b45f6098c28e052de7a8",
+      "surface": "Python",
+      "verdict": "unmeasured"
+    },
+    {
+      "control": "f069199b25cd7893879df799a2d44e95d6a9cbad",
+      "candidate": "e3104f444688ab3890c4b45f6098c28e052de7a8",
+      "surface": "Rust",
+      "verdict": "unmeasured"
+    },
+    {
+      "control": "f069199b25cd7893879df799a2d44e95d6a9cbad",
+      "candidate": "e3104f444688ab3890c4b45f6098c28e052de7a8",
+      "surface": "Python",
+      "verdict": "unmeasured"
+    }
+  ],
+  "machine": "WSL2",
+  "cores": [
+    2,
+    4,
+    16,
+    20
+  ],
+  "candidate_scope": "10M rows per input, 64 keys, batch size 1M, 4 Tokio workers",
+  "verdict_rule": "regression only when both rounds' paired-median lower confidence limits exceed +5%"
+}
