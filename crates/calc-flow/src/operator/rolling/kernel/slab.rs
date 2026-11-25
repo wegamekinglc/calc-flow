@@ -562,8 +562,7 @@ impl RollingKernelPlan {
     ) -> Result<(EntityRouting, u64)> {
         let started = Instant::now();
         let residents = state.slab.as_ref().map_or(0, StateTable::entity_count);
-        let routing = if residents == 1
-            && input.num_rows() > 1
+        let routing = if input.num_rows() > 1
             && let Some(keys) = direct_entity_column(self, input)
         {
             direct_entity_routing(keys, residents, node_id)?
@@ -1304,6 +1303,29 @@ mod tests {
         let wide = columns[1].as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(narrow.value(63).to_bits(), 63.5_f64.to_bits());
         assert_eq!(wide.value(63).to_bits(), 62.5_f64.to_bits());
+    }
+
+    #[test]
+    fn slab_encodes_each_distinct_utf8_key_once_on_cold_and_warm_batches() {
+        let plan = plan();
+        let mut state = RollingKernelState::default();
+        for start in [0, 6] {
+            let times = (start..start + 6).collect::<Vec<_>>();
+            let seed = input(&times, &[Some(1.0); 6]);
+            let mut columns = seed.columns().to_vec();
+            columns[1] = Arc::new(StringArray::from(vec!["é", "a", "", "a", "é", ""]));
+            let batch = RecordBatch::try_new(seed.schema(), columns).unwrap();
+            let expected = plan.encoded_entity_routing(&batch, 3, "r").unwrap();
+            super::super::take_direct_entity_key_encodings();
+            let (routing, _) = plan.route_slab(&state, &batch, "r", None).unwrap();
+            assert_eq!(super::super::take_direct_entity_key_encodings(), 3);
+            assert_eq!(routing.keys, expected.keys);
+            assert_eq!(routing.rows, expected.rows);
+            assert_eq!(routing.entity_ids, expected.entity_ids);
+            plan.prepare_slab_ordered_stream(&mut state, &batch, "r", None)
+                .unwrap()
+                .commit(&mut state);
+        }
     }
 
     #[test]
