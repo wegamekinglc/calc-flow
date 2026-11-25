@@ -7013,7 +7013,7 @@ mod tests {
             },
             1_024,
         );
-        let input = TypedGroupInput::Single(Float64Array::from_iter(
+        let input = TypedGroupInput::Single(
             [
                 Some(0.0),
                 Some(-0.0),
@@ -7023,8 +7023,9 @@ mod tests {
             ]
             .into_iter()
             .cycle()
-            .take(1_024),
-        ));
+            .take(1_024)
+            .collect::<Float64Array>(),
+        );
         for row in 0..1_024 {
             state.update(0, &input, row, false, "unique").unwrap();
         }
