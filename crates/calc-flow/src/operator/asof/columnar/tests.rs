@@ -272,6 +272,13 @@ fn test_aligned_exact_runs_match_physical_rows_in_pending_order_without_index_pr
     let selection = select(&state, None, true, probes.len());
     let reads = super::state::CANDIDATE_TIME_READS.replace(0);
     assert_eq!(selection.matched(), probes.len());
+    assert_eq!(
+        selection.right[..4]
+            .iter()
+            .map(|row| row.row)
+            .collect::<Vec<_>>(),
+        [3, 1, 2, 0]
+    );
     let output = state
         .materialize(&selection, &output_schema(&declaration), None)
         .unwrap();
