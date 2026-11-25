@@ -1,0 +1,2200 @@
+{
+  "rust": {
+    "artifact": 15063531466,
+    "digest": "sha256:a9ecf8693fbd7bf4b53fba106ee0dafb8b4e2d4faa41ee44ff65f90b8866d4a8",
+    "cohorts": {
+      "plain": {
+        "state": "complete",
+        "rounds": [
+          {
+            "median": 12.75509422787907,
+            "low": 8.03632764476041,
+            "high": 15.467612571154987,
+            "coverage": 0.978515625
+          },
+          {
+            "median": 13.01480474003861,
+            "low": 10.273542358966425,
+            "high": 16.1776123592402,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "regression",
+        "ms": {
+          "base": {
+            "p50": 726.168876,
+            "p95": 752.40176995
+          },
+          "head": {
+            "p50": 816.5936760000001,
+            "p95": 849.31936095
+          }
+        },
+        "delta_percent": 12.452310060173954,
+        "accepted_intervals": 47,
+        "rejected": [],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": 44
+      },
+      "trace": {
+        "state": "complete",
+        "rounds": [
+          {
+            "median": 12.966739187290466,
+            "low": 9.427949719646623,
+            "high": 22.993597672853227,
+            "coverage": 0.978515625
+          },
+          {
+            "median": 11.486442679215624,
+            "low": 3.477814886479358,
+            "high": 15.18802064898923,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "inconclusive",
+        "ms": {
+          "base": {
+            "p50": 744.8742299999999,
+            "p95": 769.6997623
+          },
+          "head": {
+            "p50": 835.953563,
+            "p95": 898.58832365
+          }
+        },
+        "delta_percent": 12.227478053576935,
+        "accepted_intervals": 47,
+        "rejected": [],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": 44
+      }
+    },
+    "cpu_model": "AMD EPYC 9V45 96-Core Processor",
+    "inside_ms": {
+      "admit_left": {
+        "base": 198.86053805,
+        "head": 328.30543345,
+        "delta_ms": 129.4448954
+      },
+      "admit_left.budget_preflight": {
+        "base": 0.0,
+        "head": 0.00646625,
+        "delta_ms": 0.00646625
+      },
+      "admit_left.build_run": {
+        "base": 0.0,
+        "head": 21.121511,
+        "delta_ms": 21.121511
+      },
+      "admit_left.compact_payload": {
+        "base": 0.0,
+        "head": 65.6270444,
+        "delta_ms": 65.6270444
+      },
+      "admit_left.encode_sequences": {
+        "base": 0.0,
+        "head": 51.89984,
+        "delta_ms": 51.89984
+      },
+      "admit_left.envelope_record": {
+        "base": 0.0,
+        "head": 0.0023995,
+        "delta_ms": 0.0023995
+      },
+      "admit_left.ingress_validation": {
+        "base": 22.24702,
+        "head": 2.4469833999999997,
+        "delta_ms": -19.8000366
+      },
+      "admit_left.install_indexes": {
+        "base": 0.0,
+        "head": 104.14520645,
+        "delta_ms": 104.14520645
+      },
+      "admit_left.late_mask": {
+        "base": 0.0,
+        "head": 5.16963665,
+        "delta_ms": 5.16963665
+      },
+      "admit_left.project_charge": {
+        "base": 0.0,
+        "head": 0.0551397,
+        "delta_ms": 0.0551397
+      },
+      "admit_left.release_install_admission": {
+        "base": 0.23608245,
+        "head": 0.0,
+        "delta_ms": -0.23608245
+      },
+      "admit_left.release_prepare_admission": {
+        "base": 176.37743559999998,
+        "head": 0.0,
+        "delta_ms": -176.37743559999998
+      },
+      "admit_left.residual": {
+        "base": 0.0,
+        "head": 0.030516099999999997,
+        "delta_ms": 0.030516099999999997
+      },
+      "admit_left.route_keys": {
+        "base": 0.0,
+        "head": 10.6865889,
+        "delta_ms": 10.6865889
+      },
+      "admit_left.selection_charge": {
+        "base": 0.0,
+        "head": 12.781084300000002,
+        "delta_ms": 12.781084300000002
+      },
+      "admit_left.validate_locators": {
+        "base": 0.0,
+        "head": 54.333016799999996,
+        "delta_ms": 54.333016799999996
+      },
+      "admit_right": {
+        "base": 309.32008744999996,
+        "head": 317.5938428,
+        "delta_ms": 8.273755350000044
+      },
+      "admit_right.budget_preflight": {
+        "base": 0.0,
+        "head": 0.0063453,
+        "delta_ms": 0.0063453
+      },
+      "admit_right.build_run": {
+        "base": 0.0,
+        "head": 21.15158375,
+        "delta_ms": 21.15158375
+      },
+      "admit_right.compact_payload": {
+        "base": 0.0,
+        "head": 61.9003151,
+        "delta_ms": 61.9003151
+      },
+      "admit_right.encode_sequences": {
+        "base": 0.0,
+        "head": 49.994459549999995,
+        "delta_ms": 49.994459549999995
+      },
+      "admit_right.envelope_record": {
+        "base": 0.0,
+        "head": 0.0024254000000000003,
+        "delta_ms": 0.0024254000000000003
+      },
+      "admit_right.ingress_validation": {
+        "base": 26.930735149999997,
+        "head": 2.4718545,
+        "delta_ms": -24.458880649999998
+      },
+      "admit_right.install_indexes": {
+        "base": 0.0,
+        "head": 98.91921504999999,
+        "delta_ms": 98.91921504999999
+      },
+      "admit_right.late_mask": {
+        "base": 0.0,
+        "head": 5.03813565,
+        "delta_ms": 5.03813565
+      },
+      "admit_right.project_charge": {
+        "base": 0.0,
+        "head": 0.05416795,
+        "delta_ms": 0.05416795
+      },
+      "admit_right.release_install_admission": {
+        "base": 104.49466895,
+        "head": 0.0,
+        "delta_ms": -104.49466895
+      },
+      "admit_right.release_prepare_admission": {
+        "base": 177.89468335,
+        "head": 0.0,
+        "delta_ms": -177.89468335
+      },
+      "admit_right.residual": {
+        "base": 0.0,
+        "head": 1.1051289,
+        "delta_ms": 1.1051289
+      },
+      "admit_right.route_keys": {
+        "base": 0.0,
+        "head": 10.9467767,
+        "delta_ms": 10.9467767
+      },
+      "admit_right.selection_charge": {
+        "base": 0.0,
+        "head": 12.590270949999999,
+        "delta_ms": 12.590270949999999
+      },
+      "admit_right.validate_locators": {
+        "base": 0.0,
+        "head": 53.413164,
+        "delta_ms": 53.413164
+      },
+      "native_union_ns": {
+        "base": 739.6831117,
+        "head": 826.3468804500001,
+        "delta_ms": 86.66376875000003
+      },
+      "other_inside_window_ns": {
+        "base": 7.2036418499999995,
+        "head": 9.124997650000001,
+        "delta_ms": 1.9213558000000015
+      },
+      "outer_ns": {
+        "base": 746.88675355,
+        "head": 835.4718781,
+        "delta_ms": 88.58512455000005
+      },
+      "overlapped_native_ns": {
+        "base": 0.0,
+        "head": 0.0,
+        "delta_ms": 0.0
+      },
+      "watermark.arrow_assembly_ns": {
+        "base": 0.04427175,
+        "head": 0.0410846,
+        "delta_ms": -0.0031871499999999997
+      },
+      "watermark.arrow_bookkeeping_ns": {
+        "base": 0.04798765,
+        "head": 0.09019869999999999,
+        "delta_ms": 0.04221104999999999
+      },
+      "watermark.arrow_charge_ns": {
+        "base": 0.0979414,
+        "head": 9.38378815,
+        "delta_ms": 9.285846750000001
+      },
+      "watermark.arrow_columns_ns": {
+        "base": 0.05513585,
+        "head": 0.02557625,
+        "delta_ms": -0.029559600000000002
+      },
+      "watermark.arrow_output_ns": {
+        "base": 0.24533665,
+        "head": 9.5406477,
+        "delta_ms": 9.295311049999999
+      },
+      "watermark.emit_ns": {
+        "base": 0.09818394999999999,
+        "head": 0.1304254,
+        "delta_ms": 0.032241450000000005
+      },
+      "watermark.left_commit_ns": {
+        "base": 0.4352303,
+        "head": 9.9765104,
+        "delta_ms": 9.5412801
+      },
+      "watermark.matching_ns": {
+        "base": 164.48355625,
+        "head": 102.73324695000001,
+        "delta_ms": -61.750309299999984
+      },
+      "watermark.residual_ns": {
+        "base": 0.1521047,
+        "head": 27.603716,
+        "delta_ms": 27.4516113
+      },
+      "watermark.right_eviction_ns": {
+        "base": 66.08807435,
+        "head": 30.46305775,
+        "delta_ms": -35.625016599999995
+      },
+      "watermark_ns": {
+        "base": 231.5024862,
+        "head": 180.4476042,
+        "delta_ms": -51.05488199999999
+      }
+    },
+    "paired_differences_ms": {
+      "admit_left": [
+        {
+          "median_ms": 140.6122665,
+          "low_ms": 114.864037,
+          "high_ms": 171.231039,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 119.8850875,
+          "low_ms": 79.481513,
+          "high_ms": 165.805221,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.budget_preflight": [
+        {
+          "median_ms": 0.006359,
+          "low_ms": 0.005408,
+          "high_ms": 0.006991,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0063195000000000005,
+          "low_ms": 0.005968,
+          "high_ms": 0.007271,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.build_run": [
+        {
+          "median_ms": 23.1748575,
+          "low_ms": 18.823771,
+          "high_ms": 24.837447,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 20.474351,
+          "low_ms": 15.707443,
+          "high_ms": 23.453101,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.compact_payload": [
+        {
+          "median_ms": 70.4564445,
+          "low_ms": 60.21179,
+          "high_ms": 81.084576,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 58.992197000000004,
+          "low_ms": 51.891518,
+          "high_ms": 70.590617,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.encode_sequences": [
+        {
+          "median_ms": 57.677893499999996,
+          "low_ms": 48.711277,
+          "high_ms": 63.4269,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 48.7843055,
+          "low_ms": 36.913002,
+          "high_ms": 56.809526,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.envelope_record": [
+        {
+          "median_ms": 0.002397,
+          "low_ms": 0.002234,
+          "high_ms": 0.002827,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0022245,
+          "low_ms": 0.002023,
+          "high_ms": 0.002514,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.ingress_validation": [
+        {
+          "median_ms": -18.665523999999998,
+          "low_ms": -24.857237,
+          "high_ms": -12.194009,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -20.803133,
+          "low_ms": -34.656214,
+          "high_ms": -10.650877,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.install_indexes": [
+        {
+          "median_ms": 105.92430999999999,
+          "low_ms": 102.829312,
+          "high_ms": 107.755072,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 102.5264445,
+          "low_ms": 95.87778,
+          "high_ms": 108.005768,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.late_mask": [
+        {
+          "median_ms": 5.213842,
+          "low_ms": 4.955679,
+          "high_ms": 5.495467,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 5.020186499999999,
+          "low_ms": 4.863878,
+          "high_ms": 5.169398,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.project_charge": [
+        {
+          "median_ms": 0.05715,
+          "low_ms": 0.052028,
+          "high_ms": 0.05973,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0549685,
+          "low_ms": 0.047308,
+          "high_ms": 0.05943,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.release_install_admission": [
+        {
+          "median_ms": -0.2367755,
+          "low_ms": -0.246259,
+          "high_ms": -0.231666,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.2355695,
+          "low_ms": -0.249975,
+          "high_ms": -0.221932,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.release_prepare_admission": [
+        {
+          "median_ms": -179.203945,
+          "low_ms": -183.686816,
+          "high_ms": -164.408007,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -176.20065699999998,
+          "low_ms": -181.958335,
+          "high_ms": -168.42671,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.residual": [
+        {
+          "median_ms": 0.0296135,
+          "low_ms": 0.028634,
+          "high_ms": 0.032757,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.030941999999999997,
+          "low_ms": 0.027351,
+          "high_ms": 0.03311,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.route_keys": [
+        {
+          "median_ms": 10.828249,
+          "low_ms": 10.247989,
+          "high_ms": 11.198581,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 10.3498965,
+          "low_ms": 9.960414,
+          "high_ms": 11.199998,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.selection_charge": [
+        {
+          "median_ms": 12.652838,
+          "low_ms": 12.500292,
+          "high_ms": 13.084316,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 12.452452000000001,
+          "low_ms": 12.392909,
+          "high_ms": 12.963963,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.validate_locators": [
+        {
+          "median_ms": 52.436322000000004,
+          "low_ms": 50.41557,
+          "high_ms": 57.202843,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 54.034127999999995,
+          "low_ms": 50.529454,
+          "high_ms": 66.347963,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right": [
+        {
+          "median_ms": 13.715811500000001,
+          "low_ms": -8.689907,
+          "high_ms": 25.775274,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 1.539871,
+          "low_ms": -10.131691,
+          "high_ms": 31.407791,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.budget_preflight": [
+        {
+          "median_ms": 0.006255,
+          "low_ms": 0.005247,
+          "high_ms": 0.008085,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.005973,
+          "low_ms": 0.005371,
+          "high_ms": 0.007,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.build_run": [
+        {
+          "median_ms": 21.457929,
+          "low_ms": 18.923601,
+          "high_ms": 22.808426,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 21.1387145,
+          "low_ms": 19.611198,
+          "high_ms": 23.483428,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.compact_payload": [
+        {
+          "median_ms": 62.755033999999995,
+          "low_ms": 58.036999,
+          "high_ms": 70.558316,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 60.856877499999996,
+          "low_ms": 52.774291,
+          "high_ms": 68.467273,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.encode_sequences": [
+        {
+          "median_ms": 52.9995115,
+          "low_ms": 43.868222,
+          "high_ms": 55.15209,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 51.042255,
+          "low_ms": 41.759047,
+          "high_ms": 55.179637,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.envelope_record": [
+        {
+          "median_ms": 0.0024375,
+          "low_ms": 0.002325,
+          "high_ms": 0.002925,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0023794999999999997,
+          "low_ms": 0.002113,
+          "high_ms": 0.002446,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.ingress_validation": [
+        {
+          "median_ms": -25.9140255,
+          "low_ms": -34.539952,
+          "high_ms": -15.783765,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -25.4116325,
+          "low_ms": -31.497414,
+          "high_ms": -11.219566,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.install_indexes": [
+        {
+          "median_ms": 98.588649,
+          "low_ms": 95.761636,
+          "high_ms": 103.475342,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 98.230966,
+          "low_ms": 90.756459,
+          "high_ms": 103.432024,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.late_mask": [
+        {
+          "median_ms": 5.072836499999999,
+          "low_ms": 4.523718,
+          "high_ms": 5.339514,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 5.03228,
+          "low_ms": 4.887532,
+          "high_ms": 5.261312,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.project_charge": [
+        {
+          "median_ms": 0.054331000000000004,
+          "low_ms": 0.052568,
+          "high_ms": 0.060331,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.052858,
+          "low_ms": 0.050236,
+          "high_ms": 0.056023,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.release_install_admission": [
+        {
+          "median_ms": -104.9722645,
+          "low_ms": -108.316856,
+          "high_ms": -98.735906,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -104.827038,
+          "low_ms": -108.62637,
+          "high_ms": -100.259328,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.release_prepare_admission": [
+        {
+          "median_ms": -176.911505,
+          "low_ms": -182.637066,
+          "high_ms": -173.288075,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -179.2765885,
+          "low_ms": -188.070625,
+          "high_ms": -167.918074,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.residual": [
+        {
+          "median_ms": 1.0544820000000001,
+          "low_ms": 0.954295,
+          "high_ms": 1.104481,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 1.0768244999999999,
+          "low_ms": 1.017982,
+          "high_ms": 1.18935,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.route_keys": [
+        {
+          "median_ms": 11.288156,
+          "low_ms": 10.10637,
+          "high_ms": 11.574733,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 11.018740000000001,
+          "low_ms": 9.985172,
+          "high_ms": 11.302511,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.selection_charge": [
+        {
+          "median_ms": 12.5642485,
+          "low_ms": 12.453908,
+          "high_ms": 12.679208,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 12.4621915,
+          "low_ms": 12.382972,
+          "high_ms": 12.938084,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.validate_locators": [
+        {
+          "median_ms": 53.684703999999996,
+          "low_ms": 46.378526,
+          "high_ms": 59.765457,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 53.3991335,
+          "low_ms": 47.803398,
+          "high_ms": 60.801838,
+          "coverage": 0.978515625
+        }
+      ],
+      "native_union_ns": [
+        {
+          "median_ms": 94.002118,
+          "low_ms": 67.156713,
+          "high_ms": 162.917648,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 82.635141,
+          "low_ms": 25.205491,
+          "high_ms": 111.411885,
+          "coverage": 0.978515625
+        }
+      ],
+      "other_inside_window_ns": [
+        {
+          "median_ms": 2.439189,
+          "low_ms": 0.318776,
+          "high_ms": 5.249636,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.6909945,
+          "low_ms": 0.451204,
+          "high_ms": 1.413546,
+          "coverage": 0.978515625
+        }
+      ],
+      "outer_ns": [
+        {
+          "median_ms": 95.4611425,
+          "low_ms": 70.844903,
+          "high_ms": 167.743151,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 84.4818235,
+          "low_ms": 25.9305,
+          "high_ms": 112.25438,
+          "coverage": 0.978515625
+        }
+      ],
+      "overlapped_native_ns": [
+        {
+          "median_ms": 0.0,
+          "low_ms": 0.0,
+          "high_ms": 0.0,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0,
+          "low_ms": 0.0,
+          "high_ms": 0.0,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_assembly_ns": [
+        {
+          "median_ms": -0.0042085000000000004,
+          "low_ms": -0.00861,
+          "high_ms": -0.001189,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.0015834999999999998,
+          "low_ms": -0.006491,
+          "high_ms": -0.000342,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_bookkeeping_ns": [
+        {
+          "median_ms": 0.0416075,
+          "low_ms": 0.03896,
+          "high_ms": 0.044684,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0404765,
+          "low_ms": 0.038315,
+          "high_ms": 0.051831,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_charge_ns": [
+        {
+          "median_ms": 9.324182,
+          "low_ms": 9.272561,
+          "high_ms": 9.650039,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 9.139734,
+          "low_ms": 9.099452,
+          "high_ms": 9.313682,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_columns_ns": [
+        {
+          "median_ms": -0.033565,
+          "low_ms": -0.036621,
+          "high_ms": -0.026747,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.0275705,
+          "low_ms": -0.036423,
+          "high_ms": -0.01503,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_output_ns": [
+        {
+          "median_ms": 9.323215999999999,
+          "low_ms": 9.269063,
+          "high_ms": 9.660544,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 9.147875500000001,
+          "low_ms": 9.111186,
+          "high_ms": 9.344637,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.emit_ns": [
+        {
+          "median_ms": 0.031865500000000005,
+          "low_ms": 0.025658,
+          "high_ms": 0.038169,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.03172850000000001,
+          "low_ms": 0.028561,
+          "high_ms": 0.045517,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.left_commit_ns": [
+        {
+          "median_ms": 9.8111015,
+          "low_ms": 6.854421,
+          "high_ms": 13.627704,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 7.513228,
+          "low_ms": 6.305806,
+          "high_ms": 11.66363,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.matching_ns": [
+        {
+          "median_ms": -61.657887,
+          "low_ms": -75.726073,
+          "high_ms": -51.280316,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -60.123201,
+          "low_ms": -67.413899,
+          "high_ms": -53.208825,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.residual_ns": [
+        {
+          "median_ms": 29.7730225,
+          "low_ms": 21.516568,
+          "high_ms": 37.935107,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 24.7739845,
+          "low_ms": 16.015819,
+          "high_ms": 38.491669,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.right_eviction_ns": [
+        {
+          "median_ms": -41.7742505,
+          "low_ms": -43.479062,
+          "high_ms": -29.956914,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -32.3900105,
+          "low_ms": -41.373996,
+          "high_ms": -24.194771,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark_ns": [
+        {
+          "median_ms": -49.8274835,
+          "low_ms": -66.290143,
+          "high_ms": -34.088665,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -49.329998,
+          "low_ms": -56.86143,
+          "high_ms": -40.813135,
+          "coverage": 0.978515625
+        }
+      ]
+    },
+    "inventory": {
+      "base": {
+        "inside_left": [
+          10
+        ],
+        "inside_right": [
+          10
+        ],
+        "inside_watermark": [
+          20
+        ],
+        "outside_watermark": [
+          3
+        ]
+      },
+      "head": {
+        "cardinality_mask_rows": [
+          100000000
+        ],
+        "inside_left": [
+          10
+        ],
+        "inside_right": [
+          10
+        ],
+        "inside_watermark": [
+          20
+        ],
+        "outside_watermark": [
+          3
+        ],
+        "record_mask_rows": [
+          20000000
+        ],
+        "variable_value_length_rows": [
+          20000000
+        ]
+      }
+    },
+    "instrumentation": {
+      "base": {
+        "plain_mean_ms": 722.0165646,
+        "trace_mean_ms": 746.88652225,
+        "p50_shift_percent": 2.575895858141952
+      },
+      "head": {
+        "plain_mean_ms": 814.15782865,
+        "trace_mean_ms": 835.47163145,
+        "p50_shift_percent": 2.3708103024789873
+      }
+    }
+  },
+  "python": {
+    "artifact": 15064051488,
+    "digest": "sha256:cee2acca334b03004af3a23b9f25dc1438fc52e5282f81b0fc1ed71e7f85c7a9",
+    "cohorts": {
+      "plain": {
+        "state": "complete",
+        "rounds": [
+          {
+            "median": 14.119020458627363,
+            "low": 9.72622647676804,
+            "high": 16.935264457855048,
+            "coverage": 0.978515625
+          },
+          {
+            "median": 10.811349881227727,
+            "low": -1.698127677561323,
+            "high": 17.811143062990542,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "inconclusive",
+        "ms": {
+          "base": {
+            "p50": 792.2531164999999,
+            "p95": 836.6983804
+          },
+          "head": {
+            "p50": 874.0879415,
+            "p95": 956.2606022
+          }
+        },
+        "delta_percent": 10.329378742178807,
+        "accepted_intervals": 86,
+        "rejected": [],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": {
+          "prepare": 4,
+          "sample": 40
+        }
+      },
+      "trace": {
+        "state": "complete",
+        "rounds": [
+          {
+            "median": 2.7511277684340585,
+            "low": -3.9257349260939156,
+            "high": 5.4376557610517295,
+            "coverage": 0.978515625
+          },
+          {
+            "median": 4.342927310410727,
+            "low": -5.7696671609488215,
+            "high": 13.164664566878193,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "inconclusive",
+        "ms": {
+          "base": {
+            "p50": 804.1214749999999,
+            "p95": 838.3237224
+          },
+          "head": {
+            "p50": 841.372044,
+            "p95": 884.0705438
+          }
+        },
+        "delta_percent": 4.632455438402516,
+        "accepted_intervals": 84,
+        "rejected": [],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": {
+          "prepare": 4,
+          "sample": 40
+        }
+      }
+    },
+    "cpu_model": "AMD EPYC 9V74 80-Core Processor",
+    "inside_ms": {
+      "admit_left": {
+        "base": 176.5933641,
+        "head": 354.05061,
+        "delta_ms": 177.4572459
+      },
+      "admit_left.budget_preflight": {
+        "base": 0.0,
+        "head": 0.00624475,
+        "delta_ms": 0.00624475
+      },
+      "admit_left.build_run": {
+        "base": 0.0,
+        "head": 20.865003,
+        "delta_ms": 20.865003
+      },
+      "admit_left.compact_payload": {
+        "base": 0.0,
+        "head": 51.12733895,
+        "delta_ms": 51.12733895
+      },
+      "admit_left.encode_sequences": {
+        "base": 0.0,
+        "head": 45.30935065,
+        "delta_ms": 45.30935065
+      },
+      "admit_left.envelope_record": {
+        "base": 0.0,
+        "head": 0.00177875,
+        "delta_ms": 0.00177875
+      },
+      "admit_left.ingress_validation": {
+        "base": 33.49397405,
+        "head": 2.14065315,
+        "delta_ms": -31.3533209
+      },
+      "admit_left.install_indexes": {
+        "base": 0.0,
+        "head": 133.65848915,
+        "delta_ms": 133.65848915
+      },
+      "admit_left.late_mask": {
+        "base": 0.0,
+        "head": 6.5900717,
+        "delta_ms": 6.5900717
+      },
+      "admit_left.project_charge": {
+        "base": 0.0,
+        "head": 0.055540849999999996,
+        "delta_ms": 0.055540849999999996
+      },
+      "admit_left.release_install_admission": {
+        "base": 0.19364575,
+        "head": 0.0,
+        "delta_ms": -0.19364575
+      },
+      "admit_left.release_prepare_admission": {
+        "base": 142.9057443,
+        "head": 0.0,
+        "delta_ms": -142.9057443
+      },
+      "admit_left.residual": {
+        "base": 0.0,
+        "head": 0.032815199999999996,
+        "delta_ms": 0.032815199999999996
+      },
+      "admit_left.route_keys": {
+        "base": 0.0,
+        "head": 12.5071245,
+        "delta_ms": 12.5071245
+      },
+      "admit_left.selection_charge": {
+        "base": 0.0,
+        "head": 17.72441055,
+        "delta_ms": 17.72441055
+      },
+      "admit_left.validate_locators": {
+        "base": 0.0,
+        "head": 64.0317888,
+        "delta_ms": 64.0317888
+      },
+      "admit_right": {
+        "base": 306.90354264999996,
+        "head": 281.99501885,
+        "delta_ms": -24.908523799999955
+      },
+      "admit_right.budget_preflight": {
+        "base": 0.0,
+        "head": 0.00644145,
+        "delta_ms": 0.00644145
+      },
+      "admit_right.build_run": {
+        "base": 0.0,
+        "head": 13.754451099999999,
+        "delta_ms": 13.754451099999999
+      },
+      "admit_right.compact_payload": {
+        "base": 0.0,
+        "head": 42.0818372,
+        "delta_ms": 42.0818372
+      },
+      "admit_right.encode_sequences": {
+        "base": 0.0,
+        "head": 30.13276185,
+        "delta_ms": 30.13276185
+      },
+      "admit_right.envelope_record": {
+        "base": 0.0,
+        "head": 0.0024926999999999996,
+        "delta_ms": 0.0024926999999999996
+      },
+      "admit_right.ingress_validation": {
+        "base": 22.39663915,
+        "head": 4.70425595,
+        "delta_ms": -17.6923832
+      },
+      "admit_right.install_indexes": {
+        "base": 0.0,
+        "head": 97.9659645,
+        "delta_ms": 97.9659645
+      },
+      "admit_right.late_mask": {
+        "base": 0.0,
+        "head": 6.3231677,
+        "delta_ms": 6.3231677
+      },
+      "admit_right.project_charge": {
+        "base": 0.0,
+        "head": 0.0554944,
+        "delta_ms": 0.0554944
+      },
+      "admit_right.release_install_admission": {
+        "base": 153.05417755000002,
+        "head": 0.0,
+        "delta_ms": -153.05417755000002
+      },
+      "admit_right.release_prepare_admission": {
+        "base": 131.45272595,
+        "head": 0.0,
+        "delta_ms": -131.45272595
+      },
+      "admit_right.residual": {
+        "base": 0.0,
+        "head": 0.0381532,
+        "delta_ms": 0.0381532
+      },
+      "admit_right.route_keys": {
+        "base": 0.0,
+        "head": 12.8905954,
+        "delta_ms": 12.8905954
+      },
+      "admit_right.selection_charge": {
+        "base": 0.0,
+        "head": 17.8628035,
+        "delta_ms": 17.8628035
+      },
+      "admit_right.validate_locators": {
+        "base": 0.0,
+        "head": 56.1765999,
+        "delta_ms": 56.1765999
+      },
+      "native_union_ns": {
+        "base": 796.4038575,
+        "head": 820.6526015,
+        "delta_ms": 24.248743999999988
+      },
+      "other_inside_window_ns": {
+        "base": 13.7207107,
+        "head": 12.719749550000001,
+        "delta_ms": -1.0009611499999984
+      },
+      "outer_ns": {
+        "base": 810.1245682,
+        "head": 833.3723510499999,
+        "delta_ms": 23.247782849999908
+      },
+      "overlapped_native_ns": {
+        "base": 0.0,
+        "head": 0.0,
+        "delta_ms": 0.0
+      },
+      "python.arrow_bridge": {
+        "base": 0.7473086999999999,
+        "head": 0.76592845,
+        "delta_ms": 0.018619750000000046
+      },
+      "python.concat": {
+        "base": 0.0405666,
+        "head": 0.03917945,
+        "delta_ms": -0.0013871500000000037
+      },
+      "python.last_bridge_to_end_ns": {
+        "base": 0.14722945,
+        "head": 0.14700870000000002,
+        "delta_ms": -0.00022074999999999179
+      },
+      "python.publish_events": {
+        "base": 0.6494503,
+        "head": 0.6615395,
+        "delta_ms": 0.012089199999999911
+      },
+      "python.time_to_first_bridge_ns": {
+        "base": 82.25788370000001,
+        "head": 75.9825106,
+        "delta_ms": -6.27537310000001
+      },
+      "python.wait_for_chunk_output": {
+        "base": 809.35694625,
+        "head": 832.5943437000001,
+        "delta_ms": 23.237397450000117
+      },
+      "watermark.arrow_assembly_ns": {
+        "base": 0.040647300000000004,
+        "head": 0.04424975,
+        "delta_ms": 0.003602449999999993
+      },
+      "watermark.arrow_bookkeeping_ns": {
+        "base": 0.0397073,
+        "head": 0.09731335,
+        "delta_ms": 0.057606050000000006
+      },
+      "watermark.arrow_charge_ns": {
+        "base": 0.0844868,
+        "head": 11.46253325,
+        "delta_ms": 11.37804645
+      },
+      "watermark.arrow_columns_ns": {
+        "base": 0.0419217,
+        "head": 0.02296755,
+        "delta_ms": -0.01895415
+      },
+      "watermark.arrow_output_ns": {
+        "base": 0.2067631,
+        "head": 11.6270639,
+        "delta_ms": 11.4203008
+      },
+      "watermark.emit_ns": {
+        "base": 0.0880653,
+        "head": 0.1355141,
+        "delta_ms": 0.0474488
+      },
+      "watermark.left_commit_ns": {
+        "base": 0.2191591,
+        "head": 10.226490199999999,
+        "delta_ms": 10.007331099999998
+      },
+      "watermark.matching_ns": {
+        "base": 203.1396342,
+        "head": 114.9154018,
+        "delta_ms": -88.22423239999999
+      },
+      "watermark.residual_ns": {
+        "base": 0.0740064,
+        "head": 22.01455035,
+        "delta_ms": 21.940543950000002
+      },
+      "watermark.right_eviction_ns": {
+        "base": 109.17932265,
+        "head": 25.6879523,
+        "delta_ms": -83.49137035000001
+      },
+      "watermark_ns": {
+        "base": 312.90695075,
+        "head": 184.60697265000002,
+        "delta_ms": -128.2999781
+      }
+    },
+    "paired_differences_ms": {
+      "admit_left": [
+        {
+          "median_ms": 156.301883,
+          "low_ms": 142.97102,
+          "high_ms": 219.384959,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 178.478386,
+          "low_ms": 159.771659,
+          "high_ms": 226.67599,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.budget_preflight": [
+        {
+          "median_ms": 0.006235,
+          "low_ms": 0.005387,
+          "high_ms": 0.006569,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.00659,
+          "low_ms": 0.005238,
+          "high_ms": 0.007382,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.build_run": [
+        {
+          "median_ms": 18.898972,
+          "low_ms": 14.190446,
+          "high_ms": 23.674428,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 23.190091000000002,
+          "low_ms": 21.190106,
+          "high_ms": 26.999051,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.compact_payload": [
+        {
+          "median_ms": 48.133109000000005,
+          "low_ms": 41.112989,
+          "high_ms": 56.807278,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 53.123138,
+          "low_ms": 42.587769,
+          "high_ms": 68.737572,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.encode_sequences": [
+        {
+          "median_ms": 40.330627500000006,
+          "low_ms": 34.897166,
+          "high_ms": 56.506422,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 48.56509,
+          "low_ms": 39.758255,
+          "high_ms": 64.272261,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.envelope_record": [
+        {
+          "median_ms": 0.0018484999999999999,
+          "low_ms": 0.001683,
+          "high_ms": 0.002022,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0017075,
+          "low_ms": 0.001571,
+          "high_ms": 0.002012,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.ingress_validation": [
+        {
+          "median_ms": -28.183506,
+          "low_ms": -33.971411,
+          "high_ms": -15.499053,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -36.5386625,
+          "low_ms": -48.625948,
+          "high_ms": -26.167141,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.install_indexes": [
+        {
+          "median_ms": 131.355448,
+          "low_ms": 125.743665,
+          "high_ms": 138.018022,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 135.0293925,
+          "low_ms": 131.691205,
+          "high_ms": 141.521399,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.late_mask": [
+        {
+          "median_ms": 6.5143445,
+          "low_ms": 6.421549,
+          "high_ms": 6.661946,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 6.575837,
+          "low_ms": 6.50814,
+          "high_ms": 6.765223,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.project_charge": [
+        {
+          "median_ms": 0.056514999999999996,
+          "low_ms": 0.052988,
+          "high_ms": 0.06181,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.054552,
+          "low_ms": 0.052397,
+          "high_ms": 0.055821,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.release_install_admission": [
+        {
+          "median_ms": -0.1897305,
+          "low_ms": -0.203283,
+          "high_ms": -0.179345,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.19577499999999998,
+          "low_ms": -0.205623,
+          "high_ms": -0.191714,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.release_prepare_admission": [
+        {
+          "median_ms": -143.234642,
+          "low_ms": -149.597543,
+          "high_ms": -141.169473,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -140.4698965,
+          "low_ms": -150.465457,
+          "high_ms": -133.978329,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.residual": [
+        {
+          "median_ms": 0.034215499999999996,
+          "low_ms": 0.032677,
+          "high_ms": 0.034663,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.031876,
+          "low_ms": 0.030344,
+          "high_ms": 0.03347,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.route_keys": [
+        {
+          "median_ms": 12.3766945,
+          "low_ms": 11.837416,
+          "high_ms": 13.153851,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 12.375809499999999,
+          "low_ms": 11.996934,
+          "high_ms": 13.339591,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.selection_charge": [
+        {
+          "median_ms": 17.543217,
+          "low_ms": 17.464866,
+          "high_ms": 17.798299,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 17.6557125,
+          "low_ms": 17.485907,
+          "high_ms": 18.54038,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_left.validate_locators": [
+        {
+          "median_ms": 61.705684,
+          "low_ms": 53.538709,
+          "high_ms": 72.730803,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 63.8442735,
+          "low_ms": 60.484075,
+          "high_ms": 71.242464,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right": [
+        {
+          "median_ms": -6.309619,
+          "low_ms": -79.102022,
+          "high_ms": 22.881116,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -35.1061265,
+          "low_ms": -52.054367,
+          "high_ms": 21.452153,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.budget_preflight": [
+        {
+          "median_ms": 0.0062285,
+          "low_ms": 0.005817,
+          "high_ms": 0.00723,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0065994999999999995,
+          "low_ms": 0.00568,
+          "high_ms": 0.00725,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.build_run": [
+        {
+          "median_ms": 15.088824500000001,
+          "low_ms": 11.811716,
+          "high_ms": 18.645205,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 12.4744285,
+          "low_ms": 9.558249,
+          "high_ms": 15.523902,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.compact_payload": [
+        {
+          "median_ms": 43.8573645,
+          "low_ms": 38.723813,
+          "high_ms": 59.439228,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 36.829136000000005,
+          "low_ms": 30.289951,
+          "high_ms": 45.423114,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.encode_sequences": [
+        {
+          "median_ms": 32.626391,
+          "low_ms": 28.963986,
+          "high_ms": 43.728262,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 25.025841,
+          "low_ms": 17.428648,
+          "high_ms": 31.11666,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.envelope_record": [
+        {
+          "median_ms": 0.001817,
+          "low_ms": 0.001531,
+          "high_ms": 0.002113,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.001923,
+          "low_ms": 0.001692,
+          "high_ms": 0.002212,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.ingress_validation": [
+        {
+          "median_ms": -22.5016635,
+          "low_ms": -34.206089,
+          "high_ms": -12.179325,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -11.742245,
+          "low_ms": -20.013089,
+          "high_ms": -5.308506,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.install_indexes": [
+        {
+          "median_ms": 105.9470335,
+          "low_ms": 87.088345,
+          "high_ms": 114.659495,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 94.00524200000001,
+          "low_ms": 81.991138,
+          "high_ms": 109.197382,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.late_mask": [
+        {
+          "median_ms": 6.3552859999999995,
+          "low_ms": 6.229966,
+          "high_ms": 6.502874,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 6.2704135,
+          "low_ms": 6.13126,
+          "high_ms": 6.476775,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.project_charge": [
+        {
+          "median_ms": 0.054183499999999996,
+          "low_ms": 0.051105,
+          "high_ms": 0.058836,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0543755,
+          "low_ms": 0.050863,
+          "high_ms": 0.068381,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.release_install_admission": [
+        {
+          "median_ms": -158.39206000000001,
+          "low_ms": -161.362626,
+          "high_ms": -156.263651,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -148.672665,
+          "low_ms": -152.26863,
+          "high_ms": -144.117618,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.release_prepare_admission": [
+        {
+          "median_ms": -132.366398,
+          "low_ms": -133.947785,
+          "high_ms": -128.303488,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -128.86182050000002,
+          "low_ms": -131.861344,
+          "high_ms": -128.171055,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.residual": [
+        {
+          "median_ms": 0.0381965,
+          "low_ms": 0.037113,
+          "high_ms": 0.039229,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.037890999999999994,
+          "low_ms": 0.034702,
+          "high_ms": 0.039259,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.route_keys": [
+        {
+          "median_ms": 12.481846,
+          "low_ms": 11.915269,
+          "high_ms": 13.75798,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 12.667102,
+          "low_ms": 12.023266,
+          "high_ms": 13.682217,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.selection_charge": [
+        {
+          "median_ms": 17.567964500000002,
+          "low_ms": 17.485845,
+          "high_ms": 18.302769,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 17.711846,
+          "low_ms": 17.497117,
+          "high_ms": 18.358067,
+          "coverage": 0.978515625
+        }
+      ],
+      "admit_right.validate_locators": [
+        {
+          "median_ms": 57.6385455,
+          "low_ms": 47.817749,
+          "high_ms": 66.742521,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 55.1386885,
+          "low_ms": 45.03293,
+          "high_ms": 64.556709,
+          "coverage": 0.978515625
+        }
+      ],
+      "native_union_ns": [
+        {
+          "median_ms": 20.0658585,
+          "low_ms": -31.920095,
+          "high_ms": 61.433432,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 35.020115,
+          "low_ms": -46.312022,
+          "high_ms": 96.49227,
+          "coverage": 0.978515625
+        }
+      ],
+      "other_inside_window_ns": [
+        {
+          "median_ms": 0.5480075,
+          "low_ms": -5.925454,
+          "high_ms": 3.190673,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.4184295,
+          "low_ms": 0.240646,
+          "high_ms": 0.874086,
+          "coverage": 0.978515625
+        }
+      ],
+      "outer_ns": [
+        {
+          "median_ms": 22.296546,
+          "low_ms": -31.237919,
+          "high_ms": 45.477471,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 35.4385445,
+          "low_ms": -45.93677,
+          "high_ms": 102.623596,
+          "coverage": 0.978515625
+        }
+      ],
+      "overlapped_native_ns": [
+        {
+          "median_ms": 0.0,
+          "low_ms": 0.0,
+          "high_ms": 0.0,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0,
+          "low_ms": 0.0,
+          "high_ms": 0.0,
+          "coverage": 0.978515625
+        }
+      ],
+      "python.arrow_bridge": [
+        {
+          "median_ms": 0.013655500000000001,
+          "low_ms": 0.004719,
+          "high_ms": 0.046489,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0132455,
+          "low_ms": -0.002555,
+          "high_ms": 0.038776,
+          "coverage": 0.978515625
+        }
+      ],
+      "python.concat": [
+        {
+          "median_ms": -0.00047650000000000004,
+          "low_ms": -0.012128,
+          "high_ms": 0.004718,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.0008060000000000001,
+          "low_ms": -0.002274,
+          "high_ms": 0.001461,
+          "coverage": 0.978515625
+        }
+      ],
+      "python.last_bridge_to_end_ns": [
+        {
+          "median_ms": 0.0003340000000000001,
+          "low_ms": -0.032538,
+          "high_ms": 0.012179,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.000291,
+          "low_ms": -0.016433,
+          "high_ms": 0.012529,
+          "coverage": 0.978515625
+        }
+      ],
+      "python.publish_events": [
+        {
+          "median_ms": 0.020143,
+          "low_ms": -0.008712,
+          "high_ms": 0.028589,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0091775,
+          "low_ms": -0.045316,
+          "high_ms": 0.037484,
+          "coverage": 0.978515625
+        }
+      ],
+      "python.time_to_first_bridge_ns": [
+        {
+          "median_ms": 0.38799999999999996,
+          "low_ms": -33.967565,
+          "high_ms": 19.050359,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -10.575460499999998,
+          "low_ms": -26.998094,
+          "high_ms": 8.952257,
+          "coverage": 0.978515625
+        }
+      ],
+      "python.wait_for_chunk_output": [
+        {
+          "median_ms": 22.2730295,
+          "low_ms": -31.247393,
+          "high_ms": 45.485462,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 35.397484500000004,
+          "low_ms": -45.946001,
+          "high_ms": 102.59825,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_assembly_ns": [
+        {
+          "median_ms": 0.004146,
+          "low_ms": 0.001052,
+          "high_ms": 0.006359,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.0037485,
+          "low_ms": -0.00131,
+          "high_ms": 0.006609,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_bookkeeping_ns": [
+        {
+          "median_ms": 0.058246,
+          "low_ms": 0.054821,
+          "high_ms": 0.059415,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.057164,
+          "low_ms": 0.051413,
+          "high_ms": 0.061231,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_charge_ns": [
+        {
+          "median_ms": 11.3188965,
+          "low_ms": 11.290673,
+          "high_ms": 11.39691,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 11.392179,
+          "low_ms": 11.354271,
+          "high_ms": 11.485059,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_columns_ns": [
+        {
+          "median_ms": -0.017762,
+          "low_ms": -0.024077,
+          "high_ms": -0.012988,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -0.019391,
+          "low_ms": -0.028168,
+          "high_ms": -0.014821,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.arrow_output_ns": [
+        {
+          "median_ms": 11.360179,
+          "low_ms": 11.34446,
+          "high_ms": 11.472405,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 11.4371325,
+          "low_ms": 11.382463,
+          "high_ms": 11.528764,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.emit_ns": [
+        {
+          "median_ms": 0.054838,
+          "low_ms": 0.033047,
+          "high_ms": 0.066688,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 0.041952,
+          "low_ms": 0.030765,
+          "high_ms": 0.062593,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.left_commit_ns": [
+        {
+          "median_ms": 7.822179,
+          "low_ms": 7.691719,
+          "high_ms": 9.646675,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 11.697051,
+          "low_ms": 8.080559,
+          "high_ms": 15.159202,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.matching_ns": [
+        {
+          "median_ms": -86.6427525,
+          "low_ms": -105.963034,
+          "high_ms": -83.742936,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -82.98791650000001,
+          "low_ms": -100.058242,
+          "high_ms": -64.980827,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.residual_ns": [
+        {
+          "median_ms": 16.759310499999998,
+          "low_ms": 8.078347,
+          "high_ms": 29.636957,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": 24.682661,
+          "low_ms": 21.680108,
+          "high_ms": 26.517164,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark.right_eviction_ns": [
+        {
+          "median_ms": -80.3785375,
+          "low_ms": -95.086022,
+          "high_ms": -60.702539,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -87.74892249999999,
+          "low_ms": -95.718575,
+          "high_ms": -77.22139,
+          "coverage": 0.978515625
+        }
+      ],
+      "watermark_ns": [
+        {
+          "median_ms": -131.3707945,
+          "low_ms": -146.135087,
+          "high_ms": -126.277794,
+          "coverage": 0.978515625
+        },
+        {
+          "median_ms": -118.0057845,
+          "low_ms": -144.901791,
+          "high_ms": -102.219757,
+          "coverage": 0.978515625
+        }
+      ]
+    },
+    "inventory": {
+      "base": {
+        "inside_left": [
+          10
+        ],
+        "inside_right": [
+          10
+        ],
+        "inside_watermark": [
+          20
+        ],
+        "outside_watermark": [
+          3
+        ],
+        "python_arrow_bridge": [
+          10
+        ],
+        "python_concat": [
+          1
+        ],
+        "python_publish_events": [
+          10
+        ],
+        "python_wait_for_chunk_output": [
+          10
+        ]
+      },
+      "head": {
+        "cardinality_mask_rows": [
+          100000000
+        ],
+        "inside_left": [
+          10
+        ],
+        "inside_right": [
+          10
+        ],
+        "inside_watermark": [
+          20
+        ],
+        "outside_watermark": [
+          3
+        ],
+        "python_arrow_bridge": [
+          10
+        ],
+        "python_concat": [
+          1
+        ],
+        "python_publish_events": [
+          10
+        ],
+        "python_wait_for_chunk_output": [
+          10
+        ],
+        "record_mask_rows": [
+          20000000
+        ],
+        "variable_value_length_rows": [
+          20000000
+        ]
+      }
+    },
+    "instrumentation": {
+      "base": {
+        "plain_mean_ms": 792.8873407,
+        "trace_mean_ms": 810.1237823499999,
+        "p50_shift_percent": 1.4980513490981062
+      },
+      "head": {
+        "plain_mean_ms": 876.0887461,
+        "trace_mean_ms": 833.3714812,
+        "p50_shift_percent": -3.742861095172767
+      }
+    }
+  }
+}
