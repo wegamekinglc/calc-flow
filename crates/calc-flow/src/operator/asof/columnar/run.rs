@@ -49,7 +49,14 @@ fn uint64_row(value: u64) -> [u8; UINT64_ROW_BYTES] {
     row
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static ENCODED_UINT64_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn uint64_binary(values: &[u64]) -> BinaryArray {
+    #[cfg(test)]
+    ENCODED_UINT64_ROWS.set(ENCODED_UINT64_ROWS.get() + values.len());
     let offsets = OffsetBuffer::from_repeated_length(UINT64_ROW_BYTES, values.len());
     let rows = values.iter().copied().map(uint64_row).collect::<Vec<_>>();
     BinaryArray::new(offsets, Buffer::from_vec(rows.into_flattened()), None)

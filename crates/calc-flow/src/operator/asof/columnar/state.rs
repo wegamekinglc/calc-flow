@@ -1456,40 +1456,11 @@ impl ColumnarState {
         identity_bound: i128,
     ) -> EvictionSummary {
         let mut summary = EvictionSummary::default();
+        // A run can span keys. Drop all expiring identities before detaching its last payload.
         for bucket in &mut self.right_by_key {
-            let expired = bucket.payloads.rows().partition_point(|locator| {
-                i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
-            });
-            let dominated = bucket
-                .payloads
-                .rows()
-                .partition_point(|locator| {
-                    i128::from(self.right_runs[&locator.run].time(*locator)) <= threshold
-                })
-                .saturating_sub(1);
-            let payload_count = expired.max(dominated);
             let identity_count = bucket.identities.rows().partition_point(|locator| {
                 i128::from(self.right_runs[&locator.run].time(*locator)) < identity_bound
             });
-            for &locator in &bucket.payloads.rows()[..payload_count] {
-                retire_from_run(
-                    &mut self.right_runs,
-                    &mut self.run_bytes,
-                    locator.run,
-                    |run| {
-                        let has_identity = run.has_identity(locator);
-                        if run.drop_payload(locator) {
-                            summary.payloads += 1;
-                            self.right_payloads -= 1;
-                            if has_identity {
-                                self.right_identity_only += 1;
-                            } else {
-                                self.right_rows -= 1;
-                            }
-                        }
-                    },
-                );
-            }
             #[cfg(test)]
             RETIRED_IDENTITY_LOCATORS.set(RETIRED_IDENTITY_LOCATORS.get() + identity_count);
             for &locator in &bucket.identities.rows()[..identity_count] {
@@ -1509,9 +1480,41 @@ impl ColumnarState {
                     },
                 );
             }
-            let (before, after) = bucket.payloads.drop_prefix(payload_count);
-            self.index_bytes = self.index_bytes - before + after;
             let (before, after) = bucket.identities.drop_prefix(identity_count);
+            self.index_bytes = self.index_bytes - before + after;
+        }
+        for bucket in &mut self.right_by_key {
+            let expired = bucket.payloads.rows().partition_point(|locator| {
+                i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
+            });
+            let dominated = bucket
+                .payloads
+                .rows()
+                .partition_point(|locator| {
+                    i128::from(self.right_runs[&locator.run].time(*locator)) <= threshold
+                })
+                .saturating_sub(1);
+            let payload_count = expired.max(dominated);
+            for &locator in &bucket.payloads.rows()[..payload_count] {
+                retire_from_run(
+                    &mut self.right_runs,
+                    &mut self.run_bytes,
+                    locator.run,
+                    |run| {
+                        let has_identity = run.has_identity(locator);
+                        if run.drop_payload(locator) {
+                            summary.payloads += 1;
+                            self.right_payloads -= 1;
+                            if has_identity {
+                                self.right_identity_only += 1;
+                            } else {
+                                self.right_rows -= 1;
+                            }
+                        }
+                    },
+                );
+            }
+            let (before, after) = bucket.payloads.drop_prefix(payload_count);
             self.index_bytes = self.index_bytes - before + after;
         }
         self.finish_retirement();

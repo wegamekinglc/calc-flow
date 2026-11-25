@@ -2105,18 +2105,78 @@ fn test_single_uint64_sequence_retains_values_until_checkpoint_encoding() {
     );
 }
 
+fn uint64_sequence_record(rows: &[(i64, i64, u64)]) -> RecordBatch {
+    use datafusion::arrow::array::UInt64Array;
+
+    let values = record(
+        &rows
+            .iter()
+            .map(|&(key, time, _)| (key, time, 0, None))
+            .collect::<Vec<_>>(),
+    );
+    let mut fields = values.schema().fields().to_vec();
+    fields[2] = Arc::new(Field::new("sequence", DataType::UInt64, false));
+    let mut columns = values.columns().to_vec();
+    columns[2] = Arc::new(UInt64Array::from_iter_values(rows.iter().map(|row| row.2)));
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+}
+
+#[test]
+fn test_expiring_uint64_runs_only_encode_surviving_identities() {
+    use super::run::ENCODED_UINT64_ROWS;
+
+    let input = uint64_sequence_record(&[(1, 20, 100), (2, 0, 200)]);
+    let schemas = [input.schema(), input.schema()];
+    let declaration = spec(0, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = ColumnarState::new("u64", &declaration, schemas.clone(), &pool).unwrap();
+    admit(&mut state, 1, &input).unwrap();
+    admit(&mut state, 1, &uint64_sequence_record(&[(1, 100, 300)])).unwrap();
+    let watermark = |left, right| super::Progress {
+        left_watermark: Some(left),
+        right_watermark: Some(right),
+        ..super::Progress::default()
+    };
+    ENCODED_UINT64_ROWS.set(0);
+    assert_eq!(state.evict(watermark(1, 0)).payloads, 1);
+    assert_eq!(ENCODED_UINT64_ROWS.get(), 0);
+    assert_eq!(
+        state.evict(watermark(21, 21)),
+        super::EvictionSummary {
+            payloads: 1,
+            identities: 2
+        }
+    );
+    assert_eq!(
+        ENCODED_UINT64_ROWS.get(),
+        0,
+        "discarding a run must not encode its sequences"
+    );
+    assert_eq!(state.evict(watermark(101, 100)).payloads, 1);
+    assert_eq!(state.identity_only_rows(), 1);
+    assert_eq!(
+        ENCODED_UINT64_ROWS.get(),
+        1,
+        "the sole surviving identity must own its encoding"
+    );
+    let snapshot = state.capture(1 << 20).unwrap();
+    assert_eq!(ENCODED_UINT64_ROWS.get(), 1);
+    let mut restored =
+        ColumnarState::restore("u64", &declaration, &schemas, &pool, &snapshot).unwrap();
+    assert!(matches!(
+        admit(&mut restored, 1, &uint64_sequence_record(&[(1, 100, 300)])).unwrap_err(),
+        crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofDuplicateIdentity,
+            ..
+        }
+    ));
+}
+
 #[test]
 fn test_uint64_sequence_restores_duplicates_and_retires_payload_before_identity() {
     use super::run::SequenceColumn;
-    use datafusion::arrow::array::UInt64Array;
-
     let batch = |sequences: &[u64]| {
-        let values = record(&vec![(1, 5, 0, Some("payload")); sequences.len()]);
-        let mut fields = values.schema().fields().to_vec();
-        fields[2] = Arc::new(Field::new("sequence", DataType::UInt64, false));
-        let mut columns = values.columns().to_vec();
-        columns[2] = Arc::new(UInt64Array::from(sequences.to_vec()));
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+        uint64_sequence_record(&sequences.iter().map(|&seq| (1, 5, seq)).collect::<Vec<_>>())
     };
     let input = batch(&[u64::MAX, 0, 255, 256, 1 << 63]);
     let schemas = [input.schema(), input.schema()];
