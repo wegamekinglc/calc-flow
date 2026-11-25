@@ -156,10 +156,7 @@ impl ColumnarState {
         let mut records = Vec::new();
         let mut previous = None;
         while let Some(first) = rows.first() {
-            if first.row != 0
-                || first.run < self.first_fresh_run
-                || previous.is_some_and(|run| run >= first.run)
-            {
+            if first.run < self.first_fresh_run || previous.is_some_and(|run| run >= first.run) {
                 return None;
             }
             let record = self.run(side, first.run).payload_record()?;
