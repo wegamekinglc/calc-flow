@@ -1,0 +1,95 @@
+{
+  "runner": {
+    "mask": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "outcome": {
+      "elapsed": 10.54568164700001,
+      "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 4.0, 'siblings': [1], 'sibling_busy': 100.0, 'host_busy': 29.525, 'available_bytes': 15599542272, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 1, 'cpu_busy': 100.0, 'siblings': [0], 'sibling_busy': 4.0, 'host_busy': 29.525, 'available_bytes': 15599542272, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True}, {'cpu': 2, 'cpu_busy': 3.0, 'siblings': [3], 'sibling_busy': 11.1, 'host_busy': 29.525, 'available_bytes': 15599542272, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True}, {'cpu': 3, 'cpu_busy': 11.1, 'siblings': [2], 'sibling_busy': 3.0, 'host_busy': 29.525, 'available_bytes': 15599542272, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True}]\")])",
+      "state": "stopped"
+    },
+    "accepted": {
+      "prepare": 0,
+      "sample": 0
+    },
+    "native_sha256": {
+      "baseline": "d35884118ae4a4f63e35f3542574f1377a7cdf035781142c90898bd1edbee522",
+      "candidate": "0b9cc7a418e5709aac5cb2242d8b1ce1f8aeff8159e7b8d9f74822bdf2809370"
+    },
+    "rejected": [
+      {
+        "cpu": 0,
+        "cpu_busy": 4.0,
+        "siblings": [
+          1
+        ],
+        "sibling_busy": 100.0,
+        "host_busy": 29.525,
+        "available_bytes": 15599542272,
+        "major_faults": 0,
+        "swap_pages": 0,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "suitable": false
+      }
+    ]
+  },
+  "one": {
+    "mask": [
+      2
+    ],
+    "outcome": {
+      "elapsed": 23.952411685000015,
+      "state": "completed"
+    },
+    "accepted": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "native_sha256": {
+      "baseline": "d35884118ae4a4f63e35f3542574f1377a7cdf035781142c90898bd1edbee522",
+      "candidate": "0b9cc7a418e5709aac5cb2242d8b1ce1f8aeff8159e7b8d9f74822bdf2809370"
+    },
+    "result": {
+      "base_p50": 0.1394567555,
+      "base_p95": 0.14952189010000003,
+      "change_percent": -9.561448602610001,
+      "cpus": [
+        2
+      ],
+      "head_max": 0.138394325,
+      "head_min": 0.086927295,
+      "head_p50": 0.1261226695,
+      "head_p95": 0.1356934807,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        -8.089371856398463,
+        -14.068363151955904
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": -4.821419323667653,
+          "low": -11.667705964654374,
+          "median": -8.089371856398463
+        },
+        {
+          "coverage": 0.978515625,
+          "high": -6.1222363148349945,
+          "low": -39.98421093075283,
+          "median": -14.068363151955904
+        }
+      ],
+      "round_min_changes": [
+        -8.92967596478842,
+        -35.61044706747385
+      ],
+      "rows_per_second": 7928788.725804761,
+      "samples": 20,
+      "verdict": "no-confirmed-regression"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "id": 15035673616,
+  "node_id": "MDg6QXJ0aWZhY3QxNTAzNTY3MzYxNg==",
+  "name": "hosted-asof-affinity-1m-45643368973-1",
+  "size_in_bytes": 41773,
+  "url": "https://api.github.com/repos/wegamekinglc/calc-flow/actions/artifacts/15035673616",
+  "archive_download_url": "https://api.github.com/repos/wegamekinglc/calc-flow/actions/artifacts/15035673616/zip",
+  "expired": false,
+  "digest": "sha256:3c314c3e4df23977ab29a49ed58f09a88f41ef80ec3532f2a6ead1d1610dd325",
+  "created_at": "2026-11-25T15:18:00Z",
+  "updated_at": "2026-11-25T15:18:00Z",
+  "expires_at": "2026-12-25T15:17:59Z",
+  "workflow_run": {
+    "id": 45643368973,
+    "repository_id": 1222490326,
+    "head_repository_id": 1222490326,
+    "head_branch": "benchmarks/asof-worker-affinity-20261125",
+    "head_sha": "7f3548e6b1b54da66cdb41f9978b89454d15f230"
+  }
+}
