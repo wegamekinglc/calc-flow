@@ -1297,6 +1297,21 @@ async fn timed_nonterminal_epochs(root: &std::path::Path) -> (Vec<u64>, f64) {
     (epochs, started.elapsed().as_secs_f64())
 }
 
+async fn completed_epochs_at_cutoff(
+    root: &std::path::Path,
+    last_completed: Option<Epoch>,
+    minimum_epochs: usize,
+) -> (Vec<u64>, f64) {
+    let (mut epochs, validation_seconds) = timed_nonterminal_epochs(root).await;
+    let cutoff = last_completed.map_or(0, Epoch::as_u64);
+    epochs.truncate(epochs_through(&epochs, cutoff).len());
+    assert!(
+        epochs.len() >= minimum_epochs,
+        "checkpoint coverage: {epochs:?}"
+    );
+    (epochs, validation_seconds)
+}
+
 async fn runner_arm(
     workload: Workload,
     checkpointing: bool,
@@ -1355,16 +1370,12 @@ async fn runner_arm(
     let accepted_input_rows = sink.accepted_rows();
     assert!(accepted_input_rows > 0);
     let status_at_cutoff = job.status();
-    let (observed, manifest_validation_seconds) = timed_nonterminal_epochs(root.path()).await;
-    let cutoff = status_at_cutoff
-        .checkpoint
-        .last_completed_epoch
-        .map_or(0, Epoch::as_u64);
-    let epochs = epochs_through(&observed, cutoff);
-    assert!(
-        epochs.len() >= minimum_epochs,
-        "checkpoint coverage: {epochs:?}"
-    );
+    let (epochs, manifest_validation_seconds) = completed_epochs_at_cutoff(
+        root.path(),
+        status_at_cutoff.checkpoint.last_completed_epoch,
+        minimum_epochs,
+    )
+    .await;
     let freeze_to_ack_seconds = if checkpointing {
         let began = Instant::now();
         job.trigger_checkpoint().await.unwrap();
@@ -1381,11 +1392,7 @@ async fn runner_arm(
     assert!(settled_rows_after_cancel >= accepted_input_rows);
     let status_after_cancel = serde_json::to_value(job.status()).unwrap();
     let checkpoint_objects = checkpoint_objects(root.path()).unwrap();
-    if checkpointing {
-        assert!(checkpoint_objects > 0);
-    } else {
-        assert_eq!(checkpoint_objects, 0);
-    }
+    assert_eq!(checkpoint_objects > 0, checkpointing);
     json!({
         "checkpointing": checkpointing,
         "seconds": seconds,
