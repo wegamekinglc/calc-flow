@@ -9,7 +9,7 @@
 - 累计 `ts.average` 为 378.58 → 1,208.96 ms，慢 219.34%。它是按实体的累计递推。现实现的快速分派会进入逐行读写状态并构造临时向量的路径。首个小 PR 以实体数约束临时分配，验证空值、NaN、跨批和恢复后的递推。
 - ASOF 为 885.02 → 2,553.77 ms，慢 188.56%，每侧各 1,000 万行。小规模阶段归因及百万行公开作业均把 Arrow 输出排在水位处理耗时增量首位。先减少整批有序命中时的物化，再分解接纳、匹配、左提交以及公开作业中尚未归属的时间。各阶段的测量负载单列。[Rust 阶段实测](https://github.com/wegamekinglc/calc-flow/blob/d0fee918f7277557bd068d3da285dfaa44d2a152/benchmarks/evidence/20261125-asof-watermark-phases/native-phase-summary.md) · [Python 作业阶段实测](https://github.com/wegamekinglc/calc-flow/blob/91c75c4d921581f2687f1b5f90fba1bc53c21cfd/benchmarks/join-asof/20261125-asof-public-watermark-phases/README.md)
 - SMA20 慢 21.55%，argmax256 慢 18.56%，argmax64 慢 18.42%，双 SMA 慢 12.07%。分别追踪进入的实体并行或串行分支、每个输入批的状态读取/写回次数、滚动队列更新和输出拷贝。多窗口复用需要保持独立窗口边界。
-- 静态 Join 为 693.57 → 632.43 ms，GroupBy 为 294.64 → 294.71 ms，四线程默认配置均无确认回退。GroupBy 消费 1,000 万行、产生 64 组。其他线程、批次和投影按照各自行判定。Interval Join 的目录上限是每侧 100 万行，千万行需另设有界输出、完整结果 oracle 的实验。
+- 静态 Join 为 693.57 → 632.43 ms，GroupBy 为 294.64 → 294.71 ms，四线程默认配置均无确认回退。定时目录的公开流式 `group_by` 把全量输入放入一个按 symbol 分组的固定时间窗（tumbling window），在最终水位产生 64 组。增量 SQL GroupBy 的持续快照和 changelog 需要各自的直接发布版对照。其他线程、批次和投影按照各自行判定。Interval Join 的目录上限是每侧 100 万行，千万行需另设有界输出、完整结果 oracle 的实验。
 
 ## 两层验收及后续小 PR
 
