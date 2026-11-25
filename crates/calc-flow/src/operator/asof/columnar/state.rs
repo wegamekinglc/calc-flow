@@ -24,6 +24,8 @@ thread_local! {
     pub(super) static PROJECTED_GROUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PROJECTED_COUNT_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static COMMITTED_ROW_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static RETIRED_IDENTITY_LOCATORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static BULK_IDENTITY_RUN_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static FINALITY_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static SELECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LATEST_BINARY_SEARCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -1403,10 +1405,35 @@ impl ColumnarState {
         });
         let threshold = future.min(pending);
         let tolerance = i128::from(self.spec.tolerance_micros());
-        if !self.right_runs.is_empty() && self.can_retire_right_runs(threshold, tolerance, progress)
+        let identity_bound = if progress.right_ended {
+            i128::MAX
+        } else {
+            progress.right_watermark.map_or(i128::MIN, i128::from)
+        };
+        // With no left frontier every payload can still match a future left row.
+        if threshold == i128::MIN
+            && identity_bound != i128::MIN
+            && let Some(retired) = self.try_retire_right_identities(identity_bound)
+        {
+            return retired;
+        }
+        if !self.right_runs.is_empty()
+            && self.right_by_key.iter().all(|bucket| {
+                self.column_before(&bucket.payloads, threshold.saturating_sub(tolerance))
+                    && self.column_before(&bucket.identities, identity_bound)
+            })
         {
             return self.retire_right_runs();
         }
+        self.retire_right_prefixes(threshold, tolerance, identity_bound)
+    }
+
+    fn retire_right_prefixes(
+        &mut self,
+        threshold: i128,
+        tolerance: i128,
+        identity_bound: i128,
+    ) -> EvictionSummary {
         let mut summary = EvictionSummary::default();
         let mut dead_runs = BTreeSet::new();
         for bucket in &mut self.right_by_key {
@@ -1422,11 +1449,7 @@ impl ColumnarState {
                 .saturating_sub(1);
             let payload_count = expired.max(dominated);
             let identity_count = bucket.identities.rows().partition_point(|locator| {
-                let time = self.right_runs[&locator.run].time(*locator);
-                progress.right_ended
-                    || progress
-                        .right_watermark
-                        .is_some_and(|watermark| time < watermark)
+                i128::from(self.right_runs[&locator.run].time(*locator)) < identity_bound
             });
             for &locator in &bucket.payloads.rows()[..payload_count] {
                 let run = self
@@ -1450,6 +1473,8 @@ impl ColumnarState {
                     dead_runs.insert(locator.run);
                 }
             }
+            #[cfg(test)]
+            RETIRED_IDENTITY_LOCATORS.set(RETIRED_IDENTITY_LOCATORS.get() + identity_count);
             for &locator in &bucket.identities.rows()[..identity_count] {
                 let run = self
                     .right_runs
@@ -1485,23 +1510,58 @@ impl ColumnarState {
         summary
     }
 
-    fn can_retire_right_runs(&self, threshold: i128, tolerance: i128, progress: Progress) -> bool {
-        // Both columns are ordered by (time, sequence). The last live row is
-        // sufficient to prove the strict expiration test for the whole column.
-        let identity_bound = if progress.right_ended {
-            i128::MAX
-        } else {
-            progress.right_watermark.map_or(i128::MIN, i128::from)
-        };
-        self.right_by_key.iter().all(|bucket| {
-            let before = |column: &LocatorColumn, bound| {
-                column.rows().last().is_none_or(|locator| {
-                    i128::from(self.right_runs[&locator.run].time(*locator)) < bound
-                })
-            };
-            before(&bucket.payloads, threshold.saturating_sub(tolerance))
-                && before(&bucket.identities, identity_bound)
+    // Per-key columns are in event-time order, including after restore.
+    fn column_before(&self, column: &LocatorColumn, bound: i128) -> bool {
+        column
+            .rows()
+            .last()
+            .is_none_or(|locator| i128::from(self.right_runs[&locator.run].time(*locator)) < bound)
+    }
+
+    fn try_retire_right_identities(&mut self, bound: i128) -> Option<EvictionSummary> {
+        let identities = self.right_by_key.iter().try_fold(0usize, |total, bucket| {
+            self.column_before(&bucket.identities, bound)
+                .then(|| total + bucket.identities.len())
+        })?;
+        if identities != 0 {
+            // Keep work proportional to the live identities on sparse watermark steps.
+            if identities < self.right_runs.len()
+                || !self
+                    .right_runs
+                    .values()
+                    .all(Run::can_clear_identities_densely)
+            {
+                return None;
+            }
+            self.clear_right_run_identities();
+        }
+        for bucket in &mut self.right_by_key {
+            self.index_bytes -= std::mem::take(&mut bucket.identities).capacity_bytes();
+            // Recovery can retain spare capacity even in an empty payload column.
+            let (before, after) = bucket.payloads.drop_prefix(0);
+            self.index_bytes = self.index_bytes - before + after;
+        }
+        self.right_rows = self.right_payloads;
+        self.right_identity_only = 0;
+        self.finish_retirement();
+        Some(EvictionSummary {
+            payloads: 0,
+            identities: identities as u64,
         })
+    }
+
+    fn clear_right_run_identities(&mut self) {
+        self.right_runs.retain(|_, run| {
+            #[cfg(test)]
+            BULK_IDENTITY_RUN_VISITS.set(BULK_IDENTITY_RUN_VISITS.get() + 1);
+            run.clear_identities();
+            if run.is_live() {
+                true
+            } else {
+                self.run_bytes -= run.charge();
+                false
+            }
+        });
     }
 
     fn retire_right_runs(&mut self) -> EvictionSummary {
