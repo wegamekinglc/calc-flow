@@ -533,6 +533,254 @@ async fn test_columnar_accepted_counter_overflow_installs_no_state() {
 }
 
 #[test]
+fn test_multirecord_assembly_detaches_sliced_input_and_retains_its_reservation() {
+    let (mut operator, _) = fixture();
+    let large = "x".repeat(1 << 20);
+    let source = indexed_input(
+        &operator.schemas[0],
+        &[(&large, 1, 0), ("A", 5, 1), ("B", 6, 2)],
+    );
+    let batches = [source.slice(1, 2), source.slice(0, 0)];
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    for (watermark, accepted) in [(None, 2), (Some(6), 1)] {
+        let baseline = operator.runtime_pool.reserved();
+        let validated = admission::ValidatedInput {
+            index: 0,
+            watermark,
+            accepted,
+        };
+        let admission::PreparedRecord::Assembled { record, workspace } = operator
+            .prepare_record(&batches, validated, &context)
+            .unwrap()
+        else {
+            panic!("assembling two batches must own the result");
+        };
+        let expected = usize::try_from(accepted).unwrap();
+        assert_eq!(record, source.slice(3 - expected, expected));
+        assert!(workspace.size() > 0);
+        assert_eq!(
+            operator.runtime_pool.reserved(),
+            baseline + workspace.size()
+        );
+        for (new, original) in record.columns().iter().zip(source.columns()) {
+            for (copied, source) in new
+                .to_data()
+                .buffers()
+                .iter()
+                .zip(original.to_data().buffers())
+            {
+                assert_ne!(copied.data_ptr(), source.data_ptr());
+                assert!(copied.capacity() < 1024);
+            }
+        }
+        drop((record, workspace));
+        assert_eq!(operator.runtime_pool.reserved(), baseline);
+    }
+}
+
+#[test]
+fn test_partial_record_workspace_pricing_observes_cancellation_between_morsels() {
+    let (operator, _) = fixture();
+    let rows = vec![("A", 4, 1); 2 * crate::operator::keyed::MORSEL_ROWS + 1];
+    let record = indexed_input(&operator.schemas[0], &rows);
+    let input = admission::ValidatedInput {
+        index: 0,
+        watermark: Some(5),
+        accepted: 0,
+    };
+    let mut checks = 0;
+    let result = input.record_charge(&record, operator.spec.left(), false, &mut || {
+        checks += 1;
+        if checks == 2 {
+            Err(CalcFlowError::Cancelled {
+                run_id: "test".into(),
+            })
+        } else {
+            Ok(())
+        }
+    });
+    assert!(matches!(result, Err(CalcFlowError::Cancelled { .. })));
+    assert_eq!(checks, 2);
+}
+
+#[test]
+fn test_workspace_refusal_duplicate_search_bounds_scratch_for_discarded_rows() {
+    let (operator, _) = fixture();
+    let schema = &operator.schemas[0];
+    let mut rows = vec![("late", 4, 0); 128 * 1024];
+    rows.push(("A", 5, 7));
+    let first = indexed_input(schema, &rows);
+    let validated = admission::ValidatedInput {
+        index: 0,
+        watermark: Some(5),
+        accepted: 2,
+    };
+    for (sequence, expected) in [(7, true), (8, false)] {
+        let records = [first.clone(), indexed_input(schema, &[("A", 5, sequence)])];
+        let allocations = allocation_counter::measure(|| {
+            assert_eq!(
+                admission::contains_duplicate_identity_in_records(
+                    &records,
+                    operator.spec.left(),
+                    validated,
+                    &mut || Ok(())
+                )
+                .unwrap(),
+                expected
+            );
+        });
+        assert!(
+            allocations.bytes_max < 128 * 1024,
+            "duplicate lookup scratch: {allocations:?}"
+        );
+    }
+}
+
+#[test]
+fn test_multirecord_admission_bounds_live_bytes_when_an_accepted_value_is_large() {
+    const BUDGET: usize = 128 * 1024;
+    let observations = [false, true].map(|partial| {
+        let (template, _) = fixture();
+        let mut fields = template.schemas[0]
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields.push(Field::new("value", DataType::Utf8, false));
+        let schema = Arc::new(Schema::new(fields));
+        let spec = StreamAsofJoinSpec::new(
+            template.spec.left().clone(),
+            template.spec.right().clone(),
+            Duration::ZERO,
+            AsofStateLimits::new(100, BUDGET as u64).unwrap(),
+        )
+        .unwrap()
+        .with_late_policy(AsofLatePolicy::Drop);
+        let mut operator =
+            StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+        let record = |time, value: String| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["A"])),
+                    Arc::new(TimestampMicrosecondArray::from(vec![time]).with_timezone("UTC")),
+                    Arc::new(Int64Array::from(vec![time])),
+                    Arc::new(StringArray::from(vec![value])),
+                ],
+            )
+            .unwrap()
+        };
+        let short_time = if partial { 4 } else { 5 };
+        let input = Batch::table(
+            vec![
+                record(short_time, "s".into()),
+                record(6, "b".repeat(90 * 1024)),
+            ],
+            BatchMetadata::default(),
+        )
+        .unwrap();
+        let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+        let context = progress_context(&job, 5, 2);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let mut result = Ok(());
+        let allocations = allocation_counter::measure(|| {
+            result = runtime.block_on(operator.process_data(
+                "right",
+                input.clone(),
+                &context,
+                &mut output,
+            ));
+        });
+        (
+            partial,
+            allocations.bytes_max,
+            result,
+            operator.status.state_rows,
+        )
+    });
+    assert!(
+        observations
+            .iter()
+            .all(|(_, peak, _, _)| *peak <= BUDGET as u64),
+        "{observations:?}"
+    );
+    for (_, _, result, installed) in observations {
+        assert!(matches!(
+            result,
+            Err(CalcFlowError::OperatorReason {
+                reason_code: StreamingFailureReason::AsofStateLimitExceeded,
+                ..
+            })
+        ));
+        assert_eq!(installed, 0);
+    }
+}
+
+#[test]
+fn test_multirecord_partial_admission_keeps_dropped_bytes_out_of_workspace() {
+    const BUDGET: usize = 128 * 1024;
+    let (template, _) = fixture();
+    let schema = template.schemas[0].clone();
+    let spec = StreamAsofJoinSpec::new(
+        template.spec.left().clone(),
+        template.spec.right().clone(),
+        Duration::ZERO,
+        AsofStateLimits::new(100, BUDGET as u64).unwrap(),
+    )
+    .unwrap()
+    .with_late_policy(AsofLatePolicy::Drop);
+    let mut operator =
+        StreamAsofJoinOperator::new("asof", schema.clone(), schema.clone(), spec).unwrap();
+    let large = "x".repeat(1024 * 1024);
+    // Both a full row mask and a copy of the first discarded string would exceed the workspace.
+    let dropped = BUDGET + crate::operator::keyed::MORSEL_ROWS;
+    let mut first = vec![("late", 4, 1); dropped];
+    first[0].0 = &large;
+    first.push(("A", 5, 2));
+    let input = Batch::table(
+        vec![
+            indexed_input(&schema, &first),
+            indexed_input(&schema, &[("B", 9, 3)]),
+        ],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = progress_context(&job, 5, 3);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let allocations = allocation_counter::measure(|| {
+        runtime
+            .block_on(operator.process_data("right", input.clone(), &context, &mut output))
+            .unwrap();
+    });
+    assert_eq!(operator.status.right.accepted_rows, 2);
+    assert_eq!(operator.status.right.late_rows, dropped as u64);
+    assert!(
+        allocations.bytes_max <= BUDGET as u64,
+        "live admission allocation: {allocations:?}"
+    );
+    let probes = Batch::table(
+        vec![indexed_input(&schema, &[("A", 5, 1), ("B", 9, 1)])],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    runtime
+        .block_on(operator.process_data("left", probes, &context, &mut output))
+        .unwrap();
+    runtime
+        .block_on(operator.on_end(&context, &mut output))
+        .unwrap();
+    assert_eq!(right_sequences(&output.drain("output")), [Some(2), Some(3)]);
+}
+
+#[test]
 fn test_columnar_multirecord_preflight_precedes_concatenation() {
     let (template, _) = fixture();
     let mut fields = template.schemas[0]

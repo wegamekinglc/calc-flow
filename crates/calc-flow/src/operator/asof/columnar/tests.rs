@@ -1,7 +1,7 @@
 use super::{ColumnarState, Selection};
 use crate::operator::asof::{
     AsofJoinSide, AsofStateLimits, StreamAsofJoinSpec,
-    admission::{AcceptedRows, ValidatedInput},
+    admission::{AcceptedRows, PreparedRecord, ValidatedInput},
     schema,
 };
 use crate::{Result, StreamingFailureReason};
@@ -83,7 +83,7 @@ fn select(state: &ColumnarState, frontier: Option<i64>, ended: bool, limit: usiz
 
 fn admit(state: &mut ColumnarState, side: usize, input: &RecordBatch) -> Result<()> {
     state.admit(
-        input,
+        PreparedRecord::Input(input),
         ValidatedInput {
             index: side,
             watermark: None,
@@ -938,6 +938,48 @@ fn test_admission_charge_uses_visible_offsets_and_reserves_validity_for_every_se
 }
 
 #[test]
+fn test_partial_record_charge_matches_masked_pricing_for_sliced_variable_columns() {
+    use datafusion::arrow::array::{ArrayRef, BinaryArray, LargeBinaryArray, LargeStringArray};
+
+    let base = record(&[
+        (0, 0, 0, None),
+        (1, 4, 1, Some("dropped")),
+        (2, 6, 2, Some("selected")),
+        (3, 5, 3, None),
+        (4, 3, 4, Some("dropped")),
+    ]);
+    let strings = [None, Some(""), None, Some("long value"), Some("x")];
+    let bytes = strings.map(|value| value.map(str::as_bytes));
+    let extra: [(&str, ArrayRef); 3] = [
+        ("binary", Arc::new(BinaryArray::from_iter(bytes))),
+        ("large_binary", Arc::new(LargeBinaryArray::from_iter(bytes))),
+        ("large_text", Arc::new(LargeStringArray::from_iter(strings))),
+    ];
+    let mut fields = base.schema().fields().to_vec();
+    let mut columns = base.columns().to_vec();
+    for (name, column) in extra {
+        fields.push(Arc::new(Field::new(name, column.data_type().clone(), true)));
+        columns.push(column);
+    }
+    let record = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns)
+        .unwrap()
+        .slice(1, 4);
+    let declaration = spec(0, 100, 1 << 20);
+    let input = ValidatedInput {
+        index: 0,
+        watermark: Some(5),
+        accepted: 2,
+    };
+    let selected = AcceptedRows::for_record(&record, declaration.left(), input);
+    assert_eq!(
+        input
+            .record_charge(&record, declaration.left(), false, &mut || Ok(()))
+            .unwrap(),
+        super::run::logical_record_selection_charge(&record, &selected)
+    );
+}
+
+#[test]
 fn test_fresh_compacted_run_builds_its_dense_locators_in_one_allocation() {
     let declaration = spec(0, 1024, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
@@ -987,7 +1029,10 @@ fn test_late_drop_excludes_rows_before_key_birth_and_retains_watermark_equality(
     let mut state = state(&declaration, &pool);
     state
         .admit(
-            &record(&[(2, 4, 1, Some("late")), (1, 5, 1, Some("equal"))]),
+            PreparedRecord::Input(&record(&[
+                (2, 4, 1, Some("late")),
+                (1, 5, 1, Some("equal")),
+            ])),
             ValidatedInput {
                 index: 1,
                 watermark: Some(5),

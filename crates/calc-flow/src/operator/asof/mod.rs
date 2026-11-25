@@ -31,7 +31,7 @@ use datafusion::execution::memory_pool::{
 pub(crate) use schema::schema_issues;
 pub use spec::{AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinSpec};
 pub use status::{StreamAsofJoinSideStatus, StreamAsofJoinStatus};
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(super) struct SweepStamp {
@@ -110,9 +110,9 @@ impl StreamAsofJoinOperator {
             self.status.right.accepted_rows
         };
         let next_accepted = checked(&self.name, accepted_rows, validated.accepted)?;
-        let admitted = self.state.admit(record.as_ref(), validated, &mut || {
-            context.check_cancelled()
-        });
+        let admitted = self
+            .state
+            .admit(record, validated, &mut || context.check_cancelled());
         if let Err(error) = admitted {
             if matches!(
                 error,
@@ -120,8 +120,8 @@ impl StreamAsofJoinOperator {
                     reason_code: StreamingFailureReason::AsofStateLimitExceeded,
                     ..
                 }
-            ) && admission::contains_duplicate_identity(
-                record.as_ref(),
+            ) && admission::contains_duplicate_identity_in_records(
+                batches,
                 validated.side(&self.spec),
                 validated,
                 &mut || context.check_cancelled(),
@@ -162,24 +162,21 @@ impl StreamAsofJoinOperator {
         batches: &'a [RecordBatch],
         validated: admission::ValidatedInput,
         context: &dyn kernel::KernelContext,
-    ) -> Result<Cow<'a, RecordBatch>> {
+    ) -> Result<admission::PreparedRecord<'a>> {
         if batches.len() == 1 {
-            return Ok(Cow::Borrowed(&batches[0]));
+            return Ok(admission::PreparedRecord::Input(&batches[0]));
         }
         let full = validated.accepted
             == batches
                 .iter()
                 .map(|record| record.num_rows() as u64)
                 .sum::<u64>();
-        let charge = batches.iter().fold(0usize, |total, record| {
-            let accepted = admission::AcceptedRows::for_record(
-                record,
-                validated.side(&self.spec),
-                validated,
-                full.then_some(record.num_rows()),
-            );
-            total.saturating_add(columnar::logical_record_selection_charge(record, &accepted))
-        });
+        let side = validated.side(&self.spec);
+        let charge = batches.iter().try_fold(0usize, |total, record| {
+            validated
+                .record_charge(record, side, full, &mut || context.check_cancelled())
+                .map(|bytes| total.saturating_add(bytes))
+        })?;
         let reservation = match self
             .reserve_workspace(u64::try_from(charge).expect("ASOF workspace charge fits u64"))
         {
@@ -201,10 +198,16 @@ impl StreamAsofJoinOperator {
                 return Err(self.attempt_error(error));
             }
         };
-        let combined =
-            concat_batches(&batches[0].schema(), batches).map_err(|error| arrow_error(&error))?;
-        drop(reservation);
-        Ok(Cow::Owned(combined))
+        let combined = if full {
+            concat_batches(&batches[0].schema(), batches).map_err(|error| arrow_error(&error))
+        } else {
+            validated.gather_records(batches, side, &mut || context.check_cancelled())
+        }?;
+        // Each flat column was assembled from multiple records under this reservation.
+        Ok(admission::PreparedRecord::Assembled {
+            record: combined,
+            workspace: reservation,
+        })
     }
 
     /// Constructs an independent bounded backward ASOF operator.

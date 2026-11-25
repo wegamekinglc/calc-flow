@@ -1,16 +1,25 @@
 use super::{
     AsofJoinSide, AsofLatePolicy, StreamAsofJoinOperator, StreamAsofJoinSideStatus,
-    StreamAsofJoinSpec, reason,
+    StreamAsofJoinSpec, columnar, reason,
 };
-use crate::operator::keyed::{KeySchema, hash_rows};
+use crate::operator::keyed::{KeySchema, MORSEL_ROWS, hash_rows};
 use crate::{Batch, Result, StreamingFailureReason};
 use datafusion::arrow::{
-    array::{Array, ArrayRef, TimestampMicrosecondArray},
+    array::{Array, ArrayRef, BooleanArray, TimestampMicrosecondArray},
+    compute::interleave_record_batch,
     datatypes::Field,
     record_batch::RecordBatch,
 };
-use datafusion::common::ScalarValue;
+use datafusion::{common::ScalarValue, execution::memory_pool::MemoryReservation};
 use std::{collections::HashMap, sync::Arc};
+
+pub(super) enum PreparedRecord<'a> {
+    Input(&'a RecordBatch),
+    Assembled {
+        record: RecordBatch,
+        workspace: MemoryReservation,
+    },
+}
 
 #[derive(Clone, Copy)]
 pub(super) struct ValidatedInput {
@@ -33,9 +42,9 @@ impl AcceptedRows {
         record: &RecordBatch,
         side: &AsofJoinSide,
         input: ValidatedInput,
-        known_count: Option<usize>,
     ) -> Self {
-        if known_count == Some(record.num_rows()) || input.watermark.is_none() {
+        let count = usize::try_from(input.accepted).expect("validated input row count");
+        if count == record.num_rows() {
             return Self::all(record.num_rows());
         }
         let mask = times(record, side)
@@ -43,10 +52,9 @@ impl AcceptedRows {
             .iter()
             .map(|time| !input.is_late(*time))
             .collect::<Vec<_>>();
-        let count = known_count.unwrap_or_else(|| mask.iter().filter(|keep| **keep).count());
         Self {
             count,
-            mask: (count != record.num_rows()).then_some(mask),
+            mask: Some(mask),
         }
     }
 }
@@ -259,19 +267,52 @@ impl<'a> DuplicateIdentitySearch<'a> {
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<bool> {
         let columns = identity_columns(record, self.side)?;
-        let hashes = hash_rows(&self.schema, &columns, None, check)?;
-        let times = times(record, self.side);
-        for (row, hash) in hashes.into_iter().enumerate() {
-            if self.input.is_late(times.value(row)) {
+        for (morsel, times) in times(record, self.side)
+            .values()
+            .chunks(MORSEL_ROWS)
+            .enumerate()
+        {
+            check()?;
+            let first = morsel * MORSEL_ROWS;
+            let kept = self.input.accepted_indices(times).count();
+            if kept == 0 {
                 continue;
             }
-            if let Some(prior) = self.seen.get(&hash)
-                && self.contains_prior(prior, &columns, row)?
-            {
-                return Ok(true);
+            let selected = (kept < times.len()).then(|| {
+                times
+                    .iter()
+                    .map(|&time| Some(!self.input.is_late(time)))
+                    .collect::<BooleanArray>()
+            });
+            let part = columns
+                .iter()
+                .map(|column| column.slice(first, times.len()))
+                .collect::<Vec<_>>();
+            let hashes = hash_rows(&self.schema, &part, selected.as_ref(), check)?;
+            for (offset, hash) in hashes.into_iter().enumerate() {
+                if selected.as_ref().is_none_or(|mask| mask.value(offset))
+                    && self.already_seen(record_index, first + offset, hash, &columns)?
+                {
+                    return Ok(true);
+                }
             }
-            self.seen.entry(hash).or_default().push((record_index, row));
         }
+        Ok(false)
+    }
+
+    fn already_seen(
+        &mut self,
+        record: usize,
+        row: usize,
+        hash: u64,
+        columns: &[ArrayRef],
+    ) -> Result<bool> {
+        if let Some(prior) = self.seen.get(&hash)
+            && self.contains_prior(prior, columns, row)?
+        {
+            return Ok(true);
+        }
+        self.seen.entry(hash).or_default().push((record, row));
         Ok(false)
     }
 
@@ -390,6 +431,58 @@ impl ValidatedInput {
         } else {
             spec.right()
         }
+    }
+
+    pub(super) fn record_charge(
+        self,
+        record: &RecordBatch,
+        side: &AsofJoinSide,
+        full: bool,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<usize> {
+        if full {
+            check()?;
+            Ok(columnar::logical_record_selection_charge(
+                record,
+                &AcceptedRows::all(record.num_rows()),
+            ))
+        } else {
+            columnar::logical_filtered_record_charge(
+                record,
+                times(record, side).values(),
+                self,
+                check,
+            )
+        }
+    }
+
+    pub(super) fn gather_records(
+        self,
+        batches: &[RecordBatch],
+        side: &AsofJoinSide,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<RecordBatch> {
+        let mut positions =
+            Vec::with_capacity(usize::try_from(self.accepted).expect("validated input row count"));
+        for (batch, record) in batches.iter().enumerate() {
+            for (morsel, times) in times(record, side).values().chunks(MORSEL_ROWS).enumerate() {
+                check()?;
+                let start = morsel * MORSEL_ROWS;
+                positions.extend(self.accepted_indices(times).map(|row| (batch, start + row)));
+            }
+        }
+        interleave_record_batch(&batches.iter().collect::<Vec<_>>(), &positions)
+            .map_err(|error| super::arrow_error(&error))
+    }
+
+    pub(super) fn accepted_indices(
+        self,
+        times: &[i64],
+    ) -> impl Iterator<Item = usize> + Clone + '_ {
+        times
+            .iter()
+            .enumerate()
+            .filter_map(move |(row, time)| (!self.is_late(*time)).then_some(row))
     }
 
     pub(super) fn is_late(self, time: i64) -> bool {

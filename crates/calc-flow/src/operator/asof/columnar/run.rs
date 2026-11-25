@@ -1,6 +1,10 @@
 use crate::Result;
-use crate::operator::asof::{admission::AcceptedRows, arrow_error};
+use crate::operator::asof::{
+    admission::{AcceptedRows, ValidatedInput},
+    arrow_error,
+};
 use crate::operator::keyed::GroupId;
+use datafusion::arrow::array::AsArray;
 use datafusion::arrow::{
     array::{
         Array, ArrayRef, BinaryArray, LargeBinaryArray, LargeBinaryBuilder, LargeStringArray,
@@ -275,15 +279,83 @@ pub(in crate::operator::asof) fn logical_record_selection_charge(
     record: &RecordBatch,
     accepted: &AcceptedRows,
 ) -> usize {
+    record_charge(record, accepted.count, |column| {
+        logical_array_selection_charge(column, accepted)
+    })
+}
+
+enum ValueOffsets<'a> {
+    Narrow(&'a [i32]),
+    Wide(&'a [i64]),
+}
+
+impl<'a> ValueOffsets<'a> {
+    fn from_array(array: &'a ArrayRef) -> Option<Self> {
+        match array.data_type() {
+            DataType::Utf8 => Some(Self::Narrow(array.as_string::<i32>().value_offsets())),
+            DataType::Binary => Some(Self::Narrow(array.as_binary::<i32>().value_offsets())),
+            DataType::LargeUtf8 => Some(Self::Wide(array.as_string::<i64>().value_offsets())),
+            DataType::LargeBinary => Some(Self::Wide(array.as_binary::<i64>().value_offsets())),
+            _ => None,
+        }
+    }
+
+    fn bytes(&self, row: usize) -> usize {
+        match self {
+            Self::Narrow(offsets) => {
+                usize::try_from(offsets[row + 1] - offsets[row]).expect("nonnegative value length")
+            }
+            Self::Wide(offsets) => {
+                usize::try_from(offsets[row + 1] - offsets[row]).expect("nonnegative value length")
+            }
+        }
+    }
+}
+
+pub(in crate::operator::asof) fn logical_filtered_record_charge(
+    record: &RecordBatch,
+    times: &[i64],
+    input: ValidatedInput,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<usize> {
+    use crate::operator::keyed::MORSEL_ROWS;
+    let offsets = record
+        .columns()
+        .iter()
+        .filter_map(ValueOffsets::from_array)
+        .collect::<Vec<_>>();
+    let mut count = 0;
+    let mut value_bytes = 0usize;
+    for (morsel, chunk) in times.chunks(MORSEL_ROWS).enumerate() {
+        check()?;
+        for relative in input.accepted_indices(chunk) {
+            let row = morsel * MORSEL_ROWS + relative;
+            count += 1;
+            value_bytes = offsets.iter().fold(value_bytes, |bytes, column| {
+                bytes.saturating_add(column.bytes(row))
+            });
+        }
+    }
+    let fixed = record_charge(record, count, |column| {
+        logical_array_indices_charge(column, count, std::iter::empty())
+    });
+    Ok(fixed.saturating_add(value_bytes))
+}
+
+fn record_charge(
+    record: &RecordBatch,
+    count: usize,
+    column_charge: impl Fn(&ArrayRef) -> usize,
+) -> usize {
     record
         .columns()
         .iter()
         .fold(0usize, |total, column| {
-            total.saturating_add(logical_array_selection_charge(column, accepted))
+            total.saturating_add(column_charge(column))
         })
         .saturating_add(ipc_schema_charge(&record.schema()))
         .saturating_add(256)
-        .saturating_add(accepted.count.saturating_mul(384))
+        .saturating_add(count.saturating_mul(384))
 }
 
 fn retained_payload_charge(record: &RecordBatch) -> usize {

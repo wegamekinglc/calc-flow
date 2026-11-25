@@ -11,6 +11,7 @@ use datafusion::arrow::{
 };
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use std::{
+    borrow::Cow,
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -661,7 +662,7 @@ impl ColumnarState {
 
     pub(in crate::operator::asof) fn admit(
         &mut self,
-        record: &RecordBatch,
+        record: admission::PreparedRecord<'_>,
         input: admission::ValidatedInput,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
@@ -672,11 +673,8 @@ impl ColumnarState {
         let cut = self.keys.cut();
         let reserved = self.reservation.size();
         let declaration = input.side(&self.spec).clone();
-        let selected = usize::try_from(input.accepted).expect("validated input row count");
-        let accepted =
-            admission::AcceptedRows::for_record(record, &declaration, input, Some(selected));
         let installed = self
-            .prepare_run(record, &declaration, &accepted, input, check)
+            .prepare_run(record, &declaration, input, check)
             .and_then(|run| self.install_prepared_run(input.index, run));
         match installed {
             Ok(()) => Ok(()),
@@ -692,12 +690,20 @@ impl ColumnarState {
 
     fn prepare_run(
         &mut self,
-        record: &RecordBatch,
+        prepared: admission::PreparedRecord<'_>,
         declaration: &AsofJoinSide,
-        accepted: &admission::AcceptedRows,
         input: admission::ValidatedInput,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PreparedRun> {
+        let (record, reservation) = match prepared {
+            admission::PreparedRecord::Input(record) => {
+                (Cow::Borrowed(record), self.reservation.new_empty())
+            }
+            admission::PreparedRecord::Assembled { record, workspace } => {
+                (Cow::Owned(record), workspace)
+            }
+        };
+        let accepted = admission::AcceptedRows::for_record(record.as_ref(), declaration, input);
         let selected_rows = accepted.count;
         let (sequence_charge, encoded_extent) =
             declaration
@@ -706,21 +712,30 @@ impl ColumnarState {
                 .fold((0usize, 0usize), |(charge, extent), name| {
                     let index = record.schema().index_of(name).expect("validated sequence");
                     let selected =
-                        super::run::logical_array_selection_charge(record.column(index), accepted);
+                        super::run::logical_array_selection_charge(record.column(index), &accepted);
                     (
                         charge.saturating_add(selected),
                         extent.saturating_add(selected.saturating_add(selected_rows * 64)),
                     )
                 });
-        let preflight = super::run::logical_record_selection_charge(record, accepted)
+        let preflight = super::run::logical_record_selection_charge(record.as_ref(), &accepted)
             .saturating_add(
                 sequence_charge
                     .saturating_mul(super::run::sequence_tuple_copy_count([encoded_extent])),
             );
-        let workspace = self.preflight_admission(record, declaration, input, preflight, check)?;
-        let compacted = compact_accepted(record, accepted)?;
-        let record = &compacted;
-        let sequences = SequenceColumn::from_names(record, declaration.sequence_by())?;
+        let workspace = self.preflight_admission(
+            record.as_ref(),
+            declaration,
+            input,
+            preflight,
+            reservation,
+            check,
+        )?;
+        let record = match record {
+            Cow::Borrowed(record) => compact_accepted(record, &accepted)?,
+            Cow::Owned(record) => record,
+        };
+        let sequences = SequenceColumn::from_names(&record, declaration.sequence_by())?;
         let key_arrays = declaration
             .keys()
             .iter()
@@ -733,7 +748,7 @@ impl ColumnarState {
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
         let groups = self.route_run_keys(&key_arrays, record.num_rows(), check)?;
-        let times = admission::times(record, declaration).values().to_vec();
+        let times = admission::times(&record, declaration).values().to_vec();
         let run_id = self.next_run;
         let next_run = self.next_run.checked_add(1).ok_or_else(|| {
             reason(
@@ -742,7 +757,7 @@ impl ColumnarState {
                 "ASOF run identifier space is exhausted",
             )
         })?;
-        let run = Run::new(record.clone(), groups, times, sequences);
+        let run = Run::new(record, groups, times, sequences);
         Ok(PreparedRun {
             run,
             workspace,
@@ -923,6 +938,7 @@ impl ColumnarState {
         declaration: &AsofJoinSide,
         input: admission::ValidatedInput,
         bytes: usize,
+        reservation: MemoryReservation,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<MemoryReservation> {
         let limit = usize::try_from(self.spec.limits().max_state_bytes()).unwrap_or(usize::MAX);
@@ -936,8 +952,7 @@ impl ColumnarState {
                 "ASOF admission workspace exceeds max_state_bytes",
             ));
         }
-        let reservation = self.reservation.new_empty();
-        if reservation.try_grow(bytes).is_err() {
+        if reservation.try_resize(bytes).is_err() {
             if self.contains_duplicate_for_budget(record, declaration, input, check)? {
                 return Err(self.duplicate_identity());
             }
