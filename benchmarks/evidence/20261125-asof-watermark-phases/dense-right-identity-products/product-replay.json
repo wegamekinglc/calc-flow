@@ -1,0 +1,180 @@
+{
+  "native-parent": {
+    "outcome": {
+      "cpu": 2,
+      "metrics": {
+        "watermark_ns": {
+          "p50_ms": {
+            "base": 0.556595,
+            "head": 0.016627
+          },
+          "p95_ms": {
+            "base": 0.8528067,
+            "head": 0.02159985
+          },
+          "paired_median_difference_ms_by_round": [
+            -0.539377,
+            -0.535671
+          ],
+          "paired_median_difference_ms": -0.5378035,
+          "rounds": [
+            {
+              "median": -96.87983081556294,
+              "low": -97.75241140229555,
+              "high": -96.5517177258147,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -97.30674784192205,
+              "low": -98.1352957574314,
+              "high": -96.22256498542771,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        }
+      },
+      "state": "complete",
+      "wall_seconds": 5.084888962999685
+    },
+    "checked_observations": 44
+  },
+  "native-release": {
+    "outcome": {
+      "cpu": 12,
+      "metrics": {
+        "watermark_ns": {
+          "p50_ms": {
+            "base": 0.0186755,
+            "head": 0.016395
+          },
+          "p95_ms": {
+            "base": 0.0229414,
+            "head": 0.022190950000000004
+          },
+          "paired_median_difference_ms_by_round": [
+            -0.002146999999999998,
+            -0.0015640000000000012
+          ],
+          "paired_median_difference_ms": -0.0019279999999999992,
+          "rounds": [
+            {
+              "median": -11.339859958280124,
+              "low": -25.362946360348428,
+              "high": 20.97480439308017,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -8.604759593375682,
+              "low": -29.75428999955887,
+              "high": 25.401659940607637,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "inconclusive"
+        }
+      },
+      "state": "complete",
+      "wall_seconds": 5.202768724000634
+    },
+    "checked_observations": 44
+  },
+  "python-parent": {
+    "outcome": {
+      "elapsed": 23.984314651002933,
+      "state": "completed"
+    },
+    "completed_requests": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "result": {
+      "base_p50": 0.102629761,
+      "base_p95": 0.1190713806,
+      "change_percent": -15.813675138539985,
+      "cpus": [
+        8
+      ],
+      "head_max": 0.113973543,
+      "head_min": 0.073134141,
+      "head_p50": 0.086400224,
+      "head_p95": 0.11216623070000001,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        -7.7782111614995815,
+        -14.706228183190113
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": 1.2910535547021373,
+          "low": -15.517778941308514,
+          "median": -7.7782111614995815
+        },
+        {
+          "coverage": 0.978515625,
+          "high": -10.169719064313032,
+          "low": -24.52694598207501,
+          "median": -14.706228183190113
+        }
+      ],
+      "round_min_changes": [
+        -7.622081679957359,
+        -11.610081729757892
+      ],
+      "rows_per_second": 11574044.06729316,
+      "samples": 20,
+      "verdict": "no-confirmed-regression"
+    },
+    "verified_requests": 44
+  },
+  "python-release": {
+    "outcome": {
+      "elapsed": 22.23350718399888,
+      "state": "completed"
+    },
+    "completed_requests": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "result": {
+      "base_p50": 0.0958852185,
+      "base_p95": 0.10424666,
+      "change_percent": -9.807321865778496,
+      "cpus": [
+        4
+      ],
+      "head_max": 0.111218032,
+      "head_min": 0.072525809,
+      "head_p50": 0.0864814465,
+      "head_p95": 0.09665038240000001,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        -13.675783778374722,
+        -8.365605539932346
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": -5.77304561915849,
+          "low": -18.40055306979833,
+          "median": -13.675783778374722
+        },
+        {
+          "coverage": 0.978515625,
+          "high": -4.122829703605502,
+          "low": -13.277927965021409,
+          "median": -8.365605539932346
+        }
+      ],
+      "round_min_changes": [
+        -21.429765580669326,
+        -11.64843791535245
+      ],
+      "rows_per_second": 11563173.842148906,
+      "samples": 20,
+      "verdict": "no-confirmed-regression"
+    },
+    "verified_requests": 44
+  }
+}
