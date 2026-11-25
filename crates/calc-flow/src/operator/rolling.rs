@@ -4502,6 +4502,71 @@ impl FloatRowsExtrema {
     }
 }
 
+/// A fixed row window needs only one key per observation. NaNs never
+/// participate in distinct counts, so one NaN pattern can mark a missing row.
+#[derive(Clone, Debug)]
+struct FloatRowsUnique {
+    window: usize,
+    recent: VecDeque<u64>,
+    counts: hashbrown::HashMap<u64, usize, std::hash::RandomState>,
+    valid_count: u64,
+}
+
+impl FloatRowsUnique {
+    const MISSING: u64 = f64::NAN.to_bits();
+
+    fn new(window: usize) -> Self {
+        Self {
+            window,
+            recent: VecDeque::new(),
+            counts: hashbrown::HashMap::default(),
+            valid_count: 0,
+        }
+    }
+
+    fn advance(&mut self, sample: Option<f64>) {
+        let key = match sample {
+            Some(0.0) => 0, // The two zero signs compare equal.
+            Some(value) if !value.is_nan() => value.to_bits(),
+            _ => Self::MISSING,
+        };
+        let leaving = if self.recent.len() == self.window {
+            self.recent.pop_front()
+        } else {
+            None
+        };
+        self.recent.push_back(key);
+        if leaving == Some(key) {
+            return;
+        }
+        if let Some(leaving) = leaving.filter(|&bits| bits != Self::MISSING) {
+            self.valid_count -= 1;
+            let hashbrown::hash_map::Entry::Occupied(mut entry) = self.counts.entry(leaving) else {
+                unreachable!("recent key is counted");
+            };
+            *entry.get_mut() -= 1;
+            if *entry.get() == 0 {
+                entry.remove();
+            }
+        }
+        if key != Self::MISSING {
+            *self.counts.entry(key).or_default() += 1;
+            self.valid_count += 1;
+        }
+    }
+
+    fn distinct_count(&self) -> u64 {
+        u64::try_from(self.counts.len()).expect("allocated distinct keys fit u64")
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.recent
+            .capacity()
+            .saturating_mul(size_of::<u64>())
+            .saturating_add(self.counts.allocation_size())
+    }
+}
+
 /// Batch-local scan state is rebuilt from the retained entity tail. The tail
 /// is already part of the durable checkpoint, so no second scan-state format
 /// or cross-callback mutable cache is required.
@@ -4512,11 +4577,8 @@ enum IncrementalScanState {
         min_periods: u64,
     },
     UniqueFloat64 {
-        window: usize,
+        state: FloatRowsUnique,
         min_periods: u64,
-        recent: VecDeque<Option<u64>>,
-        counts: HashMap<u64, usize>,
-        valid_count: usize,
     },
 }
 
@@ -4528,11 +4590,8 @@ impl IncrementalScanState {
                 min_periods,
             }),
             ScanKind::UniqueCount => Some(Self::UniqueFloat64 {
-                window,
+                state: FloatRowsUnique::new(window),
                 min_periods,
-                recent: VecDeque::new(),
-                counts: HashMap::new(),
-                valid_count: 0,
             }),
             ScanKind::Rank | ScanKind::Quantile | ScanKind::Decay => None,
         }
@@ -4568,20 +4627,7 @@ impl IncrementalScanState {
     fn estimated_bytes(&self) -> usize {
         match self {
             Self::Extrema { state, .. } => state.heap_bytes(),
-            Self::UniqueFloat64 { recent, counts, .. } => {
-                let buckets = counts.capacity().saturating_mul(8).div_ceil(7);
-                let table_bytes = if buckets == 0 {
-                    0
-                } else {
-                    buckets
-                        .saturating_mul(size_of::<(u64, usize)>() + 1)
-                        .saturating_add(16)
-                };
-                recent
-                    .capacity()
-                    .saturating_mul(size_of::<Option<u64>>())
-                    .saturating_add(table_bytes)
-            }
+            Self::UniqueFloat64 { state, .. } => state.heap_bytes(),
         }
     }
 
@@ -4596,36 +4642,9 @@ impl IncrementalScanState {
                     state.age()
                 }
             }
-            Self::UniqueFloat64 {
-                window,
-                min_periods,
-                recent,
-                counts,
-                valid_count,
-            } => {
-                // IEEE zero signs compare equal in the public unique-count
-                // contract. NaNs were excluded with the other invalid samples.
-                let key = sample.map(|value| if value == 0.0 { 0 } else { value.to_bits() });
-                recent.push_back(key);
-                if let Some(key) = key {
-                    *counts.entry(key).or_default() += 1;
-                    *valid_count += 1;
-                }
-                if recent.len() > *window
-                    && let Some(leaving) = recent.pop_front().flatten()
-                {
-                    *valid_count -= 1;
-                    let count = counts.get_mut(&leaving).expect("recent key is counted");
-                    *count -= 1;
-                    if *count == 0 {
-                        counts.remove(&leaving);
-                    }
-                }
-                if u64::try_from(*valid_count).unwrap_or(u64::MAX) < *min_periods {
-                    None
-                } else {
-                    u64::try_from(counts.len()).ok()
-                }
+            Self::UniqueFloat64 { state, min_periods } => {
+                state.advance(sample);
+                (state.valid_count >= *min_periods).then(|| state.distinct_count())
             }
         }
     }

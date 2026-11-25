@@ -31,7 +31,8 @@ use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
     CompiledFrame, CompiledPairAggregate, CompiledRollingOutput, CompiledWindowGroup,
-    FloatRowsExtrema, PairAccumulator, ScanKind, Statistic, SumClass, SumState, WindowAccumulator,
+    FloatRowsExtrema, FloatRowsUnique, PairAccumulator, ScanKind, Statistic, SumClass, SumState,
+    WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
@@ -3256,6 +3257,7 @@ enum TypedWindowState {
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
     FloatRowsExtrema(FloatRowsExtrema),
+    FloatRowsUnique(FloatRowsUnique),
     ValueScan(TypedValueScanState),
     Lag(TypedLagState),
     Utf8Lag(TypedUtf8LagState),
@@ -3936,6 +3938,12 @@ impl TypedWindowState {
                 ..
             } => Self::Decay(None),
             TypedGroupPlan::Scan {
+                kind: ScanKind::UniqueCount,
+                window,
+                storage: OutputStorage::Float64,
+                ..
+            } => Self::FloatRowsUnique(FloatRowsUnique::new(window)),
+            TypedGroupPlan::Scan {
                 kind: kind @ (ScanKind::Argmax | ScanKind::Argmin),
                 window,
                 storage: OutputStorage::Float64,
@@ -4009,6 +4017,10 @@ impl TypedWindowState {
             ),
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
+            }
+            (Self::FloatRowsUnique(state), TypedGroupInput::Single(input)) => {
+                state.advance(valid_float64(input, row_index, false));
+                Ok(())
             }
             (Self::FloatRowsExtrema(state), TypedGroupInput::Single(input)) => {
                 let position = state.position.checked_add(1).ok_or_else(|| {
@@ -4118,6 +4130,7 @@ impl TypedWindowState {
             Self::ValueExtrema(state) => state.estimated_bytes(),
             Self::Pair(state) => state.estimated_bytes(),
             Self::Ewma(_) => TypedEwmaState::estimated_bytes(),
+            Self::FloatRowsUnique(state) => size_of::<Self>().saturating_add(state.heap_bytes()),
             Self::FloatRowsExtrema(state) => {
                 size_of::<FloatRowsExtrema>().saturating_add(state.heap_bytes())
             }
@@ -4162,6 +4175,7 @@ impl TypedWindowState {
             Self::Pair(state) => state.samples.len(),
             Self::Lag(state) => state.history.len(),
             Self::FloatRowsExtrema(state) => state.recent_valid.len(),
+            Self::FloatRowsUnique(state) => state.recent.len(),
             Self::Scan(state) => state.recent.len(),
             Self::ValueScan(state) => state.values.len(),
             Self::Utf8Lag(state) => state.history.len(),
@@ -5211,6 +5225,9 @@ impl DerivedBuilder {
             },
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
+            TypedWindowState::FloatRowsUnique(state) => {
+                self.append_unique(output.kind, Some(state.distinct_count()))
+            }
             TypedWindowState::FloatRowsExtrema(state) => match (self, output.kind) {
                 (
                     Self::Count(builder),
@@ -5222,13 +5239,7 @@ impl DerivedBuilder {
                 _ => Err(typed_output_mismatch()),
             },
             TypedWindowState::Scan(state) => self.append_scan(state, output),
-            TypedWindowState::ValueScan(state) => match (self, output.kind) {
-                (Self::Count(builder), TypedOutputKind::Scan(ScanKind::UniqueCount)) => {
-                    builder.append_option(state.latest);
-                    Ok(())
-                }
-                _ => Err(typed_output_mismatch()),
-            },
+            TypedWindowState::ValueScan(state) => self.append_unique(output.kind, state.latest),
             TypedWindowState::Lag(state) => self.append_lag(state, output, node_id),
             TypedWindowState::Utf8Lag(state) => match (self, output.kind) {
                 (Self::Utf8(builder), TypedOutputKind::Lag) => {
@@ -5425,6 +5436,16 @@ impl DerivedBuilder {
             _ => return Err(typed_output_mismatch()),
         }
         Ok(())
+    }
+
+    fn append_unique(&mut self, kind: TypedOutputKind, count: Option<u64>) -> Result<()> {
+        match (self, kind) {
+            (Self::Count(builder), TypedOutputKind::Scan(ScanKind::UniqueCount)) => {
+                builder.append_option(count);
+                Ok(())
+            }
+            _ => Err(typed_output_mismatch()),
+        }
     }
 
     fn append_scan(&mut self, state: &TypedScanState, output: &TypedOutputPlan) -> Result<()> {
@@ -5629,6 +5650,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::Pair(state) => state.accumulator.valid_count,
         TypedWindowState::Ewma(state) => state.valid_count,
         TypedWindowState::FloatRowsExtrema(state) => state.valid_count,
+        TypedWindowState::FloatRowsUnique(state) => state.valid_count,
         TypedWindowState::Scan(state) => state.valid_count,
         TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::ValueScan(state) => state.valid_count,
@@ -6944,6 +6966,80 @@ mod tests {
             );
         }
         assert!(full.accumulator.numeric.variance(0).is_nan());
+    }
+
+    #[test]
+    fn unique_state_charges_the_typed_group_slot() {
+        let state = TypedWindowState::new(
+            TypedGroupPlan::Scan {
+                input_index: 0,
+                kind: ScanKind::UniqueCount,
+                window: 64,
+                storage: OutputStorage::Float64,
+            },
+            0,
+        );
+        assert_eq!(state.estimated_bytes(), size_of::<TypedWindowState>());
+    }
+
+    #[test]
+    fn unique_state_retains_the_charge_for_allocated_hash_buckets() {
+        const WINDOW: usize = 448;
+        let mut state = FloatRowsUnique::new(WINDOW);
+        for key in 0..448_u32 {
+            state.advance(Some(f64::from(key)));
+        }
+        let full = state.heap_bytes();
+        for _ in 0..WINDOW {
+            state.advance(None);
+            assert!(
+                state.heap_bytes() >= full,
+                "full {full}, now {}",
+                state.heap_bytes()
+            );
+        }
+        assert_eq!(state.distinct_count(), 0);
+    }
+
+    #[test]
+    fn float_rows_unique_keeps_one_key_per_sample() {
+        const WINDOW: usize = 256;
+        let mut state = TypedWindowState::new(
+            TypedGroupPlan::Scan {
+                input_index: 0,
+                kind: ScanKind::UniqueCount,
+                window: WINDOW,
+                storage: OutputStorage::Float64,
+            },
+            1_024,
+        );
+        let input = TypedGroupInput::Single(
+            [
+                Some(0.0),
+                Some(-0.0),
+                None,
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+            ]
+            .into_iter()
+            .cycle()
+            .take(1_024)
+            .collect::<Float64Array>(),
+        );
+        for row in 0..1_024 {
+            state.update(0, &input, row, false, "unique").unwrap();
+        }
+        let valid = (1_024 - WINDOW..1_024)
+            .filter(|row| matches!(row % 5, 0 | 1 | 4))
+            .count();
+        assert_eq!(typed_valid_count(&state), u64::try_from(valid).unwrap());
+        assert_eq!(state.retained_rows(), WINDOW);
+        let bytes = state.estimated_bytes();
+        // Two distinct keys need one word per recent row plus a small frequency table.
+        assert!(
+            bytes <= size_of::<TypedWindowState>() + WINDOW * 8 + 256,
+            "{bytes}"
+        );
     }
 
     #[test]
