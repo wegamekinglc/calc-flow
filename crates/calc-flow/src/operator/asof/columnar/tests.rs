@@ -1019,6 +1019,94 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
 }
 
 #[test]
+fn fully_expired_right_runs_retire_without_copying_locator_columns() {
+    let declaration = spec(5, 8_192, 8 << 20);
+    for cleared_identities in [false, true] {
+        let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32 << 20));
+        let mut state = state(&declaration, &pool);
+        for start in [0, 2_048_i64] {
+            let rows = (start..start + 2_048)
+                .map(|i| (i % 4, i, i, Some("right")))
+                .collect::<Vec<_>>();
+            admit(&mut state, 1, &record(&rows)).unwrap();
+        }
+        admit(&mut state, 0, &record(&[(1, 10_000, 0, Some("pending"))])).unwrap();
+        if cleared_identities {
+            let retired = state.evict(super::Progress {
+                right_watermark: Some(5_000),
+                ..super::Progress::default()
+            });
+            assert_eq!((retired.payloads, retired.identities), (0, 4_096));
+        }
+        let mut retired = super::EvictionSummary::default();
+        let allocations = allocation_counter::measure(|| {
+            retired = state.evict(super::Progress {
+                left_watermark: Some(5_000),
+                right_watermark: Some(5_000),
+                ..super::Progress::default()
+            });
+        });
+        assert_eq!(retired.payloads, 4_096);
+        assert_eq!(
+            retired.identities,
+            if cleared_identities { 0 } else { 4_096 }
+        );
+        assert_eq!((state.state_rows(), state.right_payload_rows()), (1, 0));
+        assert_eq!(state.identity_only_rows(), 0);
+        let selection = select(&state, Some(10_001), false, 1);
+        assert_eq!((selection.len(), selection.matched()), (1, 0));
+        state.commit(&selection).unwrap();
+        assert_eq!(pool.reserved(), 0);
+        assert!(
+            allocations.bytes_total <= 2_048,
+            "fully retired right index allocated {} bytes",
+            allocations.bytes_total
+        );
+    }
+}
+
+#[test]
+fn pending_left_and_equal_right_watermark_preserve_last_keys_boundary_match() {
+    let declaration = spec(5, 16, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 22));
+    let mut state = state(&declaration, &pool);
+    admit(
+        &mut state,
+        1,
+        &record(&[(1, 1, 0, None), (2, 20, 0, Some("boundary"))]),
+    )
+    .unwrap();
+    admit(&mut state, 0, &record(&[(2, 25, 0, None)])).unwrap();
+    let evicted = state.evict(super::Progress {
+        left_watermark: Some(100),
+        right_watermark: Some(20),
+        ..super::Progress::default()
+    });
+    assert_eq!((evicted.payloads, evicted.identities), (1, 1));
+    assert_eq!((state.state_rows(), state.right_payload_rows()), (2, 1));
+    let segments = state.capture(1 << 20).unwrap();
+    let restored = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &segments,
+    )
+    .unwrap();
+    let selection = select(&restored, Some(26), false, 1);
+    assert_eq!(selection.matched(), 1);
+    let output = restored
+        .materialize(&selection, &output_schema(&declaration), None)
+        .unwrap();
+    let values = output
+        .column(7)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(values.value(0), "boundary");
+}
+
+#[test]
 fn test_eviction_drops_dominated_prefix_but_keeps_newest_tie_at_threshold() {
     let declaration = spec(60, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));

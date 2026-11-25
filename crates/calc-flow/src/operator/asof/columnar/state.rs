@@ -1356,6 +1356,10 @@ impl ColumnarState {
         });
         let threshold = future.min(pending);
         let tolerance = i128::from(self.spec.tolerance_micros());
+        if !self.right_runs.is_empty() && self.can_retire_right_runs(threshold, tolerance, progress)
+        {
+            return self.retire_right_runs();
+        }
         let mut summary = EvictionSummary::default();
         let mut dead_runs = BTreeSet::new();
         for group in 0..self.right_by_key.len() {
@@ -1438,6 +1442,43 @@ impl ColumnarState {
                 self.run_bytes -= run.charge();
             }
         }
+        self.finish_retirement();
+        summary
+    }
+
+    fn can_retire_right_runs(&self, threshold: i128, tolerance: i128, progress: Progress) -> bool {
+        // Both columns are ordered by (time, sequence). The last live row is
+        // sufficient to prove the strict expiration test for the whole column.
+        let identity_bound = if progress.right_ended {
+            i128::MAX
+        } else {
+            progress.right_watermark.map_or(i128::MIN, i128::from)
+        };
+        self.right_by_key.iter().all(|bucket| {
+            let before = |column: &LocatorColumn, bound| {
+                column.rows().last().is_none_or(|locator| {
+                    i128::from(self.right_runs[&locator.run].time(*locator)) < bound
+                })
+            };
+            before(&bucket.payloads, threshold.saturating_sub(tolerance))
+                && before(&bucket.identities, identity_bound)
+        })
+    }
+
+    fn retire_right_runs(&mut self) -> EvictionSummary {
+        let mut summary = EvictionSummary::default();
+        for bucket in &mut self.right_by_key {
+            let old = std::mem::take(bucket);
+            summary.payloads += old.payloads.len() as u64;
+            summary.identities += old.identities.len() as u64;
+            self.index_bytes -= old.payloads.capacity_bytes() + old.identities.capacity_bytes();
+        }
+        for run in std::mem::take(&mut self.right_runs).into_values() {
+            self.run_bytes -= run.charge();
+        }
+        self.right_rows = 0;
+        self.right_payloads = 0;
+        self.right_identity_only = 0;
         self.finish_retirement();
         summary
     }
