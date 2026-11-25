@@ -1199,7 +1199,7 @@ fn right_only_watermark_reclaims_restored_spare_on_empty_columns() {
         let after = restored.index_capacities();
         assert_eq!(after.right_identities[1], 0);
         assert_eq!(after.right_payloads[1], 0);
-        assert!(before - restored.persistent_bytes() >= 2 * slot as usize);
+        assert!(before - restored.persistent_bytes() >= 2 * size_of::<super::RowLocator>());
     }
 }
 
