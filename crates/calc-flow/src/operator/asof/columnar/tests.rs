@@ -262,11 +262,8 @@ fn test_ordered_historical_probes_bound_dense_steps_and_sparse_jumps() {
     assert_eq!(selection.matched(), probes.len());
     assert_eq!(output.column(0), output.column(4));
     assert_eq!(output.column(2), output.column(6));
-    // Four adjacent reads per probe, plus one logarithmic jump per key.
-    assert!(
-        reads <= 4 * probes.len() + 4 * 16,
-        "{reads} timestamp reads"
-    );
+    // A dense probe opens one new time boundary. Each key also has a sparse jump.
+    assert!(reads <= probes.len() + 4 * 20, "{reads} timestamp reads");
 
     #[cfg(feature = "benchmark-internals")]
     {
@@ -277,6 +274,73 @@ fn test_ordered_historical_probes_bound_dense_steps_and_sparse_jumps() {
         assert_eq!(legacy.right, selection.right);
         assert_eq!(legacy.right_validity, selection.right_validity);
     }
+}
+
+#[test]
+fn cached_probe_boundaries_preserve_ties_tolerance_and_time_extremes() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 22));
+    let declaration = spec(2, 64, 1 << 20);
+    let mut state = state(&declaration, &pool);
+    let right = [i64::MIN, -2, 0, 0, 8, 14, i64::MAX]
+        .into_iter()
+        .zip(0_i64..)
+        .map(|(time, sequence)| (1, time, sequence, None))
+        .collect::<Vec<_>>();
+    let times = [
+        i64::MIN,
+        i64::MIN + 1,
+        -4,
+        -3,
+        -2,
+        -1,
+        0,
+        0,
+        2,
+        3,
+        7,
+        8,
+        10,
+        13,
+        14,
+        i64::MAX,
+    ];
+    let left = times
+        .into_iter()
+        .zip(0_i64..)
+        .map(|(time, sequence)| (1, time, sequence, None))
+        .collect::<Vec<_>>();
+    admit(&mut state, 1, &record(&right)).unwrap();
+    admit(&mut state, 0, &record(&left)).unwrap();
+    let matches = select(&state, None, true, left.len());
+    let output = state
+        .materialize(&matches, &output_schema(&declaration), None)
+        .unwrap();
+    let sequences = output
+        .column(6)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(
+        sequences.iter().collect::<Vec<_>>(),
+        [
+            Some(0),
+            Some(0),
+            None,
+            None,
+            Some(1),
+            Some(1),
+            Some(3),
+            Some(3),
+            Some(3),
+            None,
+            None,
+            Some(4),
+            Some(4),
+            None,
+            Some(5),
+            Some(6),
+        ]
+    );
 }
 
 #[test]

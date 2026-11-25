@@ -220,46 +220,93 @@ struct RightBucket {
 
 const SELECTION_ROW_BYTES: usize = 72;
 const MIN_PROBES_PER_GROUP: usize = 4;
-// While probing, only the two locator columns, validity bytes, and group offsets are live.
+// While probing, only the two locator columns, validity bytes, and group bounds are live.
 const _: () = assert!(
     2 * size_of::<RowLocator>()
         + size_of::<bool>()
-        + size_of::<usize>().div_ceil(MIN_PROBES_PER_GROUP)
+        + size_of::<Option<ProbeBounds>>().div_ceil(MIN_PROBES_PER_GROUP)
         <= SELECTION_ROW_BYTES
 );
 
-struct ProbeOffsets {
-    groups: usize,
-    ends: Vec<usize>,
+#[derive(Clone, Copy)]
+struct ProbeBounds {
+    end: usize,
+    winner_time: Option<i64>,
+    next_time: Option<i64>,
 }
 
-impl ProbeOffsets {
-    fn visible_end(
+impl ProbeBounds {
+    fn winner(self, rows: &[RowLocator]) -> Option<(RowLocator, i64)> {
+        self.winner_time.map(|time| (rows[self.end - 1], time))
+    }
+
+    fn advance(&mut self, rows: &[RowLocator], time: i64, right_time: &impl Fn(RowLocator) -> i64) {
+        let Some(crossed) = self.next_time.filter(|next| *next <= time) else {
+            return;
+        };
+        self.end += 1;
+        self.winner_time = Some(crossed);
+        self.next_time = rows.get(self.end).copied().map(right_time);
+        if self.next_time.is_some_and(|next| next <= time) {
+            // Bound the search when a time jump or a long tie crosses several rows.
+            self.end += 1 + visible_right_rows(&rows[self.end + 1..], time, right_time);
+            self.winner_time = Some(right_time(rows[self.end - 1]));
+            self.next_time = rows.get(self.end).copied().map(right_time);
+        }
+    }
+}
+
+fn visible_right_rows(
+    rows: &[RowLocator],
+    time: i64,
+    right_time: &impl Fn(RowLocator) -> i64,
+) -> usize {
+    #[cfg(test)]
+    LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
+    rows.partition_point(|row| right_time(*row) <= time)
+}
+
+struct ProbeCursors {
+    groups: usize,
+    bounds: Vec<Option<ProbeBounds>>,
+}
+
+impl ProbeCursors {
+    fn predecessor(
         &mut self,
         group: usize,
         rows: &[RowLocator],
-        visible: impl Fn(&RowLocator) -> bool,
-    ) -> usize {
-        let search = |suffix: &[RowLocator]| {
-            #[cfg(test)]
-            LATEST_BINARY_SEARCHES.with(|count| count.set(count.get() + 1));
-            suffix.partition_point(&visible)
-        };
+        time: i64,
+        check_tail: bool,
+        right_time: impl Fn(RowLocator) -> i64,
+    ) -> Option<(RowLocator, i64)> {
+        if let Some(bounds) = self.bounds.get_mut(group).and_then(Option::as_mut) {
+            // Within this selection each key sees nondecreasing left times.
+            bounds.advance(rows, time, &right_time);
+            return bounds.winner(rows);
+        }
+        let &last = rows.last()?;
+        if check_tail {
+            let last_time = right_time(last);
+            if last_time <= time {
+                return Some((last, last_time));
+            }
+        }
         if self.groups == 0 || rows.len() < MIN_PROBES_PER_GROUP {
-            return search(rows);
+            let end = visible_right_rows(rows, time, &right_time);
+            return end.checked_sub(1).map(|i| (rows[i], right_time(rows[i])));
         }
-        if self.ends.is_empty() {
-            self.ends = vec![0; self.groups];
+        if self.bounds.is_empty() {
+            self.bounds.resize(self.groups, None);
         }
-        let end = &mut self.ends[group];
-        // Pending time is nondecreasing per group. Bound the walk when time jumps.
-        let suffix = &rows[*end..];
-        let adjacent = suffix.len().min(2);
-        *end += suffix[..adjacent]
-            .iter()
-            .position(|row| !visible(row))
-            .unwrap_or_else(|| adjacent + search(&suffix[adjacent..]));
-        *end
+        let mut bounds = ProbeBounds {
+            end: 0,
+            winner_time: None,
+            next_time: Some(right_time(rows[0])),
+        };
+        bounds.advance(rows, time, &right_time);
+        self.bounds[group] = Some(bounds);
+        bounds.winner(rows)
     }
 }
 
@@ -1329,19 +1376,19 @@ impl ColumnarState {
         let reuse = groups <= count / MIN_PROBES_PER_GROUP;
         #[cfg(feature = "benchmark-internals")]
         let reuse = reuse && !self.legacy_latest_lookup;
-        let mut offsets = ProbeOffsets {
+        let mut cursors = ProbeCursors {
             groups: if reuse { groups } else { 0 },
-            ends: Vec::new(),
+            bounds: Vec::new(),
         };
         for locator in left.iter().copied() {
             let run = &self.left_runs[&locator.run];
             let group = run.group(locator).index();
             let time = run.time(locator);
-            let candidate = self.candidate(group, time, &mut offsets);
+            let candidate = self.candidate(group, time, &mut cursors);
             validity.push(candidate.is_some());
             right.push(candidate.unwrap_or_default());
         }
-        drop(offsets);
+        drop(cursors);
         Selection::new(left, right, validity)
     }
 
@@ -1510,33 +1557,19 @@ impl ColumnarState {
         self.sync_reservation();
     }
 
-    fn candidate(&self, group: usize, time: i64, offsets: &mut ProbeOffsets) -> Option<RowLocator> {
+    fn candidate(&self, group: usize, time: i64, cursors: &mut ProbeCursors) -> Option<RowLocator> {
         let right_time = |locator: RowLocator| {
             #[cfg(test)]
             CANDIDATE_TIME_READS.set(CANDIDATE_TIME_READS.get() + 1);
             self.right_runs[&locator.run].time(locator)
         };
         let rows = self.right_by_key.get(group)?.payloads.rows();
-        let latest = rows.last()?;
-        let direct = || {
-            let timestamp = right_time(*latest);
-            (timestamp <= time).then_some((*latest, timestamp))
-        };
         #[cfg(feature = "benchmark-internals")]
-        let direct = if self.legacy_latest_lookup {
-            None
-        } else {
-            direct()
-        };
+        let check_tail = !self.legacy_latest_lookup;
         #[cfg(not(feature = "benchmark-internals"))]
-        let direct = direct();
-        let (locator, timestamp) = if let Some(latest) = direct {
-            latest
-        } else {
-            let end = offsets.visible_end(group, rows, |locator| right_time(*locator) <= time);
-            let locator = *rows.get(end.checked_sub(1)?)?;
-            (locator, right_time(locator))
-        };
+        let check_tail = true;
+        let (locator, timestamp) =
+            cursors.predecessor(group, rows, time, check_tail, right_time)?;
         (i128::from(timestamp) >= i128::from(time) - i128::from(self.spec.tolerance_micros()))
             .then_some(locator)
     }
