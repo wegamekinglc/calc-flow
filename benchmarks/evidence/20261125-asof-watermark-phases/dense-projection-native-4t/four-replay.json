@@ -1,0 +1,45 @@
+{
+  "replay": {
+    "case": "job",
+    "state": "complete",
+    "observations": 44,
+    "resource_intervals": 51,
+    "verdict": "regression"
+  },
+  "outcome": {
+    "state": "complete",
+    "case": "job",
+    "cpus": [
+      2,
+      4,
+      16,
+      20
+    ],
+    "rounds": [
+      {
+        "median": 42.64169942646604,
+        "low": 38.213518324751995,
+        "high": 52.07963809318586,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 46.16879821944168,
+        "low": 37.76862204840774,
+        "high": 51.41019757965919,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "regression",
+    "pooled_ms": {
+      "base": {
+        "p50": 711.067749,
+        "p95": 742.4940121999999
+      },
+      "head": {
+        "p50": 1036.4941575,
+        "p95": 1083.4383087
+      }
+    },
+    "wall_seconds": 53.57792336199964
+  }
+}
