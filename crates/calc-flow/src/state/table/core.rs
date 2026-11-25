@@ -2036,48 +2036,37 @@ impl StateTable {
         &mut self,
         column: usize,
         order: &[EntityId],
-        ids: &[EntityId],
+        locals: &[usize],
         values: &Float64Array,
         nan_as_value: bool,
         mut emit: impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
     ) -> Result<bool> {
-        if !self.full_tick_input_is_valid(order, ids, values) {
+        if self.checkpointing || order.is_empty() || values.len() < locals.len() {
             return Ok(false);
         }
-        if !self.full_tick_entities_are_valid(order) {
+        let Some((first, rest)) = locals.split_at_checked(order.len()) else {
+            return Ok(false);
+        };
+        if !first.iter().copied().eq(0..order.len())
+            || !rest.chunks(order.len()).all(|tick| first.starts_with(tick))
+            || !Self::full_tick_order_is_valid(order)
+            || !self.full_tick_entities_are_valid(order)
+        {
             return Ok(false);
         }
         self.write_numeric_first_tick(column, order, values, nan_as_value, &mut emit)?;
-        self.write_numeric_recurrent_ticks(column, order.len(), ids, values, nan_as_value, emit)?;
+        self.write_numeric_recurrent_ticks(
+            column,
+            order,
+            locals.len(),
+            values,
+            nan_as_value,
+            emit,
+        )?;
         Ok(true)
     }
 
-    fn full_tick_input_is_valid(
-        &self,
-        order: &[EntityId],
-        ids: &[EntityId],
-        values: &Float64Array,
-    ) -> bool {
-        self.full_tick_shape_is_valid(order, ids, values)
-            && Self::full_tick_order_is_valid(order, ids)
-    }
-
-    fn full_tick_shape_is_valid(
-        &self,
-        order: &[EntityId],
-        ids: &[EntityId],
-        values: &Float64Array,
-    ) -> bool {
-        !self.checkpointing
-            && !order.is_empty()
-            && ids.len() >= order.len()
-            && values.len() >= ids.len()
-    }
-
-    fn full_tick_order_is_valid(order: &[EntityId], ids: &[EntityId]) -> bool {
-        if !ids.chunks(order.len()).all(|tick| order.starts_with(tick)) {
-            return false;
-        }
+    fn full_tick_order_is_valid(order: &[EntityId]) -> bool {
         if order.windows(2).all(|pair| pair[0].index < pair[1].index) {
             return true;
         }
@@ -2124,8 +2113,8 @@ impl StateTable {
     fn write_numeric_recurrent_ticks(
         &mut self,
         column: usize,
-        order_len: usize,
-        ids: &[EntityId],
+        order: &[EntityId],
+        row_count: usize,
         values: &Float64Array,
         nan_as_value: bool,
         mut emit: impl FnMut(usize, &[NumericAccumulator]) -> Result<()>,
@@ -2139,8 +2128,7 @@ impl StateTable {
             .partitions
             .get_mut(&KeyGroupId(0))
             .expect("full-tick group was validated");
-        for (offset, entity) in ids[order_len..].iter().enumerate() {
-            let row = order_len + offset;
+        for (row, entity) in (order.len()..row_count).zip(order.iter().cycle()) {
             let value = Self::numeric_input_value(values, row, nan_as_value);
             let accumulators = Self::push_numeric_recurrent_page(
                 transaction,
