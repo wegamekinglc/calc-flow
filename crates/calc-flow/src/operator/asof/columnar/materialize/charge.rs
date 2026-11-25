@@ -1,6 +1,8 @@
 use super::{ColumnarState, RowLocator, Selection, invalid};
 use crate::Result;
-use crate::operator::asof::columnar::run::{logical_array_indices_charge, logical_null_charge};
+use crate::operator::asof::columnar::run::{
+    logical_array_indices_charge, logical_full_output_charge, logical_null_charge,
+};
 use datafusion::arrow::buffer::BooleanBuffer;
 use std::collections::BTreeMap;
 
@@ -42,6 +44,16 @@ impl ColumnarState {
         };
         let unmatched = validity.map_or(0, |bits| locators.len() - bits.count_set_bits());
         let mut total = self.column_overhead(side, columns.clone(), locators.len(), unmatched)?;
+        if unmatched == 0
+            && let Some(records) = self.complete_runs(side, locators)
+        {
+            return records.iter().try_fold(total, |charge, record| {
+                columns
+                    .clone()
+                    .map(|column| logical_full_output_charge(record.column(column)))
+                    .try_fold(charge, add_charge)
+            });
+        }
         for (run, rows) in selected_rows(locators, validity) {
             let record = self
                 .run(side, run)

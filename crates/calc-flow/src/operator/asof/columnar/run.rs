@@ -228,6 +228,16 @@ pub(super) fn logical_array_selection_charge(array: &ArrayRef, accepted: &[bool]
         .saturating_add(count.div_ceil(8))
 }
 
+/// The output reservation includes a validity bitmap even for all-valid selections.
+pub(super) fn logical_full_output_charge(array: &ArrayRef) -> usize {
+    let extra_validity = if array.null_count() == 0 {
+        array.len().div_ceil(8)
+    } else {
+        0
+    };
+    logical_array_charge(array).saturating_add(extra_validity)
+}
+
 pub(super) fn logical_array_indices_charge(array: &ArrayRef, indices: &[usize]) -> usize {
     let count = indices.len();
     macro_rules! variable {
