@@ -1172,8 +1172,26 @@ fn checkpoint_objects(path: &std::path::Path) -> crate::Result<usize> {
     Ok(count)
 }
 
-fn read_manifest_if_present(path: &std::path::Path) -> crate::Result<Option<V4Manifest>> {
-    match V4Store::read_manifest(path) {
+fn read_manifest_if_present(
+    mut read: impl FnMut() -> crate::Result<V4Manifest>,
+) -> crate::Result<Option<V4Manifest>> {
+    // Windows may refuse to open a manifest while concurrent retention deletes it.
+    // Accept disappearance only after a read actually reports NotFound.
+    for delay_ms in [5, 10, 20, 40] {
+        match read() {
+            Err(CalcFlowError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            observed => return observed_manifest(observed),
+        }
+    }
+    observed_manifest(read())
+}
+
+fn observed_manifest(observed: crate::Result<V4Manifest>) -> crate::Result<Option<V4Manifest>> {
+    match observed {
         Ok(manifest) => Ok(Some(manifest)),
         Err(CalcFlowError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
             Ok(None)
@@ -1184,17 +1202,21 @@ fn read_manifest_if_present(path: &std::path::Path) -> crate::Result<Option<V4Ma
 
 fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
     let directory = root.join("manifests/lineage/manifests");
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(invalid(format!("checkpoint manifest directory: {error}"))),
+    };
+    let paths = entries
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|error| invalid(format!("checkpoint manifest entry: {error}")))?;
     let mut epochs = Vec::new();
-    for entry in std::fs::read_dir(directory)
-        .map_err(|error| invalid(format!("checkpoint manifest directory: {error}")))?
-    {
-        let path = entry
-            .map_err(|error| invalid(format!("checkpoint manifest entry: {error}")))?
-            .path();
-        let Some(manifest) = read_manifest_if_present(&path)? else {
+    for path in paths {
+        if path.extension() != Some(std::ffi::OsStr::new("json")) {
+            continue;
+        }
+        let Some(manifest) = read_manifest_if_present(|| V4Store::read_manifest(&path))? else {
             continue;
         };
         if manifest.sources.values().all(|source| !source.ended) {
@@ -1210,15 +1232,84 @@ fn nonterminal_epochs(root: &std::path::Path) -> crate::Result<Vec<u64>> {
 fn retention_scan_ignores_only_manifests_that_disappear() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("epoch-11.json");
-    assert!(read_manifest_if_present(&path).unwrap().is_none());
+    assert!(
+        read_manifest_if_present(|| V4Store::read_manifest(&path))
+            .unwrap()
+            .is_none()
+    );
     std::fs::write(&path, b"not a manifest").unwrap();
-    assert!(read_manifest_if_present(&path).is_err());
+    assert!(read_manifest_if_present(|| V4Store::read_manifest(&path)).is_err());
 }
 
-fn timed_nonterminal_epochs(root: &std::path::Path) -> (Vec<u64>, f64) {
+#[test]
+fn nonterminal_scan_ignores_inflight_manifest_publication() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("manifests/lineage/manifests");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("epoch-11.tmp"), b"not a manifest").unwrap();
+    assert!(nonterminal_epochs(root.path()).unwrap().is_empty());
+}
+
+#[test]
+fn retention_scan_requires_confirmed_disappearance_after_access_denial() {
+    let io = |kind| {
+        Err(CalcFlowError::Io {
+            path: "epoch-9.json".into(),
+            source: std::io::Error::from(kind),
+        })
+    };
+    let mut attempts = 0;
+    let observed = read_manifest_if_present(|| {
+        attempts += 1;
+        if attempts == 1 {
+            io(std::io::ErrorKind::PermissionDenied)
+        } else {
+            io(std::io::ErrorKind::NotFound)
+        }
+    })
+    .unwrap();
+    assert!(observed.is_none());
+    assert_eq!(attempts, 2);
+    let denied = read_manifest_if_present(|| io(std::io::ErrorKind::PermissionDenied));
+    assert!(
+        matches!(denied, Err(CalcFlowError::Io { source, .. }) if source.kind() == std::io::ErrorKind::PermissionDenied)
+    );
+}
+
+fn epochs_through(epochs: &[u64], cutoff: u64) -> &[u64] {
+    &epochs[..epochs.partition_point(|&epoch| epoch <= cutoff)]
+}
+
+#[test]
+fn retention_scan_counts_only_epochs_completed_at_the_cutoff() {
+    let observed = [1, 2];
+    assert_eq!(epochs_through(&observed, 1), &[1]);
+    assert!(epochs_through(&observed, 0).is_empty());
+}
+
+async fn timed_nonterminal_epochs(root: &std::path::Path) -> (Vec<u64>, f64) {
     let started = Instant::now();
-    let epochs = nonterminal_epochs(root).unwrap();
+    let root = root.to_owned();
+    let epochs = tokio::task::spawn_blocking(move || nonterminal_epochs(&root))
+        .await
+        .unwrap()
+        .unwrap();
     (epochs, started.elapsed().as_secs_f64())
+}
+
+async fn completed_epochs_at_cutoff(
+    root: &std::path::Path,
+    last_completed: Option<Epoch>,
+    minimum_epochs: usize,
+) -> (Vec<u64>, f64) {
+    let (mut epochs, validation_seconds) = timed_nonterminal_epochs(root).await;
+    let cutoff = last_completed.map_or(0, Epoch::as_u64);
+    epochs.truncate(epochs_through(&epochs, cutoff).len());
+    assert!(
+        epochs.len() >= minimum_epochs,
+        "checkpoint coverage: {epochs:?}"
+    );
+    (epochs, validation_seconds)
 }
 
 async fn runner_arm(
@@ -1278,12 +1369,13 @@ async fn runner_arm(
     tokio::time::sleep(Duration::from_secs(seconds)).await;
     let accepted_input_rows = sink.accepted_rows();
     assert!(accepted_input_rows > 0);
-    let status_at_cutoff = serde_json::to_value(job.status()).unwrap();
-    let (epochs, manifest_validation_seconds) = timed_nonterminal_epochs(root.path());
-    assert!(
-        epochs.len() >= minimum_epochs,
-        "checkpoint coverage: {epochs:?}"
-    );
+    let status_at_cutoff = job.status();
+    let (epochs, manifest_validation_seconds) = completed_epochs_at_cutoff(
+        root.path(),
+        status_at_cutoff.checkpoint.last_completed_epoch,
+        minimum_epochs,
+    )
+    .await;
     let freeze_to_ack_seconds = if checkpointing {
         let began = Instant::now();
         job.trigger_checkpoint().await.unwrap();
@@ -1291,7 +1383,7 @@ async fn runner_arm(
     } else {
         None
     };
-    let post_cutoff_epochs = nonterminal_epochs(root.path()).unwrap();
+    let (post_cutoff_epochs, _) = timed_nonterminal_epochs(root.path()).await;
     let cancel_started = Instant::now();
     let outcome = job.cancel().await;
     let cancel_seconds = cancel_started.elapsed().as_secs_f64();
@@ -1300,11 +1392,7 @@ async fn runner_arm(
     assert!(settled_rows_after_cancel >= accepted_input_rows);
     let status_after_cancel = serde_json::to_value(job.status()).unwrap();
     let checkpoint_objects = checkpoint_objects(root.path()).unwrap();
-    if checkpointing {
-        assert!(checkpoint_objects > 0);
-    } else {
-        assert_eq!(checkpoint_objects, 0);
-    }
+    assert_eq!(checkpoint_objects > 0, checkpointing);
     json!({
         "checkpointing": checkpointing,
         "seconds": seconds,
