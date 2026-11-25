@@ -74,6 +74,38 @@ fn charge(table: &StateTable, node_id: &str) -> Result<StateCharge> {
     })
 }
 
+enum SlabEntities {
+    PerRow(Vec<EntityId>),
+    Ewma {
+        entities: Vec<EntityId>,
+        seed: TypedEwmaState,
+    },
+}
+
+impl SlabEntities {
+    fn resolve(groups: &[TypedGroupPlan], resolved: Vec<EntityId>, locals: &[usize]) -> Self {
+        // Keep the resolved allocation and recurrence states within the old per-row ID storage.
+        let remaining = locals
+            .len()
+            .saturating_sub(resolved.capacity())
+            .saturating_mul(size_of::<EntityId>());
+        if let [
+            TypedGroupPlan::Ewma {
+                alpha, cumulative, ..
+            },
+        ] = groups
+            && resolved.len() <= remaining / size_of::<TypedEwmaState>()
+        {
+            Self::Ewma {
+                entities: resolved,
+                seed: TypedEwmaState::new(*alpha, *cumulative),
+            }
+        } else {
+            Self::PerRow(locals.iter().map(|&local| resolved[local]).collect())
+        }
+    }
+}
+
 enum SlabBuilder {
     Float(Float64Builder),
     Count(UInt64Builder),
@@ -641,78 +673,72 @@ impl RollingKernelPlan {
                 TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. }
             )
         });
-        let (entities, mut positions) =
+        let (resolved, mut positions) =
             Self::prepare_slab_entities(table, routing, node_id, track_positions)?;
+        let entities = SlabEntities::resolve(&self.groups, resolved, &routing.entity_ids);
         let mut builders = self
             .outputs
             .iter()
             .map(|output| SlabBuilder::new(output, input_rows))
             .collect::<Result<Vec<_>>>()?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        let filled = if let (
-            [
-                TypedGroupPlan::Ewma {
-                    alpha, cumulative, ..
-                },
-            ],
-            [TypedGroupInput::Single(values)],
-        ) = (self.groups.as_slice(), inputs)
-            && entities.len().saturating_mul(size_of::<TypedEwmaState>())
-                <= input_rows.saturating_mul(size_of::<EntityId>())
-        {
-            // The touched states fit in the former per-row entity ID allocation.
-            indicator::fill_ewma(
-                table,
-                &entities,
-                &routing.entity_ids,
-                values,
-                TypedEwmaState::new(*alpha, *cumulative),
-                node_id,
-                |state| {
-                    for (builder, output) in builders.iter_mut().zip(&self.outputs) {
-                        let SlabBuilder::Float(builder) = builder else {
-                            return Err(internal_error("rolling EWMA slab output type mismatch"));
-                        };
-                        builder.append_option(
-                            (state.valid_count >= output.min_periods).then_some(state.value),
-                        );
-                    }
-                    Ok(())
-                },
-            )?;
-            true
-        } else if indicator::numeric_only(&self.groups) {
-            let Some(TypedGroupInput::Single(values)) = inputs.first() else {
-                return Err(internal_error("rolling numeric slab input mismatch"));
-            };
-            let ids = routing
-                .entity_ids
-                .iter()
-                .map(|&local| entities[local])
-                .collect::<Vec<_>>();
-            self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?
-        } else {
-            false
-        };
-        if !filled {
-            for (row, &local) in routing.entity_ids.iter().enumerate() {
-                let entity = entities[local];
-                let ordered_position = if track_positions { positions[local] } else { 0 };
-                if track_positions {
-                    positions[local] += 1;
-                }
-                self.append_slab_row(
+        match entities {
+            SlabEntities::Ewma { entities, seed } => {
+                let [TypedGroupInput::Single(values)] = inputs else {
+                    return Err(internal_error("rolling EWMA slab input mismatch"));
+                };
+                indicator::fill_ewma(
                     table,
-                    indicator::EntityRow {
-                        entity,
-                        first: routing.rows[local].first == row,
-                        ordered_position,
-                        node_id,
+                    &entities,
+                    &routing.entity_ids,
+                    values,
+                    seed,
+                    node_id,
+                    |state| {
+                        for (builder, output) in builders.iter_mut().zip(&self.outputs) {
+                            let SlabBuilder::Float(builder) = builder else {
+                                return Err(internal_error(
+                                    "rolling EWMA slab output type mismatch",
+                                ));
+                            };
+                            builder.append_option(
+                                (state.valid_count >= output.min_periods).then_some(state.value),
+                            );
+                        }
+                        Ok(())
                     },
-                    inputs,
-                    row,
-                    &mut builders,
                 )?;
+            }
+            SlabEntities::PerRow(ids) => {
+                let full_tick = if indicator::numeric_only(&self.groups) {
+                    let Some(TypedGroupInput::Single(values)) = inputs.first() else {
+                        return Err(internal_error("rolling numeric slab input mismatch"));
+                    };
+                    self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?
+                } else {
+                    false
+                };
+                if !full_tick {
+                    for (row, &entity) in ids.iter().enumerate() {
+                        let local = routing.entity_ids[row];
+                        let ordered_position = if track_positions { positions[local] } else { 0 };
+                        if track_positions {
+                            positions[local] += 1;
+                        }
+                        self.append_slab_row(
+                            table,
+                            indicator::EntityRow {
+                                entity,
+                                first: routing.rows[local].first == row,
+                                ordered_position,
+                                node_id,
+                            },
+                            inputs,
+                            row,
+                            &mut builders,
+                        )?;
+                    }
+                }
             }
         }
         if let Some(recorder) = observer {
@@ -1006,6 +1032,40 @@ mod tests {
     }
 
     #[test]
+    fn average_scratch_admission_includes_live_entity_ids() {
+        let mut table = super::StateTable::new();
+        table.begin().unwrap();
+        let first = table
+            .resolve_or_append(super::EntityKey::new(vec![0]))
+            .unwrap();
+        let second = table
+            .resolve_or_append(super::EntityKey::new(vec![1]))
+            .unwrap();
+        let routed = |plan: &RollingKernelPlan, rows: usize| {
+            let mut resolved = Vec::with_capacity(8);
+            resolved.extend([first, second]);
+            let locals = [0, 1].into_iter().cycle().take(rows).collect::<Vec<_>>();
+            super::SlabEntities::resolve(&plan.groups, resolved, &locals)
+        };
+        let minimum_rows =
+            8 + (2 * size_of::<super::TypedEwmaState>()).div_ceil(size_of::<super::EntityId>());
+        let average = average_plan();
+        for (plan, rows) in [(&average, minimum_rows - 1), (&plan(), minimum_rows)] {
+            let super::SlabEntities::PerRow(ids) = routed(plan, rows) else {
+                panic!("only dense, exclusive EWMA plans can retain per-entity state");
+            };
+            assert!(
+                ids.into_iter()
+                    .eq([first, second].into_iter().cycle().take(rows))
+            );
+        }
+        assert!(matches!(
+            routed(&average, minimum_rows),
+            super::SlabEntities::Ewma { .. }
+        ));
+    }
+
+    #[test]
     fn cumulative_mean_overflow_mid_batch_preserves_committed_state() {
         let plan = average_plan();
         let mut state = RollingKernelState::default();
@@ -1029,11 +1089,12 @@ mod tests {
         let mut state = plan
             .decode_slab_state(&committed, RollingKernelPlan::slab_last_identity(&state))
             .unwrap();
-        let record = input(&[3, 4, 5, 6, 7, 8, 9, 10], &[Some(5.0); 8]);
+        let times = (3..19).collect::<Vec<_>>();
+        let record = input(&times, &[Some(5.0); 16]);
         let mut columns = record.columns().to_vec();
-        columns[1] = Arc::new(StringArray::from(vec![
-            "a", "a", "a", "b", "a", "a", "a", "a",
-        ]));
+        columns[1] = Arc::new(StringArray::from_iter_values(
+            (0..times.len()).map(|row| if row == 3 { "b" } else { "a" }),
+        ));
         let batch = RecordBatch::try_new(record.schema(), columns).unwrap();
         let Err(error) = plan.prepare_slab_ordered_stream(&mut state, &batch, "r", None) else {
             panic!("the second entity has exhausted its valid sample count");
