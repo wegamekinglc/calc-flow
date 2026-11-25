@@ -11,9 +11,10 @@ use datafusion::common::ScalarValue;
 use super::{
     DerivedBuilder, EntityRouting, LagValue, OutputStorage, Result, RollingKernelExecution,
     RollingKernelMetrics, RollingKernelPlan, RollingKernelState, RollingMetricsRecorder,
-    RollingStage, RollingWork, StateCharge, Statistic, StreamKernelUpdate, TypedFrame,
-    TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState,
-    direct_entity_column, direct_entity_routing, internal_error, nanos, operator_error,
+    RollingStage, RollingWork, StateCharge, Statistic, StreamKernelUpdate, TypedEwmaState,
+    TypedFrame, TypedGroupInput, TypedGroupPlan, TypedOutputKind, TypedOutputPlan,
+    TypedWindowState, direct_entity_column, direct_entity_routing, internal_error, nanos,
+    operator_error,
 };
 use crate::{
     accumulate::NumericAccumulator,
@@ -71,6 +72,38 @@ fn charge(table: &StateTable, node_id: &str) -> Result<StateCharge> {
         bytes: u64::try_from(table.logical_bytes())
             .map_err(|_| operator_error(node_id, "rolling slab byte charge overflowed"))?,
     })
+}
+
+enum SlabEntities {
+    PerRow(Vec<EntityId>),
+    Ewma {
+        entities: Vec<EntityId>,
+        seed: TypedEwmaState,
+    },
+}
+
+impl SlabEntities {
+    fn resolve(groups: &[TypedGroupPlan], resolved: Vec<EntityId>, locals: &[usize]) -> Self {
+        // Keep the resolved allocation and recurrence states within the old per-row ID storage.
+        let remaining = locals
+            .len()
+            .saturating_sub(resolved.capacity())
+            .saturating_mul(size_of::<EntityId>());
+        if let [
+            TypedGroupPlan::Ewma {
+                alpha, cumulative, ..
+            },
+        ] = groups
+            && resolved.len() <= remaining / size_of::<TypedEwmaState>()
+        {
+            Self::Ewma {
+                entities: resolved,
+                seed: TypedEwmaState::new(*alpha, *cumulative),
+            }
+        } else {
+            Self::PerRow(locals.iter().map(|&local| resolved[local]).collect())
+        }
+    }
 }
 
 enum SlabBuilder {
@@ -555,11 +588,6 @@ impl RollingKernelPlan {
             .iter()
             .map(|key| table.resolve_or_append(EntityKey::new(key.clone())))
             .collect::<Result<Vec<EntityId>>>()?;
-        let ids = routing
-            .entity_ids
-            .iter()
-            .map(|&local| resolved[local])
-            .collect::<Vec<_>>();
         let mut positions = Vec::with_capacity(if track_positions { resolved.len() } else { 0 });
         for (&entity, row) in resolved.iter().zip(&routing.rows) {
             let rows = u64::try_from(row.count)
@@ -573,7 +601,7 @@ impl RollingKernelPlan {
             })?;
             table.set_u64(0, entity, transitions)?;
         }
-        Ok((ids, positions))
+        Ok((resolved, positions))
     }
 
     fn append_slab_outputs(
@@ -645,41 +673,72 @@ impl RollingKernelPlan {
                 TypedGroupPlan::Rsi { .. } | TypedGroupPlan::Atr { .. }
             )
         });
-        let (ids, mut positions) =
+        let (resolved, mut positions) =
             Self::prepare_slab_entities(table, routing, node_id, track_positions)?;
+        let entities = SlabEntities::resolve(&self.groups, resolved, &routing.entity_ids);
         let mut builders = self
             .outputs
             .iter()
             .map(|output| SlabBuilder::new(output, input_rows))
             .collect::<Result<Vec<_>>>()?;
         let _stage = observer.map(|recorder| recorder.stage(RollingStage::NumericUpdate));
-        let full_tick = if indicator::numeric_only(&self.groups) {
-            let Some(TypedGroupInput::Single(values)) = inputs.first() else {
-                return Err(internal_error("rolling numeric slab input mismatch"));
-            };
-            self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?
-        } else {
-            false
-        };
-        if !full_tick {
-            for (row, &entity) in ids.iter().enumerate() {
-                let local = routing.entity_ids[row];
-                let ordered_position = if track_positions { positions[local] } else { 0 };
-                if track_positions {
-                    positions[local] += 1;
-                }
-                self.append_slab_row(
+        match entities {
+            SlabEntities::Ewma { entities, seed } => {
+                let [TypedGroupInput::Single(values)] = inputs else {
+                    return Err(internal_error("rolling EWMA slab input mismatch"));
+                };
+                indicator::fill_ewma(
                     table,
-                    indicator::EntityRow {
-                        entity,
-                        first: routing.rows[local].first == row,
-                        ordered_position,
-                        node_id,
+                    &entities,
+                    &routing.entity_ids,
+                    values,
+                    seed,
+                    node_id,
+                    |state| {
+                        for (builder, output) in builders.iter_mut().zip(&self.outputs) {
+                            let SlabBuilder::Float(builder) = builder else {
+                                return Err(internal_error(
+                                    "rolling EWMA slab output type mismatch",
+                                ));
+                            };
+                            builder.append_option(
+                                (state.valid_count >= output.min_periods).then_some(state.value),
+                            );
+                        }
+                        Ok(())
                     },
-                    inputs,
-                    row,
-                    &mut builders,
                 )?;
+            }
+            SlabEntities::PerRow(ids) => {
+                let full_tick = if indicator::numeric_only(&self.groups) {
+                    let Some(TypedGroupInput::Single(values)) = inputs.first() else {
+                        return Err(internal_error("rolling numeric slab input mismatch"));
+                    };
+                    self.write_full_tick(table, &ids, values, routing.keys.len(), &mut builders)?
+                } else {
+                    false
+                };
+                if !full_tick {
+                    for (row, &entity) in ids.iter().enumerate() {
+                        let local = routing.entity_ids[row];
+                        let ordered_position = if track_positions { positions[local] } else { 0 };
+                        if track_positions {
+                            positions[local] += 1;
+                        }
+                        self.append_slab_row(
+                            table,
+                            indicator::EntityRow {
+                                entity,
+                                first: routing.rows[local].first == row,
+                                ordered_position,
+                                node_id,
+                            },
+                            inputs,
+                            row,
+                            &mut builders,
+                        )?;
+                    }
+                }
             }
         }
         if let Some(recorder) = observer {
@@ -895,6 +954,156 @@ mod tests {
         eprintln!("complete {complete:?}; partial {partial:?}");
         assert!(complete.count_total < 1_024);
         assert!(partial.count_total <= complete.count_total + 64);
+    }
+
+    fn average_plan() -> RollingKernelPlan {
+        let mut plan = plan();
+        plan.groups = vec![TypedGroupPlan::Ewma {
+            input_index: 2,
+            alpha: 0.0,
+            cumulative: true,
+        }];
+        plan.outputs = [1, 3]
+            .map(|min_periods| TypedOutputPlan {
+                group: 0,
+                kind: TypedOutputKind::Ewma,
+                storage: OutputStorage::Float64,
+                min_periods,
+                ddof: 0,
+            })
+            .into();
+        plan
+    }
+
+    #[test]
+    fn cumulative_mean_allocations_scale_with_entities_and_validate_each_readout() {
+        let plan = average_plan();
+        let measure = |rows: i32| {
+            let times = (0..rows).map(i64::from).collect::<Vec<_>>();
+            let values = (0..rows)
+                .map(|row| match row % 16 {
+                    6 => None,
+                    9 => Some(f64::NAN),
+                    _ => Some(f64::from(row)),
+                })
+                .collect::<Vec<_>>();
+            let record = input(&times, &values);
+            let mut columns = record.columns().to_vec();
+            columns[1] = Arc::new(StringArray::from_iter_values(
+                ["a", "b", "c", "d"].into_iter().cycle().take(times.len()),
+            ));
+            let record = RecordBatch::try_new(record.schema(), columns).unwrap();
+            let mut state = RollingKernelState::default();
+            let mut update = None;
+            let counts = allocation_counter::measure(|| {
+                update = Some(
+                    plan.prepare_slab_ordered_stream(&mut state, &record, "r", None)
+                        .unwrap(),
+                );
+            });
+            let mut update = update.unwrap();
+            let columns = update.take_columns();
+            for (column, minimum) in columns.iter().zip([1, 3]) {
+                let means = column.as_any().downcast_ref::<Float64Array>().unwrap();
+                let mut groups = [(0_u32, 0.0); 4];
+                for (row, &value) in values.iter().enumerate() {
+                    let (count, sum) = &mut groups[row % groups.len()];
+                    if let Some(value) = value.filter(|value| !value.is_nan()) {
+                        *count += 1;
+                        *sum += value;
+                    }
+                    assert_eq!(means.is_valid(row), *count >= minimum);
+                    if *count >= minimum {
+                        assert!((means.value(row) - *sum / f64::from(*count)).abs() < 1e-10);
+                    }
+                }
+            }
+            update.rollback(&mut state);
+            assert!(state.slab.is_none());
+            counts.count_total
+        };
+        let short = measure(256);
+        let long = measure(4_096);
+        eprintln!("four entities, 256/4,096 rows: {short}/{long} allocations");
+        assert!(
+            long <= short + 32,
+            "same four entities required {short} allocations for 256 rows and {long} for 4096"
+        );
+    }
+
+    #[test]
+    fn average_scratch_admission_includes_live_entity_ids() {
+        let mut table = super::StateTable::new();
+        table.begin().unwrap();
+        let first = table
+            .resolve_or_append(super::EntityKey::new(vec![0]))
+            .unwrap();
+        let second = table
+            .resolve_or_append(super::EntityKey::new(vec![1]))
+            .unwrap();
+        let routed = |plan: &RollingKernelPlan, rows: usize| {
+            let mut resolved = Vec::with_capacity(8);
+            resolved.extend([first, second]);
+            let locals = [0, 1].into_iter().cycle().take(rows).collect::<Vec<_>>();
+            super::SlabEntities::resolve(&plan.groups, resolved, &locals)
+        };
+        let minimum_rows =
+            8 + (2 * size_of::<super::TypedEwmaState>()).div_ceil(size_of::<super::EntityId>());
+        let average = average_plan();
+        for (plan, rows) in [(&average, minimum_rows - 1), (&plan(), minimum_rows)] {
+            let super::SlabEntities::PerRow(ids) = routed(plan, rows) else {
+                panic!("only dense, exclusive EWMA plans can retain per-entity state");
+            };
+            assert!(
+                ids.into_iter()
+                    .eq([first, second].into_iter().cycle().take(rows))
+            );
+        }
+        assert!(matches!(
+            routed(&average, minimum_rows),
+            super::SlabEntities::Ewma { .. }
+        ));
+    }
+
+    #[test]
+    fn cumulative_mean_overflow_mid_batch_preserves_committed_state() {
+        let plan = average_plan();
+        let mut state = RollingKernelState::default();
+        let record = input(&[1, 2], &[Some(1.0), Some(2.0)]);
+        let mut columns = record.columns().to_vec();
+        columns[1] = Arc::new(StringArray::from(vec!["a", "b"]));
+        let seed = RecordBatch::try_new(record.schema(), columns).unwrap();
+        plan.prepare_slab_ordered_stream(&mut state, &seed, "r", None)
+            .unwrap()
+            .commit(&mut state);
+        let (mut routing, _) = plan.route_slab(&state, &seed, "r", None).unwrap();
+        let table = state.slab.as_mut().unwrap();
+        table.begin().unwrap();
+        let b = table
+            .resolve_or_append(super::EntityKey::new(routing.keys.pop().unwrap()))
+            .unwrap();
+        table.set_u64(1, b, u64::MAX).unwrap();
+        table.commit().unwrap();
+        let committed = RollingKernelPlan::encode_slab_state(&state).unwrap();
+
+        let mut state = plan
+            .decode_slab_state(&committed, RollingKernelPlan::slab_last_identity(&state))
+            .unwrap();
+        let times = (3..19).collect::<Vec<_>>();
+        let record = input(&times, &[Some(5.0); 16]);
+        let mut columns = record.columns().to_vec();
+        columns[1] = Arc::new(StringArray::from_iter_values(
+            (0..times.len()).map(|row| if row == 3 { "b" } else { "a" }),
+        ));
+        let batch = RecordBatch::try_new(record.schema(), columns).unwrap();
+        let Err(error) = plan.prepare_slab_ordered_stream(&mut state, &batch, "r", None) else {
+            panic!("the second entity has exhausted its valid sample count");
+        };
+        assert!(error.to_string().contains("EWMA sample count overflowed"));
+        assert_eq!(
+            RollingKernelPlan::encode_slab_state(&state).unwrap(),
+            committed
+        );
     }
 
     #[test]
