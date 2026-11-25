@@ -1,9 +1,9 @@
 use datafusion::arrow::array::{Array, Float64Array, Int64Array, UInt64Array};
 
 use super::super::{
-    LagValue, OutputStorage, Result, Statistic, TypedFrame, TypedGroupInput, TypedGroupPlan,
-    TypedOutputKind, TypedOutputPlan, TypedWindowState, cumulative::TypedCumulativeState,
-    internal_error, valid_float64,
+    LagValue, OutputStorage, Result, Statistic, TypedEwmaState, TypedFrame, TypedGroupInput,
+    TypedGroupPlan, TypedOutputKind, TypedOutputPlan, TypedWindowState,
+    cumulative::TypedCumulativeState, internal_error, valid_float64,
 };
 use crate::{
     CalcFlowError,
@@ -527,18 +527,52 @@ fn update_ewma(
         return Err(internal_error("rolling EWMA plan mismatch"));
     };
     let base = column_base(groups, index);
-    let (count, value) = crate::array::rolling::next_ewma(
-        table.u64(base, position.entity)?,
-        f64::from_bits(table.u64(base + 1, position.entity)?),
-        valid_float64(input, row, false),
-        *alpha,
-        *cumulative,
-    )
-    .ok_or_else(|| {
-        super::super::operator_error(position.node_id, "rolling EWMA sample count overflowed")
-    })?;
-    write_fields(table, position.entity, base, &[count, value.to_bits()])?;
-    Ok((count, value))
+    let mut state = TypedEwmaState::new(*alpha, *cumulative).load(table, position.entity, base)?;
+    state.update(valid_float64(input, row, false), position.node_id)?;
+    state.save(table, position.entity, base)?;
+    Ok((state.valid_count, state.value))
+}
+
+impl TypedEwmaState {
+    fn load(mut self, table: &StateTable, entity: EntityId, base: usize) -> Result<Self> {
+        self.valid_count = table.u64(base, entity)?;
+        self.value = f64::from_bits(table.u64(base + 1, entity)?);
+        Ok(self)
+    }
+
+    fn save(self, table: &mut StateTable, entity: EntityId, base: usize) -> Result<()> {
+        write_fields(
+            table,
+            entity,
+            base,
+            &[self.valid_count, self.value.to_bits()],
+        )
+    }
+}
+
+pub(super) fn fill_ewma(
+    table: &mut StateTable,
+    entities: &[EntityId],
+    locals: &[usize],
+    input: &Float64Array,
+    seed: TypedEwmaState,
+    node_id: &str,
+    mut emit: impl FnMut(&TypedEwmaState) -> Result<()>,
+) -> Result<()> {
+    // Column zero counts transitions; a sole EWMA group owns columns one and two.
+    let mut states = Vec::with_capacity(entities.len());
+    for &entity in entities {
+        states.push(seed.load(table, entity, 1)?);
+    }
+    for (row, &local) in locals.iter().enumerate() {
+        let state = &mut states[local];
+        state.update(valid_float64(input, row, false), node_id)?;
+        emit(state)?;
+    }
+    for (&entity, state) in entities.iter().zip(states) {
+        state.save(table, entity, 1)?;
+    }
+    Ok(())
 }
 
 fn update_cumulative(
