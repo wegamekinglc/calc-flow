@@ -500,24 +500,89 @@ fn test_strict_finality_commits_only_the_closed_prefix_and_eof_drains() {
 }
 
 #[test]
-fn test_fresh_charge_counts_each_group_locator_once_on_both_sides() {
-    let declaration = spec(0, 4_096, 16 << 20);
+fn test_fresh_charge_skips_dense_tight_group_columns_and_counts_sparse_input_once() {
+    let declaration = spec(0, 8_192, 16 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(16 << 20));
     let mut state = state(&declaration, &pool);
-    let rows = (0..1_024)
-        .map(|row| (row % 64, row / 64, row, None))
-        .collect::<Vec<_>>();
-    let input = record(&rows);
-    let work = [0, 1].map(|side| {
+    let batch = |start| {
+        record(
+            &(start..start + 1_024)
+                .map(|row| (row % 64, row / 64, row, None))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let mut work = |side, input: &RecordBatch| {
         super::state::PROJECTED_GROUP_VISITS.set(0);
         super::state::PROJECTED_COUNT_UPDATES.set(0);
-        admit(&mut state, side, &input).unwrap();
+        admit(&mut state, side, input).unwrap();
         (
             super::state::PROJECTED_GROUP_VISITS.replace(0),
             super::state::PROJECTED_COUNT_UPDATES.replace(0),
         )
-    });
-    assert_eq!(work, [(input.num_rows(), input.num_rows()); 2]);
+    };
+    for start in [0, 1_024] {
+        let input = batch(start);
+        for side in [0, 1] {
+            assert_eq!(
+                work(side, &input),
+                (0, 0),
+                "dense fresh append on side {side}"
+            );
+        }
+    }
+    let sparse = record(&[(12, 100, 3_000, None)]);
+    for side in [0, 1] {
+        assert_eq!(work(side, &sparse), (1, 1), "sparse append on side {side}");
+    }
+}
+
+#[test]
+fn test_fresh_projection_reclaims_only_the_touched_restored_right_slots() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 22));
+    let mut source = state(&spec(0, 128, 1 << 20), &pool);
+    admit(&mut source, 1, &record(&[(1, 1, 1, None), (2, 1, 2, None)])).unwrap();
+    let mut capacities = source.index_capacities();
+    let slot = u64::try_from(size_of::<super::RowLocator>()).unwrap();
+    capacities.right_payloads[0] += 3 * slot;
+    capacities.right_identities[0] += slot;
+    capacities.right_identities[1] += 5 * slot;
+    source.restore_index_capacities(&capacities).unwrap();
+    let segments = source.capture(1 << 20).unwrap();
+    let restore = |limit| {
+        ColumnarState::restore(
+            "asof-columnar-test",
+            &spec(0, 128, limit),
+            &[input_schema(), input_schema()],
+            &pool,
+            &segments,
+        )
+        .unwrap()
+    };
+    let input = record(
+        &(2..10)
+            .map(|time| (1, time, time, None))
+            .collect::<Vec<_>>(),
+    );
+    let mut reference = restore(1 << 20);
+    admit(&mut reference, 1, &input).unwrap();
+    let retained = reference.persistent_bytes();
+    let after = reference.index_capacities();
+    assert_eq!(after.right_payloads, [9 * slot, slot]);
+    assert_eq!(after.right_identities, [9 * slot, 6 * slot]);
+    let limit =
+        u64::try_from(retained).unwrap() + 2 * u64::try_from(input.num_rows()).unwrap() * slot;
+    let mut exact = restore(limit);
+    admit(&mut exact, 1, &input).unwrap();
+    assert_eq!(exact.persistent_bytes(), retained);
+    let mut short = restore(limit - 1);
+    assert!(matches!(
+        admit(&mut short, 1, &input),
+        Err(crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofStateLimitExceeded,
+            ..
+        })
+    ));
+    assert_eq!(short.persistent_bytes(), source.persistent_bytes());
 }
 
 #[test]
