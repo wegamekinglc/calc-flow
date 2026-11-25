@@ -1,0 +1,214 @@
+{
+  "rust-release": {
+    "artifact": 15068887723,
+    "digest": "sha256:faac299bd0feda4429ed2124889ff2275ec3f4494599bca929acee0ff5da2f4f",
+    "model": "AMD EPYC 9V74 80-Core Processor",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": -12.579355400021154,
+        "low": -16.622288102732853,
+        "high": -9.182965543690635,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -13.626380783743341,
+        "low": -18.683773732961264,
+        "high": -11.74337226485811,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "improved",
+    "ms": {
+      "base": {
+        "p50": 898.0855015,
+        "p95": 928.4772598500001
+      },
+      "head": {
+        "p50": 781.8786190000001,
+        "p95": 823.5618463000001
+      }
+    },
+    "delta_percent": -12.93940079267607,
+    "accepted_intervals": 53,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": 44,
+    "early_affinity": {
+      "allowed": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "selected": [
+        0,
+        2
+      ],
+      "pid": 2452
+    }
+  },
+  "rust-parent": {
+    "artifact": 15068134416,
+    "digest": "sha256:d64bebb9bc6dd1b1e8348fc0faa1c508be54a7b20e391b66d8a357487679d944",
+    "model": "AMD EPYC 9V74 80-Core Processor",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "stopped",
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 4.0, 'siblings': [1], 'sibling_busy': 49.5, 'host_busy': 33.55, 'available_bytes': 14932602880, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True, 'owned_host_percent': 7.9229818459359755, 'external_host_percent': 25.62701815406402}, {'cpu': 2, 'cpu_busy': 29.7, 'siblings': [3], 'sibling_busy': 51.0, 'host_busy': 33.55, 'available_bytes': 14932602880, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False, 'owned_host_percent': 7.9229818459359755, 'external_host_percent': 25.62701815406402}]\")])",
+    "accepted_intervals": 14,
+    "rejected": [
+      {
+        "cpu": 2,
+        "cpu_busy": 29.7,
+        "siblings": [
+          3
+        ],
+        "sibling_busy": 51.0,
+        "host_busy": 33.55,
+        "available_bytes": 14932602880,
+        "major_faults": 0,
+        "swap_pages": 0,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "suitable": false,
+        "owned_host_percent": 7.9229818459359755,
+        "external_host_percent": 25.62701815406402
+      }
+    ],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": 11,
+    "early_affinity": {
+      "allowed": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "selected": [
+        0,
+        2
+      ],
+      "pid": 2947
+    }
+  },
+  "python-release": {
+    "artifact": 15069138122,
+    "digest": "sha256:8c2c64206c4081e190e824464108a380287638c838b03b1e867fb065bd6d2ac6",
+    "model": "AMD EPYC 9V45 96-Core Processor",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": -17.211782336866822,
+        "low": -23.467544533031592,
+        "high": -13.079678362662573,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -19.142397575820645,
+        "low": -21.70904326905476,
+        "high": -16.06189482033564,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "improved",
+    "ms": {
+      "base": {
+        "p50": 605.498753,
+        "p95": 644.4295881500001
+      },
+      "head": {
+        "p50": 496.67516700000004,
+        "p95": 527.6272598
+      }
+    },
+    "delta_percent": -17.97255328121211,
+    "accepted_intervals": 58,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "early_affinity": {
+      "allowed": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "selected": [
+        0,
+        2
+      ],
+      "pid": 2449
+    }
+  },
+  "python-parent": {
+    "artifact": 15069391523,
+    "digest": "sha256:2d83c3fe9bd49c7d2e9f0c8da2420495c9609846479b2af8585b7d2c71f26454",
+    "model": "AMD EPYC 7763 64-Core Processor",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "stopped",
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 2.0, 'siblings': [1], 'sibling_busy': 74.7, 'host_busy': 43.925, 'available_bytes': 14655389696, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False, 'owned_host_percent': 24.99490678293085, 'external_host_percent': 18.930093217069146}, {'cpu': 2, 'cpu_busy': 99.0, 'siblings': [3], 'sibling_busy': 0.0, 'host_busy': 43.925, 'available_bytes': 14655389696, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True, 'owned_host_percent': 24.99490678293085, 'external_host_percent': 18.930093217069146}]\")])",
+    "accepted_intervals": 47,
+    "rejected": [
+      {
+        "cpu": 0,
+        "cpu_busy": 2.0,
+        "siblings": [
+          1
+        ],
+        "sibling_busy": 74.7,
+        "host_busy": 43.925,
+        "available_bytes": 14655389696,
+        "major_faults": 0,
+        "swap_pages": 0,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "suitable": false,
+        "owned_host_percent": 24.99490678293085,
+        "external_host_percent": 18.930093217069146
+      }
+    ],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": {
+      "prepare": 2,
+      "sample": 20
+    },
+    "early_affinity": {
+      "allowed": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "selected": [
+        0,
+        2
+      ],
+      "pid": 2667
+    }
+  }
+}
