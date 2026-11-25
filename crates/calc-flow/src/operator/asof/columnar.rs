@@ -7,7 +7,7 @@ mod run;
 mod state;
 
 use run::RowLocator;
-pub(super) use run::logical_record_selection_charge;
+pub(super) use run::{logical_filtered_record_charge, logical_record_selection_charge};
 #[cfg(test)]
 pub(super) use state::EvictionSummary;
 pub(super) use state::{ColumnarState, Progress};
