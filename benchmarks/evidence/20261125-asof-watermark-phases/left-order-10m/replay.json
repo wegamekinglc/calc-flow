@@ -1,0 +1,169 @@
+{
+  "rust-release": {
+    "artifact": 15065223753,
+    "digest": "sha256:adf3dbf7a18f9fafca6083813fa29a37f644d9f95fbed1e91f830c5141652790",
+    "model": "Intel(R) Xeon(R) 6975P-C",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": 19.149799409088885,
+        "low": 11.719169065891855,
+        "high": 25.397488613184738,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 21.503856961329916,
+        "low": 13.948276842527395,
+        "high": 27.634539318112395,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "regression",
+    "ms": {
+      "base": {
+        "p50": 800.5757455,
+        "p95": 832.0068269999999
+      },
+      "head": {
+        "p50": 958.2968935,
+        "p95": 1025.03709495
+      }
+    },
+    "delta_percent": 19.700965072517306,
+    "accepted_intervals": 51,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      1
+    ],
+    "completed_observations": 44
+  },
+  "rust-parent": {
+    "artifact": 15066875493,
+    "digest": "sha256:80a308290e1edbb838e584d47f7ede183723574650a5a8850fee849e8ab078ce",
+    "model": "AMD EPYC 7763 64-Core Processor",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "stopped",
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 93.0, 'siblings': [1], 'sibling_busy': 1.0, 'host_busy': 50.525, 'available_bytes': 14625050624, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True, 'owned_host_percent': 25.08143013527463, 'external_host_percent': 25.44356986472537}, {'cpu': 2, 'cpu_busy': 8.1, 'siblings': [3], 'sibling_busy': 100.0, 'host_busy': 50.525, 'available_bytes': 14625050624, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False, 'owned_host_percent': 25.08143013527463, 'external_host_percent': 25.44356986472537}]\")])",
+    "accepted_intervals": 4,
+    "rejected": [
+      {
+        "cpu": 2,
+        "cpu_busy": 8.1,
+        "siblings": [
+          3
+        ],
+        "sibling_busy": 100.0,
+        "host_busy": 50.525,
+        "available_bytes": 14625050624,
+        "major_faults": 0,
+        "swap_pages": 0,
+        "swap_in_pages": 0,
+        "swap_out_pages": 0,
+        "suitable": false,
+        "owned_host_percent": 25.08143013527463,
+        "external_host_percent": 25.44356986472537
+      }
+    ],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": 2
+  },
+  "python-release": {
+    "artifact": 15066915620,
+    "digest": "sha256:ce194359ced4593c46bd5900c995006891a89e0c116a4fdeceabbafd2e7c718b",
+    "model": "Intel(R) Xeon(R) 6975P-C",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": 8.979467469565595,
+        "low": 3.570909370095632,
+        "high": 15.66904241967717,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 15.157912692796716,
+        "low": 4.863884273528596,
+        "high": 17.437688274517104,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "inconclusive",
+    "ms": {
+      "base": {
+        "p50": 727.5942454999999,
+        "p95": 764.9377591
+      },
+      "head": {
+        "p50": 818.1755875,
+        "p95": 879.40507625
+      }
+    },
+    "delta_percent": 12.449430786489103,
+    "accepted_intervals": 90,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      1
+    ],
+    "completed_observations": {
+      "prepare": 4,
+      "sample": 40
+    }
+  },
+  "python-parent": {
+    "artifact": 15065298660,
+    "digest": "sha256:2fa794e4012aceff27c32e3183d1370d47a87a282d348223cec2e752baaaaf3d",
+    "model": "Intel(R) Xeon(R) 6975P-C",
+    "cpu_count": "4",
+    "cores_per_socket": "2",
+    "threads_per_core": "2",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": -15.63549045147765,
+        "low": -19.494878453847665,
+        "high": -8.39869410672901,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -6.510404769038757,
+        "low": -10.77266158859118,
+        "high": -2.4234590824855795,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "no-confirmed-regression",
+    "ms": {
+      "base": {
+        "p50": 903.819056,
+        "p95": 959.0027499
+      },
+      "head": {
+        "p50": 800.28013,
+        "p95": 903.7159457
+      }
+    },
+    "delta_percent": -11.455713985300175,
+    "accepted_intervals": 91,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      1
+    ],
+    "completed_observations": {
+      "prepare": 4,
+      "sample": 40
+    }
+  }
+}
