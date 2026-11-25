@@ -20,6 +20,11 @@ const KEYED_PAGE_ROWS: usize = 1_024;
 const VALUE_LOG_PAGE_BYTES: usize = 64 * 1_024;
 const PAGE_DESCRIPTOR_BYTES: usize = 64;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static RECURRENT_PAGE_BORROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 type RestoredPartition = (StatePartition, Vec<(Vec<u8>, EntityId)>);
 
 #[derive(Clone, Copy)]
@@ -1898,32 +1903,31 @@ impl StateTable {
             .as_mut()
             .ok_or_else(|| internal("state-table mutation requires a transaction"))?;
         let partition = self.partitions.get_mut(&group).expect("prepared group");
-        Self::push_numeric_recurrent_page(transaction, partition, schema, column, group, row, value)
+        let max_window = Self::numeric_max_window(schema)?;
+        let (slot, page) = Self::borrow_numeric_page(&mut partition.rings[column][row]);
+        Self::push_numeric_recurrent_page(transaction, page, schema, max_window, group, slot, value)
             .map(|_| ())
+    }
+
+    fn borrow_numeric_page(page: &mut Option<Page<RingPage>>) -> (u32, &mut RingPage) {
+        let page = page.as_mut().expect("ring page");
+        #[cfg(test)]
+        RECURRENT_PAGE_BORROWS.set(RECURRENT_PAGE_BORROWS.get() + 1);
+        (
+            page.id.slot,
+            Arc::get_mut(&mut page.value).expect("checkpoint-off ring page is writable"),
+        )
     }
 
     fn push_numeric_recurrent_page<'a>(
         transaction: &mut Transaction,
-        partition: &'a mut StatePartition,
+        page: &'a mut RingPage,
         schema: &RingColumn,
-        column: usize,
+        max_window: usize,
         group: KeyGroupId,
-        row: usize,
+        slot: u32,
         value: Option<f64>,
     ) -> Result<&'a [NumericAccumulator]> {
-        let max_window = Self::numeric_max_window(schema)?;
-        let slot = partition.rings[column][row]
-            .as_ref()
-            .expect("ring page")
-            .id
-            .slot;
-        let page = Arc::get_mut(
-            &mut partition.rings[column][row]
-                .as_mut()
-                .expect("ring page")
-                .value,
-        )
-        .expect("checkpoint-off ring page is writable");
         let update = Self::push_numeric_recurrent_ring(transaction, page, group, slot, value)?;
         Self::update_numeric_windows(page, &schema.numeric_windows, max_window, update, value)?;
         Ok(page.numeric.as_deref().expect("numeric group"))
@@ -2128,18 +2132,42 @@ impl StateTable {
             .partitions
             .get_mut(&KeyGroupId(0))
             .expect("full-tick group was validated");
-        for (row, entity) in (order.len()..row_count).zip(order.iter().cycle()) {
+        let max_window = Self::numeric_max_window(schema)?;
+        let mut append = |row, slot, page: &mut RingPage| {
             let value = Self::numeric_input_value(values, row, nan_as_value);
             let accumulators = Self::push_numeric_recurrent_page(
                 transaction,
-                partition,
+                page,
                 schema,
-                column,
+                max_window,
                 KeyGroupId(0),
-                entity.row as usize,
+                slot,
                 value,
             )?;
-            emit(row, accumulators)?;
+            emit(row, accumulators)
+        };
+        let pages = &mut partition.rings[column];
+        // Borrow a contiguous run only if at least two more complete ticks reuse it.
+        if (row_count - order.len()) / 2 >= order.len()
+            && order
+                .windows(2)
+                .all(|pair| pair[0].row.checked_add(1) == Some(pair[1].row))
+        {
+            let start = order[0].row as usize;
+            let mut touched = pages[start..start + order.len()]
+                .iter_mut()
+                .map(Self::borrow_numeric_page)
+                .collect::<Vec<_>>();
+            for start in (order.len()..row_count).step_by(order.len()) {
+                for (row, (slot, page)) in (start..row_count).zip(touched.iter_mut()) {
+                    append(row, *slot, page)?;
+                }
+            }
+        } else {
+            for (row, entity) in (order.len()..row_count).zip(order.iter().cycle()) {
+                let (slot, page) = Self::borrow_numeric_page(&mut pages[entity.row as usize]);
+                append(row, slot, page)?;
+            }
         }
         Ok(())
     }

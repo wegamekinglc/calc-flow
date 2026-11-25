@@ -329,6 +329,112 @@ fn rollback_restores_keyed_page_capacity_after_growth() {
 }
 
 #[test]
+fn test_recurrent_full_ticks_borrow_each_contiguous_page_once() {
+    use datafusion::arrow::array::Float64Array;
+
+    let mut table = StateTable::with_checkpointing(false);
+    let history = table.add_numeric_rows_column("mean", 20);
+    let order = [b"a", b"b", b"c", b"d"].map(|key| entity(&mut table, key));
+    let locals: Vec<_> = (0..order.len()).cycle().take(4_097).collect();
+    let values = Float64Array::from_iter_values(locals.iter().map(|_| 2.0));
+    table.begin().unwrap();
+    super::core::RECURRENT_PAGE_BORROWS.set(0);
+    let mut count = 0;
+    assert!(
+        table
+            .write_numeric_full_tick(history, &order, &locals, &values, false, |row, numeric| {
+                assert_eq!(row, count);
+                assert_eq!(numeric[0].mean().to_bits(), 2.0_f64.to_bits());
+                count += 1;
+                Ok(())
+            })
+            .unwrap()
+    );
+    let borrows = super::core::RECURRENT_PAGE_BORROWS.get();
+    table.rollback().unwrap();
+    assert_eq!(count, locals.len());
+    assert!(
+        order
+            .iter()
+            .all(|&id| table.f64_history(history, id).unwrap().is_empty())
+    );
+    assert_eq!(borrows, order.len(), "4,097 rows touched four ring pages");
+}
+
+#[test]
+fn test_recurrent_tick_error_rolls_back_and_retries_restored_windows() {
+    use datafusion::arrow::array::Float64Array;
+
+    let mut table = StateTable::with_checkpointing(false);
+    let history = table.add_numeric_rows_column("means", 2);
+    table.add_numeric_window(history, 5);
+    let [a, b, c, d] = [b"a", b"b", b"c", b"d"].map(|key| entity(&mut table, key));
+    table.begin().unwrap();
+    for (id, value) in [(a, 1.0), (b, 2.0), (c, 3.0), (d, 4.0)] {
+        table.push_numeric_rows(history, id, Some(value)).unwrap();
+    }
+    table.commit().unwrap();
+    let snapshot = table.snapshot();
+    table.restore(snapshot).unwrap();
+    for (order, rows) in [([b, c], 21), ([d, a], 21), ([a, b], 3)] {
+        let mut reference = table.clone();
+        let before = table.canonical_state_for_test();
+        let locals: Vec<_> = (0..order.len()).cycle().take(rows).collect();
+        let inputs = [Some(2.0), None, Some(f64::NAN), Some(7.0), Some(1.0)];
+        let values = Float64Array::from_iter(inputs.into_iter().cycle().take(rows));
+        table.begin().unwrap();
+        let stop_at = rows - 2;
+        let mut emitted = 0;
+        let error = table
+            .write_numeric_full_tick(history, &order, &locals, &values, false, |row, _| {
+                assert_eq!(row, emitted);
+                emitted += 1;
+                if row == stop_at {
+                    return Err(super::internal("injected output failure"));
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("injected output failure"));
+        assert_eq!(emitted, stop_at + 1);
+        table.rollback().unwrap();
+        assert_eq!(table.canonical_state_for_test(), before);
+        reference.begin().unwrap();
+        table.begin().unwrap();
+        assert!(
+            table
+                .write_numeric_full_tick(
+                    history,
+                    &order,
+                    &locals,
+                    &values,
+                    false,
+                    |row, observed| {
+                        let id = order[locals[row]];
+                        let value = inputs[row % inputs.len()].filter(|v| !v.is_nan());
+                        reference.push_numeric_rows(history, id, value)?;
+                        for (actual, scalar) in observed
+                            .iter()
+                            .zip(reference.numeric_accumulators(history, id)?)
+                        {
+                            assert_eq!(actual.valid_count, scalar.valid_count);
+                            assert_eq!(actual.mean().to_bits(), scalar.mean().to_bits());
+                        }
+                        Ok(())
+                    }
+                )
+                .unwrap()
+        );
+        table.commit().unwrap();
+        reference.commit().unwrap();
+        assert_eq!(
+            table.canonical_state_for_test(),
+            reference.canonical_state_for_test()
+        );
+    }
+}
+
+#[test]
 fn numeric_tick_tail_requires_the_same_entity_prefix_before_any_write() {
     use datafusion::arrow::array::Float64Array;
 
