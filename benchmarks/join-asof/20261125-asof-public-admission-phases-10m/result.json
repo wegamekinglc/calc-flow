@@ -1,0 +1,2281 @@
+{
+  "bad_intervals": [
+    {
+      "cores": [
+        {
+          "available_bytes": 23173832704,
+          "cpu": 2,
+          "cpu_busy": 38.9,
+          "host_busy": 22.9375,
+          "major_faults": 754,
+          "sibling_busy": 19.0,
+          "siblings": [
+            3
+          ],
+          "suitable": false,
+          "swap_in_pages": 1391,
+          "swap_out_pages": 0,
+          "swap_pages": 1391
+        },
+        {
+          "available_bytes": 23173832704,
+          "cpu": 6,
+          "cpu_busy": 63.6,
+          "host_busy": 22.9375,
+          "major_faults": 754,
+          "sibling_busy": 17.0,
+          "siblings": [
+            7
+          ],
+          "suitable": false,
+          "swap_in_pages": 1391,
+          "swap_out_pages": 0,
+          "swap_pages": 1391
+        },
+        {
+          "available_bytes": 23173832704,
+          "cpu": 10,
+          "cpu_busy": 18.2,
+          "host_busy": 22.9375,
+          "major_faults": 754,
+          "sibling_busy": 20.4,
+          "siblings": [
+            11
+          ],
+          "suitable": false,
+          "swap_in_pages": 1391,
+          "swap_out_pages": 0,
+          "swap_pages": 1391
+        },
+        {
+          "available_bytes": 23173832704,
+          "cpu": 12,
+          "cpu_busy": 36.5,
+          "host_busy": 22.9375,
+          "major_faults": 754,
+          "sibling_busy": 17.0,
+          "siblings": [
+            13
+          ],
+          "suitable": false,
+          "swap_in_pages": 1391,
+          "swap_out_pages": 0,
+          "swap_pages": 1391
+        }
+      ],
+      "epoch": 1795579078.423013,
+      "preflight": false
+    }
+  ],
+  "completed_formal_single_arm_samples": 33,
+  "completed_warmups": 4,
+  "elapsed": 91.6,
+  "incomplete_exploratory_only": {
+    "paired_sample_counts": [
+      10,
+      6
+    ],
+    "per_arm": {
+      "baseline": {
+        "diagnostic_incomplete": {
+          "n": 17,
+          "p50_ms": 625.04753,
+          "p95_ms": 668.0590424000001
+        },
+        "instrument_sensitive": false,
+        "level_drift_pct": {
+          "p50_ms": 0.9292297260906857,
+          "p95_ms": 1.5834965677918422
+        },
+        "ordinary_complete": {
+          "n": 20,
+          "p50_ms": 619.2928764999999,
+          "p95_ms": 657.6452524
+        },
+        "per_side": {
+          "both": {
+            "ingress_validation": {
+              "n": 17,
+              "p50_ms": 51.83044,
+              "p95_ms": 60.496055399999996
+            },
+            "release_install_admission": {
+              "n": 17,
+              "p50_ms": 130.775122,
+              "p95_ms": 149.4027262
+            },
+            "release_prepare_admission": {
+              "n": 17,
+              "p50_ms": 261.664201,
+              "p95_ms": 279.66637
+            },
+            "wall_ns": {
+              "n": 17,
+              "p50_ms": 444.554622,
+              "p95_ms": 484.788068
+            }
+          },
+          "left": {
+            "ingress_validation": {
+              "n": 17,
+              "p50_ms": 15.473237,
+              "p95_ms": 22.905654799999997
+            },
+            "release_install_admission": {
+              "n": 17,
+              "p50_ms": 0.188768,
+              "p95_ms": 0.208948
+            },
+            "release_prepare_admission": {
+              "n": 17,
+              "p50_ms": 134.136129,
+              "p95_ms": 140.97780160000002
+            },
+            "wall_ns": {
+              "n": 17,
+              "p50_ms": 149.908488,
+              "p95_ms": 157.1558288
+            }
+          },
+          "right": {
+            "ingress_validation": {
+              "n": 17,
+              "p50_ms": 40.6133,
+              "p95_ms": 48.214873999999995
+            },
+            "release_install_admission": {
+              "n": 17,
+              "p50_ms": 130.597127,
+              "p95_ms": 149.1897856
+            },
+            "release_prepare_admission": {
+              "n": 17,
+              "p50_ms": 128.005941,
+              "p95_ms": 139.55116600000002
+            },
+            "wall_ns": {
+              "n": 17,
+              "p50_ms": 297.791552,
+              "p95_ms": 332.5446534
+            }
+          }
+        }
+      },
+      "candidate": {
+        "diagnostic_incomplete": {
+          "n": 16,
+          "p50_ms": 1644.6706965,
+          "p95_ms": 1770.5243877500002
+        },
+        "instrument_sensitive": false,
+        "level_drift_pct": {
+          "p50_ms": 4.689592188571323,
+          "p95_ms": 9.039838859833594
+        },
+        "ordinary_complete": {
+          "n": 20,
+          "p50_ms": 1570.9973284999999,
+          "p95_ms": 1623.7408329500004
+        },
+        "per_side": {
+          "both": {
+            "budget_preflight": {
+              "n": 16,
+              "p50_ms": 31.622251499999997,
+              "p95_ms": 32.770021
+            },
+            "build_run": {
+              "n": 16,
+              "p50_ms": 24.119085,
+              "p95_ms": 27.041521250000002
+            },
+            "compact_payload": {
+              "n": 16,
+              "p50_ms": 193.3741015,
+              "p95_ms": 203.4920985
+            },
+            "encode_sequences": {
+              "n": 16,
+              "p50_ms": 68.766712,
+              "p95_ms": 72.44172800000001
+            },
+            "envelope_record": {
+              "n": 16,
+              "p50_ms": 0.0034565000000000004,
+              "p95_ms": 0.003933
+            },
+            "ingress_validation": {
+              "n": 16,
+              "p50_ms": 8.630206,
+              "p95_ms": 10.49838175
+            },
+            "install_indexes": {
+              "n": 16,
+              "p50_ms": 402.19379649999996,
+              "p95_ms": 450.32389025000003
+            },
+            "late_mask": {
+              "n": 16,
+              "p50_ms": 11.8977,
+              "p95_ms": 12.3723835
+            },
+            "project_charge": {
+              "n": 16,
+              "p50_ms": 104.799285,
+              "p95_ms": 116.68135749999999
+            },
+            "residual": {
+              "n": 16,
+              "p50_ms": 0.08176249999999999,
+              "p95_ms": 0.09522050000000001
+            },
+            "route_keys": {
+              "n": 16,
+              "p50_ms": 298.565747,
+              "p95_ms": 324.16372674999997
+            },
+            "validate_locators": {
+              "n": 16,
+              "p50_ms": 105.892019,
+              "p95_ms": 121.34137774999999
+            },
+            "wall_ns": {
+              "n": 16,
+              "p50_ms": 1246.3415835,
+              "p95_ms": 1348.07564575
+            }
+          },
+          "left": {
+            "budget_preflight": {
+              "n": 16,
+              "p50_ms": 15.334699,
+              "p95_ms": 16.23448975
+            },
+            "build_run": {
+              "n": 16,
+              "p50_ms": 13.0268575,
+              "p95_ms": 14.72828775
+            },
+            "compact_payload": {
+              "n": 16,
+              "p50_ms": 95.80153200000001,
+              "p95_ms": 103.16317049999999
+            },
+            "encode_sequences": {
+              "n": 16,
+              "p50_ms": 35.642503000000005,
+              "p95_ms": 37.57297525
+            },
+            "envelope_record": {
+              "n": 16,
+              "p50_ms": 0.0016064999999999999,
+              "p95_ms": 0.00210375
+            },
+            "ingress_validation": {
+              "n": 16,
+              "p50_ms": 3.035439,
+              "p95_ms": 6.27036425
+            },
+            "install_indexes": {
+              "n": 16,
+              "p50_ms": 200.98036100000002,
+              "p95_ms": 223.791016
+            },
+            "late_mask": {
+              "n": 16,
+              "p50_ms": 6.1157015,
+              "p95_ms": 6.79837925
+            },
+            "project_charge": {
+              "n": 16,
+              "p50_ms": 52.575424999999996,
+              "p95_ms": 61.15904425000001
+            },
+            "residual": {
+              "n": 16,
+              "p50_ms": 0.040468000000000004,
+              "p95_ms": 0.050956
+            },
+            "route_keys": {
+              "n": 16,
+              "p50_ms": 150.4619255,
+              "p95_ms": 171.50522675000002
+            },
+            "validate_locators": {
+              "n": 16,
+              "p50_ms": 52.79543150000001,
+              "p95_ms": 60.95477225
+            },
+            "wall_ns": {
+              "n": 16,
+              "p50_ms": 624.9365285,
+              "p95_ms": 677.8535785
+            }
+          },
+          "right": {
+            "budget_preflight": {
+              "n": 16,
+              "p50_ms": 16.074317999999998,
+              "p95_ms": 17.1380415
+            },
+            "build_run": {
+              "n": 16,
+              "p50_ms": 11.18921,
+              "p95_ms": 13.434119249999998
+            },
+            "compact_payload": {
+              "n": 16,
+              "p50_ms": 95.844579,
+              "p95_ms": 100.28641975
+            },
+            "encode_sequences": {
+              "n": 16,
+              "p50_ms": 32.9138435,
+              "p95_ms": 36.9587105
+            },
+            "envelope_record": {
+              "n": 16,
+              "p50_ms": 0.001767,
+              "p95_ms": 0.0020334999999999997
+            },
+            "ingress_validation": {
+              "n": 16,
+              "p50_ms": 5.7013465,
+              "p95_ms": 8.784676249999999
+            },
+            "install_indexes": {
+              "n": 16,
+              "p50_ms": 202.3851445,
+              "p95_ms": 223.678557
+            },
+            "late_mask": {
+              "n": 16,
+              "p50_ms": 5.589289,
+              "p95_ms": 6.8615695
+            },
+            "project_charge": {
+              "n": 16,
+              "p50_ms": 51.9311915,
+              "p95_ms": 56.24453225
+            },
+            "residual": {
+              "n": 16,
+              "p50_ms": 0.0415445,
+              "p95_ms": 0.04808675
+            },
+            "route_keys": {
+              "n": 16,
+              "p50_ms": 148.8528255,
+              "p95_ms": 165.12406125
+            },
+            "validate_locators": {
+              "n": 16,
+              "p50_ms": 53.16405949999999,
+              "p95_ms": 68.76745575
+            },
+            "wall_ns": {
+              "n": 16,
+              "p50_ms": 626.295848,
+              "p95_ms": 674.2204409999999
+            }
+          }
+        }
+      }
+    },
+    "round_common_boundaries": {
+      "both": {
+        "ingress_validation": [
+          -42.6956455,
+          -42.606133
+        ],
+        "wall_ns": [
+          808.4990594999999,
+          813.0254285
+        ]
+      },
+      "left": {
+        "ingress_validation": [
+          -13.7134405,
+          -9.343615
+        ],
+        "wall_ns": [
+          482.579602,
+          491.9620875
+        ]
+      },
+      "right": {
+        "ingress_validation": [
+          -33.4724445,
+          -33.728253499999994
+        ],
+        "wall_ns": [
+          333.9899135,
+          327.38418850000005
+        ]
+      }
+    }
+  },
+  "requests": [
+    {
+      "arm": "baseline",
+      "operation": "prepare",
+      "request": 2,
+      "round": 0,
+      "sample": null,
+      "seconds": 0.721845375,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 73093132,
+          "release_install_admission": 137318153,
+          "release_prepare_admission": 309546517,
+          "rows": 20000000,
+          "wall_ns": 519957802
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 16616483,
+          "release_install_admission": 196220,
+          "release_prepare_admission": 163963827,
+          "rows": 10000000,
+          "wall_ns": 180776530
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 56476649,
+          "release_install_admission": 137121933,
+          "release_prepare_admission": 145582690,
+          "rows": 10000000,
+          "wall_ns": 339181272
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 3,
+      "round": 0,
+      "sample": 0,
+      "seconds": 0.651241336,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 65693113,
+          "release_install_admission": 130754203,
+          "release_prepare_admission": 263961289,
+          "rows": 20000000,
+          "wall_ns": 460408605
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 18974545,
+          "release_install_admission": 207454,
+          "release_prepare_admission": 135169731,
+          "rows": 10000000,
+          "wall_ns": 154351730
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 46718568,
+          "release_install_admission": 130546749,
+          "release_prepare_admission": 128791558,
+          "rows": 10000000,
+          "wall_ns": 306056875
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 4,
+      "round": 0,
+      "sample": 1,
+      "seconds": 0.609970104,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 54252369,
+          "release_install_admission": 113871061,
+          "release_prepare_admission": 261882574,
+          "rows": 20000000,
+          "wall_ns": 430006004
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 18582267,
+          "release_install_admission": 188768,
+          "release_prepare_admission": 134791692,
+          "rows": 10000000,
+          "wall_ns": 153562727
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 35670102,
+          "release_install_admission": 113682293,
+          "release_prepare_admission": 127090882,
+          "rows": 10000000,
+          "wall_ns": 276443277
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 5,
+      "round": 0,
+      "sample": 2,
+      "seconds": 0.623510014,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 51830440,
+          "release_install_admission": 126340442,
+          "release_prepare_admission": 263553663,
+          "rows": 20000000,
+          "wall_ns": 441724545
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 9015828,
+          "release_install_admission": 185277,
+          "release_prepare_admission": 134731888,
+          "rows": 10000000,
+          "wall_ns": 143932993
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 42814612,
+          "release_install_admission": 126155165,
+          "release_prepare_admission": 128821775,
+          "rows": 10000000,
+          "wall_ns": 297791552
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 6,
+      "round": 0,
+      "sample": 3,
+      "seconds": 0.620579399,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 50486408,
+          "release_install_admission": 125473407,
+          "release_prepare_admission": 256784124,
+          "rows": 20000000,
+          "wall_ns": 432743939
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 5561391,
+          "release_install_admission": 198343,
+          "release_prepare_admission": 129373423,
+          "rows": 10000000,
+          "wall_ns": 135133157
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 44925017,
+          "release_install_admission": 125275064,
+          "release_prepare_admission": 127410701,
+          "rows": 10000000,
+          "wall_ns": 297610782
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 7,
+      "round": 0,
+      "sample": 4,
+      "seconds": 0.628211053,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 49934522,
+          "release_install_admission": 130775122,
+          "release_prepare_admission": 263844978,
+          "rows": 20000000,
+          "wall_ns": 444554622
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 19067725,
+          "release_install_admission": 177995,
+          "release_prepare_admission": 138532832,
+          "rows": 10000000,
+          "wall_ns": 157778552
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 30866797,
+          "release_install_admission": 130597127,
+          "release_prepare_admission": 125312146,
+          "rows": 10000000,
+          "wall_ns": 286776070
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 8,
+      "round": 0,
+      "sample": 5,
+      "seconds": 0.628622562,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 59196791,
+          "release_install_admission": 132556609,
+          "release_prepare_admission": 254626895,
+          "rows": 20000000,
+          "wall_ns": 446380295
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 4996693,
+          "release_install_admission": 173841,
+          "release_prepare_admission": 126620954,
+          "rows": 10000000,
+          "wall_ns": 131791488
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 54200098,
+          "release_install_admission": 132382768,
+          "release_prepare_admission": 128005941,
+          "rows": 10000000,
+          "wall_ns": 314588807
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 9,
+      "round": 0,
+      "sample": 6,
+      "seconds": 0.615037927,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 51189653,
+          "release_install_admission": 130974669,
+          "release_prepare_admission": 255242027,
+          "rows": 20000000,
+          "wall_ns": 437406349
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 20390521,
+          "release_install_admission": 188266,
+          "release_prepare_admission": 126646963,
+          "rows": 10000000,
+          "wall_ns": 147225750
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 30799132,
+          "release_install_admission": 130786403,
+          "release_prepare_admission": 128595064,
+          "rows": 10000000,
+          "wall_ns": 290180599
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 10,
+      "round": 0,
+      "sample": 7,
+      "seconds": 0.624385823,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 52293956,
+          "release_install_admission": 141393780,
+          "release_prepare_admission": 253638868,
+          "rows": 20000000,
+          "wall_ns": 447326604
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 9734223,
+          "release_install_admission": 188987,
+          "release_prepare_admission": 127921077,
+          "rows": 10000000,
+          "wall_ns": 137844287
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 42559733,
+          "release_install_admission": 141204793,
+          "release_prepare_admission": 125717791,
+          "rows": 10000000,
+          "wall_ns": 309482317
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 11,
+      "round": 0,
+      "sample": 8,
+      "seconds": 0.614924134,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 52123721,
+          "release_install_admission": 126916771,
+          "release_prepare_admission": 258900818,
+          "rows": 20000000,
+          "wall_ns": 437941310
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 19225133,
+          "release_install_admission": 190391,
+          "release_prepare_admission": 131705469,
+          "rows": 10000000,
+          "wall_ns": 151120993
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 32898588,
+          "release_install_admission": 126726380,
+          "release_prepare_admission": 127195349,
+          "rows": 10000000,
+          "wall_ns": 286820317
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 12,
+      "round": 0,
+      "sample": 9,
+      "seconds": 0.624793626,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 51307508,
+          "release_install_admission": 131075891,
+          "release_prepare_admission": 252288487,
+          "rows": 20000000,
+          "wall_ns": 434671886
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 20064216,
+          "release_install_admission": 179771,
+          "release_prepare_admission": 128387712,
+          "rows": 10000000,
+          "wall_ns": 148631699
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 31243292,
+          "release_install_admission": 130896120,
+          "release_prepare_admission": 123900775,
+          "rows": 10000000,
+          "wall_ns": 286040187
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "prepare",
+      "request": 2,
+      "round": 0,
+      "sample": null,
+      "seconds": 2.003825742,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 34358282,
+          "build_run": 40455775,
+          "callbacks": 20,
+          "compact_payload": 256789014,
+          "encode_sequences": 107079284,
+          "envelope_record": 4152,
+          "ingress_validation": 9153749,
+          "install_indexes": 494282876,
+          "late_mask": 13004785,
+          "project_charge": 109127522,
+          "residual": 326271,
+          "route_keys": 323853968,
+          "rows": 20000000,
+          "validate_locators": 138904535,
+          "wall_ns": 1527340213
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15375767,
+          "build_run": 18521373,
+          "callbacks": 10,
+          "compact_payload": 123174993,
+          "encode_sequences": 50973000,
+          "envelope_record": 1879,
+          "ingress_validation": 5017161,
+          "install_indexes": 238305215,
+          "late_mask": 6179967,
+          "project_charge": 54310061,
+          "residual": 96973,
+          "route_keys": 161574259,
+          "rows": 10000000,
+          "validate_locators": 66390923,
+          "wall_ns": 739921571
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 18982515,
+          "build_run": 21934402,
+          "callbacks": 10,
+          "compact_payload": 133614021,
+          "encode_sequences": 56106284,
+          "envelope_record": 2273,
+          "ingress_validation": 4136588,
+          "install_indexes": 255977661,
+          "late_mask": 6824818,
+          "project_charge": 54817461,
+          "residual": 229298,
+          "route_keys": 162279709,
+          "rows": 10000000,
+          "validate_locators": 72513612,
+          "wall_ns": 787418642
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 3,
+      "round": 0,
+      "sample": 0,
+      "seconds": 1.74535445,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31714622,
+          "build_run": 25195293,
+          "callbacks": 20,
+          "compact_payload": 206479773,
+          "encode_sequences": 69447432,
+          "envelope_record": 3680,
+          "ingress_validation": 9220402,
+          "install_indexes": 441119841,
+          "late_mask": 12054279,
+          "project_charge": 107929032,
+          "residual": 83694,
+          "route_keys": 315110727,
+          "rows": 20000000,
+          "validate_locators": 105169372,
+          "wall_ns": 1323528147
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15960838,
+          "build_run": 14682614,
+          "callbacks": 10,
+          "compact_payload": 106482468,
+          "encode_sequences": 36996839,
+          "envelope_record": 1609,
+          "ingress_validation": 1977966,
+          "install_indexes": 228766321,
+          "late_mask": 6647496,
+          "project_charge": 53617068,
+          "residual": 37788,
+          "route_keys": 156649006,
+          "rows": 10000000,
+          "validate_locators": 51966364,
+          "wall_ns": 673786377
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 15753784,
+          "build_run": 10512679,
+          "callbacks": 10,
+          "compact_payload": 99997305,
+          "encode_sequences": 32450593,
+          "envelope_record": 2071,
+          "ingress_validation": 7242436,
+          "install_indexes": 212353520,
+          "late_mask": 5406783,
+          "project_charge": 54311964,
+          "residual": 45906,
+          "route_keys": 158461721,
+          "rows": 10000000,
+          "validate_locators": 53203008,
+          "wall_ns": 649741770
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 4,
+      "round": 0,
+      "sample": 1,
+      "seconds": 1.682654182,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 32092228,
+          "build_run": 25565135,
+          "callbacks": 20,
+          "compact_payload": 196160048,
+          "encode_sequences": 71144457,
+          "envelope_record": 3803,
+          "ingress_validation": 8939002,
+          "install_indexes": 407923015,
+          "late_mask": 11819322,
+          "project_charge": 103137167,
+          "residual": 81366,
+          "route_keys": 299740434,
+          "rows": 20000000,
+          "validate_locators": 120703913,
+          "wall_ns": 1277309890
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15850619,
+          "build_run": 14311315,
+          "callbacks": 10,
+          "compact_payload": 97455467,
+          "encode_sequences": 36092604,
+          "envelope_record": 1831,
+          "ingress_validation": 3441849,
+          "install_indexes": 201390093,
+          "late_mask": 6187818,
+          "project_charge": 51440834,
+          "residual": 40347,
+          "route_keys": 148506673,
+          "rows": 10000000,
+          "validate_locators": 46144997,
+          "wall_ns": 620864447
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16241609,
+          "build_run": 11253820,
+          "callbacks": 10,
+          "compact_payload": 98704581,
+          "encode_sequences": 35051853,
+          "envelope_record": 1972,
+          "ingress_validation": 5497153,
+          "install_indexes": 206532922,
+          "late_mask": 5631504,
+          "project_charge": 51696333,
+          "residual": 41019,
+          "route_keys": 151233761,
+          "rows": 10000000,
+          "validate_locators": 74558916,
+          "wall_ns": 656445443
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 5,
+      "round": 0,
+      "sample": 2,
+      "seconds": 1.646956439,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31109045,
+          "build_run": 24068926,
+          "callbacks": 20,
+          "compact_payload": 198008642,
+          "encode_sequences": 71014249,
+          "envelope_record": 3256,
+          "ingress_validation": 8345964,
+          "install_indexes": 402054484,
+          "late_mask": 11476415,
+          "project_charge": 104747466,
+          "residual": 75001,
+          "route_keys": 294927886,
+          "rows": 20000000,
+          "validate_locators": 109393481,
+          "wall_ns": 1255224815
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15041328,
+          "build_run": 13122820,
+          "callbacks": 10,
+          "compact_payload": 102056738,
+          "encode_sequences": 37507084,
+          "envelope_record": 1470,
+          "ingress_validation": 3013226,
+          "install_indexes": 198526669,
+          "late_mask": 6064486,
+          "project_charge": 52223629,
+          "residual": 36808,
+          "route_keys": 148358190,
+          "rows": 10000000,
+          "validate_locators": 55939607,
+          "wall_ns": 631892055
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16067717,
+          "build_run": 10946106,
+          "callbacks": 10,
+          "compact_payload": 95951904,
+          "encode_sequences": 33507165,
+          "envelope_record": 1786,
+          "ingress_validation": 5332738,
+          "install_indexes": 203527815,
+          "late_mask": 5411929,
+          "project_charge": 52523837,
+          "residual": 38193,
+          "route_keys": 146569696,
+          "rows": 10000000,
+          "validate_locators": 53453874,
+          "wall_ns": 623332760
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 6,
+      "round": 0,
+      "sample": 3,
+      "seconds": 1.643454106,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31802668,
+          "build_run": 21630524,
+          "callbacks": 20,
+          "compact_payload": 188937384,
+          "encode_sequences": 67412999,
+          "envelope_record": 3391,
+          "ingress_validation": 8579593,
+          "install_indexes": 394937684,
+          "late_mask": 12154312,
+          "project_charge": 104819821,
+          "residual": 92419,
+          "route_keys": 301767397,
+          "rows": 20000000,
+          "validate_locators": 106206342,
+          "wall_ns": 1238344534
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15721749,
+          "build_run": 11223715,
+          "callbacks": 10,
+          "compact_payload": 95392993,
+          "encode_sequences": 34494386,
+          "envelope_record": 1586,
+          "ingress_validation": 2800067,
+          "install_indexes": 202419907,
+          "late_mask": 6144798,
+          "project_charge": 52707170,
+          "residual": 40130,
+          "route_keys": 153035863,
+          "rows": 10000000,
+          "validate_locators": 53081231,
+          "wall_ns": 627063595
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16080919,
+          "build_run": 10406809,
+          "callbacks": 10,
+          "compact_payload": 93544391,
+          "encode_sequences": 32918613,
+          "envelope_record": 1805,
+          "ingress_validation": 5779526,
+          "install_indexes": 192517777,
+          "late_mask": 6009514,
+          "project_charge": 52112651,
+          "residual": 52289,
+          "route_keys": 148731534,
+          "rows": 10000000,
+          "validate_locators": 53125111,
+          "wall_ns": 611280939
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 7,
+      "round": 0,
+      "sample": 4,
+      "seconds": 1.655926613,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 33434875,
+          "build_run": 22583883,
+          "callbacks": 20,
+          "compact_payload": 193395625,
+          "encode_sequences": 65562389,
+          "envelope_record": 3465,
+          "ingress_validation": 8732965,
+          "install_indexes": 409678082,
+          "late_mask": 12094538,
+          "project_charge": 104778749,
+          "residual": 79763,
+          "route_keys": 303271157,
+          "rows": 20000000,
+          "validate_locators": 106269006,
+          "wall_ns": 1259884497
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15314095,
+          "build_run": 11609095,
+          "callbacks": 10,
+          "compact_payload": 95983681,
+          "encode_sequences": 32653315,
+          "envelope_record": 1762,
+          "ingress_validation": 5743903,
+          "install_indexes": 196707825,
+          "late_mask": 5276128,
+          "project_charge": 53065302,
+          "residual": 41256,
+          "route_keys": 151699683,
+          "rows": 10000000,
+          "validate_locators": 52201930,
+          "wall_ns": 620297975
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 18120780,
+          "build_run": 10974788,
+          "callbacks": 10,
+          "compact_payload": 97411944,
+          "encode_sequences": 32909074,
+          "envelope_record": 1703,
+          "ingress_validation": 2989062,
+          "install_indexes": 212970257,
+          "late_mask": 6818410,
+          "project_charge": 51713447,
+          "residual": 38507,
+          "route_keys": 151571474,
+          "rows": 10000000,
+          "validate_locators": 54067076,
+          "wall_ns": 639586522
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 8,
+      "round": 0,
+      "sample": 5,
+      "seconds": 1.638020952,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 30783716,
+          "build_run": 21667617,
+          "callbacks": 20,
+          "compact_payload": 191300956,
+          "encode_sequences": 66313954,
+          "envelope_record": 3526,
+          "ingress_validation": 8170595,
+          "install_indexes": 402307235,
+          "late_mask": 11880568,
+          "project_charge": 105019738,
+          "residual": 99380,
+          "route_keys": 300559919,
+          "rows": 20000000,
+          "validate_locators": 105237129,
+          "wall_ns": 1243344333
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15295287,
+          "build_run": 10418717,
+          "callbacks": 10,
+          "compact_payload": 95203811,
+          "encode_sequences": 33010246,
+          "envelope_record": 1505,
+          "ingress_validation": 2052841,
+          "install_indexes": 201534360,
+          "late_mask": 6425593,
+          "project_charge": 52443680,
+          "residual": 55033,
+          "route_keys": 151585802,
+          "rows": 10000000,
+          "validate_locators": 52509632,
+          "wall_ns": 620536507
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 15488429,
+          "build_run": 11248900,
+          "callbacks": 10,
+          "compact_payload": 96097145,
+          "encode_sequences": 33303708,
+          "envelope_record": 2021,
+          "ingress_validation": 6117754,
+          "install_indexes": 200772875,
+          "late_mask": 5454975,
+          "project_charge": 52576058,
+          "residual": 44347,
+          "route_keys": 148974117,
+          "rows": 10000000,
+          "validate_locators": 52727497,
+          "wall_ns": 622807826
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 9,
+      "round": 0,
+      "sample": 6,
+      "seconds": 1.600585867,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31529881,
+          "build_run": 20652812,
+          "callbacks": 20,
+          "compact_payload": 183551532,
+          "encode_sequences": 65530753,
+          "envelope_record": 3448,
+          "ingress_validation": 9781765,
+          "install_indexes": 382062891,
+          "late_mask": 11837246,
+          "project_charge": 102809853,
+          "residual": 82159,
+          "route_keys": 294833474,
+          "rows": 20000000,
+          "validate_locators": 115530634,
+          "wall_ns": 1218206448
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15448786,
+          "build_run": 9238199,
+          "callbacks": 10,
+          "compact_payload": 89406492,
+          "encode_sequences": 29859740,
+          "envelope_record": 1892,
+          "ingress_validation": 6287462,
+          "install_indexes": 179418388,
+          "late_mask": 5290236,
+          "project_charge": 51273564,
+          "residual": 41490,
+          "route_keys": 143410002,
+          "rows": 10000000,
+          "validate_locators": 48693665,
+          "wall_ns": 578369916
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16081095,
+          "build_run": 11414613,
+          "callbacks": 10,
+          "compact_payload": 94145040,
+          "encode_sequences": 35671013,
+          "envelope_record": 1556,
+          "ingress_validation": 3494303,
+          "install_indexes": 202644503,
+          "late_mask": 6547010,
+          "project_charge": 51536289,
+          "residual": 40669,
+          "route_keys": 151423472,
+          "rows": 10000000,
+          "validate_locators": 66836969,
+          "wall_ns": 639836532
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 10,
+      "round": 0,
+      "sample": 7,
+      "seconds": 1.635922868,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 30721195,
+          "build_run": 23914144,
+          "callbacks": 20,
+          "compact_payload": 195026709,
+          "encode_sequences": 69460657,
+          "envelope_record": 3302,
+          "ingress_validation": 8555485,
+          "install_indexes": 392811221,
+          "late_mask": 11270687,
+          "project_charge": 103071757,
+          "residual": 80357,
+          "route_keys": 296404939,
+          "rows": 20000000,
+          "validate_locators": 105577696,
+          "wall_ns": 1236898149
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 14703083,
+          "build_run": 12784624,
+          "callbacks": 10,
+          "compact_payload": 99289455,
+          "encode_sequences": 36949911,
+          "envelope_record": 1459,
+          "ingress_validation": 2767692,
+          "install_indexes": 201150822,
+          "late_mask": 5865755,
+          "project_charge": 52041295,
+          "residual": 38058,
+          "route_keys": 151911694,
+          "rows": 10000000,
+          "validate_locators": 54167298,
+          "wall_ns": 631671146
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16018112,
+          "build_run": 11129520,
+          "callbacks": 10,
+          "compact_payload": 95737254,
+          "encode_sequences": 32510746,
+          "envelope_record": 1843,
+          "ingress_validation": 5787793,
+          "install_indexes": 191660399,
+          "late_mask": 5404932,
+          "project_charge": 51030462,
+          "residual": 42299,
+          "route_keys": 144493245,
+          "rows": 10000000,
+          "validate_locators": 51410398,
+          "wall_ns": 605227003
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 11,
+      "round": 0,
+      "sample": 8,
+      "seconds": 1.645887287,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 32519480,
+          "build_run": 24169244,
+          "callbacks": 20,
+          "compact_payload": 193352578,
+          "encode_sequences": 69194315,
+          "envelope_record": 3685,
+          "ingress_validation": 10365324,
+          "install_indexes": 405950936,
+          "late_mask": 11914832,
+          "project_charge": 102652965,
+          "residual": 80761,
+          "route_keys": 293666624,
+          "rows": 20000000,
+          "validate_locators": 105468090,
+          "wall_ns": 1249338834
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 16072255,
+          "build_run": 13212619,
+          "callbacks": 10,
+          "compact_payload": 94377022,
+          "encode_sequences": 34428238,
+          "envelope_record": 1937,
+          "ingress_validation": 4112376,
+          "install_indexes": 197327754,
+          "late_mask": 6347072,
+          "project_charge": 51923878,
+          "residual": 40589,
+          "route_keys": 147745213,
+          "rows": 10000000,
+          "validate_locators": 54490945,
+          "wall_ns": 620079898
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16447225,
+          "build_run": 10956625,
+          "callbacks": 10,
+          "compact_payload": 98975556,
+          "encode_sequences": 34766077,
+          "envelope_record": 1748,
+          "ingress_validation": 6252948,
+          "install_indexes": 208623182,
+          "late_mask": 5567760,
+          "project_charge": 50729087,
+          "residual": 40172,
+          "route_keys": 145921411,
+          "rows": 10000000,
+          "validate_locators": 50977145,
+          "wall_ns": 629258936
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 12,
+      "round": 0,
+      "sample": 9,
+      "seconds": 1.627387438,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 30390569,
+          "build_run": 24299377,
+          "callbacks": 20,
+          "compact_payload": 195415740,
+          "encode_sequences": 68339109,
+          "envelope_record": 3531,
+          "ingress_validation": 10897555,
+          "install_indexes": 388404064,
+          "late_mask": 12090127,
+          "project_charge": 102328642,
+          "residual": 93834,
+          "route_keys": 295771047,
+          "rows": 20000000,
+          "validate_locators": 103467172,
+          "wall_ns": 1231500767
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15082317,
+          "build_run": 13813849,
+          "callbacks": 10,
+          "compact_payload": 101074029,
+          "encode_sequences": 36862090,
+          "envelope_record": 1540,
+          "ingress_validation": 1923626,
+          "install_indexes": 196739455,
+          "late_mask": 6625446,
+          "project_charge": 51203073,
+          "residual": 49597,
+          "route_keys": 148314032,
+          "rows": 10000000,
+          "validate_locators": 54142787,
+          "wall_ns": 625831841
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 15308252,
+          "build_run": 10485528,
+          "callbacks": 10,
+          "compact_payload": 94341711,
+          "encode_sequences": 31477019,
+          "envelope_record": 1991,
+          "ingress_validation": 8973929,
+          "install_indexes": 191664609,
+          "late_mask": 5464681,
+          "project_charge": 51125569,
+          "residual": 44237,
+          "route_keys": 147457015,
+          "rows": 10000000,
+          "validate_locators": 49324385,
+          "wall_ns": 605668926
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "prepare",
+      "request": 2,
+      "round": 1,
+      "sample": null,
+      "seconds": 0.636575153,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 49603021,
+          "release_install_admission": 125253772,
+          "release_prepare_admission": 269407202,
+          "rows": 20000000,
+          "wall_ns": 444263995
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 15254492,
+          "release_install_admission": 189465,
+          "release_prepare_admission": 139800431,
+          "rows": 10000000,
+          "wall_ns": 155244388
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 34348529,
+          "release_install_admission": 125064307,
+          "release_prepare_admission": 129606771,
+          "rows": 10000000,
+          "wall_ns": 289019607
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 3,
+      "round": 1,
+      "sample": 0,
+      "seconds": 0.62504753,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 53044632,
+          "release_install_admission": 130514122,
+          "release_prepare_admission": 261664201,
+          "rows": 20000000,
+          "wall_ns": 445222955
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 15473237,
+          "release_install_admission": 186504,
+          "release_prepare_admission": 129722664,
+          "rows": 10000000,
+          "wall_ns": 145382405
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 37571395,
+          "release_install_admission": 130327618,
+          "release_prepare_admission": 131941537,
+          "rows": 10000000,
+          "wall_ns": 299840550
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 4,
+      "round": 1,
+      "sample": 1,
+      "seconds": 0.627308024,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 49846289,
+          "release_install_admission": 126294754,
+          "release_prepare_admission": 266057387,
+          "rows": 20000000,
+          "wall_ns": 442198430
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 4951614,
+          "release_install_admission": 194497,
+          "release_prepare_admission": 137196757,
+          "rows": 10000000,
+          "wall_ns": 142342868
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 44894675,
+          "release_install_admission": 126100257,
+          "release_prepare_admission": 128860630,
+          "rows": 10000000,
+          "wall_ns": 299855562
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 5,
+      "round": 1,
+      "sample": 2,
+      "seconds": 0.617223193,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 51592073,
+          "release_install_admission": 128737961,
+          "release_prepare_admission": 255130220,
+          "rows": 20000000,
+          "wall_ns": 435460254
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 23831878,
+          "release_install_admission": 184329,
+          "release_prepare_admission": 131916151,
+          "rows": 10000000,
+          "wall_ns": 155932358
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 27760195,
+          "release_install_admission": 128553632,
+          "release_prepare_admission": 123214069,
+          "rows": 10000000,
+          "wall_ns": 279527896
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 6,
+      "round": 1,
+      "sample": 3,
+      "seconds": 0.64548566,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 49796114,
+          "release_install_admission": 135432286,
+          "release_prepare_admission": 268771162,
+          "rows": 20000000,
+          "wall_ns": 453999562
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 9182814,
+          "release_install_admission": 177317,
+          "release_prepare_admission": 140548357,
+          "rows": 10000000,
+          "wall_ns": 149908488
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 40613300,
+          "release_install_admission": 135254969,
+          "release_prepare_admission": 128222805,
+          "rows": 10000000,
+          "wall_ns": 304091074
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 7,
+      "round": 1,
+      "sample": 4,
+      "seconds": 0.635862889,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 51581488,
+          "release_install_admission": 136913131,
+          "release_prepare_admission": 260322534,
+          "rows": 20000000,
+          "wall_ns": 448817153
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 22674099,
+          "release_install_admission": 189920,
+          "release_prepare_admission": 134136129,
+          "rows": 10000000,
+          "wall_ns": 157000148
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 28907389,
+          "release_install_admission": 136723211,
+          "release_prepare_admission": 126186405,
+          "rows": 10000000,
+          "wall_ns": 291817005
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 8,
+      "round": 1,
+      "sample": 5,
+      "seconds": 0.68552914,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 56210199,
+          "release_install_admission": 153982607,
+          "release_prepare_admission": 286643522,
+          "rows": 20000000,
+          "wall_ns": 496836328
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 10867854,
+          "release_install_admission": 205007,
+          "release_prepare_admission": 142695580,
+          "rows": 10000000,
+          "wall_ns": 153768441
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 45342345,
+          "release_install_admission": 153777600,
+          "release_prepare_admission": 143947942,
+          "rows": 10000000,
+          "wall_ns": 343067887
+        }
+      }
+    },
+    {
+      "arm": "baseline",
+      "operation": "sample",
+      "request": 9,
+      "round": 1,
+      "sample": 6,
+      "seconds": 0.663691518,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "callbacks": 20,
+          "ingress_validation": 55596165,
+          "release_install_admission": 148257756,
+          "release_prepare_admission": 277922082,
+          "rows": 20000000,
+          "wall_ns": 481776003
+        },
+        "left": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 12177124,
+          "release_install_admission": 214924,
+          "release_prepare_admission": 139470110,
+          "rows": 10000000,
+          "wall_ns": 151862158
+        },
+        "right": {
+          "accepted": 10000000,
+          "callbacks": 10,
+          "ingress_validation": 43419041,
+          "release_install_admission": 148042832,
+          "release_prepare_admission": 138451972,
+          "rows": 10000000,
+          "wall_ns": 329913845
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "prepare",
+      "request": 2,
+      "round": 1,
+      "sample": null,
+      "seconds": 1.867653607,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31249626,
+          "build_run": 44524910,
+          "callbacks": 20,
+          "compact_payload": 233573605,
+          "encode_sequences": 99520954,
+          "envelope_record": 3592,
+          "ingress_validation": 7218249,
+          "install_indexes": 442659212,
+          "late_mask": 12517292,
+          "project_charge": 109787547,
+          "residual": 323792,
+          "route_keys": 321508420,
+          "rows": 20000000,
+          "validate_locators": 129046317,
+          "wall_ns": 1431933516
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15086325,
+          "build_run": 25457633,
+          "callbacks": 10,
+          "compact_payload": 118202980,
+          "encode_sequences": 50635950,
+          "envelope_record": 1844,
+          "ingress_validation": 3696842,
+          "install_indexes": 211162701,
+          "late_mask": 6170185,
+          "project_charge": 54502529,
+          "residual": 35785,
+          "route_keys": 161548014,
+          "rows": 10000000,
+          "validate_locators": 62025362,
+          "wall_ns": 708526150
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16163301,
+          "build_run": 19067277,
+          "callbacks": 10,
+          "compact_payload": 115370625,
+          "encode_sequences": 48885004,
+          "envelope_record": 1748,
+          "ingress_validation": 3521407,
+          "install_indexes": 231496511,
+          "late_mask": 6347107,
+          "project_charge": 55285018,
+          "residual": 288007,
+          "route_keys": 159960406,
+          "rows": 10000000,
+          "validate_locators": 67020955,
+          "wall_ns": 723407366
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 3,
+      "round": 1,
+      "sample": 0,
+      "seconds": 1.671871085,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31348260,
+          "build_run": 26241457,
+          "callbacks": 20,
+          "compact_payload": 193243915,
+          "encode_sequences": 70766307,
+          "envelope_record": 3380,
+          "ingress_validation": 8393689,
+          "install_indexes": 402324252,
+          "late_mask": 11593536,
+          "project_charge": 107636485,
+          "residual": 82743,
+          "route_keys": 319856861,
+          "rows": 20000000,
+          "validate_locators": 108284862,
+          "wall_ns": 1279775747
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15355303,
+          "build_run": 13741560,
+          "callbacks": 10,
+          "compact_payload": 95376903,
+          "encode_sequences": 35773268,
+          "envelope_record": 1798,
+          "ingress_validation": 4509210,
+          "install_indexes": 200198466,
+          "late_mask": 5603961,
+          "project_charge": 53573910,
+          "residual": 40922,
+          "route_keys": 171274085,
+          "rows": 10000000,
+          "validate_locators": 54958891,
+          "wall_ns": 650408277
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 15992957,
+          "build_run": 12499897,
+          "callbacks": 10,
+          "compact_payload": 97867012,
+          "encode_sequences": 34993039,
+          "envelope_record": 1582,
+          "ingress_validation": 3884479,
+          "install_indexes": 202125786,
+          "late_mask": 5989575,
+          "project_charge": 54062575,
+          "residual": 41821,
+          "route_keys": 148582776,
+          "rows": 10000000,
+          "validate_locators": 53325971,
+          "wall_ns": 629367470
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 4,
+      "round": 1,
+      "sample": 1,
+      "seconds": 1.624519894,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31816995,
+          "build_run": 23616102,
+          "callbacks": 20,
+          "compact_payload": 186716563,
+          "encode_sequences": 67307536,
+          "envelope_record": 3381,
+          "ingress_validation": 7545277,
+          "install_indexes": 390255725,
+          "late_mask": 12063095,
+          "project_charge": 118922722,
+          "residual": 78998,
+          "route_keys": 294817990,
+          "rows": 20000000,
+          "validate_locators": 100552111,
+          "wall_ns": 1233696495
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 15006533,
+          "build_run": 12361717,
+          "callbacks": 10,
+          "compact_payload": 93106312,
+          "encode_sequences": 34663743,
+          "envelope_record": 1775,
+          "ingress_validation": 4063759,
+          "install_indexes": 190887872,
+          "late_mask": 5540957,
+          "project_charge": 67406650,
+          "residual": 37730,
+          "route_keys": 147582803,
+          "rows": 10000000,
+          "validate_locators": 50581320,
+          "wall_ns": 621241171
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16810462,
+          "build_run": 11254385,
+          "callbacks": 10,
+          "compact_payload": 93610251,
+          "encode_sequences": 32643793,
+          "envelope_record": 1606,
+          "ingress_validation": 3481518,
+          "install_indexes": 199367853,
+          "late_mask": 6522138,
+          "project_charge": 51516072,
+          "residual": 41268,
+          "route_keys": 147235187,
+          "rows": 10000000,
+          "validate_locators": 49970791,
+          "wall_ns": 612455324
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 5,
+      "round": 1,
+      "sample": 2,
+      "seconds": 1.612333689,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 31141387,
+          "build_run": 22853272,
+          "callbacks": 20,
+          "compact_payload": 182984214,
+          "encode_sequences": 64448733,
+          "envelope_record": 3266,
+          "ingress_validation": 8680819,
+          "install_indexes": 395132250,
+          "late_mask": 11697423,
+          "project_charge": 110909058,
+          "residual": 70518,
+          "route_keys": 296613496,
+          "rows": 20000000,
+          "validate_locators": 98579419,
+          "wall_ns": 1223113855
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 14732460,
+          "build_run": 10958601,
+          "callbacks": 10,
+          "compact_payload": 92741859,
+          "encode_sequences": 31919239,
+          "envelope_record": 1584,
+          "ingress_validation": 3057652,
+          "install_indexes": 200809900,
+          "late_mask": 6086605,
+          "project_charge": 58885288,
+          "residual": 34313,
+          "route_keys": 149338049,
+          "rows": 10000000,
+          "validate_locators": 49778952,
+          "wall_ns": 618344502
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16408927,
+          "build_run": 11894671,
+          "callbacks": 10,
+          "compact_payload": 90242355,
+          "encode_sequences": 32529494,
+          "envelope_record": 1682,
+          "ingress_validation": 5623167,
+          "install_indexes": 194322350,
+          "late_mask": 5610818,
+          "project_charge": 52023770,
+          "residual": 36205,
+          "route_keys": 147275447,
+          "rows": 10000000,
+          "validate_locators": 48800467,
+          "wall_ns": 604769353
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 6,
+      "round": 1,
+      "sample": 3,
+      "seconds": 1.632051773,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 30133699,
+          "build_run": 25552663,
+          "callbacks": 20,
+          "compact_payload": 191308926,
+          "encode_sequences": 68005786,
+          "envelope_record": 3288,
+          "ingress_validation": 8303320,
+          "install_indexes": 402080358,
+          "late_mask": 11430845,
+          "project_charge": 103564269,
+          "residual": 71549,
+          "route_keys": 297391060,
+          "rows": 20000000,
+          "validate_locators": 99988749,
+          "wall_ns": 1237834512
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 14856497,
+          "build_run": 14865309,
+          "callbacks": 10,
+          "compact_payload": 95619383,
+          "encode_sequences": 36133391,
+          "envelope_record": 1543,
+          "ingress_validation": 1459611,
+          "install_indexes": 202932983,
+          "late_mask": 6242766,
+          "project_charge": 51725656,
+          "residual": 32117,
+          "route_keys": 147780882,
+          "rows": 10000000,
+          "validate_locators": 52391078,
+          "wall_ns": 624041216
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 15277202,
+          "build_run": 10687354,
+          "callbacks": 10,
+          "compact_payload": 95689543,
+          "encode_sequences": 31872395,
+          "envelope_record": 1745,
+          "ingress_validation": 6843709,
+          "install_indexes": 199147375,
+          "late_mask": 5188079,
+          "project_charge": 51838613,
+          "residual": 39432,
+          "route_keys": 149610178,
+          "rows": 10000000,
+          "validate_locators": 47597671,
+          "wall_ns": 613793296
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 7,
+      "round": 1,
+      "sample": 4,
+      "seconds": 1.739771401,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 32298737,
+          "build_run": 24601443,
+          "callbacks": 20,
+          "compact_payload": 196122022,
+          "encode_sequences": 70082183,
+          "envelope_record": 3574,
+          "ingress_validation": 10288061,
+          "install_indexes": 424458874,
+          "late_mask": 12367801,
+          "project_charge": 114492868,
+          "residual": 85838,
+          "route_keys": 318803553,
+          "rows": 20000000,
+          "validate_locators": 123253772,
+          "wall_ns": 1326858726
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 16367629,
+          "build_run": 12930895,
+          "callbacks": 10,
+          "compact_payload": 100737596,
+          "encode_sequences": 37770649,
+          "envelope_record": 1604,
+          "ingress_validation": 1566469,
+          "install_indexes": 217624344,
+          "late_mask": 7251029,
+          "project_charge": 59076509,
+          "residual": 41785,
+          "route_keys": 152964324,
+          "rows": 10000000,
+          "validate_locators": 62122379,
+          "wall_ns": 668455212
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 15931108,
+          "build_run": 11670548,
+          "callbacks": 10,
+          "compact_payload": 95384426,
+          "encode_sequences": 32311534,
+          "envelope_record": 1970,
+          "ingress_validation": 8721592,
+          "install_indexes": 206834530,
+          "late_mask": 5116772,
+          "project_charge": 55416359,
+          "residual": 44053,
+          "route_keys": 165839229,
+          "rows": 10000000,
+          "validate_locators": 61131393,
+          "wall_ns": 658403514
+        }
+      }
+    },
+    {
+      "arm": "candidate",
+      "operation": "sample",
+      "request": 8,
+      "round": 1,
+      "sample": 5,
+      "seconds": 1.846034201,
+      "stages": {
+        "both": {
+          "accepted": 20000000,
+          "budget_preflight": 32548403,
+          "build_run": 29441714,
+          "callbacks": 20,
+          "compact_payload": 202496207,
+          "encode_sequences": 76333541,
+          "envelope_record": 4323,
+          "ingress_validation": 8235673,
+          "install_indexes": 477936038,
+          "late_mask": 12386131,
+          "project_charge": 115934236,
+          "residual": 88311,
+          "route_keys": 337084324,
+          "rows": 20000000,
+          "validate_locators": 119237504,
+          "wall_ns": 1411726405
+        },
+        "left": {
+          "accepted": 10000000,
+          "budget_preflight": 16190110,
+          "build_run": 13204928,
+          "callbacks": 10,
+          "compact_payload": 101342443,
+          "encode_sequences": 35511738,
+          "envelope_record": 2604,
+          "ingress_validation": 6264665,
+          "install_indexes": 222132581,
+          "late_mask": 5395083,
+          "project_charge": 57205184,
+          "residual": 41625,
+          "route_keys": 172198652,
+          "rows": 10000000,
+          "validate_locators": 60565570,
+          "wall_ns": 690055183
+        },
+        "right": {
+          "accepted": 10000000,
+          "budget_preflight": 16358293,
+          "build_run": 16236786,
+          "callbacks": 10,
+          "compact_payload": 101153764,
+          "encode_sequences": 40821803,
+          "envelope_record": 1719,
+          "ingress_validation": 1971008,
+          "install_indexes": 255803457,
+          "late_mask": 6991048,
+          "project_charge": 58729052,
+          "residual": 46686,
+          "route_keys": 164885672,
+          "rows": 10000000,
+          "validate_locators": 58671934,
+          "wall_ns": 721671222
+        }
+      }
+    }
+  ],
+  "resource_intervals": 81,
+  "state": {
+    "elapsed": 91.42407936009113,
+    "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 2, 'cpu_busy': 38.9, 'siblings': [3], 'sibling_busy': 19.0, 'host_busy': 22.9375, 'available_bytes': 23173832704, 'major_faults': 754, 'swap_pages': 1391, 'swap_in_pages': 1391, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 6, 'cpu_busy': 63.6, 'siblings': [7], 'sibling_busy': 17.0, 'host_busy': 22.9375, 'available_bytes': 23173832704, 'major_faults': 754, 'swap_pages': 1391, 'swap_in_pages': 1391, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 10, 'cpu_busy': 18.2, 'siblings': [11], 'sibling_busy': 20.4, 'host_busy': 22.9375, 'available_bytes': 23173832704, 'major_faults': 754, 'swap_pages': 1391, 'swap_in_pages': 1391, 'swap_out_pages': 0, 'suitable': False}, {'cpu': 12, 'cpu_busy': 36.5, 'siblings': [13], 'sibling_busy': 17.0, 'host_busy': 22.9375, 'available_bytes': 23173832704, 'major_faults': 754, 'swap_pages': 1391, 'swap_in_pages': 1391, 'swap_out_pages': 0, 'suitable': False}]\")])",
+    "state": "stopped"
+  }
+}
