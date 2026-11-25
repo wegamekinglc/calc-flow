@@ -31,7 +31,7 @@ use super::budget::StateCharge;
 use super::{
     CompiledAggregate, CompiledDifference, CompiledEvaluation, CompiledEwma, CompiledFloatReadout,
     CompiledFrame, CompiledPairAggregate, CompiledRollingOutput, CompiledWindowGroup,
-    PairAccumulator, ScanKind, Statistic, SumClass, SumState, WindowAccumulator,
+    FloatRowsExtrema, PairAccumulator, ScanKind, Statistic, SumClass, SumState, WindowAccumulator,
     generated_kernel_manifest::{
         GeneratedComplexity, GeneratedTransition, generated_kernel_capability,
     },
@@ -3255,6 +3255,7 @@ enum TypedWindowState {
     Pair(Float64PairState),
     Ewma(TypedEwmaState),
     Scan(TypedScanState),
+    FloatRowsExtrema(FloatRowsExtrema),
     ValueScan(TypedValueScanState),
     Lag(TypedLagState),
     Utf8Lag(TypedUtf8LagState),
@@ -3934,6 +3935,12 @@ impl TypedWindowState {
                 storage: OutputStorage::Float64,
                 ..
             } => Self::Decay(None),
+            TypedGroupPlan::Scan {
+                kind: kind @ (ScanKind::Argmax | ScanKind::Argmin),
+                window,
+                storage: OutputStorage::Float64,
+                ..
+            } => Self::FloatRowsExtrema(FloatRowsExtrema::new(window, kind == ScanKind::Argmax)),
             TypedGroupPlan::Scan { kind, window, .. } => Self::Scan(TypedScanState::new(
                 kind,
                 TypedFrame::Rows(window),
@@ -4002,6 +4009,13 @@ impl TypedWindowState {
             ),
             (Self::Ewma(state), TypedGroupInput::Single(input)) => {
                 state.update(valid_float64(input, row_index, false), node_id)
+            }
+            (Self::FloatRowsExtrema(state), TypedGroupInput::Single(input)) => {
+                let position = state.position.checked_add(1).ok_or_else(|| {
+                    operator_error(node_id, "typed rolling scan ordinal overflowed")
+                })?;
+                state.advance(position, valid_float64(input, row_index, false));
+                Ok(())
             }
             (Self::Scan(state), TypedGroupInput::Single(input)) => state.update(
                 event_time,
@@ -4104,6 +4118,9 @@ impl TypedWindowState {
             Self::ValueExtrema(state) => state.estimated_bytes(),
             Self::Pair(state) => state.estimated_bytes(),
             Self::Ewma(_) => TypedEwmaState::estimated_bytes(),
+            Self::FloatRowsExtrema(state) => {
+                size_of::<FloatRowsExtrema>().saturating_add(state.heap_bytes())
+            }
             Self::Scan(state) => state.estimated_bytes(),
             Self::ValueScan(state) => state.estimated_bytes(),
             Self::Lag(state) => size_of::<TypedLagState>().saturating_add(
@@ -4144,6 +4161,7 @@ impl TypedWindowState {
             Self::ValueExtrema(state) => state.values.len(),
             Self::Pair(state) => state.samples.len(),
             Self::Lag(state) => state.history.len(),
+            Self::FloatRowsExtrema(state) => state.recent_valid.len(),
             Self::Scan(state) => state.recent.len(),
             Self::ValueScan(state) => state.values.len(),
             Self::Utf8Lag(state) => state.history.len(),
@@ -5193,6 +5211,16 @@ impl DerivedBuilder {
             },
             TypedWindowState::Pair(state) => self.append_pair(state, output),
             TypedWindowState::Ewma(state) => self.append_ewma(state, output),
+            TypedWindowState::FloatRowsExtrema(state) => match (self, output.kind) {
+                (
+                    Self::Count(builder),
+                    TypedOutputKind::Scan(ScanKind::Argmax | ScanKind::Argmin),
+                ) => {
+                    builder.append_option(state.age());
+                    Ok(())
+                }
+                _ => Err(typed_output_mismatch()),
+            },
             TypedWindowState::Scan(state) => self.append_scan(state, output),
             TypedWindowState::ValueScan(state) => match (self, output.kind) {
                 (Self::Count(builder), TypedOutputKind::Scan(ScanKind::UniqueCount)) => {
@@ -5600,6 +5628,7 @@ fn typed_valid_count(state: &TypedWindowState) -> u64 {
         TypedWindowState::ValueExtrema(state) => state.valid_count,
         TypedWindowState::Pair(state) => state.accumulator.valid_count,
         TypedWindowState::Ewma(state) => state.valid_count,
+        TypedWindowState::FloatRowsExtrema(state) => state.valid_count,
         TypedWindowState::Scan(state) => state.valid_count,
         TypedWindowState::Lag(state) => u64::try_from(state.history.len()).unwrap_or(u64::MAX),
         TypedWindowState::ValueScan(state) => state.valid_count,
@@ -6915,6 +6944,38 @@ mod tests {
             );
         }
         assert!(full.accumulator.numeric.variance(0).is_nan());
+    }
+
+    #[test]
+    fn float_rows_arg_extrema_store_validity_and_surviving_candidates() {
+        const WINDOW: usize = 256;
+        for kind in [ScanKind::Argmax, ScanKind::Argmin] {
+            let mut state = TypedWindowState::new(
+                TypedGroupPlan::Scan {
+                    input_index: 3,
+                    kind,
+                    window: WINDOW,
+                    storage: OutputStorage::Float64,
+                },
+                1024,
+            );
+            let input = TypedGroupInput::Single(Float64Array::from_iter_values(
+                (0..1024_i32).map(|i| f64::from(if kind == ScanKind::Argmax { i } else { -i })),
+            ));
+            for row in 0..1024 {
+                state
+                    .update(i64::try_from(row).unwrap(), &input, row, false, "r")
+                    .unwrap();
+            }
+            assert_eq!(state.retained_rows(), WINDOW);
+            assert_eq!(typed_valid_count(&state), 256);
+            let bytes = state.estimated_bytes();
+            // A strictly improving stream retains a validity window and one extremum.
+            assert!(
+                bytes <= size_of::<TypedWindowState>() + WINDOW * 4,
+                "{kind:?}: {bytes} bytes"
+            );
+        }
     }
 
     #[test]

@@ -3294,14 +3294,22 @@ async fn rolling_scan_retains_history_across_checkpoint() {
     use crate::{CancellationToken, StreamJobContext};
 
     for checkpoint in [false, true] {
-        let spec = kernel_spec(json!([{
-            "kind": "unique_count",
-            "primitive_version": 1,
-            "input": "price",
-            "output": "distinct_price",
-            "frame": {"kind": "rows", "size": 3},
-            "min_periods": 1
-        }]));
+        let output = |kind, name, min_periods| {
+            json!({
+                "kind": kind,
+                "primitive_version": 1,
+                "input": "price",
+                "output": name,
+                "frame": {"kind": "rows", "size": 3},
+                "min_periods": min_periods
+            })
+        };
+        let spec = kernel_spec(json!([
+            output("unique_count", "distinct_price", 1),
+            output("argmax", "maximum_age", 1),
+            output("argmax", "full_maximum_age", 3),
+            output("argmin", "minimum_age", 1),
+        ]));
         let mut operator =
             RollingOperator::new("rolling", Arc::new(kernel_schema()), spec.clone()).unwrap();
         let job = StreamJobContext::new(
@@ -3342,7 +3350,7 @@ async fn rolling_scan_retains_history_across_checkpoint() {
         }
 
         let context = StreamOperatorContext::new(&job, "rolling", Some(EventTime::from_micros(3)));
-        let next = float64_fast_record(&[(4, "a", 4, Some(3.0))]);
+        let next = float64_fast_record(&[(4, "a", 4, Some(3.0)), (5, "a", 5, None)]);
         operator
             .process_data(
                 "input",
@@ -3353,7 +3361,7 @@ async fn rolling_scan_retains_history_across_checkpoint() {
             .await
             .unwrap();
         operator
-            .on_watermark(EventTime::from_micros(4), &context, &mut collector)
+            .on_watermark(EventTime::from_micros(5), &context, &mut collector)
             .await
             .unwrap();
         let emitted = collector.drain("output");
@@ -3363,14 +3371,24 @@ async fn rolling_scan_retains_history_across_checkpoint() {
             .table_payload()
             .unwrap()
             .batches()[0];
-        assert_eq!(record.num_rows(), 1);
-        let index = record.schema().index_of("distinct_price").unwrap();
-        let counts = record
-            .column(index)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .unwrap();
-        assert_eq!(counts.value(0), 2, "checkpoint={checkpoint}");
+        assert_eq!(record.num_rows(), 2);
+        for (name, expected) in [
+            ("distinct_price", [Some(2), Some(1)]),
+            ("maximum_age", [Some(1), Some(2)]),
+            ("full_maximum_age", [Some(1), None]),
+            ("minimum_age", [Some(2), Some(2)]),
+        ] {
+            let actual = record
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            assert!(
+                actual.iter().eq(expected),
+                "{name}, checkpoint={checkpoint}: {actual:?}"
+            );
+        }
     }
 }
 
@@ -4055,16 +4073,11 @@ fn numeric_scans_compile_to_ordered_columnar_kernel() {
 fn incremental_scan_memory_estimate_covers_allocated_capacity() {
     let mut extrema = IncrementalScanState::new(ScanKind::Argmax, 64, 1).unwrap();
     extrema.advance_float(0, Some(1.0));
-    let IncrementalScanState::Extrema {
-        recent_valid,
-        candidates,
-        ..
-    } = &extrema
-    else {
+    let IncrementalScanState::Extrema { state, .. } = &extrema else {
         unreachable!()
     };
-    let extrema_minimum = recent_valid.capacity() * size_of::<bool>()
-        + candidates.capacity() * size_of::<(usize, f64)>();
+    let extrema_minimum = state.recent_valid.capacity() * size_of::<bool>()
+        + state.candidates.capacity() * size_of::<(u64, f64)>();
     assert!(extrema.estimated_bytes() >= extrema_minimum);
 
     let mut unique = IncrementalScanState::new(ScanKind::UniqueCount, 64, 1).unwrap();

@@ -891,6 +891,7 @@ fn retained_aux_group_work(state: &TypedWindowState) -> Option<usize> {
     match state {
         TypedWindowState::Count(state) => Some(state.samples.len()),
         TypedWindowState::ValueExtrema(state) => Some(state.values.len()),
+        TypedWindowState::FloatRowsExtrema(state) => Some(state.recent_valid.len()),
         TypedWindowState::Scan(state) => Some(state.recent.len()),
         TypedWindowState::ValueScan(state) => Some(state.values.len()),
         TypedWindowState::Lag(state) => Some(state.history.len()),
