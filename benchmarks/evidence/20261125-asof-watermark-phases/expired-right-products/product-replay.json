@@ -1,0 +1,196 @@
+{
+  "native-release": {
+    "replay": {
+      "case": "job",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 50,
+      "verdict": "regression"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "job",
+      "cpus": [
+        2,
+        4,
+        16,
+        20
+      ],
+      "rounds": [
+        {
+          "median": 42.510480854480974,
+          "low": 34.61784049880527,
+          "high": 45.68779019509481,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 37.8438890898904,
+          "low": 34.62158016489671,
+          "high": 41.80430530142869,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 728.688339,
+          "p95": 757.01465325
+        },
+        "head": {
+          "p50": 1012.3840554999999,
+          "p95": 1072.9948701
+        }
+      },
+      "wall_seconds": 52.3618352579997
+    }
+  },
+  "native-previous": {
+    "replay": {
+      "case": "job",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 56,
+      "verdict": "no-confirmed-regression"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "job",
+      "cpus": [
+        2,
+        4,
+        16,
+        20
+      ],
+      "rounds": [
+        {
+          "median": -7.125513570687215,
+          "low": -10.003111576619371,
+          "high": -5.28354674016982,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -5.791421265472557,
+          "low": -7.567255238646919,
+          "high": -2.599275719963523,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "no-confirmed-regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 1066.0698470000002,
+          "p95": 1127.1824218000002
+        },
+        "head": {
+          "p50": 1000.9698965,
+          "p95": 1050.0406298
+        }
+      },
+      "wall_seconds": 58.3156035739994
+    }
+  },
+  "python-preceding": {
+    "outcome": {
+      "elapsed": 88.00284818999899,
+      "state": "completed"
+    },
+    "completed_requests": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "result": {
+      "base_p50": 0.9657631799999999,
+      "base_p95": 0.99505637175,
+      "change_percent": -7.451256890949187,
+      "cpus": [
+        4,
+        6,
+        8,
+        14
+      ],
+      "head_max": 0.97375368,
+      "head_min": 0.821612762,
+      "head_p50": 0.8938016845,
+      "head_p95": 0.9718593524499999,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        -7.946681550228584,
+        -7.409748337942889
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": -5.356387578241195,
+          "low": -13.967441790785152,
+          "median": -7.946681550228584
+        },
+        {
+          "coverage": 0.978515625,
+          "high": -4.111761370928379,
+          "low": -8.665063966336007,
+          "median": -7.409748337942889
+        }
+      ],
+      "round_min_changes": [
+        -11.4103477733442,
+        -7.64581558617512
+      ],
+      "rows_per_second": 11188164.190576663,
+      "samples": 20,
+      "verdict": "no-confirmed-regression"
+    },
+    "verified_requests": 44
+  },
+  "python-release": {
+    "outcome": {
+      "elapsed": 80.29205644499962,
+      "state": "completed"
+    },
+    "completed_requests": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "result": {
+      "base_p50": 0.6209590174999999,
+      "base_p95": 0.6372021738000001,
+      "change_percent": 40.61817380725936,
+      "cpus": [
+        6,
+        12,
+        16,
+        20
+      ],
+      "head_max": 0.891776407,
+      "head_min": 0.822422477,
+      "head_p50": 0.8731812305,
+      "head_p95": 0.8893997464000001,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        37.640753546045524,
+        41.6951807932064
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": 41.29327555931124,
+          "low": 33.20297751603827,
+          "median": 37.640753546045524
+        },
+        {
+          "coverage": 0.978515625,
+          "high": 45.78798536043611,
+          "low": 35.379540532900066,
+          "median": 41.6951807932064
+        }
+      ],
+      "round_min_changes": [
+        33.80250845351607,
+        39.34777945908523
+      ],
+      "rows_per_second": 11452376.265891345,
+      "samples": 20,
+      "verdict": "regression"
+    },
+    "verified_requests": 44
+  }
+}
