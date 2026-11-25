@@ -1,6 +1,8 @@
 use super::{ColumnarState, Selection};
 use crate::operator::asof::{
-    AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinSpec, schema,
+    AsofJoinSide, AsofStateLimits, StreamAsofJoinSpec,
+    admission::{AcceptedRows, ValidatedInput},
+    schema,
 };
 use crate::{Result, StreamingFailureReason};
 use datafusion::arrow::{
@@ -80,9 +82,15 @@ fn select(state: &ColumnarState, frontier: Option<i64>, ended: bool, limit: usiz
 }
 
 fn admit(state: &mut ColumnarState, side: usize, input: &RecordBatch) -> Result<()> {
-    state
-        .admit(side, input, None, AsofLatePolicy::Error, &mut || Ok(()))
-        .map(|_| ())
+    state.admit(
+        input,
+        ValidatedInput {
+            index: side,
+            watermark: None,
+            accepted: input.num_rows() as u64,
+        },
+        &mut || Ok(()),
+    )
 }
 
 fn with_next_run(
@@ -901,26 +909,70 @@ fn test_admission_after_partial_commit_reuses_reclaimed_capacity() {
 }
 
 #[test]
+fn test_admission_charge_uses_visible_offsets_and_reserves_validity_for_every_selection() {
+    let input = record(&[
+        (1, 0, 1, Some("outside")),
+        (2, 1, 2, Some("visible")),
+        (1, 2, 3, None),
+        (2, 3, 4, Some("")),
+        (1, 4, 5, Some("outside")),
+    ])
+    .slice(1, 3);
+    let full = AcceptedRows::all(3);
+    let partial = AcceptedRows {
+        count: 2,
+        mask: Some(vec![false, true, true]),
+    };
+    assert_eq!(
+        super::run::logical_array_selection_charge(input.column(3), &full),
+        128 + 4 * 4 + 7 + 1
+    );
+    assert_eq!(
+        super::run::logical_array_selection_charge(input.column(3), &partial),
+        128 + 3 * 4 + 1
+    );
+    assert_eq!(
+        super::run::logical_array_selection_charge(input.column(0), &full),
+        128 + 3 * 8 + 1
+    );
+}
+
+#[test]
+fn test_full_admission_prices_sliced_payload_without_scanning_a_row_mask_per_column() {
+    let declaration = spec(0, 1024, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    let input = record(&[
+        (1, 0, 1, Some("discarded prefix")),
+        (2, 10, 1, Some("visible")),
+        (3, 10, 1, None),
+        (1, 11, 2, Some("")),
+        (2, 12, 2, Some("discarded suffix")),
+    ])
+    .slice(1, 3);
+    super::run::MASKED_CHARGE_ROWS.set(0);
+    admit(&mut state, 0, &input).unwrap();
+    assert_eq!(state.pending_left_rows(), 3);
+    assert_eq!(super::run::MASKED_CHARGE_ROWS.replace(0), 0);
+}
+
+#[test]
 fn test_late_drop_excludes_rows_before_key_birth_and_retains_watermark_equality() {
     let declaration = spec(0, 100, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
     let mut state = state(&declaration, &pool);
-    let admitted = state
+    state
         .admit(
-            1,
             &record(&[(2, 4, 1, Some("late")), (1, 5, 1, Some("equal"))]),
-            Some(5),
-            AsofLatePolicy::Drop,
+            ValidatedInput {
+                index: 1,
+                watermark: Some(5),
+                accepted: 1,
+            },
             &mut || Ok(()),
         )
         .unwrap();
-    assert_eq!(
-        admitted,
-        super::AdmissionSummary {
-            accepted: 1,
-            late: 1
-        }
-    );
+    assert_eq!(state.right_payload_rows(), 1);
     assert_eq!(state.keys.len(), 1);
     admit(&mut state, 0, &record(&[(1, 5, 1, Some("left"))])).unwrap();
     let selection = select(&state, Some(6), false, 10);
@@ -1543,9 +1595,7 @@ fn test_string_sequence_encoding_is_reserved_before_row_conversion() {
     )
     .unwrap();
     let allocations = allocation_counter::measure(|| {
-        let error = state
-            .admit(1, &input, None, AsofLatePolicy::Error, &mut || Ok(()))
-            .expect_err("sequence encoding exceeds workspace");
+        let error = admit(&mut state, 1, &input).expect_err("sequence encoding exceeds workspace");
         assert!(matches!(
             error,
             crate::CalcFlowError::OperatorReason {

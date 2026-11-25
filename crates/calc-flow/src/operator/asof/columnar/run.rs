@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::operator::asof::arrow_error;
+use crate::operator::asof::{admission::AcceptedRows, arrow_error};
 use crate::operator::keyed::GroupId;
 use datafusion::arrow::{
     array::{
@@ -187,49 +187,26 @@ pub(super) fn logical_array_charge(array: &ArrayRef) -> usize {
     128usize.saturating_add(data).saturating_add(validity)
 }
 
-pub(super) fn logical_array_selection_charge(array: &ArrayRef, accepted: &[bool]) -> usize {
-    assert_eq!(array.len(), accepted.len());
-    let count = accepted.iter().filter(|accepted| **accepted).count();
-    macro_rules! variable {
-        ($array_type:ty, $offset_width:expr) => {{
-            let values = array
-                .as_any()
-                .downcast_ref::<$array_type>()
-                .expect("typed array");
-            let mut bytes = (count + 1) * $offset_width;
-            for (row, accepted) in accepted.iter().enumerate() {
-                if *accepted {
-                    bytes = bytes.saturating_add(
-                        usize::try_from(values.value_length(row)).expect("nonnegative value"),
-                    );
-                }
-            }
-            bytes
-        }};
-    }
-    let data = match array.data_type() {
-        DataType::Null => 0,
-        DataType::Boolean => count.div_ceil(8),
-        DataType::Utf8 => variable!(StringArray, 4),
-        DataType::LargeUtf8 => variable!(LargeStringArray, 8),
-        DataType::Binary => variable!(BinaryArray, 4),
-        DataType::LargeBinary => variable!(LargeBinaryArray, 8),
-        DataType::FixedSizeBinary(width) => {
-            count.saturating_mul(usize::try_from(*width).expect("positive fixed binary width"))
-        }
-        data_type => count.saturating_mul(
-            data_type
-                .primitive_width()
-                .expect("validated flat ASOF payload type"),
-        ),
-    };
-    128usize
-        .saturating_add(data)
-        .saturating_add(count.div_ceil(8))
+#[cfg(test)]
+thread_local! {
+    pub(super) static MASKED_CHARGE_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The output reservation includes a validity bitmap even for all-valid selections.
-pub(super) fn logical_full_output_charge(array: &ArrayRef) -> usize {
+pub(super) fn logical_array_selection_charge(array: &ArrayRef, rows: &AcceptedRows) -> usize {
+    let Some(accepted) = rows.mask.as_deref() else {
+        return logical_full_selection_charge(array);
+    };
+    debug_assert_eq!(array.len(), accepted.len());
+    let indices = accepted.iter().enumerate().filter_map(|(row, keep)| {
+        #[cfg(test)]
+        MASKED_CHARGE_ROWS.set(MASKED_CHARGE_ROWS.get() + 1);
+        keep.then_some(row)
+    });
+    logical_array_indices_charge(array, rows.count, indices)
+}
+
+/// Selection reservations include a validity bitmap even for all-valid arrays.
+pub(super) fn logical_full_selection_charge(array: &ArrayRef) -> usize {
     let extra_validity = if array.null_count() == 0 {
         array.len().div_ceil(8)
     } else {
@@ -238,21 +215,22 @@ pub(super) fn logical_full_output_charge(array: &ArrayRef) -> usize {
     logical_array_charge(array).saturating_add(extra_validity)
 }
 
-pub(super) fn logical_array_indices_charge(array: &ArrayRef, indices: &[usize]) -> usize {
-    let count = indices.len();
+pub(super) fn logical_array_indices_charge(
+    array: &ArrayRef,
+    count: usize,
+    indices: impl Iterator<Item = usize>,
+) -> usize {
     macro_rules! variable {
         ($array_type:ty, $offset_width:expr) => {{
             let values = array
                 .as_any()
                 .downcast_ref::<$array_type>()
                 .expect("typed array");
-            indices
-                .iter()
-                .fold((count + 1) * $offset_width, |total, row| {
-                    total.saturating_add(
-                        usize::try_from(values.value_length(*row)).expect("nonnegative value"),
-                    )
-                })
+            indices.fold((count + 1) * $offset_width, |total, row| {
+                total.saturating_add(
+                    usize::try_from(values.value_length(row)).expect("nonnegative value"),
+                )
+            })
         }};
     }
     let data = match array.data_type() {
@@ -295,7 +273,7 @@ pub(super) fn logical_null_charge(data_type: &DataType, rows: usize) -> usize {
 
 pub(in crate::operator::asof) fn logical_record_selection_charge(
     record: &RecordBatch,
-    accepted: &[bool],
+    accepted: &AcceptedRows,
 ) -> usize {
     record
         .columns()
@@ -305,13 +283,7 @@ pub(in crate::operator::asof) fn logical_record_selection_charge(
         })
         .saturating_add(ipc_schema_charge(&record.schema()))
         .saturating_add(256)
-        .saturating_add(
-            accepted
-                .iter()
-                .filter(|accepted| **accepted)
-                .count()
-                .saturating_mul(384),
-        )
+        .saturating_add(accepted.count.saturating_mul(384))
 }
 
 fn retained_payload_charge(record: &RecordBatch) -> usize {

@@ -9,7 +9,7 @@ mod state;
 use run::RowLocator;
 pub(super) use run::logical_record_selection_charge;
 #[cfg(test)]
-pub(super) use state::{AdmissionSummary, EvictionSummary};
+pub(super) use state::EvictionSummary;
 pub(super) use state::{ColumnarState, Progress};
 #[cfg(test)]
 pub(super) use state::{take_finality_probes, take_selections};

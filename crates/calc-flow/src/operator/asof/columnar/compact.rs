@@ -1,6 +1,9 @@
 //! Detach accepted payload rows from their source buffers before retaining them.
 
-use crate::{Result, operator::asof::arrow_error};
+use crate::{
+    Result,
+    operator::asof::{admission::AcceptedRows, arrow_error},
+};
 use datafusion::arrow::{
     array::{Array, ArrayRef, AsArray, GenericByteArray, PrimitiveArray, UInt32Array},
     buffer::{Buffer, OffsetBuffer},
@@ -14,9 +17,9 @@ use std::sync::Arc;
 
 pub(super) fn compact_accepted(
     record: &RecordBatch,
-    accepted: &[bool],
-    selected_rows: usize,
+    accepted: &AcceptedRows,
 ) -> Result<RecordBatch> {
+    let selected_rows = accepted.count;
     let full = selected_rows == record.num_rows()
         && u32::try_from(selected_rows.saturating_sub(1)).is_ok()
         && record.columns().iter().all(can_copy_full_column);
@@ -27,11 +30,9 @@ pub(super) fn compact_accepted(
             .map(|column| copy_full_column(column.as_ref()))
             .collect::<Result<_>>()?
     } else {
-        let rows = accepted
-            .iter()
-            .enumerate()
-            .filter(|(_, keep)| **keep)
-            .map(|(row, _)| {
+        let rows = (0..record.num_rows())
+            .filter(|&row| accepted.mask.as_ref().is_none_or(|mask| mask[row]))
+            .map(|row| {
                 u32::try_from(row).map_err(|_| {
                     arrow_error(&ArrowError::InvalidArgumentError(
                         "ASOF accepted row exceeds UInt32".into(),

@@ -1,7 +1,5 @@
 use super::{RowLocator, Selection, compact::compact_accepted, run::Run, run::SequenceColumn};
-use crate::operator::asof::{
-    AsofJoinSide, AsofLatePolicy, StreamAsofJoinSpec, admission, arrow_error, reason,
-};
+use crate::operator::asof::{AsofJoinSide, StreamAsofJoinSpec, admission, arrow_error, reason};
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS, VARIABLE_STEP_BYTES};
 use crate::{Result, StreamingFailureReason};
 use datafusion::arrow::{
@@ -46,12 +44,6 @@ pub(in crate::operator::asof) fn take_selections() -> usize {
 #[cfg(test)]
 pub(in crate::operator::asof) fn take_latest_binary_searches() -> usize {
     LATEST_BINARY_SEARCHES.with(|count| count.replace(0))
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(in crate::operator::asof) struct AdmissionSummary {
-    pub(in crate::operator::asof) accepted: u64,
-    pub(in crate::operator::asof) late: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -658,20 +650,25 @@ impl ColumnarState {
 
     pub(in crate::operator::asof) fn admit(
         &mut self,
-        side: usize,
         record: &RecordBatch,
-        watermark: Option<i64>,
-        late_policy: AsofLatePolicy,
+        input: admission::ValidatedInput,
         check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<AdmissionSummary> {
+    ) -> Result<()> {
         check()?;
-        if record.num_rows() == 0 {
-            return Ok(AdmissionSummary::default());
+        if input.accepted == 0 {
+            return Ok(());
         }
         let cut = self.keys.cut();
         let reserved = self.reservation.size();
-        match self.admit_attempt(side, record, watermark, late_policy, check) {
-            Ok(summary) => Ok(summary),
+        let declaration = input.side(&self.spec).clone();
+        let selected = usize::try_from(input.accepted).expect("validated input row count");
+        let accepted =
+            admission::AcceptedRows::for_record(record, &declaration, input, Some(selected));
+        let installed = self
+            .prepare_run(record, &declaration, &accepted, input, check)
+            .and_then(|run| self.install_prepared_run(input.index, run));
+        match installed {
+            Ok(()) => Ok(()),
             Err(error) => {
                 self.keys.rollback(cut);
                 self.key_ranks.clear();
@@ -682,61 +679,15 @@ impl ColumnarState {
         }
     }
 
-    fn admit_attempt(
-        &mut self,
-        side: usize,
-        record: &RecordBatch,
-        watermark: Option<i64>,
-        late_policy: AsofLatePolicy,
-        check: &mut dyn FnMut() -> Result<()>,
-    ) -> Result<AdmissionSummary> {
-        let declaration = if side == 0 {
-            self.spec.left().clone()
-        } else {
-            self.spec.right().clone()
-        };
-        let accepted = admission::times(record, &declaration)
-            .values()
-            .iter()
-            .map(|time| watermark.is_none_or(|watermark| *time >= watermark))
-            .collect::<Vec<_>>();
-        let late = accepted.iter().filter(|accepted| !**accepted).count();
-        if late != 0 && late_policy == AsofLatePolicy::Error {
-            return Err(reason(
-                &self.name,
-                StreamingFailureReason::AsofLateRow,
-                "input contains event time below its accepted watermark",
-            ));
-        }
-        let accepted_count = record.num_rows() - late;
-        if accepted_count == 0 {
-            return Ok(AdmissionSummary {
-                accepted: 0,
-                late: late as u64,
-            });
-        }
-        let input = admission::ValidatedInput {
-            index: side,
-            watermark,
-            accepted: accepted_count as u64,
-        };
-        let prepared = self.prepare_run(record, &declaration, &accepted, input, check)?;
-        self.install_prepared_run(side, prepared)?;
-        Ok(AdmissionSummary {
-            accepted: accepted_count as u64,
-            late: late as u64,
-        })
-    }
-
     fn prepare_run(
         &mut self,
         record: &RecordBatch,
         declaration: &AsofJoinSide,
-        accepted: &[bool],
+        accepted: &admission::AcceptedRows,
         input: admission::ValidatedInput,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<PreparedRun> {
-        let selected_rows = usize::try_from(input.accepted).expect("validated input row count");
+        let selected_rows = accepted.count;
         let (sequence_charge, encoded_extent) =
             declaration
                 .sequence_by()
@@ -756,7 +707,7 @@ impl ColumnarState {
                     .saturating_mul(super::run::sequence_tuple_copy_count([encoded_extent])),
             );
         let workspace = self.preflight_admission(record, declaration, input, preflight, check)?;
-        let compacted = compact_accepted(record, accepted, selected_rows)?;
+        let compacted = compact_accepted(record, accepted)?;
         let record = &compacted;
         let sequences = SequenceColumn::from_names(record, declaration.sequence_by())?;
         let key_arrays = declaration
