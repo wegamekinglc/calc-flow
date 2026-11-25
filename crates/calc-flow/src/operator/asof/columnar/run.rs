@@ -4,10 +4,11 @@ use crate::operator::asof::{
     arrow_error,
 };
 use crate::operator::keyed::GroupId;
+use datafusion::arrow::array::AsArray;
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, AsArray, BinaryArray, LargeBinaryArray, LargeBinaryBuilder,
-        LargeStringArray, StringArray,
+        Array, ArrayRef, BinaryArray, LargeBinaryArray, LargeBinaryBuilder, LargeStringArray,
+        StringArray,
     },
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,

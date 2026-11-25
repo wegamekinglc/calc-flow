@@ -556,7 +556,7 @@ fn test_multirecord_assembly_detaches_sliced_input_and_retains_its_reservation()
         else {
             panic!("assembling two batches must own the result");
         };
-        let expected = accepted as usize;
+        let expected = usize::try_from(accepted).unwrap();
         assert_eq!(record, source.slice(3 - expected, expected));
         assert!(workspace.size() > 0);
         assert_eq!(
