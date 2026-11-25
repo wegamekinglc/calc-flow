@@ -66,6 +66,24 @@ fn single_run_indices(
     ))
 }
 
+impl<'a> SideLayout<'a> {
+    fn sources(
+        self,
+        state: &'a ColumnarState,
+        side: usize,
+        locators: &[RowLocator],
+        validity: Option<&BooleanBuffer>,
+    ) -> SideSources<'a> {
+        match self {
+            Self::Unused => SideSources::AllNull,
+            Self::Complete(records) => SideSources::CompleteRuns(records),
+            Self::Indexed { has_unmatched } => {
+                state.indexed_sources(side, locators, validity.filter(|_| has_unmatched))
+            }
+        }
+    }
+}
+
 impl OutputPlan<'_> {
     pub(in crate::operator::asof) fn materialize(self, schema: &SchemaRef) -> Result<RecordBatch> {
         let Self {
@@ -92,8 +110,8 @@ impl OutputPlan<'_> {
         }
         let [left, right] = sides;
         let sources = [
-            state.sources(left, 0, &selection.left, None),
-            state.sources(right, 1, &selection.right, Some(&selection.right_validity)),
+            left.sources(state, 0, &selection.left, None),
+            right.sources(state, 1, &selection.right, Some(&selection.right_validity)),
         ];
         let columns = requests
             .iter()
@@ -108,22 +126,16 @@ impl OutputPlan<'_> {
 }
 
 impl ColumnarState {
-    fn sources<'a>(
-        &'a self,
-        layout: SideLayout<'a>,
+    fn indexed_sources(
+        &self,
         side: usize,
         locators: &[RowLocator],
-        validity: Option<&BooleanBuffer>,
-    ) -> SideSources<'a> {
-        let nulls = match layout {
-            SideLayout::Unused => return SideSources::AllNull,
-            SideLayout::Complete(records) => return SideSources::CompleteRuns(records),
-            SideLayout::Indexed { has_unmatched } => validity.filter(|_| has_unmatched),
-        };
+        nulls: Option<&BooleanBuffer>,
+    ) -> SideSources<'_> {
         let mut by_run = HashMap::new();
         let mut runs = Vec::new();
         for (index, locator) in locators.iter().copied().enumerate() {
-            if validity.is_some_and(|validity| !validity.value(index)) {
+            if nulls.is_some_and(|validity| !validity.value(index)) {
                 continue;
             }
             let next = runs.len();
@@ -151,7 +163,7 @@ impl ColumnarState {
             .copied()
             .enumerate()
             .map(|(index, locator)| {
-                if validity.is_some_and(|validity| !validity.value(index)) {
+                if nulls.is_some_and(|validity| !validity.value(index)) {
                     (0, 0)
                 } else {
                     (by_run[&locator.run] + offset, locator.row as usize)
