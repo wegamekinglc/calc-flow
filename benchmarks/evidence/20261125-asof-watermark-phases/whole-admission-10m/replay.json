@@ -1,0 +1,126 @@
+{
+  "rust": {
+    "artifact": 15063128996,
+    "digest": "sha256:bbbaaa8b0ca7a1aab708c60afc34ef747f21b8be467c64249f0cc2227fc610e4",
+    "model": "AMD EPYC 7763 64-Core Processor",
+    "cases": {
+      "release": {
+        "state": "stopped",
+        "error": "ExceptionGroup('unhandled errors in a TaskGroup', [RuntimeError(\"host resource envelope failed: [{'cpu': 0, 'cpu_busy': 93.0, 'siblings': [1], 'sibling_busy': 1.0, 'host_busy': 50.1, 'available_bytes': 14900838400, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': True, 'owned_host_percent': 24.766882427429135, 'external_host_percent': 25.333117572570867}, {'cpu': 2, 'cpu_busy': 31.7, 'siblings': [3], 'sibling_busy': 74.7, 'host_busy': 50.1, 'available_bytes': 14900838400, 'major_faults': 0, 'swap_pages': 0, 'swap_in_pages': 0, 'swap_out_pages': 0, 'suitable': False, 'owned_host_percent': 24.766882427429135, 'external_host_percent': 25.333117572570867}]\")])",
+        "accepted_intervals": 12,
+        "rejected": [
+          {
+            "cpu": 2,
+            "cpu_busy": 31.7,
+            "siblings": [
+              3
+            ],
+            "sibling_busy": 74.7,
+            "host_busy": 50.1,
+            "available_bytes": 14900838400,
+            "major_faults": 0,
+            "swap_pages": 0,
+            "swap_in_pages": 0,
+            "swap_out_pages": 0,
+            "suitable": false,
+            "owned_host_percent": 24.766882427429135,
+            "external_host_percent": 25.333117572570867
+          }
+        ],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": 7
+      },
+      "parent": {
+        "state": "not started"
+      }
+    }
+  },
+  "python": {
+    "artifact": 15064735932,
+    "digest": "sha256:6ab600ab23cb1db616d42580b3a26bf051f4bcc1ec1a8a9e5256dad126e40e55",
+    "model": "AMD EPYC 9V74 80-Core Processor",
+    "cases": {
+      "release": {
+        "state": "complete",
+        "rounds": [
+          {
+            "median": -10.381915090698683,
+            "low": -13.773752662641492,
+            "high": -4.3180655139767765,
+            "coverage": 0.978515625
+          },
+          {
+            "median": -8.312839226811263,
+            "low": -14.177054305173586,
+            "high": -2.6348684130624966,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "no-confirmed-regression",
+        "ms": {
+          "base": {
+            "p50": 809.235621,
+            "p95": 841.5682796
+          },
+          "head": {
+            "p50": 735.7828395,
+            "p95": 814.923662
+          }
+        },
+        "delta_percent": -9.076810213721432,
+        "accepted_intervals": 81,
+        "rejected": [],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": {
+          "prepare": 4,
+          "sample": 40
+        }
+      },
+      "parent": {
+        "state": "complete",
+        "rounds": [
+          {
+            "median": -9.901465210824966,
+            "low": -17.32970848614145,
+            "high": 0.6451696699140586,
+            "coverage": 0.978515625
+          },
+          {
+            "median": -18.309526357593136,
+            "low": -26.00502536411058,
+            "high": -10.268822138473633,
+            "coverage": 0.978515625
+          }
+        ],
+        "verdict": "no-confirmed-regression",
+        "ms": {
+          "base": {
+            "p50": 835.19796,
+            "p95": 904.5697934000001
+          },
+          "head": {
+            "p50": 709.3092505000001,
+            "p95": 784.6124645
+          }
+        },
+        "delta_percent": -15.07291870061559,
+        "accepted_intervals": 78,
+        "rejected": [],
+        "selected_cpus": [
+          0,
+          2
+        ],
+        "completed_observations": {
+          "prepare": 4,
+          "sample": 40
+        }
+      }
+    }
+  }
+}
