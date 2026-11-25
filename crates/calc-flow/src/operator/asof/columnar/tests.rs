@@ -390,9 +390,10 @@ fn test_pending_output_uses_typed_key_order_across_runs_not_group_birth_order() 
         &mut state,
         0,
         &record(&[
+            // Each key appends in order; the combined left input does not.
             (2, 5, 0, Some("key-2")),
-            (1, 5, 0, Some("key-1-time-5")),
             (1, 4, 2, Some("sequence-2")),
+            (1, 5, 0, Some("key-1-time-5")),
         ]),
     )
     .unwrap();
@@ -742,9 +743,16 @@ fn test_ordered_interleaved_identity_admission_is_linear_on_both_sides() {
         let mut state = state(&spec, &pool);
         admit(&mut state, side, &input(0)).unwrap();
         super::state::ADMISSION_IDENTITY_COMPARISONS.set(0);
+        super::state::INDEX_IDENTITY_COMPARISONS.set(0);
         admit(&mut state, side, &input(ROWS)).unwrap();
         let comparisons = super::state::ADMISSION_IDENTITY_COMPARISONS.replace(0);
         assert_eq!(comparisons, ROWS, "one comparison per row for side {side}");
+        let index_comparisons = super::state::INDEX_IDENTITY_COMPARISONS.replace(0);
+        let columns = if side == 0 { 1 } else { 2 };
+        assert!(
+            index_comparisons <= usize::try_from(KEYS).unwrap() * columns,
+            "ordered installation revisited identities {index_comparisons} times on side {side}"
+        );
         assert_eq!(state.state_rows(), 2 * ROWS);
     }
 }
