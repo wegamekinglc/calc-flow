@@ -4070,6 +4070,40 @@ fn numeric_scans_compile_to_ordered_columnar_kernel() {
 }
 
 #[test]
+fn float_row_distinct_count_expires_nulls_duplicates_and_both_zero_signs() {
+    let values = [
+        Some(-0.0),
+        Some(0.0),
+        Some(f64::INFINITY),
+        None,
+        Some(f64::from_bits(0xfff8_0000_0000_002a)),
+        Some(f64::NEG_INFINITY),
+        None,
+        None,
+        None,
+        None,
+        Some(-0.0),
+        Some(0.0),
+        Some(2.0),
+        Some(2.0),
+    ];
+    let mut scan = FloatRowsUnique::new(4);
+    for (position, sample) in values.iter().copied().enumerate() {
+        scan.advance(sample);
+        let window = &values[position.saturating_sub(3)..=position];
+        let valid: Vec<_> = window.iter().flatten().filter(|x| !x.is_nan()).collect();
+        let mut seen = Vec::new();
+        for value in &valid {
+            if !seen.contains(value) {
+                seen.push(*value);
+            }
+        }
+        assert_eq!(scan.valid_count, u64::try_from(valid.len()).unwrap());
+        assert_eq!(scan.distinct_count(), u64::try_from(seen.len()).unwrap());
+    }
+}
+
+#[test]
 fn incremental_scan_memory_estimate_covers_allocated_capacity() {
     let mut extrema = IncrementalScanState::new(ScanKind::Argmax, 64, 1).unwrap();
     extrema.advance_float(0, Some(1.0));
@@ -4082,11 +4116,11 @@ fn incremental_scan_memory_estimate_covers_allocated_capacity() {
 
     let mut unique = IncrementalScanState::new(ScanKind::UniqueCount, 64, 1).unwrap();
     unique.advance_float(0, Some(1.0));
-    let IncrementalScanState::UniqueFloat64 { recent, counts, .. } = &unique else {
+    let IncrementalScanState::UniqueFloat64 { state, .. } = &unique else {
         unreachable!()
     };
-    let unique_minimum = recent.capacity() * size_of::<Option<u64>>()
-        + counts.capacity() * size_of::<(u64, usize)>();
+    let unique_minimum = state.recent.capacity() * size_of::<u64>()
+        + state.counts.capacity() * size_of::<(u64, usize)>();
     assert!(unique.estimated_bytes() >= unique_minimum);
 }
 

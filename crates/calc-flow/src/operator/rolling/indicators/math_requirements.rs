@@ -191,7 +191,7 @@ fn incremental_scan(kind: ScanKind, window: u64, scope: usize) -> Result<Option<
             total([growing::<bool>(count), growing::<(u64, f64)>(count)]).map(Some)
         }
         ScanKind::UniqueCount => {
-            total([growing::<Option<u64>>(count), bytes::hash_table(scope)]).map(Some)
+            total([growing::<u64>(scope.min(window)), bytes::hash_table(scope)]).map(Some)
         }
         _ => Ok(None),
     }
