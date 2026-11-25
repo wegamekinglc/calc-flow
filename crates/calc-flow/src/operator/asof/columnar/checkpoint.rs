@@ -315,7 +315,9 @@ fn validate_payload(
     let sequences = SequenceColumn::from_names(payload, declaration.sequence_by())?;
     for row in 0..run.rows() {
         let locator = Run::locator(run_id, row);
-        if times.value(row) != run.time(locator) || sequences.value(row) != run.sequence(locator) {
+        if times.value(row) != run.time(locator)
+            || !sequences.compare(row, run.sequences(), row).is_eq()
+        {
             return Err(mismatch(
                 "payload time or sequence differs from its run identity",
             ));

@@ -8,13 +8,17 @@ use datafusion::arrow::array::AsArray;
 use datafusion::arrow::{
     array::{
         Array, ArrayRef, BinaryArray, LargeBinaryArray, LargeBinaryBuilder, LargeStringArray,
-        StringArray,
+        StringArray, UInt64Array,
     },
+    buffer::{Buffer, OffsetBuffer, ScalarBuffer},
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
-    row::{RowConverter, SortField},
+    row::{RowConverter, Rows, SortField},
 };
-use std::sync::Arc;
+use std::{
+    cmp::Ordering,
+    sync::{Arc, OnceLock},
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(in crate::operator::asof) struct RowLocator {
@@ -24,6 +28,7 @@ pub(in crate::operator::asof) struct RowLocator {
 
 #[derive(Clone)]
 pub(super) enum SequenceColumn {
+    UInt64(ScalarBuffer<u64>, OnceLock<Arc<BinaryArray>>),
     Binary(BinaryArray),
     LargeBinary(LargeBinaryArray),
 }
@@ -38,6 +43,31 @@ pub(super) fn sequence_copy_count(encoded_extent: usize) -> usize {
 
 pub(super) fn sequence_tuple_copy_count(extents: impl IntoIterator<Item = usize>) -> usize {
     sequence_copy_count(extents.into_iter().fold(0, usize::saturating_add))
+}
+
+const UINT64_ROW_BYTES: usize = 1 + size_of::<u64>();
+
+fn uint64_row(value: u64) -> [u8; UINT64_ROW_BYTES] {
+    let mut row = [1; UINT64_ROW_BYTES];
+    row[1..].copy_from_slice(&value.to_be_bytes());
+    row
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static ENCODED_UINT64_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn uint64_binary(values: &[u64]) -> BinaryArray {
+    #[cfg(test)]
+    ENCODED_UINT64_ROWS.set(ENCODED_UINT64_ROWS.get() + values.len());
+    let offsets = OffsetBuffer::from_repeated_length(UINT64_ROW_BYTES, values.len());
+    let rows = values.iter().copied().map(uint64_row).collect::<Vec<_>>();
+    BinaryArray::new(offsets, Buffer::from_vec(rows.into_flattened()), None)
+}
+
+fn uint64_binary_bytes(rows: usize) -> usize {
+    rows * UINT64_ROW_BYTES + (rows + 1) * size_of::<i32>()
 }
 
 impl SequenceColumn {
@@ -55,7 +85,20 @@ impl SequenceColumn {
         Self::from_columns(&columns)
     }
 
+    fn single_uint64(columns: &[ArrayRef]) -> Option<Self> {
+        let [column] = columns else { return None };
+        let values = column.as_any().downcast_ref::<UInt64Array>()?;
+        // Keep the same Binary/LargeBinary threshold as RowConverter's Rows::size().
+        let max_rows = (i32::MAX as usize - size_of::<Rows>() - size_of::<usize>())
+            / (UINT64_ROW_BYTES + size_of::<usize>());
+        (values.null_count() == 0 && values.len() <= max_rows)
+            .then(|| Self::UInt64(values.values().clone(), OnceLock::new()))
+    }
+
     fn from_columns(columns: &[ArrayRef]) -> Result<Self> {
+        if let Some(values) = Self::single_uint64(columns) {
+            return Ok(values);
+        }
         let fields = columns
             .iter()
             .map(|array| SortField::new(array.data_type().clone()))
@@ -78,15 +121,44 @@ impl SequenceColumn {
         Ok(Self::LargeBinary(builder.finish()))
     }
 
-    pub(super) fn value(&self, row: usize) -> &[u8] {
+    fn with_bytes<T>(&self, row: usize, use_value: impl FnOnce(&[u8]) -> T) -> T {
         match self {
-            Self::Binary(values) => values.value(row),
-            Self::LargeBinary(values) => values.value(row),
+            Self::UInt64(values, _) => use_value(&uint64_row(values[row])),
+            Self::Binary(values) => use_value(values.value(row)),
+            Self::LargeBinary(values) => use_value(values.value(row)),
+        }
+    }
+
+    pub(super) fn compare(&self, row: usize, other: &Self, other_row: usize) -> Ordering {
+        if let (Self::UInt64(left, _), Self::UInt64(right, _)) = (self, other) {
+            return left[row].cmp(&right[other_row]);
+        }
+        self.with_bytes(row, |left| {
+            other.with_bytes(other_row, |right| left.cmp(right))
+        })
+    }
+
+    fn logical_charge(&self) -> usize {
+        match self {
+            Self::UInt64(values, _) => 128 + uint64_binary_bytes(values.len()),
+            _ => logical_array_charge(&self.array()),
+        }
+    }
+
+    fn detach_from_payload(&mut self) {
+        if let Self::UInt64(values, encoded) = self {
+            let binary = encoded
+                .take()
+                .map_or_else(|| uint64_binary(values), Arc::unwrap_or_clone);
+            *self = Self::Binary(binary);
         }
     }
 
     pub(super) fn array(&self) -> ArrayRef {
         match self {
+            Self::UInt64(values, encoded) => encoded
+                .get_or_init(|| Arc::new(uint64_binary(values)))
+                .clone(),
             Self::Binary(values) => Arc::new(values.clone()),
             Self::LargeBinary(values) => Arc::new(values.clone()),
         }
@@ -115,6 +187,7 @@ impl SequenceColumn {
 
     pub(super) fn memory_size(&self) -> usize {
         match self {
+            Self::UInt64(values, _) => size_of::<BinaryArray>() + uint64_binary_bytes(values.len()),
             Self::Binary(values) => values.get_array_memory_size(),
             Self::LargeBinary(values) => values.get_array_memory_size(),
         }
@@ -379,7 +452,7 @@ fn retained_identity_charge(
         .len()
         .saturating_mul(size_of::<GroupId>())
         .saturating_add(times.len().saturating_mul(size_of::<i64>()))
-        .saturating_add(logical_array_charge(&sequences.array()))
+        .saturating_add(sequences.logical_charge())
         .saturating_add(rows.div_ceil(8).saturating_mul(2))
         .saturating_add(256)
         .saturating_add(ipc_schema_charge(&identity_schema(matches!(
@@ -445,8 +518,14 @@ impl Run {
         self.groups[locator.row as usize]
     }
 
-    pub(super) fn sequence(&self, locator: RowLocator) -> &[u8] {
-        self.sequences.value(locator.row as usize)
+    pub(super) fn compare_sequence(
+        &self,
+        left: RowLocator,
+        other: &Self,
+        right: RowLocator,
+    ) -> Ordering {
+        self.sequences
+            .compare(left.row as usize, &other.sequences, right.row as usize)
     }
 
     pub(super) fn compare_left_rows<K: Ord>(
@@ -455,11 +534,11 @@ impl Run {
         other: &Self,
         right: usize,
         key_order: impl Fn(GroupId) -> K,
-    ) -> std::cmp::Ordering {
+    ) -> Ordering {
         self.times[left]
             .cmp(&other.times[right])
             .then_with(|| key_order(self.groups[left]).cmp(&key_order(other.groups[right])))
-            .then_with(|| self.sequences.value(left).cmp(other.sequences.value(right)))
+            .then_with(|| self.sequences.compare(left, &other.sequences, right))
     }
 
     pub(super) fn strictly_ordered_left<K: Ord>(&self, key_order: impl Fn(GroupId) -> K) -> bool {
@@ -485,7 +564,7 @@ impl Run {
     pub(super) fn same_identity(&self, left: RowLocator, right: RowLocator) -> bool {
         self.group(left) == self.group(right)
             && self.time(left) == self.time(right)
-            && self.sequence(left) == self.sequence(right)
+            && self.compare_sequence(left, self, right).is_eq()
     }
 
     pub(super) fn has_payload(&self, locator: RowLocator) -> bool {
@@ -585,6 +664,10 @@ impl Run {
         }
         self.payload_rows -= 1;
         if self.payload_rows == 0 {
+            // An identity-only run must fit its reservation during subsequent checkpoint capture.
+            if self.identity_rows != 0 {
+                self.sequences.detach_from_payload();
+            }
             self.payload = None;
         }
         true
