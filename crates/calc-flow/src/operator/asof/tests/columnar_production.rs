@@ -59,6 +59,35 @@ fn right_sequences(messages: &[crate::StreamMessage]) -> Vec<Option<i64>> {
 }
 
 #[tokio::test]
+async fn complete_run_output_verifies_locators_once_across_budget_and_gather() {
+    let (mut operator, _) = fixture();
+    let schema = operator.schemas[0].clone();
+    let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
+    let context = StreamOperatorContext::new(&job, "asof", None);
+    let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+    let rows = (0..32).map(|i| ("A", i, i)).collect::<Vec<_>>();
+    let batch = Batch::table(
+        vec![indexed_input(&schema, &rows)],
+        BatchMetadata::default(),
+    )
+    .unwrap();
+    for side in ["right", "left"] {
+        operator
+            .process_data(side, batch.clone(), &context, &mut output)
+            .await
+            .unwrap();
+    }
+    columnar::VERIFIED_RUN_ROWS.set(0);
+    operator.on_end(&context, &mut output).await.unwrap();
+    let messages = output.drain("output");
+    assert_eq!(
+        right_sequences(&messages),
+        (0..32).map(Some).collect::<Vec<_>>()
+    );
+    assert_eq!(columnar::VERIFIED_RUN_ROWS.get(), 64);
+}
+
+#[tokio::test]
 async fn test_watermark_finds_a_sorted_asof_prefix_without_scanning_every_row() {
     let (mut operator, _) = fixture();
     let schema = operator.schemas[0].clone();

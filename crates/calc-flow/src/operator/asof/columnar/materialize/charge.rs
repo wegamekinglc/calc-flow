@@ -1,4 +1,4 @@
-use super::{ColumnarState, RowLocator, Selection, invalid};
+use super::{ColumnarState, OutputPlan, RowLocator, Selection, SideLayout, invalid};
 use crate::Result;
 use crate::operator::asof::columnar::run::{
     logical_array_indices_charge, logical_full_output_charge, logical_null_charge,
@@ -7,11 +7,11 @@ use datafusion::arrow::buffer::BooleanBuffer;
 use std::collections::BTreeMap;
 
 impl ColumnarState {
-    pub(in crate::operator::asof) fn output_charge(
-        &self,
-        selection: &Selection,
-        projection: Option<&[(usize, usize)]>,
-    ) -> Result<usize> {
+    pub(in crate::operator::asof) fn plan_output<'a>(
+        &'a self,
+        selection: &'a Selection,
+        projection: Option<&'a [(usize, usize)]>,
+    ) -> Result<OutputPlan<'a>> {
         if projection.is_some_and(|fields| fields.iter().any(|&(side, _)| side > 1)) {
             return Err(invalid("ASOF projection side is invalid"));
         }
@@ -25,7 +25,15 @@ impl ColumnarState {
             ),
             None => self.side_output_charge(selection, side, &(0..self.column_count(side))),
         };
-        add_charge(charge(0)?, charge(1)?)
+        let (left_charge, left) = charge(0)?;
+        let (right_charge, right) = charge(1)?;
+        Ok(OutputPlan {
+            state: self,
+            selection,
+            projection,
+            sides: [left, right],
+            charge: add_charge(left_charge, right_charge)?,
+        })
     }
 
     fn side_output_charge(
@@ -33,9 +41,9 @@ impl ColumnarState {
         selection: &Selection,
         side: usize,
         columns: &(impl Iterator<Item = usize> + Clone),
-    ) -> Result<usize> {
+    ) -> Result<(usize, SideLayout<'_>)> {
         if columns.clone().next().is_none() {
-            return Ok(0);
+            return Ok((0, SideLayout::Unused));
         }
         let (locators, validity) = if side == 0 {
             (&selection.left, None)
@@ -47,12 +55,13 @@ impl ColumnarState {
         if unmatched == 0
             && let Some(records) = self.complete_runs(side, locators)
         {
-            return records.iter().try_fold(total, |charge, record| {
+            let charge = records.iter().try_fold(total, |charge, record| {
                 columns
                     .clone()
                     .map(|column| logical_full_output_charge(record.column(column)))
                     .try_fold(charge, add_charge)
-            });
+            })?;
+            return Ok((charge, SideLayout::Complete(records)));
         }
         for (run, rows) in selected_rows(locators, validity) {
             let record = self
@@ -64,7 +73,12 @@ impl ColumnarState {
                 .map(|column| logical_array_indices_charge(record.column(column), &rows))
                 .try_fold(total, add_charge)?;
         }
-        Ok(total)
+        Ok((
+            total,
+            SideLayout::Indexed {
+                has_unmatched: unmatched != 0,
+            },
+        ))
     }
 
     fn column_overhead(

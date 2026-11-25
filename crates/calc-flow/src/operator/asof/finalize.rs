@@ -97,14 +97,14 @@ impl StreamAsofJoinOperator {
                 .expect("ASOF selection charge fits u64"),
         )?;
         let selection = self.state.select_prefix(count);
-        let workspace = self.reserve_workspace(
-            u64::try_from(
-                self.state
-                    .output_charge(&selection, self.output_projection.as_deref())?,
-            )
-            .expect("ASOF output charge fits u64"),
-        )?;
-        let record = self.materialize_selection(&selection)?;
+        let plan = self
+            .state
+            .plan_output(&selection, self.output_projection.as_deref())?;
+        let workspace = self
+            .reserve_workspace(u64::try_from(plan.charge).expect("ASOF output charge fits u64"))?;
+        #[cfg(test)]
+        MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        let record = plan.materialize(self.outputs[0].schema().expect("exact ASOF output"))?;
         let batch =
             self.prepare_output_batch(&selection, record, context.output_budget().max_bytes)?;
         Ok(PreparedOutput {
@@ -114,16 +114,6 @@ impl StreamAsofJoinOperator {
             _workspace: workspace,
             _scratch: scratch,
         })
-    }
-
-    fn materialize_selection(&self, selection: &Selection) -> Result<RecordBatch> {
-        #[cfg(test)]
-        MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
-        self.state.materialize(
-            selection,
-            self.outputs[0].schema().expect("exact ASOF output"),
-            self.output_projection.as_deref(),
-        )
     }
 
     fn prepare_output_batch(
