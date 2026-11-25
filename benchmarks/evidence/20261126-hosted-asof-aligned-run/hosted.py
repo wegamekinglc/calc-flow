@@ -20,8 +20,8 @@ OUT = ROOT / "target" / "products"
 RAW = ROOT / "target" / "evidence" / os.environ.get("ASOF_BASELINE", "candidate")
 REFS = {
     "release": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
-    "parent": "e3104f444688ab3890c4b45f6098c28e052de7a8",
-    "candidate": "5540d317884b59c53a8a9f80ac7129b78314c694",
+    "parent": "5540d317884b59c53a8a9f80ac7129b78314c694",
+    "candidate": "f67422bac9c0e23a8d22e717422c7b5bb329f723",
 }
 
 
@@ -109,7 +109,7 @@ def compare(surface, name):
         command(sys.executable, RAW / "verify.py", next(RAW.glob("obs-job-*")))
     else:
         worker = ROOT / ("target/post-timer-worker-" + name)
-        checkout(worker, REFS["parent"])
+        checkout(worker, "e3104f444688ab3890c4b45f6098c28e052de7a8")
         patch = gzip.decompress((STUDY / "worker.patch.gz").read_bytes())
         command("git", "apply", "--check", input=patch, cwd=worker)
         command("git", "apply", input=patch, cwd=worker)

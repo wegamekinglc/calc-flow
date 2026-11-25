@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-admission-10m]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-left-order-10m]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -564,7 +564,7 @@ jobs:
           retention-days: 30
 
   asof-aligned-products:
-    if: inputs.mode == 'asof-admission-10m'
+    if: inputs.mode == 'asof-left-order-10m'
     runs-on: ubuntu-latest
     timeout-minutes: 125
     strategy:
@@ -608,7 +608,7 @@ jobs:
           retention-days: 14
 
   asof-aligned-compare:
-    if: inputs.mode == 'asof-admission-10m'
+    if: inputs.mode == 'asof-left-order-10m'
     needs: asof-aligned-products
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -616,7 +616,9 @@ jobs:
       fail-fast: false
       matrix:
         surface: [rust, python]
+        baseline: [release, parent]
     env:
+      ASOF_BASELINE: ${{ matrix.baseline }}
       PYTHONPATH: ${{ github.workspace }}
       STUDY: benchmarks/evidence/20261126-hosted-asof-aligned-run
       ASOF_CGROUP: asof-aligned-${{ github.run_id }}-${{ github.run_attempt }}
@@ -633,10 +635,10 @@ jobs:
           (cd "$STUDY" && sha256sum --quiet --check registered.sha256)
           uv venv target/study-venv
           uv pip sync --python target/study-venv/bin/python --require-hashes benchmarks/requirements.lock
-      - name: Verify ordinary baseline artifacts from run 45691470579
+      - name: Verify the registered baseline product from its original run
         env:
           GH_TOKEN: ${{ github.token }}
-        run: target/study-venv/bin/python "$STUDY/download_prior.py" "${{ matrix.surface }}"
+        run: target/study-venv/bin/python "$STUDY/download_prior.py" "${{ matrix.surface }}" "$ASOF_BASELINE"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: asof-product-${{ matrix.surface }}-candidate
@@ -650,9 +652,7 @@ jobs:
           cat /proc/self/status > target/evidence/controller.txt
           sudo mkdir "/sys/fs/cgroup/$ASOF_CGROUP"
           echo "$$" | sudo tee "/sys/fs/cgroup/$ASOF_CGROUP/cgroup.procs" >/dev/null
-          for baseline in release parent; do
-            ASOF_BASELINE="$baseline" target/study-venv/bin/python "$STUDY/hosted.py" compare "${{ matrix.surface }}" "$baseline"
-          done
+          exec target/study-venv/bin/python "$STUDY/hosted.py" compare "${{ matrix.surface }}" "$ASOF_BASELINE"
       - name: Seal raw results without installed packages or executables
         if: always()
         run: |
@@ -660,7 +660,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: asof-admission-10m-${{ matrix.surface }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: asof-left-order-10m-${{ matrix.surface }}-${{ matrix.baseline }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/asof-raw.tar.gz
           if-no-files-found: error
           retention-days: 30
