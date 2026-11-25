@@ -109,56 +109,49 @@ impl StreamAsofJoinOperator {
         } else {
             self.status.right.accepted_rows
         };
-        checked(&self.name, accepted_rows, validated.accepted)?;
-        let admitted = self.state.admit(
-            validated.index,
-            record.as_ref(),
-            validated.watermark,
-            self.spec.late_policy(),
-            &mut || context.check_cancelled(),
-        );
-        let summary = match admitted {
-            Ok(summary) => summary,
-            Err(error) => {
-                if matches!(
-                    error,
-                    CalcFlowError::OperatorReason {
-                        reason_code: StreamingFailureReason::AsofStateLimitExceeded,
-                        ..
-                    }
-                ) && admission::contains_duplicate_identity(
-                    record.as_ref(),
-                    validated.side(&self.spec),
-                    validated,
-                    &mut || context.check_cancelled(),
-                )
-                .unwrap_or(false)
-                {
-                    self.record_duplicate(validated.index)?;
-                    return Err(reason(
-                        &self.name,
-                        StreamingFailureReason::AsofDuplicateIdentity,
-                        "input contains a duplicate key/event-time/sequence identity",
-                    ));
+        let next_accepted = checked(&self.name, accepted_rows, validated.accepted)?;
+        let admitted = self.state.admit(record.as_ref(), validated, &mut || {
+            context.check_cancelled()
+        });
+        if let Err(error) = admitted {
+            if matches!(
+                error,
+                CalcFlowError::OperatorReason {
+                    reason_code: StreamingFailureReason::AsofStateLimitExceeded,
+                    ..
                 }
-                if matches!(
-                    error,
-                    CalcFlowError::OperatorReason {
-                        reason_code: StreamingFailureReason::AsofDuplicateIdentity,
-                        ..
-                    }
-                ) {
-                    self.record_duplicate(validated.index)?;
-                }
-                return Err(self.attempt_error(error));
+            ) && admission::contains_duplicate_identity(
+                record.as_ref(),
+                validated.side(&self.spec),
+                validated,
+                &mut || context.check_cancelled(),
+            )
+            .unwrap_or(false)
+            {
+                self.record_duplicate(validated.index)?;
+                return Err(reason(
+                    &self.name,
+                    StreamingFailureReason::AsofDuplicateIdentity,
+                    "input contains a duplicate key/event-time/sequence identity",
+                ));
             }
-        };
+            if matches!(
+                error,
+                CalcFlowError::OperatorReason {
+                    reason_code: StreamingFailureReason::AsofDuplicateIdentity,
+                    ..
+                }
+            ) {
+                self.record_duplicate(validated.index)?;
+            }
+            return Err(self.attempt_error(error));
+        }
         let status = if validated.index == 0 {
             &mut self.status.left
         } else {
             &mut self.status.right
         };
-        status.accepted_rows = checked(&self.name, status.accepted_rows, summary.accepted)?;
+        status.accepted_rows = next_accepted;
         self.swept = None;
         self.refresh_state_gauges();
         Ok(())
@@ -173,12 +166,18 @@ impl StreamAsofJoinOperator {
         if batches.len() == 1 {
             return Ok(Cow::Borrowed(&batches[0]));
         }
-        let charge = batches.iter().fold(0usize, |total, record| {
-            let accepted = admission::times(record, validated.side(&self.spec))
-                .values()
+        let full = validated.accepted
+            == batches
                 .iter()
-                .map(|time| !validated.is_late(*time))
-                .collect::<Vec<_>>();
+                .map(|record| record.num_rows() as u64)
+                .sum::<u64>();
+        let charge = batches.iter().fold(0usize, |total, record| {
+            let accepted = admission::AcceptedRows::for_record(
+                record,
+                validated.side(&self.spec),
+                validated,
+                full.then_some(record.num_rows()),
+            );
             total.saturating_add(columnar::logical_record_selection_charge(record, &accepted))
         });
         let reservation = match self

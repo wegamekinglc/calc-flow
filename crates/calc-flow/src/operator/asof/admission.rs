@@ -19,6 +19,38 @@ pub(super) struct ValidatedInput {
     pub accepted: u64,
 }
 
+pub(super) struct AcceptedRows {
+    pub(super) count: usize,
+    pub(super) mask: Option<Vec<bool>>,
+}
+
+impl AcceptedRows {
+    pub(super) fn all(count: usize) -> Self {
+        Self { count, mask: None }
+    }
+
+    pub(super) fn for_record(
+        record: &RecordBatch,
+        side: &AsofJoinSide,
+        input: ValidatedInput,
+        known_count: Option<usize>,
+    ) -> Self {
+        if known_count == Some(record.num_rows()) || input.watermark.is_none() {
+            return Self::all(record.num_rows());
+        }
+        let mask = times(record, side)
+            .values()
+            .iter()
+            .map(|time| !input.is_late(*time))
+            .collect::<Vec<_>>();
+        let count = known_count.unwrap_or_else(|| mask.iter().filter(|keep| **keep).count());
+        Self {
+            count,
+            mask: (count != record.num_rows()).then_some(mask),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct IngressFacts {
     watermark: Option<crate::EventTime>,

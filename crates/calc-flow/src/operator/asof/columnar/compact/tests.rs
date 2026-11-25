@@ -1,4 +1,4 @@
-use super::compact_accepted;
+use super::{AcceptedRows, compact_accepted};
 use datafusion::arrow::{
     array::{Array, Int64Array},
     datatypes::{DataType, Field, Schema},
@@ -20,10 +20,10 @@ fn full_admission_copies_only_the_logical_primitive_range() {
     )
     .unwrap()
     .slice(ROWS, ROWS);
-    let accepted = vec![true; ROWS];
+    let accepted = AcceptedRows::all(ROWS);
     let mut result = None;
     let memory = allocation_counter::measure(|| {
-        result = Some(compact_accepted(&input, &accepted, ROWS).unwrap());
+        result = Some(compact_accepted(&input, &accepted).unwrap());
     });
     let result = result.unwrap();
     assert_eq!(result, input);
@@ -55,7 +55,7 @@ fn full_copy_rebases_sliced_strings_and_preserves_temporal_metadata() {
     ])
     .unwrap()
     .slice(1, 3);
-    let copied = compact_accepted(&input, &[true; 3], 3).unwrap();
+    let copied = compact_accepted(&input, &AcceptedRows::all(3)).unwrap();
     assert_eq!(copied, input);
     for (expected, actual) in input.columns().iter().zip(copied.columns()) {
         let expected = expected.to_data();
@@ -86,9 +86,16 @@ fn nullable_and_partial_admission_preserve_selected_values() {
     let input =
         RecordBatch::try_from_iter([("text", strings as datafusion::arrow::array::ArrayRef)])
             .unwrap();
-    let all = compact_accepted(&input, &[true; 4], 4).unwrap();
+    let all = compact_accepted(&input, &AcceptedRows::all(4)).unwrap();
     assert_eq!(all, input);
-    let some = compact_accepted(&input, &[false, true, false, true], 2).unwrap();
+    let some = compact_accepted(
+        &input,
+        &AcceptedRows {
+            count: 2,
+            mask: Some(vec![false, true, false, true]),
+        },
+    )
+    .unwrap();
     let expected = StringArray::from(vec![None, Some("z")]);
     assert_eq!(some.column(0).to_data(), expected.to_data());
 }

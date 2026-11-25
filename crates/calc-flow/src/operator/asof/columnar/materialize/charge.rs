@@ -1,7 +1,7 @@
 use super::{ColumnarState, OutputPlan, RowLocator, Selection, SideLayout, invalid};
 use crate::Result;
 use crate::operator::asof::columnar::run::{
-    logical_array_indices_charge, logical_full_output_charge, logical_null_charge,
+    logical_array_indices_charge, logical_full_selection_charge, logical_null_charge,
 };
 use datafusion::arrow::buffer::BooleanBuffer;
 use std::collections::BTreeMap;
@@ -58,7 +58,7 @@ impl ColumnarState {
             let charge = records.iter().try_fold(total, |charge, record| {
                 columns
                     .clone()
-                    .map(|column| logical_full_output_charge(record.column(column)))
+                    .map(|column| logical_full_selection_charge(record.column(column)))
                     .try_fold(charge, add_charge)
             })?;
             return Ok((charge, SideLayout::Complete(records)));
@@ -70,7 +70,13 @@ impl ColumnarState {
                 .expect("selected live ASOF payload");
             total = columns
                 .clone()
-                .map(|column| logical_array_indices_charge(record.column(column), &rows))
+                .map(|column| {
+                    logical_array_indices_charge(
+                        record.column(column),
+                        rows.len(),
+                        rows.iter().copied(),
+                    )
+                })
                 .try_fold(total, add_charge)?;
         }
         Ok((
