@@ -1,0 +1,495 @@
+{
+  "actions_run": {
+    "id": 45596944021,
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "event": "workflow_dispatch",
+    "head_sha": "ea7a21cead99c424c1d4a6ce5dcf46abfc449aab",
+    "created_at": "2026-11-25T10:38:39Z",
+    "updated_at": "2026-11-25T14:43:02Z",
+    "html_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45596944021"
+  },
+  "public_release_baseline": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+  "native_comparison_baseline": "3f905765d802635edb455c4c40fd57685666aeb4",
+  "original_complete_summary_json_sha256": "2873f4990ad243f417145bf75b1388738865cde192c1f1410acd9727dc7ffb81",
+  "original_10m_shard_results_json_sha256": "6d2ff423b40ea054ac0d448c92db090e2abb095aa841518b9c437e888e55eb50",
+  "10m_shard_host_cpu_json": {
+    "lscpu": [
+      {
+        "field": "Architecture:",
+        "data": "x86_64"
+      },
+      {
+        "field": "CPU op-mode(s):",
+        "data": "32-bit, 64-bit"
+      },
+      {
+        "field": "Address sizes:",
+        "data": "48 bits physical, 48 bits virtual"
+      },
+      {
+        "field": "Byte Order:",
+        "data": "Little Endian"
+      },
+      {
+        "field": "CPU(s):",
+        "data": "4"
+      },
+      {
+        "field": "On-line CPU(s) list:",
+        "data": "0-3"
+      },
+      {
+        "field": "Vendor ID:",
+        "data": "AuthenticAMD"
+      },
+      {
+        "field": "Model name:",
+        "data": "AMD EPYC 7763 64-Core Processor"
+      },
+      {
+        "field": "CPU family:",
+        "data": "25"
+      },
+      {
+        "field": "Model:",
+        "data": "1"
+      },
+      {
+        "field": "Thread(s) per core:",
+        "data": "2"
+      },
+      {
+        "field": "Core(s) per socket:",
+        "data": "2"
+      },
+      {
+        "field": "Socket(s):",
+        "data": "1"
+      },
+      {
+        "field": "Stepping:",
+        "data": "1"
+      },
+      {
+        "field": "BogoMIPS:",
+        "data": "4890.86"
+      },
+      {
+        "field": "Flags:",
+        "data": "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid rdseed adx smap clflushopt clwb sha_ni xsaveopt xsavec xgetbv1 xsaves user_shstk clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload umip vaes vpclmulqdq rdpid fsrm"
+      },
+      {
+        "field": "Virtualization:",
+        "data": "AMD-V"
+      },
+      {
+        "field": "Hypervisor vendor:",
+        "data": "Microsoft"
+      },
+      {
+        "field": "Virtualization type:",
+        "data": "full"
+      },
+      {
+        "field": "L1d cache:",
+        "data": "64 KiB (2 instances)"
+      },
+      {
+        "field": "L1i cache:",
+        "data": "64 KiB (2 instances)"
+      },
+      {
+        "field": "L2 cache:",
+        "data": "1 MiB (2 instances)"
+      },
+      {
+        "field": "L3 cache:",
+        "data": "32 MiB (1 instance)"
+      },
+      {
+        "field": "NUMA node(s):",
+        "data": "1"
+      },
+      {
+        "field": "NUMA node0 CPU(s):",
+        "data": "0-3"
+      },
+      {
+        "field": "Vulnerability Gather data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Ghostwrite:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Indirect target selection:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Itlb multihit:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability L1tf:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Meltdown:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mmio stale data:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Old microcode:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Reg file data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Retbleed:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Spec rstack overflow:",
+        "data": "Vulnerable: Safe RET, no microcode"
+      },
+      {
+        "field": "Vulnerability Spec store bypass:",
+        "data": "Vulnerable"
+      },
+      {
+        "field": "Vulnerability Spectre v1:",
+        "data": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization"
+      },
+      {
+        "field": "Vulnerability Spectre v2:",
+        "data": "Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected"
+      },
+      {
+        "field": "Vulnerability Srbds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsa:",
+        "data": "Vulnerable: No microcode"
+      },
+      {
+        "field": "Vulnerability Tsx async abort:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Vmscape:",
+        "data": "Not affected"
+      }
+    ]
+  },
+  "sealed_10m_releases": {
+    "baseline": {
+      "contract": "benchmark-release-v1",
+      "source": "/home/runner/work/calc-flow/calc-flow/target/source",
+      "git_sha": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+      "git_clean": true,
+      "source_sha256": "89a899dc9a348cb40dceee85a2de5b9070be2115916d6f695614f3beda12e4c9",
+      "cargo_lock_sha256": "d2b0e0ea1469156fffda9aa0fa5d80fae1d9d1cb1437c63256c7e584141bd5e5",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "f9de88a70b5119bfa2dd0c46610c6e0e4b58d688b8f89725c63a59246d3582f7",
+      "native_sha256": "d35884118ae4a4f63e35f3542574f1377a7cdf035781142c90898bd1edbee522",
+      "build_profile": "release",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/runner/work/calc-flow/calc-flow/target/release"
+      ],
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "python": "3.13.18",
+      "python_executable": "/home/runner/work/calc-flow/calc-flow/target/benchmark-venv/bin/python",
+      "wheel_path": "/home/runner/work/calc-flow/calc-flow/target/releases/baseline/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl"
+    },
+    "candidate": {
+      "contract": "benchmark-release-v1",
+      "source": "/home/runner/work/calc-flow/calc-flow/target/source",
+      "git_sha": "ea7a21cead99c424c1d4a6ce5dcf46abfc449aab",
+      "git_clean": true,
+      "source_sha256": "d7321b12eab9360be7a3d0e71dec1466da87f326960a85445b1efbb8bed5e337",
+      "cargo_lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "13ed2512ea83111b488e83ec49bcc020b7556abb1f6683c2233982cd3e1fc72f",
+      "native_sha256": "059f6a1b944027d7add4a137d44aa965643fa1bd4fb044fa497a74abfccd1b5c",
+      "build_profile": "release",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/runner/work/calc-flow/calc-flow/target/release"
+      ],
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "python": "3.13.18",
+      "python_executable": "/home/runner/work/calc-flow/calc-flow/target/benchmark-venv/bin/python",
+      "wheel_path": "/home/runner/work/calc-flow/calc-flow/target/releases/candidate/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl"
+    }
+  },
+  "catalog": "https://github.com/wegamekinglc/calc-flow/blob/ea7a21cead99c424c1d4a6ce5dcf46abfc449aab/scripts/benchmark_suite/catalog.py",
+  "fixture": "https://github.com/wegamekinglc/calc-flow/blob/ea7a21cead99c424c1d4a6ce5dcf46abfc449aab/benchmarks/engine_comparison.py",
+  "artifacts": [
+    {
+      "id": 15033815380,
+      "name": "benchmark-suite-engines-10000000-45596944021-1",
+      "size_in_bytes": 15522481,
+      "digest": "sha256:895d188bbf88a902587947df903f390a5a4530a505332d43d9e326e8ff69857f",
+      "created_at": "2026-11-25T14:41:32Z",
+      "expires_at": "2026-12-25T14:41:25Z"
+    },
+    {
+      "id": 15032414978,
+      "name": "benchmark-complete-report-45596944021-1",
+      "size_in_bytes": 6956610,
+      "digest": "sha256:4c70ad28929d56d900dd538b844702d579f7aab09141c362e82f217825ebf3c0",
+      "created_at": "2026-11-25T14:42:59Z",
+      "expires_at": "2026-12-25T14:42:57Z"
+    },
+    {
+      "id": 15028179143,
+      "name": "benchmark-suite-rust-45596944021-1",
+      "size_in_bytes": 3153775,
+      "digest": "sha256:ff83e2d92cd9ba2223735138b0485be3911203babf300a000fd93fdf1808aa65",
+      "created_at": "2026-11-25T13:41:28Z",
+      "expires_at": "2026-12-25T13:41:26Z"
+    },
+    {
+      "id": 15020021885,
+      "name": "benchmark-suite-engines-1000000-45596944021-1",
+      "size_in_bytes": 22447183,
+      "digest": "sha256:90c260a2df86e13a618fd455dbfbd9726bae1c8fe0bc7682744775416084a063",
+      "created_at": "2026-11-25T12:06:58Z",
+      "expires_at": "2026-12-25T12:06:48Z"
+    },
+    {
+      "id": 15018302253,
+      "name": "benchmark-suite-python-nightly-45596944021-1",
+      "size_in_bytes": 1965989,
+      "digest": "sha256:301887f66f8835f5e7f8a9720cbd7d60ce53a757ed389c2775abb0bae7171861",
+      "created_at": "2026-11-25T11:43:40Z",
+      "expires_at": "2026-12-25T11:43:39Z"
+    },
+    {
+      "id": 15016795389,
+      "name": "benchmark-suite-engines-100-45596944021-1",
+      "size_in_bytes": 17097925,
+      "digest": "sha256:607013619b0053347df0c3d35e79d7df4d08ea5d7717aa370c64758829d01551",
+      "created_at": "2026-11-25T11:12:34Z",
+      "expires_at": "2026-12-25T11:12:25Z"
+    },
+    {
+      "id": 15016541865,
+      "name": "benchmark-suite-engines-10000-45596944021-1",
+      "size_in_bytes": 17138382,
+      "digest": "sha256:a416ecccba90659190d3c4aa664e8514ba0fb6f9671b75f153b42e91f854b386",
+      "created_at": "2026-11-25T11:15:25Z",
+      "expires_at": "2026-12-25T11:15:17Z"
+    },
+    {
+      "id": 15016455696,
+      "name": "benchmark-suite-engines-10-45596944021-1",
+      "size_in_bytes": 17052954,
+      "digest": "sha256:7c65a5d3af2135303f94f4d16729fdbd062245b622c89ad0a0ca065e70e74653",
+      "created_at": "2026-11-25T11:10:23Z",
+      "expires_at": "2026-12-25T11:10:18Z"
+    },
+    {
+      "id": 15016425896,
+      "name": "benchmark-suite-engines-1000-45596944021-1",
+      "size_in_bytes": 17117640,
+      "digest": "sha256:139569f12067e64b55a689fe2f30ea0d19e282b53e0c3d55a7372cd3102c0d74",
+      "created_at": "2026-11-25T11:10:19Z",
+      "expires_at": "2026-12-25T11:10:12Z"
+    },
+    {
+      "id": 15015918039,
+      "name": "benchmark-suite-engines-100000-45596944021-1",
+      "size_in_bytes": 22396619,
+      "digest": "sha256:fd95ada6e3625b59582831bc25acbcf0c33ea43e16d9ff67c166f0744b722d81",
+      "created_at": "2026-11-25T11:23:11Z",
+      "expires_at": "2026-12-25T11:23:01Z"
+    },
+    {
+      "id": 15015760074,
+      "name": "benchmark-suite-warm-100-45596944021-1",
+      "size_in_bytes": 380878,
+      "digest": "sha256:641916083ae871bd99fb0bec54399cc6d376852492ba764e9b19008b3df34fe9",
+      "created_at": "2026-11-25T10:59:53Z",
+      "expires_at": "2026-12-25T10:59:52Z"
+    },
+    {
+      "id": 15015598597,
+      "name": "benchmark-suite-python-standard-45596944021-1",
+      "size_in_bytes": 4122696,
+      "digest": "sha256:f9948a21e6e582849f8b2d1cd297048fd3e920cc54662ffdda247751e7a9295f",
+      "created_at": "2026-11-25T11:15:18Z",
+      "expires_at": "2026-12-25T11:15:15Z"
+    },
+    {
+      "id": 15015566246,
+      "name": "benchmark-suite-warm-1000000-45596944021-1",
+      "size_in_bytes": 2635783,
+      "digest": "sha256:bc633b1dd9eb0def6ed6bd2727f59d9020c2f28e9409aa65d7c667feb1498b9b",
+      "created_at": "2026-11-25T11:01:10Z",
+      "expires_at": "2026-12-25T11:01:07Z"
+    },
+    {
+      "id": 15015027043,
+      "name": "benchmark-suite-warm-10000-45596944021-1",
+      "size_in_bytes": 381548,
+      "digest": "sha256:2264804912e11bcaf4865ec6923ac8d851946f6894f9d0d0ff4b74b9ee294ca4",
+      "created_at": "2026-11-25T10:59:55Z",
+      "expires_at": "2026-12-25T10:59:55Z"
+    },
+    {
+      "id": 15015026917,
+      "name": "benchmark-build-baseline-45596944021-1",
+      "size_in_bytes": 809,
+      "digest": "sha256:0aaee9c0f1f042a57cc3b3310b96f5ac2b07f2cb68261b6aa8d2e3b06d4492fb",
+      "created_at": "2026-11-25T10:59:13Z",
+      "expires_at": "2026-12-25T10:59:12Z"
+    },
+    {
+      "id": 15014922808,
+      "name": "benchmark-decode-throughput-45596944021-1",
+      "size_in_bytes": 4416,
+      "digest": "sha256:c2747f51dfa409518d26efbbb1f04fdbebc8f50ecd1d151e3238d5f4089ae481",
+      "created_at": "2026-11-25T11:00:36Z",
+      "expires_at": "2026-12-25T11:00:35Z"
+    },
+    {
+      "id": 15014814052,
+      "name": "benchmark-suite-python-overhead-45596944021-1",
+      "size_in_bytes": 7049384,
+      "digest": "sha256:d9244f0ba2ffeba9957de0b592fea6293091fb7cb4b3974e8775a660e28ccc8f",
+      "created_at": "2026-11-25T11:02:32Z",
+      "expires_at": "2026-12-25T11:02:31Z"
+    },
+    {
+      "id": 15014813273,
+      "name": "benchmark-release-candidate-45596944021-1",
+      "size_in_bytes": 40718101,
+      "digest": "sha256:db201d4dff81338a81a0cc0eaf4b61e512238a64f9c81082cdb519a9d2c5b1e1",
+      "created_at": "2026-11-25T10:58:44Z",
+      "expires_at": "2026-12-25T10:58:40Z"
+    },
+    {
+      "id": 15014788676,
+      "name": "benchmark-suite-lifecycle-45596944021-1",
+      "size_in_bytes": 35566,
+      "digest": "sha256:d2c2a95e198be9472069cd4db2e1508506d549578ff20818bffbb057a0b2bac2",
+      "created_at": "2026-11-25T11:00:23Z",
+      "expires_at": "2026-12-25T11:00:22Z"
+    },
+    {
+      "id": 15014777771,
+      "name": "benchmark-suite-warm-10000000-45596944021-1",
+      "size_in_bytes": 382265,
+      "digest": "sha256:b17db5793458862300ff7d20b308ee20e84b613546bdb9eaba808a01cae5eea0",
+      "created_at": "2026-11-25T11:00:28Z",
+      "expires_at": "2026-12-25T11:00:27Z"
+    },
+    {
+      "id": 15014693964,
+      "name": "benchmark-suite-python-small-45596944021-1",
+      "size_in_bytes": 6040197,
+      "digest": "sha256:114966ccc962760d9a67d39cbc747b9a7f908a429907fd43259468382480f3ca",
+      "created_at": "2026-11-25T11:12:41Z",
+      "expires_at": "2026-12-25T11:12:39Z"
+    },
+    {
+      "id": 15014643109,
+      "name": "benchmark-release-baseline-45596944021-1",
+      "size_in_bytes": 41292065,
+      "digest": "sha256:6213d31784616f8263e443724c14080b8eff02f43a857d86a42ef8b79c29437f",
+      "created_at": "2026-11-25T10:59:12Z",
+      "expires_at": "2026-12-25T10:59:10Z"
+    },
+    {
+      "id": 15014514282,
+      "name": "benchmark-release-rust-baseline-45596944021-1",
+      "size_in_bytes": 40703614,
+      "digest": "sha256:73503236feffdc0c588c31bc80934866de18bcd9ca0a432f43c794f6c5c2da2d",
+      "created_at": "2026-11-25T10:59:15Z",
+      "expires_at": "2026-12-25T10:59:14Z"
+    },
+    {
+      "id": 15014414495,
+      "name": "benchmark-build-rust-baseline-45596944021-1",
+      "size_in_bytes": 812,
+      "digest": "sha256:42058c00c7b268a06dcc9fc2b7cc966deeefc7bbc10290cfdf4ef92c5fd147d3",
+      "created_at": "2026-11-25T10:59:16Z",
+      "expires_at": "2026-12-25T10:59:16Z"
+    },
+    {
+      "id": 15014213836,
+      "name": "benchmark-build-candidate-45596944021-1",
+      "size_in_bytes": 812,
+      "digest": "sha256:a484f85aeaa7dff06e0c59f67149cdbcbc0a362fb9098f282b3b8bd5f5455dc4",
+      "created_at": "2026-11-25T10:58:45Z",
+      "expires_at": "2026-12-25T10:58:44Z"
+    },
+    {
+      "id": 15014194198,
+      "name": "benchmark-suite-warm-10-45596944021-1",
+      "size_in_bytes": 380756,
+      "digest": "sha256:e4117565c79e5381f55058ab7d128c718708c5e013483308743b7ab62f6fe6b9",
+      "created_at": "2026-11-25T11:00:32Z",
+      "expires_at": "2026-12-25T11:00:30Z"
+    },
+    {
+      "id": 15013574539,
+      "name": "benchmark-suite-warm-1000-45596944021-1",
+      "size_in_bytes": 381336,
+      "digest": "sha256:ae4ce02c845b733e5047304eca7147be43c8cb3a1df4362ce62181b115a6cb8a",
+      "created_at": "2026-11-25T11:00:04Z",
+      "expires_at": "2026-12-25T11:00:02Z"
+    },
+    {
+      "id": 15013399799,
+      "name": "benchmark-suite-warm-100000-45596944021-1",
+      "size_in_bytes": 381625,
+      "digest": "sha256:562f257c115e318217fd1f984f6706dfb5b7719f25797e99e5b621c67addf4a4",
+      "created_at": "2026-11-25T11:00:07Z",
+      "expires_at": "2026-12-25T11:00:05Z"
+    }
+  ],
+  "summary": {
+    "scheduled_rows": 1295,
+    "independently_verified_paired_cases": 500,
+    "10m_shard_rows_crossmatched": 106,
+    "qualifying_regressions": 30,
+    "invalid_evidence_rows": 0,
+    "other_report_errors": 0,
+    "regressions_by_surface_backend": {
+      "python-public-managed-stream/calc-flow-stream-1t": 15,
+      "python-public-managed-stream/calc-flow-stream": 15
+    }
+  }
+}
