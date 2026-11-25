@@ -1,0 +1,32 @@
+{
+  "state": "complete",
+  "checked_observations": 44,
+  "products": {
+    "release": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+    "main": "9aed8b4b20156a460369d0765c4bc9e42e0925e5"
+  },
+  "traced": {
+    "release": "5bcb93cc78afa6e5d12c386e435487b535508c79",
+    "main": "964d34918239ef59cdd5823df1c27bd88115971f"
+  },
+  "mean_paired_delta_ms": {
+    "watermark_ns": -2.15359395,
+    "left_commit_ns": 0.1950836,
+    "left_check_ns": 0.11954075,
+    "left_prepare_ns": -0.0072387,
+    "left_apply_ns": 0.08500655,
+    "left_other_ns": -0.002225
+  },
+  "ordinary_p50_ms": {
+    "release": 8.4672175,
+    "main": 6.126806500000001
+  },
+  "group_preflight_utc": {
+    "ordinary": "2026-11-25 15:46:49 UTC",
+    "traced": "2026-11-25 17:47:38 UTC"
+  },
+  "traced_vs_prior_ordinary_p50_percent": {
+    "release": -15.195044889303954,
+    "main": -14.83790943944453
+  }
+}
