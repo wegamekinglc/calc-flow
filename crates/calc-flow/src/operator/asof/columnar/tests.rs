@@ -1157,17 +1157,17 @@ fn small_right_watermark_steps_only_touch_remaining_identity_rows() {
 fn right_only_watermark_reclaims_restored_spare_on_empty_columns() {
     let declaration = spec(0, 64, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4 << 20));
-    let mut source = state(&declaration, &pool);
-    admit(&mut source, 1, &record(&[(1, 0, 0, None)])).unwrap();
-    admit(&mut source, 0, &record(&[(2, 0, 0, None)])).unwrap();
     let right_only = |watermark| super::Progress {
         right_watermark: Some(watermark),
         ..super::Progress::default()
     };
-    assert_eq!(source.evict(right_only(1)).identities, 1);
-    for new_identity in [false, true] {
-        if new_identity {
-            admit(&mut source, 1, &record(&[(1, 1, 1, None)])).unwrap();
+    for new_identities in [false, true] {
+        let mut source = state(&declaration, &pool);
+        admit(&mut source, 1, &record(&[(1, 0, 0, None)])).unwrap();
+        admit(&mut source, 0, &record(&[(2, 0, 0, None)])).unwrap();
+        assert_eq!(source.evict(right_only(1)).identities, 1);
+        if new_identities {
+            admit(&mut source, 1, &record(&[(1, 1, 1, None), (1, 2, 2, None)])).unwrap();
         }
         let mut capacity = source.index_capacities();
         let slot = size_of::<super::RowLocator>() as u64;
@@ -1186,10 +1186,15 @@ fn right_only_watermark_reclaims_restored_spare_on_empty_columns() {
         )
         .unwrap();
         let before = restored.persistent_bytes();
-        let evicted = restored.evict(right_only(2));
+        super::state::BULK_IDENTITY_RUN_VISITS.set(0);
+        let evicted = restored.evict(right_only(3));
+        assert_eq!(
+            super::state::BULK_IDENTITY_RUN_VISITS.get(),
+            2 * usize::from(new_identities)
+        );
         assert_eq!(
             (evicted.payloads, evicted.identities),
-            (0, u64::from(new_identity))
+            (0, 2 * u64::from(new_identities))
         );
         let after = restored.index_capacities();
         assert_eq!(after.right_identities[1], 0);
