@@ -1,0 +1,90 @@
+{
+  "main": {
+    "verified": {
+      "case": "admit",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 3,
+      "verdict": "improved"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "admit",
+      "cpu": 0,
+      "rounds": [
+        {
+          "median": -35.87498217609162,
+          "low": -38.211037290119634,
+          "high": -32.434472782828536,
+          "coverage": 0.978515625
+        },
+        {
+          "median": -35.98150735755489,
+          "low": -38.06940487523599,
+          "high": -32.09340683564591,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "improved",
+      "pooled_ms": {
+        "base": {
+          "p50": 12.697418500000001,
+          "p95": 13.18811955
+        },
+        "head": {
+          "p50": 8.116583499999999,
+          "p95": 8.6621378
+        }
+      },
+      "wall_seconds": 5.039126705029048
+    },
+    "secondary_admission_p50_ms": {
+      "base": 15.818439999999999,
+      "head": 16.0183225
+    }
+  },
+  "release": {
+    "verified": {
+      "case": "admit",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 3,
+      "verdict": "regression"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "admit",
+      "cpu": 2,
+      "rounds": [
+        {
+          "median": 12.589501273970527,
+          "low": 6.840202840274423,
+          "high": 14.94935673994917,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 13.274627614532296,
+          "low": 8.098276031170371,
+          "high": 19.867555487782585,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 7.421395,
+          "p95": 7.753053200000001
+        },
+        "head": {
+          "p50": 8.3090805,
+          "p95": 8.80939645
+        }
+      },
+      "wall_seconds": 5.03760451299604
+    },
+    "secondary_admission_p50_ms": {
+      "base": 17.610423500000003,
+      "head": 16.0228205
+    }
+  }
+}
