@@ -627,17 +627,23 @@ class EngineCase:
             raise ValueError("engine output columns differ from the oracle")
         if result.num_rows != self.expected.num_rows:
             raise ValueError("engine output row count differs from the oracle")
-        key = (
-            [("window_start", "ascending"), ("symbol", "ascending")]
-            if self.case["scenario"] == "window_sum"
-            else "symbol"
-            if self.case["scenario"] == "group_by"
-            else [("sequence", "ascending"), ("right_sequence", "ascending")]
-            if self.case["scenario"] == "interval_join"
-            else "sequence"
-        )
-        expected = self.expected.sort_by(key)
-        result = result.sort_by(key)
+        expected = self.expected
+        scenario = self.case["scenario"]
+        if not (
+            scenario == "asof_join"
+            and self.case["backend"].startswith("calc-flow-stream")
+        ):
+            key = (
+                [("window_start", "ascending"), ("symbol", "ascending")]
+                if scenario == "window_sum"
+                else "symbol"
+                if scenario == "group_by"
+                else [("sequence", "ascending"), ("right_sequence", "ascending")]
+                if scenario == "interval_join"
+                else "sequence"
+            )
+            expected = expected.sort_by(key)
+            result = result.sort_by(key)
         for name in expected.column_names:
             if name != "value" and not result[name].cast(expected[name].type).equals(
                 expected[name]
