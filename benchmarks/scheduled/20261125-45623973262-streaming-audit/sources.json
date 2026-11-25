@@ -1,0 +1,496 @@
+{
+  "actions_run": {
+    "id": 45623973262,
+    "run_attempt": 1,
+    "status": "completed",
+    "conclusion": "failure",
+    "event": "workflow_dispatch",
+    "head_sha": "de20f8216c8dcb1bfce3e3811c3884a3080157df",
+    "created_at": "2026-11-25T13:28:39Z",
+    "updated_at": "2026-11-25T16:17:25Z",
+    "html_url": "https://github.com/wegamekinglc/calc-flow/actions/runs/45623973262"
+  },
+  "public_release_baseline": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+  "native_comparison_baseline": "723df09bcb6d90e5c577d4aa1b1309221a1351e3",
+  "original_complete_summary_json_sha256": "46802f146f5c182a44c5b38d75dbe4173978c154eb7b25f3f8e47d99effc875b",
+  "original_10m_shard_results_json_sha256": "86602230bb0fd65f349c0dc5981f42328da408728c5cc6156a1f7302e6737d6e",
+  "10m_shard_host_cpu_json": {
+    "lscpu": [
+      {
+        "field": "Architecture:",
+        "data": "x86_64"
+      },
+      {
+        "field": "CPU op-mode(s):",
+        "data": "32-bit, 64-bit"
+      },
+      {
+        "field": "Address sizes:",
+        "data": "48 bits physical, 48 bits virtual"
+      },
+      {
+        "field": "Byte Order:",
+        "data": "Little Endian"
+      },
+      {
+        "field": "CPU(s):",
+        "data": "4"
+      },
+      {
+        "field": "On-line CPU(s) list:",
+        "data": "0-3"
+      },
+      {
+        "field": "Vendor ID:",
+        "data": "AuthenticAMD"
+      },
+      {
+        "field": "Model name:",
+        "data": "AMD EPYC 9V45 96-Core Processor"
+      },
+      {
+        "field": "CPU family:",
+        "data": "26"
+      },
+      {
+        "field": "Model:",
+        "data": "2"
+      },
+      {
+        "field": "Thread(s) per core:",
+        "data": "2"
+      },
+      {
+        "field": "Core(s) per socket:",
+        "data": "2"
+      },
+      {
+        "field": "Socket(s):",
+        "data": "1"
+      },
+      {
+        "field": "Stepping:",
+        "data": "1"
+      },
+      {
+        "field": "BogoMIPS:",
+        "data": "5192.19"
+      },
+      {
+        "field": "Flags:",
+        "data": "fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl xtopology tsc_reliable nonstop_tsc cpuid extd_apicid aperfmperf tsc_known_freq pni pclmulqdq ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand hypervisor lahf_lm cmp_legacy svm cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw topoext vmmcall fsgsbase bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves user_shstk avx_vnni avx512_bf16 clzero xsaveerptr rdpru arat npt nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold v_vmsave_vmload avx512vbmi umip avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid fsrm avx512_vp2intersect"
+      },
+      {
+        "field": "Virtualization:",
+        "data": "AMD-V"
+      },
+      {
+        "field": "Hypervisor vendor:",
+        "data": "Microsoft"
+      },
+      {
+        "field": "Virtualization type:",
+        "data": "full"
+      },
+      {
+        "field": "L1d cache:",
+        "data": "96 KiB (2 instances)"
+      },
+      {
+        "field": "L1i cache:",
+        "data": "64 KiB (2 instances)"
+      },
+      {
+        "field": "L2 cache:",
+        "data": "2 MiB (2 instances)"
+      },
+      {
+        "field": "L3 cache:",
+        "data": "32 MiB (1 instance)"
+      },
+      {
+        "field": "NUMA node(s):",
+        "data": "1"
+      },
+      {
+        "field": "NUMA node0 CPU(s):",
+        "data": "0-3"
+      },
+      {
+        "field": "Vulnerability Gather data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Ghostwrite:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Indirect target selection:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Itlb multihit:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability L1tf:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Meltdown:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Mmio stale data:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Old microcode:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Reg file data sampling:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Retbleed:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Spec rstack overflow:",
+        "data": "Vulnerable: Safe RET, no microcode"
+      },
+      {
+        "field": "Vulnerability Spec store bypass:",
+        "data": "Vulnerable"
+      },
+      {
+        "field": "Vulnerability Spectre v1:",
+        "data": "Mitigation; usercopy/swapgs barriers and __user pointer sanitization"
+      },
+      {
+        "field": "Vulnerability Spectre v2:",
+        "data": "Mitigation; Retpolines; STIBP disabled; RSB filling; PBRSB-eIBRS Not affected; BHI Not affected"
+      },
+      {
+        "field": "Vulnerability Srbds:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsa:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Tsx async abort:",
+        "data": "Not affected"
+      },
+      {
+        "field": "Vulnerability Vmscape:",
+        "data": "Not affected"
+      }
+    ]
+  },
+  "sealed_10m_releases": {
+    "baseline": {
+      "contract": "benchmark-release-v1",
+      "source": "/home/runner/work/calc-flow/calc-flow/target/source",
+      "git_sha": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
+      "git_clean": true,
+      "source_sha256": "89a899dc9a348cb40dceee85a2de5b9070be2115916d6f695614f3beda12e4c9",
+      "cargo_lock_sha256": "d2b0e0ea1469156fffda9aa0fa5d80fae1d9d1cb1437c63256c7e584141bd5e5",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "5f828e93ef71e2f72424a37f54a068fdc8ac95a771612538ddd425a4e1eeb451",
+      "native_sha256": "d35884118ae4a4f63e35f3542574f1377a7cdf035781142c90898bd1edbee522",
+      "build_profile": "release",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/runner/work/calc-flow/calc-flow/target/release"
+      ],
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "python": "3.13.18",
+      "python_executable": "/home/runner/work/calc-flow/calc-flow/target/benchmark-venv/bin/python",
+      "wheel_path": "/home/runner/work/calc-flow/calc-flow/target/releases/baseline/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl"
+    },
+    "candidate": {
+      "contract": "benchmark-release-v1",
+      "source": "/home/runner/work/calc-flow/calc-flow/target/source",
+      "git_sha": "de20f8216c8dcb1bfce3e3811c3884a3080157df",
+      "git_clean": true,
+      "source_sha256": "2d8f26038327636de09bedc9d19b16090becc3295267d5db138f6ea1211c92a8",
+      "cargo_lock_sha256": "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72",
+      "wheel": "calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl",
+      "wheel_sha256": "3b1e1a5c993313d3fbaa0f4407faed00bea9eaa259669bd2cfb18a9a86cb3db0",
+      "native_sha256": "0b9cc7a418e5709aac5cb2242d8b1ce1f8aeff8159e7b8d9f74822bdf2809370",
+      "build_profile": "release",
+      "command": [
+        "python",
+        "-m",
+        "maturin",
+        "build",
+        "--release",
+        "--locked",
+        "--features",
+        "pyo3/abi3-py313",
+        "--out",
+        "/home/runner/work/calc-flow/calc-flow/target/release"
+      ],
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)\nbinary: rustc\ncommit-hash: 4a4ef493e3a1488c6e321570238084b38948f6db\ncommit-date: 2026-03-02\nhost: x86_64-unknown-linux-gnu\nrelease: 1.94.0\nLLVM version: 21.1.8",
+      "python": "3.13.18",
+      "python_executable": "/home/runner/work/calc-flow/calc-flow/target/benchmark-venv/bin/python",
+      "wheel_path": "/home/runner/work/calc-flow/calc-flow/target/releases/candidate/calc_flow_python-2026.11.14-cp313-abi3-linux_x86_64.whl"
+    }
+  },
+  "catalog": "https://github.com/wegamekinglc/calc-flow/blob/de20f8216c8dcb1bfce3e3811c3884a3080157df/scripts/benchmark_suite/catalog.py",
+  "fixture": "https://github.com/wegamekinglc/calc-flow/blob/de20f8216c8dcb1bfce3e3811c3884a3080157df/benchmarks/engine_comparison.py",
+  "artifacts": [
+    {
+      "id": 15041826086,
+      "name": "benchmark-suite-engines-10000000-45623973262-1",
+      "size_in_bytes": 15531227,
+      "digest": "sha256:38d8dcee89e592e067a0bf004ad4eef9bbdd49c6e433c331b2885ea1adb1263d",
+      "created_at": "2026-11-25T16:16:42Z",
+      "expires_at": "2026-12-25T16:16:37Z"
+    },
+    {
+      "id": 15041601764,
+      "name": "benchmark-complete-report-45623973262-1",
+      "size_in_bytes": 6520489,
+      "digest": "sha256:3450c877f77ca3c48e25717b2ac935cffa3d19cd6cbe3b7ccf4f2ee3472ec201",
+      "created_at": "2026-11-25T16:17:22Z",
+      "expires_at": "2026-12-25T16:17:20Z"
+    },
+    {
+      "id": 15040836578,
+      "name": "benchmark-suite-rust-45623973262-1",
+      "size_in_bytes": 3160104,
+      "digest": "sha256:8aba0bd4402a2841d0d72084549430162beaf37f85829e7d8ea21560b388f90f",
+      "created_at": "2026-11-25T16:13:30Z",
+      "expires_at": "2026-12-25T16:13:28Z"
+    },
+    {
+      "id": 15035372449,
+      "name": "benchmark-suite-engines-1000000-45623973262-1",
+      "size_in_bytes": 22455164,
+      "digest": "sha256:ae0abbbf7faa980c761e519d9561c4234254eb30eee0a415e59bbe8cb3083916",
+      "created_at": "2026-11-25T15:03:43Z",
+      "expires_at": "2026-12-25T15:03:33Z"
+    },
+    {
+      "id": 15033105206,
+      "name": "benchmark-suite-python-nightly-45623973262-1",
+      "size_in_bytes": 2033980,
+      "digest": "sha256:7ed3a1aeb988726f8edd5e5cffecab5b0b0730763d071a80839d775e0cf0c511",
+      "created_at": "2026-11-25T14:31:32Z",
+      "expires_at": "2026-12-25T14:31:30Z"
+    },
+    {
+      "id": 15031465464,
+      "name": "benchmark-suite-engines-100000-45623973262-1",
+      "size_in_bytes": 22375248,
+      "digest": "sha256:9da0e8f916c88d3e035e24995d91429b8a9fa0775b30e8d4150f6c0214c63e44",
+      "created_at": "2026-11-25T14:11:13Z",
+      "expires_at": "2026-12-25T14:11:06Z"
+    },
+    {
+      "id": 15030995307,
+      "name": "benchmark-suite-engines-10-45623973262-1",
+      "size_in_bytes": 17063858,
+      "digest": "sha256:d38ea8cfffbb7529c0e3661de008201d30eb1715ea8467c745cf689cc001a54f",
+      "created_at": "2026-11-25T14:03:20Z",
+      "expires_at": "2026-12-25T14:03:15Z"
+    },
+    {
+      "id": 15030455182,
+      "name": "benchmark-suite-warm-10-45623973262-1",
+      "size_in_bytes": 381161,
+      "digest": "sha256:953cbbf06acb7c1d4d48f6e822bcdad89b32a6fdea0a414aeb95f72eccd70410",
+      "created_at": "2026-11-25T13:54:19Z",
+      "expires_at": "2026-12-25T13:54:17Z"
+    },
+    {
+      "id": 15030440038,
+      "name": "benchmark-release-baseline-45623973262-1",
+      "size_in_bytes": 41292072,
+      "digest": "sha256:28aab3e51c9421764301317e855c52a04096d775f6e6f95d4eef6342ae5c7458",
+      "created_at": "2026-11-25T13:53:13Z",
+      "expires_at": "2026-12-25T13:53:10Z"
+    },
+    {
+      "id": 15030367809,
+      "name": "benchmark-suite-python-standard-45623973262-1",
+      "size_in_bytes": 3915121,
+      "digest": "sha256:027e37ddb21a59f988df277df90b789244f936dd079b4fabe82f6062c7f080b1",
+      "created_at": "2026-11-25T14:09:25Z",
+      "expires_at": "2026-12-25T14:09:24Z"
+    },
+    {
+      "id": 15030255342,
+      "name": "benchmark-build-baseline-45623973262-1",
+      "size_in_bytes": 808,
+      "digest": "sha256:d922878cd3f07a260fc88075f929ab413c7a5b1d8b5414356830f6742edd52f1",
+      "created_at": "2026-11-25T13:53:14Z",
+      "expires_at": "2026-12-25T13:53:13Z"
+    },
+    {
+      "id": 15030101529,
+      "name": "benchmark-suite-lifecycle-45623973262-1",
+      "size_in_bytes": 37669,
+      "digest": "sha256:a21cb7566f464cc6404a5822334f67d83b9d653658f8cc30af16e90df62ea2d1",
+      "created_at": "2026-11-25T13:54:04Z",
+      "expires_at": "2026-12-25T13:54:02Z"
+    },
+    {
+      "id": 15029906091,
+      "name": "benchmark-suite-warm-1000-45623973262-1",
+      "size_in_bytes": 381618,
+      "digest": "sha256:122f09a4b73bb71a3612f815eeafaa3ff05ea1ca26d585af77926ed5e5cfab9e",
+      "created_at": "2026-11-25T13:53:53Z",
+      "expires_at": "2026-12-25T13:53:52Z"
+    },
+    {
+      "id": 15029782140,
+      "name": "benchmark-suite-warm-1000000-45623973262-1",
+      "size_in_bytes": 2640248,
+      "digest": "sha256:112c493241ddc00c5a76dc83c1b1faf5af1a70ec37807878f247799415a283f7",
+      "created_at": "2026-11-25T13:55:34Z",
+      "expires_at": "2026-12-25T13:55:31Z"
+    },
+    {
+      "id": 15029757649,
+      "name": "benchmark-suite-python-overhead-45623973262-1",
+      "size_in_bytes": 6088664,
+      "digest": "sha256:1289728e500d0507c4bcc954c9fe4c6164999bd83f454d4762f00cbb37bd7a1b",
+      "created_at": "2026-11-25T13:57:24Z",
+      "expires_at": "2026-12-25T13:57:21Z"
+    },
+    {
+      "id": 15029741833,
+      "name": "benchmark-suite-warm-10000000-45623973262-1",
+      "size_in_bytes": 382031,
+      "digest": "sha256:dd0352fb0975fc319c7ae58905659a8292ce35c34ebfec37238fd6306c7f6d6e",
+      "created_at": "2026-11-25T13:54:21Z",
+      "expires_at": "2026-12-25T13:54:20Z"
+    },
+    {
+      "id": 15029540297,
+      "name": "benchmark-release-candidate-45623973262-1",
+      "size_in_bytes": 40720657,
+      "digest": "sha256:aca0ee3e3d078843c8f91d160af9299e9b4dc747f32bab4587d92a7b7515eb36",
+      "created_at": "2026-11-25T13:45:44Z",
+      "expires_at": "2026-12-25T13:45:42Z"
+    },
+    {
+      "id": 15029516546,
+      "name": "benchmark-decode-throughput-45623973262-1",
+      "size_in_bytes": 4437,
+      "digest": "sha256:e58648bbf81eeb36ed6cf562e449cb32930aca410cb1d3aa0f7f227ef7659432",
+      "created_at": "2026-11-25T13:50:43Z",
+      "expires_at": "2026-12-25T13:50:43Z"
+    },
+    {
+      "id": 15029321533,
+      "name": "benchmark-suite-warm-100-45623973262-1",
+      "size_in_bytes": 380855,
+      "digest": "sha256:a64e9b88f81684ff959802409e033606d40aaca1e996335dac416b65d02860a6",
+      "created_at": "2026-11-25T13:53:57Z",
+      "expires_at": "2026-12-25T13:53:56Z"
+    },
+    {
+      "id": 15029321171,
+      "name": "benchmark-build-rust-baseline-45623973262-1",
+      "size_in_bytes": 808,
+      "digest": "sha256:e1665a8b14ff361204b8cf327255717ce5ebab8a73cc3ffbeacc8d19f098862b",
+      "created_at": "2026-11-25T13:51:47Z",
+      "expires_at": "2026-12-25T13:51:47Z"
+    },
+    {
+      "id": 15029298463,
+      "name": "benchmark-suite-engines-100-45623973262-1",
+      "size_in_bytes": 17106460,
+      "digest": "sha256:274d4dfb7a464c1f2ae4b50c01855e9e7f26fe5fcd70aa68e2a10f23ed39aa0d",
+      "created_at": "2026-11-25T14:05:03Z",
+      "expires_at": "2026-12-25T14:04:56Z"
+    },
+    {
+      "id": 15029237362,
+      "name": "benchmark-suite-python-small-45623973262-1",
+      "size_in_bytes": 5828917,
+      "digest": "sha256:6f0cc15c47b44e7e21b56d492a24f93edcef2b08b6127c416f5b5cdb510acdf4",
+      "created_at": "2026-11-25T13:57:45Z",
+      "expires_at": "2026-12-25T13:57:43Z"
+    },
+    {
+      "id": 15029213887,
+      "name": "benchmark-suite-engines-1000-45623973262-1",
+      "size_in_bytes": 17124641,
+      "digest": "sha256:05c4e59af1d9a7336631ad4e0d4712a0c5b79a455d1123b26990497d6530989f",
+      "created_at": "2026-11-25T14:06:07Z",
+      "expires_at": "2026-12-25T14:06:00Z"
+    },
+    {
+      "id": 15029206802,
+      "name": "benchmark-suite-warm-10000-45623973262-1",
+      "size_in_bytes": 381975,
+      "digest": "sha256:5822dffbbceab4e7401b04b67e0a5ddc9fd675f55abf3afaa1905650723150a3",
+      "created_at": "2026-11-25T13:54:07Z",
+      "expires_at": "2026-12-25T13:54:06Z"
+    },
+    {
+      "id": 15029204487,
+      "name": "benchmark-suite-engines-10000-45623973262-1",
+      "size_in_bytes": 17146811,
+      "digest": "sha256:6de71090e694d8c56ae14e0de00a22be020e7e7ee48edb6b0a3b8e72ff0073af",
+      "created_at": "2026-11-25T14:08:47Z",
+      "expires_at": "2026-12-25T14:08:39Z"
+    },
+    {
+      "id": 15028886846,
+      "name": "benchmark-release-rust-baseline-45623973262-1",
+      "size_in_bytes": 40723043,
+      "digest": "sha256:fc9512a1771bd91809c1271211bf03930785c9c2699498ab8e77ce4cfbcf96e4",
+      "created_at": "2026-11-25T13:51:46Z",
+      "expires_at": "2026-12-25T13:51:45Z"
+    },
+    {
+      "id": 15028664095,
+      "name": "benchmark-suite-warm-100000-45623973262-1",
+      "size_in_bytes": 382264,
+      "digest": "sha256:0912d5131e92cdd7d4ba7799724478871d5c9b48ee0ba2c2f4e3c75f05b18154",
+      "created_at": "2026-11-25T13:54:04Z",
+      "expires_at": "2026-12-25T13:54:02Z"
+    },
+    {
+      "id": 15027629937,
+      "name": "benchmark-build-candidate-45623973262-1",
+      "size_in_bytes": 809,
+      "digest": "sha256:4b59862d2caa2617e383c63bf71a1a54ae2c24cfd74111d08bc6912c68fdd0b3",
+      "created_at": "2026-11-25T13:45:45Z",
+      "expires_at": "2026-12-25T13:45:44Z"
+    }
+  ],
+  "summary": {
+    "scheduled_rows": 1295,
+    "independently_verified_paired_cases": 500,
+    "10m_shard_rows_crossmatched": 106,
+    "qualifying_regressions": 21,
+    "invalid_evidence_rows": 0,
+    "other_report_errors": 0,
+    "regressions_by_surface_backend": {
+      "python-public-managed-stream/calc-flow-stream-1t": 10,
+      "python-public-managed-stream/calc-flow-stream": 10,
+      "python-public-warm-stream/calc-flow-stream": 1
+    }
+  }
+}

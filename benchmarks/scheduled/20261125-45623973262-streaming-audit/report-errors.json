@@ -1,0 +1,26 @@
+{
+  "regression_errors": [
+    "engines/10000/calc-flow-stream-1t/unique64: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream-1t/asof_join: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream-1t/interval_join/batch-1024/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream-1t/join/batch-1000000/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream-1t/join/batch-1024/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream/asof_join: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream/interval_join/batch-1024/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream/join/batch-1000000/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/100000/calc-flow-stream/join/batch-1024/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/1000000/calc-flow-stream-1t/asof_join: repeated regression exceeds +5%",
+    "engines/1000000/calc-flow-stream-1t/interval_join/batch-1024/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/1000000/calc-flow-stream/asof_join/batch-1000000/checkpoint-100ms-duration-recovery: repeated regression exceeds +5%",
+    "engines/1000000/calc-flow-stream/asof_join: repeated regression exceeds +5%",
+    "engines/1000000/calc-flow-stream/unique64: repeated regression exceeds +5%",
+    "engines/10000000/calc-flow-stream-1t/asof_join: repeated regression exceeds +5%",
+    "engines/10000000/calc-flow-stream-1t/dual_sma: repeated regression exceeds +5%",
+    "engines/10000000/calc-flow-stream-1t/unique64: repeated regression exceeds +5%",
+    "engines/10000000/calc-flow-stream/asof_join: repeated regression exceeds +5%",
+    "engines/10000000/calc-flow-stream/dual_sma: repeated regression exceeds +5%",
+    "engines/10000000/calc-flow-stream/sma20: repeated regression exceeds +5%",
+    "warm/1000000/64000/sma20: repeated regression exceeds +5%"
+  ],
+  "other_report_errors": []
+}
