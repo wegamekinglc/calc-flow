@@ -388,7 +388,7 @@ fn compare_time_sequence(
     left_run
         .time(left)
         .cmp(&right_run.time(right))
-        .then_with(|| left_run.sequence(left).cmp(right_run.sequence(right)))
+        .then_with(|| left_run.compare_sequence(left, right_run, right))
 }
 
 fn compare_left(
@@ -907,10 +907,12 @@ impl ColumnarState {
             let current =
                 SequenceColumn::from_names(&record.slice(row, 1), declaration.sequence_by())?;
             check()?;
-            if resident.rows()[start..end]
-                .iter()
-                .any(|locator| runs[&locator.run].sequence(*locator) == current.value(0))
-            {
+            if resident.rows()[start..end].iter().any(|locator| {
+                runs[&locator.run]
+                    .sequences()
+                    .compare(locator.row as usize, &current, 0)
+                    .is_eq()
+            }) {
                 return Ok(true);
             }
         }
@@ -1622,8 +1624,8 @@ impl ColumnarState {
                 .get_mut(&locator.run)
                 .expect("selected ASOF left run");
             let before = run.charge();
-            run.drop_payload(locator);
             run.drop_identity(locator);
+            run.drop_payload(locator);
             let after = run.charge();
             self.run_bytes = self.run_bytes - before + after;
         }

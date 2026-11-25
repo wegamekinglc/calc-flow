@@ -2063,3 +2063,123 @@ fn test_duplicate_left_commit_rejects_stale_selection_without_retiring_state() {
     assert_eq!(state.persistent_bytes(), bytes);
     assert_eq!(state.right_payload_rows(), 1);
 }
+
+#[test]
+fn test_single_uint64_sequence_retains_values_until_checkpoint_encoding() {
+    use super::run::SequenceColumn;
+    use datafusion::arrow::{
+        array::{ArrayRef, UInt64Array},
+        row::{RowConverter, SortField},
+    };
+
+    let values = (0..4096).map(|i| u64::MAX - i).collect::<Vec<_>>();
+    let data = Arc::new(UInt64Array::from(values)) as ArrayRef;
+    let record = RecordBatch::try_from_iter([("seq", data.clone())]).unwrap();
+    let names = ["seq".to_owned()];
+    let mut saved = None;
+    let allocation = allocation_counter::measure(|| {
+        saved = Some(SequenceColumn::from_names(&record, &names).unwrap());
+    });
+    let saved = saved.unwrap();
+    let canonical = RowConverter::new(vec![SortField::new(DataType::UInt64)])
+        .unwrap()
+        .convert_columns(&[data])
+        .unwrap()
+        .try_into_binary()
+        .unwrap();
+    let first = saved.array().to_data();
+    let second = saved.array().to_data();
+    assert_eq!(first, canonical.to_data());
+    assert_eq!(saved.memory_size(), canonical.get_array_memory_size());
+    assert!(
+        allocation.bytes_max < 2048,
+        "typed sequence admission should retain the existing values: {allocation:?}"
+    );
+    assert!(
+        first
+            .buffers()
+            .iter()
+            .zip(second.buffers())
+            .all(|(a, b)| a.ptr_eq(b)),
+        "repeated captures should reuse the canonical sequence buffers"
+    );
+}
+
+#[test]
+fn test_uint64_sequence_restores_duplicates_and_retires_payload_before_identity() {
+    use super::run::SequenceColumn;
+    use datafusion::arrow::array::UInt64Array;
+
+    let batch = |sequences: &[u64]| {
+        let values = record(&vec![(1, 5, 0, Some("payload")); sequences.len()]);
+        let mut fields = values.schema().fields().to_vec();
+        fields[2] = Arc::new(Field::new("sequence", DataType::UInt64, false));
+        let mut columns = values.columns().to_vec();
+        columns[2] = Arc::new(UInt64Array::from(sequences.to_vec()));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap()
+    };
+    let input = batch(&[u64::MAX, 0, 255, 256, 1 << 63]);
+    let schemas = [input.schema(), input.schema()];
+    let declaration = spec(5, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = ColumnarState::new("u64", &declaration, schemas.clone(), &pool).unwrap();
+    admit(&mut state, 1, &input).unwrap();
+    let snapshot = state.capture(1 << 20).unwrap();
+    let mut restored =
+        ColumnarState::restore("u64", &declaration, &schemas, &pool, &snapshot).unwrap();
+    assert_eq!(restored.capture(1 << 20).unwrap(), snapshot);
+    let error = admit(&mut restored, 1, &batch(&[256])).unwrap_err();
+    assert!(matches!(
+        error,
+        crate::CalcFlowError::OperatorReason {
+            reason_code: StreamingFailureReason::AsofDuplicateIdentity,
+            ..
+        }
+    ));
+    let progress = super::Progress {
+        left_watermark: Some(11),
+        right_watermark: Some(5),
+        ..super::Progress::default()
+    };
+    assert_eq!(state.evict(progress).payloads, input.num_rows() as u64);
+    assert_eq!(restored.evict(progress).payloads, input.num_rows() as u64);
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    assert!(run.payload_record().is_none());
+    assert!(matches!(run.sequences(), SequenceColumn::Binary(_)));
+    assert_eq!(
+        state.capture(1 << 20).unwrap(),
+        restored.capture(1 << 20).unwrap()
+    );
+}
+
+#[test]
+fn test_typed_uint64_compares_with_old_arrow_rows_in_both_directions() {
+    use super::run::SequenceColumn;
+    use datafusion::arrow::{
+        array::{ArrayRef, UInt64Array},
+        row::{RowConverter, SortField},
+    };
+
+    let values = [0, 1, 255, 256, 1 << 63, u64::MAX];
+    let converter = RowConverter::new(vec![SortField::new(DataType::UInt64)]).unwrap();
+    let names = ["sequence".to_owned()];
+    for len in 0..=values.len() {
+        let data = Arc::new(UInt64Array::from(values[..len].to_vec())) as ArrayRef;
+        let record = RecordBatch::try_from_iter([("sequence", data.clone())]).unwrap();
+        let typed = SequenceColumn::from_names(&record, &names).unwrap();
+        let binary = converter
+            .convert_columns(&[data])
+            .unwrap()
+            .try_into_binary()
+            .unwrap();
+        let decoded = SequenceColumn::from_array(&(Arc::new(binary) as ArrayRef)).unwrap();
+        assert_eq!(typed.memory_size(), decoded.memory_size());
+        for left in 0..len {
+            for right in 0..len {
+                let expected = values[left].cmp(&values[right]);
+                assert_eq!(typed.compare(left, &decoded, right), expected);
+                assert_eq!(decoded.compare(left, &typed, right), expected);
+            }
+        }
+    }
+}
