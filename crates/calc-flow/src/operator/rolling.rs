@@ -4431,18 +4431,85 @@ fn compute_output_value(
     })
 }
 
+#[derive(Clone, Debug)]
+struct FloatRowsExtrema {
+    window: usize,
+    descending: bool,
+    position: u64,
+    recent_valid: VecDeque<bool>,
+    candidates: VecDeque<(u64, f64)>,
+    valid_count: u64,
+}
+
+impl FloatRowsExtrema {
+    fn new(window: usize, descending: bool) -> Self {
+        Self {
+            window,
+            descending,
+            position: 0,
+            recent_valid: VecDeque::new(),
+            candidates: VecDeque::new(),
+            valid_count: 0,
+        }
+    }
+
+    fn advance(&mut self, index: u64, sample: Option<f64>) {
+        self.position = index;
+        self.recent_valid.push_back(sample.is_some());
+        if let Some(sample) = sample {
+            self.valid_count += 1;
+            while self.candidates.back().is_some_and(|(_, previous)| {
+                if self.descending {
+                    *previous < sample
+                } else {
+                    *previous > sample
+                }
+            }) {
+                self.candidates.pop_back();
+            }
+            self.candidates.push_back((index, sample));
+        }
+        if self.recent_valid.len() > self.window {
+            if self.recent_valid.pop_front() == Some(true) {
+                self.valid_count -= 1;
+            }
+            let leaving = index - u64::try_from(self.window).unwrap_or(u64::MAX);
+            if self
+                .candidates
+                .front()
+                .is_some_and(|(position, _)| *position == leaving)
+            {
+                self.candidates.pop_front();
+            }
+        }
+    }
+
+    fn age(&self) -> Option<u64> {
+        self.candidates
+            .front()
+            .map(|(position, _)| self.position - position)
+    }
+
+    fn heap_bytes(&self) -> usize {
+        self.recent_valid
+            .capacity()
+            .saturating_mul(size_of::<bool>())
+            .saturating_add(
+                self.candidates
+                    .capacity()
+                    .saturating_mul(size_of::<(u64, f64)>()),
+            )
+    }
+}
+
 /// Batch-local scan state is rebuilt from the retained entity tail. The tail
 /// is already part of the durable checkpoint, so no second scan-state format
 /// or cross-callback mutable cache is required.
 #[derive(Clone, Debug)]
 enum IncrementalScanState {
     Extrema {
-        window: usize,
+        state: FloatRowsExtrema,
         min_periods: u64,
-        descending: bool,
-        recent_valid: VecDeque<bool>,
-        candidates: VecDeque<(usize, f64)>,
-        valid_count: usize,
     },
     UniqueFloat64 {
         window: usize,
@@ -4457,12 +4524,8 @@ impl IncrementalScanState {
     fn new(kind: ScanKind, window: usize, min_periods: u64) -> Option<Self> {
         match kind {
             ScanKind::Argmax | ScanKind::Argmin => Some(Self::Extrema {
-                window,
+                state: FloatRowsExtrema::new(window, matches!(kind, ScanKind::Argmax)),
                 min_periods,
-                descending: matches!(kind, ScanKind::Argmax),
-                recent_valid: VecDeque::new(),
-                candidates: VecDeque::new(),
-                valid_count: 0,
             }),
             ScanKind::UniqueCount => Some(Self::UniqueFloat64 {
                 window,
@@ -4504,18 +4567,7 @@ impl IncrementalScanState {
     #[cfg(test)]
     fn estimated_bytes(&self) -> usize {
         match self {
-            Self::Extrema {
-                recent_valid,
-                candidates,
-                ..
-            } => recent_valid
-                .capacity()
-                .saturating_mul(size_of::<bool>())
-                .saturating_add(
-                    candidates
-                        .capacity()
-                        .saturating_mul(size_of::<(usize, f64)>()),
-                ),
+            Self::Extrema { state, .. } => state.heap_bytes(),
             Self::UniqueFloat64 { recent, counts, .. } => {
                 let buckets = counts.capacity().saturating_mul(8).div_ceil(7);
                 let table_bytes = if buckets == 0 {
@@ -4536,46 +4588,13 @@ impl IncrementalScanState {
     fn advance_float(&mut self, index: usize, sample: Option<f64>) -> Option<u64> {
         let sample = sample.filter(|value| !value.is_nan());
         match self {
-            Self::Extrema {
-                window,
-                min_periods,
-                descending,
-                recent_valid,
-                candidates,
-                valid_count,
-            } => {
-                recent_valid.push_back(sample.is_some());
-                if let Some(sample) = sample {
-                    *valid_count += 1;
-                    while candidates.back().is_some_and(|(_, previous)| {
-                        if *descending {
-                            *previous < sample
-                        } else {
-                            *previous > sample
-                        }
-                    }) {
-                        candidates.pop_back();
-                    }
-                    candidates.push_back((index, sample));
+            Self::Extrema { state, min_periods } => {
+                state.advance(u64::try_from(index).ok()?, sample);
+                if state.valid_count < *min_periods {
+                    None
+                } else {
+                    state.age()
                 }
-                if recent_valid.len() > *window {
-                    if recent_valid.pop_front() == Some(true) {
-                        *valid_count -= 1;
-                    }
-                    let leaving = index - *window;
-                    if candidates
-                        .front()
-                        .is_some_and(|(position, _)| *position == leaving)
-                    {
-                        candidates.pop_front();
-                    }
-                }
-                if u64::try_from(*valid_count).unwrap_or(u64::MAX) < *min_periods {
-                    return None;
-                }
-                candidates
-                    .front()
-                    .and_then(|(position, _)| u64::try_from(index - *position).ok())
             }
             Self::UniqueFloat64 {
                 window,
