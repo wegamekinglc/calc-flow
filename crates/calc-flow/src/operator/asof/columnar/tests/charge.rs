@@ -43,3 +43,46 @@ fn test_asof_charge_shares_grouped_rows_across_output_columns() {
     eprintln!("ASOF output reservation allocations: {bytes:?}; charge={expected}");
     assert!(bytes.bytes_total < 18 * 1024, "{bytes:?}");
 }
+
+#[test]
+fn complete_run_charge_counts_exact_bytes_without_per_row_scratch() {
+    const RUN_ROWS: usize = 1_025;
+    let declaration = spec(0, 8_192, 1 << 24);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 25));
+    let mut state = state(&declaration, &pool);
+    for side in [0, 1] {
+        for batch in 0..2 {
+            let start = batch * RUN_ROWS;
+            let rows = (start..start + RUN_ROWS)
+                .map(|i| {
+                    let time = i64::try_from(i).unwrap();
+                    (time % 4, time, time, (i % 2 == batch).then_some("abc"))
+                })
+                .collect::<Vec<_>>();
+            admit(&mut state, side, &record(&rows)).unwrap();
+        }
+    }
+    let n = 2 * RUN_ROWS;
+    let selection = select(&state, None, true, n);
+    assert_eq!((selection.len(), selection.matched()), (n, n));
+    let validity = RUN_ROWS.div_ceil(8);
+    let integer = 256 + 2 * (128 + RUN_ROWS * 8 + validity);
+    let text = 256 + 2 * (128 + (RUN_ROWS + 1) * 4 + validity) + 2 * RUN_ROWS.div_ceil(2) * 3;
+    let measured = allocation_counter::measure(|| {
+        assert_eq!(
+            state.output_charge(&selection, None).unwrap(),
+            2 * (3 * integer + text)
+        );
+        assert_eq!(
+            state
+                .output_charge(&selection, Some(&[(1, 3), (0, 2), (1, 3)]))
+                .unwrap(),
+            2 * text + integer
+        );
+    });
+    assert!(
+        measured.bytes_total <= 2_048,
+        "allocated {} bytes for four complete input runs",
+        measured.bytes_total
+    );
+}
