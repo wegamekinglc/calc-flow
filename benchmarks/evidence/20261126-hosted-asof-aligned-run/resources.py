@@ -30,6 +30,17 @@ def owned_cpu():
     return int(dict(line.split() for line in stats.splitlines())["usage_usec"])
 
 
+def cgroup_masks():
+    group = Path("/sys/fs/cgroup") / os.environ["ASOF_CGROUP"]
+    masks = set()
+    for tid in (group / "cgroup.threads").read_text().split():
+        try:
+            masks.add(tuple(sorted(os.sched_getaffinity(int(tid)))))
+        except ProcessLookupError:
+            continue
+    return sorted(masks)
+
+
 async def observe_cpus(output, selected=None):
     preflight = selected is None
     cores = select_cpus() if preflight else selected
@@ -62,10 +73,13 @@ async def observe_cpus(output, selected=None):
             )
         detail.update(owned_host_percent=self_percent, external_host_percent=external)
         rows.append(detail)
+    masks = cgroup_masks()
     with (output / "resources.jsonl").open("a") as stream:
         stream.write(
-            json.dumps(dict(epoch=time.time(), preflight=preflight, cores=rows)) + "\n"
+            json.dumps(dict(epoch=time.time(), preflight=preflight, cores=rows, thread_masks=masks)) + "\n"
         )
+    if not masks or any(not set(mask).issubset(cores) for mask in masks):
+        raise RuntimeError(f"measuring cgroup has threads outside selected CPUs: {masks}")
     if not all(row["suitable"] for row in rows):
         raise RuntimeError(f"host resource envelope failed: {rows}")
     return cores

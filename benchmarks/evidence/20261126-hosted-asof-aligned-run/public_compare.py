@@ -88,7 +88,7 @@ async def run(args):
     }
     if releases["baseline"]["native_sha256"] == releases["candidate"]["native_sha256"]:
         raise ValueError("expected independent native builds")
-    parent_sha = "5540d317884b59c53a8a9f80ac7129b78314c694"
+    parent_sha = "f67422bac9c0e23a8d22e717422c7b5bb329f723"
     parent_lock = "8a72c638ce13b4ca2141d8b9b22c316fc4171813d28dc789e47a65a62ff80a72"
     registered_locks = {
         "baseline": {

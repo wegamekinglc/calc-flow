@@ -8,7 +8,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-runs = {"release": 45691470579, "parent": 45699426341}
+runs = {"release": 45691470579, "parent": 45704369193}
 api = "repos/wegamekinglc/calc-flow/actions"
 side, baseline = sys.argv[1:]
 root = Path(os.environ["GITHUB_WORKSPACE"]) / "target"

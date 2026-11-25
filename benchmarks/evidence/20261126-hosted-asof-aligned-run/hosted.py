@@ -20,8 +20,8 @@ OUT = ROOT / "target" / "products"
 RAW = ROOT / "target" / "evidence" / os.environ.get("ASOF_BASELINE", "candidate")
 REFS = {
     "release": "7012b5b409553df04e29e6d7f9a11abf919cbf93",
-    "parent": "5540d317884b59c53a8a9f80ac7129b78314c694",
-    "candidate": "f67422bac9c0e23a8d22e717422c7b5bb329f723",
+    "parent": "f67422bac9c0e23a8d22e717422c7b5bb329f723",
+    "candidate": "40689a3318ea866e5e948e5ad2fdc2788cfa39b5",
 }
 
 

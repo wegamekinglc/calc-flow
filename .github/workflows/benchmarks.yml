@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-left-order-10m]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-u64-sequence-10m]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -564,7 +564,7 @@ jobs:
           retention-days: 30
 
   asof-aligned-products:
-    if: inputs.mode == 'asof-left-order-10m'
+    if: inputs.mode == 'asof-u64-sequence-10m'
     runs-on: ubuntu-latest
     timeout-minutes: 125
     strategy:
@@ -608,7 +608,7 @@ jobs:
           retention-days: 14
 
   asof-aligned-compare:
-    if: inputs.mode == 'asof-left-order-10m'
+    if: inputs.mode == 'asof-u64-sequence-10m'
     needs: asof-aligned-products
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -652,7 +652,7 @@ jobs:
           cat /proc/self/status > target/evidence/controller.txt
           sudo mkdir "/sys/fs/cgroup/$ASOF_CGROUP"
           echo "$$" | sudo tee "/sys/fs/cgroup/$ASOF_CGROUP/cgroup.procs" >/dev/null
-          exec target/study-venv/bin/python "$STUDY/hosted.py" compare "${{ matrix.surface }}" "$ASOF_BASELINE"
+          exec target/study-venv/bin/python -S "$STUDY/pin.py" "$STUDY/hosted.py" compare "${{ matrix.surface }}" "$ASOF_BASELINE"
       - name: Seal raw results without installed packages or executables
         if: always()
         run: |
@@ -660,7 +660,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: always()
         with:
-          name: asof-left-order-10m-${{ matrix.surface }}-${{ matrix.baseline }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: asof-u64-sequence-10m-${{ matrix.surface }}-${{ matrix.baseline }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/asof-raw.tar.gz
           if-no-files-found: error
           retention-days: 30
