@@ -346,33 +346,22 @@ fn numeric_tick_tail_requires_the_same_entity_prefix_before_any_write() {
         means.push((value.valid_count > 0).then(|| value.mean()));
         Ok(())
     };
-    assert!(
-        !table
-            .write_numeric_full_tick(
-                history,
-                &[a, a],
-                &[a, a, a, a, a],
-                &values,
-                false,
-                &mut emit
-            )
-            .unwrap()
-    );
-    assert!(
-        !table
-            .write_numeric_full_tick(
-                history,
-                &[a, b],
-                &[a, b, a, b, b],
-                &values,
-                false,
-                &mut emit
-            )
-            .unwrap()
-    );
+    for (order, locals) in [
+        ([a, a], &[0, 1, 0, 1, 0][..]),
+        ([a, b], &[0, 1, 0, 1, 1]),
+        ([a, b], &[0, 0, 1, 0, 0]),
+        ([a, b], &[0]),
+        ([a, b], &[0, 1, 2]),
+    ] {
+        assert!(
+            !table
+                .write_numeric_full_tick(history, &order, locals, &values, false, &mut emit)
+                .unwrap()
+        );
+    }
     assert!(
         table
-            .write_numeric_full_tick(history, &[a, b], &[a, b, a, b, a], &values, false, emit)
+            .write_numeric_full_tick(history, &[a, b], &[0, 1, 0, 1, 0], &values, false, emit)
             .unwrap()
     );
     assert_eq!(
