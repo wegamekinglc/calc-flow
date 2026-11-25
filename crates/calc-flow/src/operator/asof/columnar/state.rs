@@ -2,10 +2,10 @@ use super::{RowLocator, Selection, run::Run, run::SequenceColumn};
 use crate::operator::asof::{
     AsofJoinSide, AsofLatePolicy, StreamAsofJoinSpec, admission, arrow_error, reason,
 };
-use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS};
+use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS, VARIABLE_STEP_BYTES};
 use crate::{Result, StreamingFailureReason};
 use datafusion::arrow::{
-    array::{ArrayRef, UInt32Array},
+    array::{Array, ArrayRef, StringArray, UInt32Array},
     compute::{SortColumn, lexsort_to_indices, take},
     datatypes::SchemaRef,
     error::ArrowError,
@@ -255,6 +255,19 @@ pub(in crate::operator::asof) struct ColumnarState {
     pub(super) next_run: u64,
     // Older runs may share a single IPC allocation across all payload columns.
     pub(super) first_fresh_run: u64,
+}
+
+fn repeats_string_morsel(keys: &StringArray, start: usize, len: usize) -> bool {
+    let previous = start - MORSEL_ROWS;
+    let offsets = keys.value_offsets();
+    let bytes = offsets[start + len] - offsets[start];
+    // Large variable keys keep the router's chunked cancellation checks.
+    if bytes != offsets[previous + len] - offsets[previous]
+        || usize::try_from(bytes).expect("valid UTF-8 offsets") > VARIABLE_STEP_BYTES
+    {
+        return false;
+    }
+    keys.slice(previous, len).to_data() == keys.slice(start, len).to_data()
 }
 
 fn group_locators(run: &Run, key_count: usize, locators: &[RowLocator]) -> Vec<Vec<RowLocator>> {
@@ -632,20 +645,7 @@ impl ColumnarState {
                     .map_err(|error| arrow_error(&error))
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
-        let mut groups = Vec::with_capacity(record.num_rows());
-        for start in (0..record.num_rows()).step_by(MORSEL_ROWS) {
-            let len = MORSEL_ROWS.min(record.num_rows() - start);
-            let arrays = key_arrays
-                .iter()
-                .map(|array| array.slice(start, len))
-                .collect::<Vec<_>>();
-            groups.extend(
-                self.keys
-                    .route_with_limit(&arrays, usize::MAX, check)
-                    .map_err(|error| self.keyed_admission_error(error))?,
-            );
-            check()?;
-        }
+        let groups = self.route_run_keys(&key_arrays, record.num_rows(), check)?;
         let times = admission::times(record, declaration).values().to_vec();
         let accepted = vec![true; record.num_rows()];
         let run_id = self.next_run;
@@ -663,6 +663,43 @@ impl ColumnarState {
             run_id,
             next_run,
         })
+    }
+
+    fn route_run_keys(
+        &mut self,
+        keys: &[ArrayRef],
+        rows: usize,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Vec<GroupId>> {
+        let strings = match keys {
+            [key] => key
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .filter(|keys| keys.null_count() == 0),
+            _ => None,
+        };
+        let mut groups = Vec::with_capacity(rows);
+        for start in (0..rows).step_by(MORSEL_ROWS) {
+            let len = MORSEL_ROWS.min(rows - start);
+            if start >= MORSEL_ROWS
+                && strings.is_some_and(|keys| repeats_string_morsel(keys, start, len))
+            {
+                let previous = start - MORSEL_ROWS;
+                groups.extend_from_within(previous..previous + len);
+            } else {
+                let arrays = keys
+                    .iter()
+                    .map(|array| array.slice(start, len))
+                    .collect::<Vec<_>>();
+                groups.extend(
+                    self.keys
+                        .route_with_limit(&arrays, usize::MAX, check)
+                        .map_err(|error| self.keyed_admission_error(error))?,
+                );
+            }
+            check()?;
+        }
+        Ok(groups)
     }
 
     fn install_prepared_run(&mut self, side: usize, prepared: PreparedRun) -> Result<()> {

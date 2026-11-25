@@ -723,6 +723,68 @@ fn test_duplicate_and_row_limit_refusal_roll_back_new_key_births() {
     assert_eq!(state.keys.len(), 1);
 }
 
+fn route_string_groups(keys: StringArray) -> (Vec<usize>, usize) {
+    use crate::operator::keyed::{hash_calls, reset_hash_calls};
+
+    let rows = keys.len();
+    let values = record(
+        &(0..rows)
+            .map(|row| (0, i64::try_from(row).unwrap(), 0, None))
+            .collect::<Vec<_>>(),
+    );
+    let mut columns = values.columns().to_vec();
+    columns[0] = Arc::new(keys);
+    let mut fields = input_schema().fields().to_vec();
+    fields[0] = Arc::new(Field::new("key", DataType::Utf8, false));
+    let schema = Arc::new(Schema::new(fields));
+    let input = RecordBatch::try_new(schema.clone(), columns).unwrap();
+    let declaration = spec(0, u64::try_from(rows).unwrap(), 1 << 26);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 26));
+    let mut state =
+        ColumnarState::new("asof", &declaration, [schema.clone(), schema], &pool).unwrap();
+    reset_hash_calls();
+    admit(&mut state, 0, &input).unwrap();
+    let run = state.left_runs.values().next().unwrap();
+    (
+        run.groups().iter().map(|group| group.index()).collect(),
+        hash_calls(),
+    )
+}
+
+#[test]
+fn repeated_string_key_morsels_reuse_only_exact_previous_groups() {
+    use crate::operator::keyed::MORSEL_ROWS;
+
+    let rows = 3 * MORSEL_ROWS + 17;
+    // The concatenated bytes match even where the string boundaries change.
+    let keys = StringArray::from_iter_values((0..rows).map(|row| {
+        let pair = if row < 2 * MORSEL_ROWS {
+            ["a", "bc"]
+        } else {
+            ["ab", "c"]
+        };
+        pair[row % 2]
+    }));
+    let (groups, hashes) = route_string_groups(keys);
+    for (row, group) in groups.into_iter().enumerate() {
+        let offset = if row < 2 * MORSEL_ROWS { 0 } else { 2 };
+        assert_eq!(group, offset + row % 2);
+    }
+    assert_eq!(hashes, 2, "only the two distinct key morsels need routing");
+}
+
+#[test]
+fn wide_repeated_string_keys_keep_chunked_routing() {
+    use crate::operator::keyed::{MORSEL_ROWS, VARIABLE_STEP_BYTES};
+
+    let value = "x".repeat(VARIABLE_STEP_BYTES / MORSEL_ROWS + 1);
+    let rows = 2 * MORSEL_ROWS;
+    let keys = StringArray::from_iter_values(std::iter::repeat_n(value.as_str(), rows));
+    let (groups, hashes) = route_string_groups(keys);
+    assert_eq!(groups, vec![0; rows]);
+    assert_eq!(hashes, 2);
+}
+
 #[test]
 fn test_ordered_interleaved_identity_admission_is_linear_on_both_sides() {
     const KEYS: i64 = 64;
