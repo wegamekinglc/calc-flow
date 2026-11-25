@@ -335,22 +335,18 @@ impl Run {
         groups: Vec<GroupId>,
         times: Vec<i64>,
         sequences: SequenceColumn,
-        accepted: &[bool],
     ) -> Self {
-        let payload_rows = accepted.iter().filter(|accepted| **accepted).count();
-        let payload_charge = if payload_rows == 0 {
-            0
-        } else {
-            retained_payload_charge(&record)
-        };
+        let payload_rows = record.num_rows();
+        debug_assert_ne!(payload_rows, 0);
+        let payload_charge = retained_payload_charge(&record);
         let identity_charge = retained_identity_charge(&groups, &times, &sequences);
         Self {
-            payload: (payload_rows != 0).then(|| Arc::new(record)),
+            payload: Some(Arc::new(record)),
             groups,
             times,
             sequences,
-            payload_live: accepted.to_vec(),
-            identity_live: accepted.to_vec(),
+            payload_live: vec![true; payload_rows],
+            identity_live: vec![true; payload_rows],
             payload_rows,
             identity_rows: payload_rows,
             payload_charge,
@@ -365,13 +361,8 @@ impl Run {
         }
     }
 
-    pub(super) fn accepted_locators(&self, run: u64) -> Vec<RowLocator> {
-        self.identity_live
-            .iter()
-            .enumerate()
-            .filter(|(_, accepted)| **accepted)
-            .map(|(row, _)| Self::locator(run, row))
-            .collect()
+    pub(super) fn fresh_locators(run: u64, rows: usize) -> Vec<RowLocator> {
+        (0..rows).map(|row| Self::locator(run, row)).collect()
     }
 
     pub(super) fn time(&self, locator: RowLocator) -> i64 {

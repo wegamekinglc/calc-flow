@@ -723,7 +723,6 @@ impl ColumnarState {
             .collect::<Result<Vec<ArrayRef>>>()?;
         let groups = self.route_run_keys(&key_arrays, record.num_rows(), check)?;
         let times = admission::times(record, declaration).values().to_vec();
-        let accepted = vec![true; record.num_rows()];
         let run_id = self.next_run;
         let next_run = self.next_run.checked_add(1).ok_or_else(|| {
             reason(
@@ -732,7 +731,7 @@ impl ColumnarState {
                 "ASOF run identifier space is exhausted",
             )
         })?;
-        let run = Run::new(record.clone(), groups, times, sequences, &accepted);
+        let run = Run::new(record.clone(), groups, times, sequences);
         Ok(PreparedRun {
             run,
             workspace,
@@ -785,7 +784,7 @@ impl ColumnarState {
             run_id,
             next_run,
         } = prepared;
-        let locators = run.accepted_locators(run_id);
+        let locators = Run::fresh_locators(run_id, run.rows());
         let ordered_by_key = self.validate_new_identities(side, &run, &locators)?;
         let _workspace = self.admission_workspace(
             run.payload_record().expect("new run payload"),

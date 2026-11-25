@@ -938,6 +938,30 @@ fn test_admission_charge_uses_visible_offsets_and_reserves_validity_for_every_se
 }
 
 #[test]
+fn test_fresh_compacted_run_builds_its_dense_locators_in_one_allocation() {
+    let declaration = spec(0, 1024, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    let rows = (0..257)
+        .map(|time| (1, time, time, None))
+        .collect::<Vec<_>>();
+    admit(&mut state, 0, &record(&rows)).unwrap();
+    let (&id, run) = state.left_runs.first_key_value().unwrap();
+    let mut locators = Vec::new();
+    let allocations = allocation_counter::measure(|| {
+        locators = super::run::Run::fresh_locators(id, run.rows());
+    });
+    assert_eq!(locators.len(), rows.len());
+    assert!(
+        locators
+            .iter()
+            .enumerate()
+            .all(|(row, locator)| locator.run == id && locator.row as usize == row)
+    );
+    assert_eq!(allocations.count_total, 1);
+}
+
+#[test]
 fn test_full_admission_prices_sliced_payload_without_scanning_a_row_mask_per_column() {
     let declaration = spec(0, 1024, 1 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
