@@ -1,4 +1,4 @@
-use super::ColumnarState;
+use super::{ColumnarState, Selection};
 use crate::operator::asof::{
     AsofJoinSide, AsofLatePolicy, AsofStateLimits, StreamAsofJoinSpec, schema,
 };
@@ -75,12 +75,7 @@ fn output_schema(declaration: &StreamAsofJoinSpec) -> SchemaRef {
     schema::output_schema(declaration, &input_schema(), &input_schema()).unwrap()
 }
 
-fn select(
-    state: &ColumnarState,
-    frontier: Option<i64>,
-    ended: bool,
-    limit: usize,
-) -> super::Selection {
+fn select(state: &ColumnarState, frontier: Option<i64>, ended: bool, limit: usize) -> Selection {
     state.select_prefix(state.finalizable_len(frontier, ended, limit))
 }
 
@@ -114,6 +109,25 @@ fn keys_only_snapshot(
         .unwrap();
     state.finish_restore(1);
     state.capture(1 << 20).unwrap()
+}
+
+impl ColumnarState {
+    fn materialize(
+        &self,
+        selection: &Selection,
+        schema: &SchemaRef,
+        projection: Option<&[(usize, usize)]>,
+    ) -> Result<RecordBatch> {
+        self.plan_output(selection, projection)?.materialize(schema)
+    }
+
+    fn output_charge(
+        &self,
+        selection: &Selection,
+        projection: Option<&[(usize, usize)]>,
+    ) -> Result<usize> {
+        Ok(self.plan_output(selection, projection)?.charge)
+    }
 }
 
 #[test]
@@ -1439,6 +1453,27 @@ fn test_single_run_projection_reuses_indices_across_asof_columns() {
     );
     eprintln!("1024-row single-run ASOF projection: {measured:?}");
     assert!(measured.bytes_total <= 80 * 1024, "{measured:?}");
+}
+
+#[test]
+fn left_only_projection_skips_unused_right_gather_indices() {
+    let declaration = spec(2_048, 4_096, 8 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let mut state = state(&declaration, &pool);
+    admit(&mut state, 1, &record(&[(1, 0, 1, None)])).unwrap();
+    let rows = (0..2_048).map(|t| (1, t, t, None)).collect::<Vec<_>>();
+    let left = record(&rows);
+    admit(&mut state, 0, &left).unwrap();
+    let selection = select(&state, None, true, rows.len());
+    assert_eq!(selection.matched(), rows.len());
+    let schema = Arc::new(left.schema().project(&[2]).unwrap());
+    let allocations = allocation_counter::measure(|| {
+        let output = state
+            .materialize(&selection, &schema, Some(&[(0, 2)]))
+            .unwrap();
+        assert_eq!(output.column(0), left.column(2));
+    });
+    assert!(allocations.bytes_total < 2_048, "{allocations:?}");
 }
 
 #[test]

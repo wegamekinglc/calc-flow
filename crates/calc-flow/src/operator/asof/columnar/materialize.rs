@@ -13,6 +13,20 @@ use datafusion::arrow::{
 };
 use std::{collections::HashMap, convert::AsRef};
 
+enum SideLayout<'a> {
+    Unused,
+    Complete(Vec<&'a RecordBatch>),
+    Indexed { has_unmatched: bool },
+}
+
+pub(in crate::operator::asof) struct OutputPlan<'a> {
+    state: &'a ColumnarState,
+    selection: &'a Selection,
+    projection: Option<&'a [(usize, usize)]>,
+    sides: [SideLayout<'a>; 2],
+    pub(in crate::operator::asof) charge: usize,
+}
+
 enum SideSources<'a> {
     AllNull,
     CompleteRuns(Vec<&'a RecordBatch>),
@@ -52,21 +66,23 @@ fn single_run_indices(
     ))
 }
 
-impl ColumnarState {
-    pub(in crate::operator::asof) fn materialize(
-        &self,
-        selection: &Selection,
-        schema: &SchemaRef,
-        projection: Option<&[(usize, usize)]>,
-    ) -> Result<RecordBatch> {
+impl OutputPlan<'_> {
+    pub(in crate::operator::asof) fn materialize(self, schema: &SchemaRef) -> Result<RecordBatch> {
+        let Self {
+            state,
+            selection,
+            projection,
+            sides,
+            ..
+        } = self;
         if selection.is_empty() {
             return Ok(RecordBatch::new_empty(schema.clone()));
         }
         let requests = projection.map_or_else(
             || {
-                (0..self.column_count(0))
+                (0..state.column_count(0))
                     .map(|column| (0, column))
-                    .chain((0..self.column_count(1)).map(|column| (1, column)))
+                    .chain((0..state.column_count(1)).map(|column| (1, column)))
                     .collect()
             },
             <[(usize, usize)]>::to_vec,
@@ -74,38 +90,36 @@ impl ColumnarState {
         if requests.len() != schema.fields().len() {
             return Err(invalid("ASOF projection and output schema lengths differ"));
         }
-        let left = self.sources(0, &selection.left, None);
-        let right = self.sources(1, &selection.right, Some(&selection.right_validity));
+        let [left, right] = sides;
+        let sources = [
+            state.sources(left, 0, &selection.left, None),
+            state.sources(right, 1, &selection.right, Some(&selection.right_validity)),
+        ];
         let columns = requests
             .iter()
             .enumerate()
             .map(|(ordinal, &(side, column))| {
                 let data_type = schema.field(ordinal).data_type();
-                if column >= self.column_count(side) {
-                    return Err(invalid("ASOF projection column is out of bounds"));
-                }
-                match side {
-                    0 => self.materialize_side(0, &left, column, data_type, selection.len()),
-                    1 => self.materialize_side(1, &right, column, data_type, selection.len()),
-                    _ => Err(invalid("ASOF projection side is invalid")),
-                }
+                state.materialize_side(side, &sources[side], column, data_type, selection.len())
             })
             .collect::<Result<Vec<_>>>()?;
         RecordBatch::try_new(schema.clone(), columns).map_err(|error| arrow_error(&error))
     }
+}
 
-    fn sources(
-        &self,
+impl ColumnarState {
+    fn sources<'a>(
+        &'a self,
+        layout: SideLayout<'a>,
         side: usize,
         locators: &[RowLocator],
         validity: Option<&BooleanBuffer>,
-    ) -> SideSources<'_> {
-        let nulls = validity.filter(|bits| bits.count_set_bits() != locators.len());
-        if nulls.is_none()
-            && let Some(records) = self.complete_runs(side, locators)
-        {
-            return SideSources::CompleteRuns(records);
-        }
+    ) -> SideSources<'a> {
+        let nulls = match layout {
+            SideLayout::Unused => return SideSources::AllNull,
+            SideLayout::Complete(records) => return SideSources::CompleteRuns(records),
+            SideLayout::Indexed { has_unmatched } => validity.filter(|_| has_unmatched),
+        };
         let mut by_run = HashMap::new();
         let mut runs = Vec::new();
         for (index, locator) in locators.iter().copied().enumerate() {
@@ -168,6 +182,8 @@ impl ColumnarState {
             {
                 return None;
             }
+            #[cfg(test)]
+            super::VERIFIED_RUN_ROWS.set(super::VERIFIED_RUN_ROWS.get() + selected.len());
             records.push(record);
             previous = Some(first.run);
             rows = rest;

@@ -16,6 +16,11 @@ pub(super) use state::{take_finality_probes, take_selections};
 
 use datafusion::arrow::{array::BooleanArray, buffer::BooleanBuffer};
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static VERIFIED_RUN_ROWS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(super) struct Selection {
     pub(super) left: Vec<RowLocator>,
     pub(super) right: Vec<RowLocator>,
