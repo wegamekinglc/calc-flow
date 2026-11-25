@@ -23,3 +23,13 @@
 1. ASOF 只改已定位的 Arrow 输出，再对照封存的原生回调及 Python 公开入口。分别保留 handler、整作业与状态指标。
 2. 对最新百万和千万行累计 average 的 1T/4T 回退，先用相同数据核对实际内核分派，再区分调度、实体路由、数值状态更新和输出。专门审阅不应归入 SQL 分组聚合。
 3. 静态 Join 与区间 Join 各自测通用 schema、保持匹配数和预算；GroupBy 以稀疏热更新对照全量输出。过滤、窗口关闭与检查点各在对应证据出现后进入独立小 PR。
+
+## 千万行滚动回退的两条执行路径
+
+**按行 argmax 和 unique。** 11.14 的 Float64 按行扫描复用 `IncrementalScanState`。对 argmax，每个最近样本只需记录有效性，有序候选队列保存位置和值；重复最大值保留先出现的候选。unique 以规范化有符号零后的位模式计数。main 的统一扫描状态还支持整数精度、按 Duration 过期、rank 等语义。每个最近样本都带序号、事件时间和可空的带类型值；在按行 argmax 中，过期只看窗口行数。当前实体并行准入也显式排除按行 Scan。两个版本都有单调队列，现有证据指向要量化的差别是每次更新读写的状态和字节数。源码能解释哪些操作有机会省掉；定时数据才衡量它们对作业的贡献。[发布版适配层](https://github.com/wegamekinglc/calc-flow/blob/7012b5b409553df04e29e6d7f9a11abf919cbf93/crates/calc-flow/src/operator/rolling/kernel.rs#L2717) · [有效性队列及去重表](https://github.com/wegamekinglc/calc-flow/blob/72072c1dc6c0874b79ccd8ce78103c97caec623d/crates/calc-flow/src/operator/rolling.rs#L4438) · [当前样本结构与过期](https://github.com/wegamekinglc/calc-flow/blob/72072c1dc6c0874b79ccd8ce78103c97caec623d/crates/calc-flow/src/operator/rolling/kernel.rs#L3359) · [并行准入](https://github.com/wegamekinglc/calc-flow/blob/72072c1dc6c0874b79ccd8ce78103c97caec623d/crates/calc-flow/src/operator/rolling/kernel/entity_parallel.rs#L433)
+
+在配对 CI 主机的 1,000 万行、单线程数据上，argmax64 的发布版 p50 为 461.45 ms，main 为 540.40 ms；argmax256 为 475.57 → 571.56 ms；unique64 为 921.32 → 990.74 ms。三个差距均已确认。适合用一个独立改动先复用 Float64 按行扫描状态，保留每个输出的最小有效期数，同时校验跨批首个相同极值、NULL、NaN、正负零及恢复后的第一行。用同版本的每行状态访问数及峰值字节解释结果，再分别从原生作业与 Python 公开入口测延迟。[定时逐项数据](https://github.com/wegamekinglc/calc-flow/blob/e0c73c35a13b8f7b7dccc9be7bd0f102c1b87f2d/benchmarks/scheduled/20261125-45496822000-streaming-audit/all-scheduled-cases.csv)
+
+**按行 SMA。** main 的有序流优先尝试 slab 路径。纯数值且实体按相同顺序重复时，`write_numeric_full_tick` 先核对整批的实体轮次，对每个已接纳的实体建立状态，再更新后续样本。若顺序不符合准入条件或启用检查点，走另一更新路径。每新增一行，单窗或多窗在共享环形历史上各自减去离开的值、加入新值并完成数值更新。两条可区分的假设是整批实体映射与重复校验增加了成本，或每行数值环和补偿求和增加了成本。以已有 Rolling 指标核对实际分派，再单测路由及数值更新；保留当前误差契约。[执行顺序](https://github.com/wegamekinglc/calc-flow/blob/72072c1dc6c0874b79ccd8ce78103c97caec623d/crates/calc-flow/src/operator/rolling/ordered_stream.rs#L495) · [整批准入](https://github.com/wegamekinglc/calc-flow/blob/72072c1dc6c0874b79ccd8ce78103c97caec623d/crates/calc-flow/src/state/table/core.rs#L2035) · [每窗更新](https://github.com/wegamekinglc/calc-flow/blob/72072c1dc6c0874b79ccd8ce78103c97caec623d/crates/calc-flow/src/state/table/core.rs#L1991)
+
+同一次 CI 中，单线程 SMA20 为 408.74 → 560.29 ms；双 SMA 为 543.15 → 621.10 ms。四线程两者分别为 481.06 → 584.71 ms、545.00 → 610.78 ms。冷态和热态分别设目标，热态用例只计 100 万行历史之后的 6.4 万行追加；按事件时间滑窗则要覆盖跨批重叠与水位闭合。表中的 `window_sum` 是另一种固定时间窗聚合。[定时逐项数据](https://github.com/wegamekinglc/calc-flow/blob/e0c73c35a13b8f7b7dccc9be7bd0f102c1b87f2d/benchmarks/scheduled/20261125-45496822000-streaming-audit/all-scheduled-cases.csv)
