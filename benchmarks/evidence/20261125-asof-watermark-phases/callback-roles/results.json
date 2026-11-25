@@ -1,0 +1,770 @@
+{
+  "emitting": {
+    "wall_ns": {
+      "release_mean": 18.4794365,
+      "main_mean": 39.59115685,
+      "paired_mean_delta": 21.11172035,
+      "round_means": [
+        22.0441576,
+        20.1792831
+      ]
+    },
+    "matching_ns": {
+      "release_mean": 8.8175306,
+      "main_mean": 20.167095749999998,
+      "paired_mean_delta": 11.34956515,
+      "round_means": [
+        11.613321899999999,
+        11.0858084
+      ]
+    },
+    "arrow_output_ns": {
+      "release_mean": 0.027043499999999998,
+      "main_mean": 10.358859449999999,
+      "paired_mean_delta": 10.33181595,
+      "round_means": [
+        10.2802328,
+        10.383399099999998
+      ]
+    },
+    "arrow_charge_ns": {
+      "release_mean": 0.0139504,
+      "main_mean": 8.68397355,
+      "paired_mean_delta": 8.67002315,
+      "round_means": [
+        8.6512616,
+        8.6887847
+      ]
+    },
+    "arrow_columns_ns": {
+      "release_mean": 0.005232799999999999,
+      "main_mean": 1.6574464999999998,
+      "paired_mean_delta": 1.6522137,
+      "round_means": [
+        1.6194273,
+        1.6850001
+      ]
+    },
+    "arrow_assembly_ns": {
+      "release_mean": 0.0032497999999999997,
+      "main_mean": 0.00664905,
+      "paired_mean_delta": 0.00339925,
+      "round_means": [
+        0.0030773,
+        0.0037212
+      ]
+    },
+    "arrow_bookkeeping_ns": {
+      "release_mean": 0.0046105,
+      "main_mean": 0.010790349999999999,
+      "paired_mean_delta": 0.00617985,
+      "round_means": [
+        0.006466599999999999,
+        0.0058931
+      ]
+    },
+    "left_commit_ns": {
+      "release_mean": 0.02237275,
+      "main_mean": 1.2876689,
+      "paired_mean_delta": 1.26529615,
+      "round_means": [
+        1.2232312,
+        1.3073611
+      ]
+    },
+    "right_eviction_ns": {
+      "release_mean": 9.601387899999999,
+      "main_mean": 7.4513722,
+      "paired_mean_delta": -2.1500157,
+      "round_means": [
+        -1.4861264999999997,
+        -2.8139049
+      ]
+    },
+    "emit_ns": {
+      "release_mean": 0.00838385,
+      "main_mean": 0.01466455,
+      "paired_mean_delta": 0.0062807,
+      "round_means": [
+        0.0056685,
+        0.0068928999999999995
+      ]
+    },
+    "residual_ns": {
+      "release_mean": 0.0027178999999999997,
+      "main_mean": 0.311496,
+      "paired_mean_delta": 0.3087781,
+      "round_means": [
+        0.40782969999999996,
+        0.20972649999999998
+      ]
+    },
+    "callbacks": {
+      "release_mean": 1,
+      "main_mean": 1,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    },
+    "evicted": {
+      "release_mean": 1000000,
+      "main_mean": 1000000,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    }
+  },
+  "empty_no_frontier": {
+    "wall_ns": {
+      "release_mean": 0.0059743999999999995,
+      "main_mean": 2.2276818499999997,
+      "paired_mean_delta": 2.22170745,
+      "round_means": [
+        1.813461,
+        2.6299539
+      ]
+    },
+    "matching_ns": {
+      "release_mean": 0.0014520499999999999,
+      "main_mean": 0.0005346,
+      "paired_mean_delta": -0.0009174499999999999,
+      "round_means": [
+        -0.0009468999999999999,
+        -0.0008879999999999999
+      ]
+    },
+    "arrow_output_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_charge_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_columns_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_assembly_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_bookkeeping_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "left_commit_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "right_eviction_ns": {
+      "release_mean": 0.0004304,
+      "main_mean": 2.22449475,
+      "paired_mean_delta": 2.22406435,
+      "round_means": [
+        1.816624,
+        2.6315047
+      ]
+    },
+    "emit_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "residual_ns": {
+      "release_mean": 0.00409195,
+      "main_mean": 0.0026525,
+      "paired_mean_delta": -0.0014394499999999999,
+      "round_means": [
+        -0.0022161,
+        -0.0006628
+      ]
+    },
+    "callbacks": {
+      "release_mean": 1,
+      "main_mean": 1,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    },
+    "evicted": {
+      "release_mean": 0,
+      "main_mean": 0,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    }
+  },
+  "empty_frontier": {
+    "wall_ns": {
+      "release_mean": 0.00405565,
+      "main_mean": 0.0018405499999999998,
+      "paired_mean_delta": -0.0022151,
+      "round_means": [
+        -0.0026346,
+        -0.0017956
+      ]
+    },
+    "matching_ns": {
+      "release_mean": 0.00048689999999999996,
+      "main_mean": 0.0002875,
+      "paired_mean_delta": -0.0001994,
+      "round_means": [
+        -0.0002241,
+        -0.0001747
+      ]
+    },
+    "arrow_output_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_charge_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_columns_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_assembly_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_bookkeeping_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "left_commit_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "right_eviction_ns": {
+      "release_mean": 0.0003705,
+      "main_mean": 0.000318,
+      "paired_mean_delta": -5.25e-05,
+      "round_means": [
+        -3.37e-05,
+        -7.130000000000001e-05
+      ]
+    },
+    "emit_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "residual_ns": {
+      "release_mean": 0.0031982499999999997,
+      "main_mean": 0.00123505,
+      "paired_mean_delta": -0.0019632,
+      "round_means": [
+        -0.0023768,
+        -0.0015496
+      ]
+    },
+    "callbacks": {
+      "release_mean": 1,
+      "main_mean": 1,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    },
+    "evicted": {
+      "release_mean": 0,
+      "main_mean": 0,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    }
+  },
+  "empty_ended": {
+    "wall_ns": {
+      "release_mean": 0.00523155,
+      "main_mean": 0.01222035,
+      "paired_mean_delta": 0.0069888,
+      "round_means": [
+        0.0066971999999999995,
+        0.0072804
+      ]
+    },
+    "matching_ns": {
+      "release_mean": 0.00029214999999999997,
+      "main_mean": 0.00017015,
+      "paired_mean_delta": -0.000122,
+      "round_means": [
+        -0.0001231,
+        -0.0001209
+      ]
+    },
+    "arrow_output_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_charge_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_columns_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_assembly_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "arrow_bookkeeping_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "left_commit_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "right_eviction_ns": {
+      "release_mean": 0.0023566999999999998,
+      "main_mean": 0.00016615,
+      "paired_mean_delta": -0.00219055,
+      "round_means": [
+        -0.0022638,
+        -0.0021173
+      ]
+    },
+    "emit_ns": {
+      "release_mean": 0.0,
+      "main_mean": 0.0,
+      "paired_mean_delta": 0.0,
+      "round_means": [
+        0.0,
+        0.0
+      ]
+    },
+    "residual_ns": {
+      "release_mean": 0.0025827,
+      "main_mean": 0.01188405,
+      "paired_mean_delta": 0.00930135,
+      "round_means": [
+        0.0090841,
+        0.0095186
+      ]
+    },
+    "callbacks": {
+      "release_mean": 2,
+      "main_mean": 2,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    },
+    "evicted": {
+      "release_mean": 0,
+      "main_mean": 0,
+      "paired_mean_delta": 0,
+      "round_means": [
+        0,
+        0
+      ]
+    }
+  },
+  "empty_no_frontier_by_state_bytes": {
+    "baseline": {
+      "0": [
+        {
+          "round": 1,
+          "sample": 1,
+          "right_ms": 0.000363,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 2,
+          "right_ms": 0.000205,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 3,
+          "right_ms": 0.000479,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 4,
+          "right_ms": 0.000222,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 5,
+          "right_ms": 0.00042199999999999996,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 6,
+          "right_ms": 0.000307,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 7,
+          "right_ms": 0.000525,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 8,
+          "right_ms": 0.00048699999999999997,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 9,
+          "right_ms": 0.000425,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 10,
+          "right_ms": 0.0005989999999999999,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 1,
+          "right_ms": 0.000527,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 2,
+          "right_ms": 0.000526,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 3,
+          "right_ms": 0.0005279999999999999,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 4,
+          "right_ms": 0.0005729999999999999,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 5,
+          "right_ms": 0.000198,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 6,
+          "right_ms": 0.0007279999999999999,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 7,
+          "right_ms": 0.000355,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 8,
+          "right_ms": 0.00020899999999999998,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 9,
+          "right_ms": 0.000544,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 10,
+          "right_ms": 0.000386,
+          "matched": 0,
+          "evicted_payloads": 0
+        }
+      ]
+    },
+    "candidate": {
+      "0": [
+        {
+          "round": 1,
+          "sample": 1,
+          "right_ms": 0.136106,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 3,
+          "right_ms": 0.127143,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 4,
+          "right_ms": 0.131509,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 8,
+          "right_ms": 0.129491,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 10,
+          "right_ms": 0.15529099999999998,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 7,
+          "right_ms": 0.154913,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 8,
+          "right_ms": 0.145055,
+          "matched": 0,
+          "evicted_payloads": 0
+        }
+      ],
+      "-16000000": [
+        {
+          "round": 1,
+          "sample": 2,
+          "right_ms": 3.441162,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 5,
+          "right_ms": 3.140501,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 6,
+          "right_ms": 3.7535339999999997,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 7,
+          "right_ms": 3.8720909999999997,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 1,
+          "sample": 9,
+          "right_ms": 3.2834459999999996,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 1,
+          "right_ms": 3.416718,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 2,
+          "right_ms": 3.356077,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 3,
+          "right_ms": 3.090349,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 4,
+          "right_ms": 3.412944,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 5,
+          "right_ms": 3.4693519999999998,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 6,
+          "right_ms": 3.05457,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 9,
+          "right_ms": 3.163699,
+          "matched": 0,
+          "evicted_payloads": 0
+        },
+        {
+          "round": 2,
+          "sample": 10,
+          "right_ms": 3.0559439999999998,
+          "matched": 0,
+          "evicted_payloads": 0
+        }
+      ]
+    }
+  }
+}
