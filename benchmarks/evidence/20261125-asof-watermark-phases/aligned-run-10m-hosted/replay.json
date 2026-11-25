@@ -1,0 +1,160 @@
+{
+  "rust-release": {
+    "artifact_id": 15060867134,
+    "artifact_sha256": "sha256:4101b95db4817548d0bfaad898d5cd8c95704a43cda18e0aebbe706860393b8e",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": 8.406590670436852,
+        "low": 2.646640119770538,
+        "high": 10.655475278066984,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 10.145828699567428,
+        "low": 3.4233545768912688,
+        "high": 14.31617886296539,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "inconclusive",
+    "ms": {
+      "base": {
+        "p50": 1157.395725,
+        "p95": 1219.30687305
+      },
+      "head": {
+        "p50": 1277.5305315,
+        "p95": 1318.5497579999999
+      }
+    },
+    "delta_percent": 10.379752050665303,
+    "accepted_intervals": 67,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": 44
+  },
+  "rust-parent": {
+    "artifact_id": 15060486720,
+    "artifact_sha256": "sha256:f127bb617d6f2d4af54bda319e37622d32a787294064a3494e8a607e16fe46d4",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": -10.011145436472418,
+        "low": -12.696308146056456,
+        "high": -0.2582952374466374,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -10.791442982509203,
+        "low": -15.734802086423983,
+        "high": -2.514555164600085,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "no-confirmed-regression",
+    "ms": {
+      "base": {
+        "p50": 896.662493,
+        "p95": 962.5518522000001
+      },
+      "head": {
+        "p50": 815.669187,
+        "p95": 874.0391808500001
+      }
+    },
+    "delta_percent": -9.032752750593765,
+    "accepted_intervals": 53,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": 44
+  },
+  "python-release": {
+    "artifact_id": 15061151754,
+    "artifact_sha256": "sha256:d4c3c3f8895a2981ed4e468dad2c72d9cfc78a4a547cec1145c9133f1e2db0c3",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": 48.857490867468,
+        "low": 37.05726764973556,
+        "high": 57.67939462722333,
+        "coverage": 0.978515625
+      },
+      {
+        "median": 37.09948916625115,
+        "low": 28.96094418163573,
+        "high": 44.23566245496258,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "regression",
+    "ms": {
+      "base": {
+        "p50": 685.9307175,
+        "p95": 717.4352044999999
+      },
+      "head": {
+        "p50": 969.8642645,
+        "p95": 1056.1632901000003
+      }
+    },
+    "delta_percent": 41.39391045714467,
+    "accepted_intervals": 91,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      1
+    ],
+    "completed_observations": {
+      "prepare": 4,
+      "sample": 40
+    }
+  },
+  "python-parent": {
+    "artifact_id": 15060162333,
+    "artifact_sha256": "sha256:31dc4d6529941f114e3ea229e6aeb2c6deffe9376f085f579a1de8263b0fb471",
+    "state": "complete",
+    "rounds": [
+      {
+        "median": -14.79644284802104,
+        "low": -18.511031970678303,
+        "high": -1.7773930363630064,
+        "coverage": 0.978515625
+      },
+      {
+        "median": -10.87411542825572,
+        "low": -31.47996511598872,
+        "high": -2.8182378777803496,
+        "coverage": 0.978515625
+      }
+    ],
+    "verdict": "no-confirmed-regression",
+    "ms": {
+      "base": {
+        "p50": 785.9267530000001,
+        "p95": 881.48956585
+      },
+      "head": {
+        "p50": 688.4508295,
+        "p95": 753.5672423999999
+      }
+    },
+    "delta_percent": -12.40267278444458,
+    "accepted_intervals": 70,
+    "rejected": [],
+    "selected_cpus": [
+      0,
+      2
+    ],
+    "completed_observations": {
+      "prepare": 4,
+      "sample": 40
+    }
+  }
+}
