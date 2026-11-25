@@ -20,6 +20,7 @@ use std::{
 
 #[cfg(test)]
 thread_local! {
+    pub(super) static INDEX_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static ADMISSION_IDENTITY_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PROJECTED_GROUP_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PROJECTED_COUNT_UPDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -125,13 +126,16 @@ impl LocatorColumn {
     fn merge(
         &mut self,
         mut incoming: Vec<RowLocator>,
+        incoming_sorted: bool,
         mut compare: impl FnMut(RowLocator, RowLocator) -> Ordering,
     ) -> (usize, usize) {
         let before = self.capacity_bytes();
         if incoming.is_empty() {
             return (before, before);
         }
-        incoming.sort_unstable_by(|left, right| compare(*left, *right));
+        if !incoming_sorted {
+            incoming.sort_unstable_by(|left, right| compare(*left, *right));
+        }
         if self.is_empty() {
             // Projection charges the live length, excluding staging vector spare capacity.
             self.values = incoming.into_boxed_slice().into_vec();
@@ -142,6 +146,10 @@ impl LocatorColumn {
         let mut merged = Vec::with_capacity(existing.len() + incoming.len());
         let mut left = 0;
         let mut right = 0;
+        if compare(existing[existing.len() - 1], incoming[0]) != Ordering::Greater {
+            merged.extend_from_slice(existing);
+            left = existing.len();
+        }
         while left < existing.len() && right < incoming.len() {
             if compare(existing[left], incoming[right]) == Ordering::Greater {
                 merged.push(incoming[right]);
@@ -249,7 +257,17 @@ pub(in crate::operator::asof) struct ColumnarState {
     pub(super) first_fresh_run: u64,
 }
 
+fn group_locators(run: &Run, key_count: usize, locators: &[RowLocator]) -> Vec<Vec<RowLocator>> {
+    let mut by_key = vec![Vec::new(); key_count];
+    for &locator in locators {
+        by_key[run.group(locator).index()].push(locator);
+    }
+    by_key
+}
+
 fn compare_identity(runs: &BTreeMap<u64, Run>, left: RowLocator, right: RowLocator) -> Ordering {
+    #[cfg(test)]
+    INDEX_IDENTITY_COMPARISONS.set(INDEX_IDENTITY_COMPARISONS.get() + 1);
     compare_time_sequence(&runs[&left.run], left, &runs[&right.run], right)
 }
 
@@ -655,7 +673,7 @@ impl ColumnarState {
             next_run,
         } = prepared;
         let locators = run.accepted_locators(run_id);
-        self.validate_new_identities(side, &run, &locators)?;
+        let ordered_by_key = self.validate_new_identities(side, &run, &locators)?;
         let _workspace = self.admission_workspace(
             run.payload_record().expect("new run payload"),
             run.sequences(),
@@ -683,13 +701,13 @@ impl ColumnarState {
         if side == 0 {
             self.run_bytes += run.charge();
             self.left_runs.insert(run_id, run);
-            self.install_left(locators);
+            self.install_left(run_id, locators, ordered_by_key);
         } else {
             self.right_rows += locators.len();
             self.right_payloads += locators.len();
             self.run_bytes += run.charge();
             self.right_runs.insert(run_id, run);
-            self.install_right(&locators);
+            self.install_right(run_id, &locators, ordered_by_key);
         }
         self.next_run = next_run;
         self.sync_reservation();
@@ -877,14 +895,15 @@ impl ColumnarState {
         true
     }
 
+    /// Returns whether each key's input is already in strictly increasing identity order.
     fn validate_new_identities(
         &self,
         side: usize,
         run: &Run,
         locators: &[RowLocator],
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if self.strictly_appends_identities(side, run, locators) {
-            return Ok(());
+            return Ok(true);
         }
         let mut sorted = locators.to_vec();
         sorted.sort_unstable_by(|left, right| {
@@ -916,7 +935,7 @@ impl ColumnarState {
                 return Err(self.duplicate_identity());
             }
         }
-        Ok(())
+        Ok(false)
     }
 
     fn duplicate_identity(&self) -> crate::CalcFlowError {
@@ -1002,7 +1021,7 @@ impl ColumnarState {
         {
             return Err(self.state_limit());
         }
-        self.validate_new_identities(side, &run, &identities)?;
+        let ordered_by_key = self.validate_new_identities(side, &run, &identities)?;
         let projected = self.projected_charge(
             side,
             &run,
@@ -1015,7 +1034,7 @@ impl ColumnarState {
         self.run_bytes += run.charge();
         if side == 0 {
             self.left_runs.insert(run_id, run);
-            self.install_left(identities);
+            self.install_left(run_id, identities, ordered_by_key);
         } else {
             self.right_rows += new_rows;
             self.right_payloads += payloads.len();
@@ -1024,7 +1043,7 @@ impl ColumnarState {
                 .filter(|locator| !run.has_payload(**locator))
                 .count();
             self.right_runs.insert(run_id, run);
-            self.install_right_restored(&payloads, &identities);
+            self.install_right_restored(run_id, &payloads, &identities);
         }
         self.sync_reservation();
         Ok(())
@@ -1068,68 +1087,64 @@ impl ColumnarState {
         Ok(())
     }
 
-    fn install_left(&mut self, locators: Vec<RowLocator>) {
-        let mut by_key = vec![Vec::new(); self.keys.len()];
-        for locator in locators.iter().copied() {
-            let group = self.left_runs[&locator.run].group(locator).index();
-            by_key[group].push(locator);
-        }
+    fn install_left(&mut self, run_id: u64, locators: Vec<RowLocator>, ordered_by_key: bool) {
+        let by_key = group_locators(&self.left_runs[&run_id], self.keys.len(), &locators);
         for (group, rows) in by_key.into_iter().enumerate() {
             if rows.is_empty() {
                 continue;
             }
             let (before, after) = {
                 let runs = &self.left_runs;
-                self.left_by_key[group]
-                    .merge(rows, |left, right| compare_identity(runs, left, right))
+                self.left_by_key[group].merge(rows, ordered_by_key, |left, right| {
+                    compare_identity(runs, left, right)
+                })
             };
             self.adjust_index(before, after);
         }
         let (before, after) = {
             let runs = &self.left_runs;
             let key_ranks = &self.key_ranks;
-            self.pending.merge(locators, |left, right| {
+            self.pending.merge(locators, false, |left, right| {
                 compare_left(runs, key_ranks, left, right)
             })
         };
         self.adjust_index(before, after);
     }
 
-    fn install_right(&mut self, locators: &[RowLocator]) {
-        let mut by_key = vec![Vec::new(); self.keys.len()];
-        for locator in locators.iter().copied() {
-            let group = self.right_runs[&locator.run].group(locator).index();
-            by_key[group].push(locator);
-        }
+    fn install_right(&mut self, run_id: u64, locators: &[RowLocator], ordered_by_key: bool) {
+        let by_key = group_locators(&self.right_runs[&run_id], self.keys.len(), locators);
         for (group, rows) in by_key.into_iter().enumerate() {
             if rows.is_empty() {
                 continue;
             }
             let (before, after) = {
                 let runs = &self.right_runs;
-                self.right_by_key[group]
-                    .payloads
-                    .merge(rows.clone(), |left, right| {
-                        compare_identity(runs, left, right)
-                    })
+                self.right_by_key[group].payloads.merge(
+                    rows.clone(),
+                    ordered_by_key,
+                    |left, right| compare_identity(runs, left, right),
+                )
             };
             self.adjust_index(before, after);
             let (before, after) = {
                 let runs = &self.right_runs;
                 self.right_by_key[group]
                     .identities
-                    .merge(rows, |left, right| compare_identity(runs, left, right))
+                    .merge(rows, ordered_by_key, |left, right| {
+                        compare_identity(runs, left, right)
+                    })
             };
             self.adjust_index(before, after);
         }
     }
-    fn install_right_restored(&mut self, payloads: &[RowLocator], identities: &[RowLocator]) {
+    fn install_right_restored(
+        &mut self,
+        run_id: u64,
+        payloads: &[RowLocator],
+        identities: &[RowLocator],
+    ) {
         for (locators, payloads_column) in [(payloads, true), (identities, false)] {
-            let mut by_key = vec![Vec::new(); self.keys.len()];
-            for locator in locators.iter().copied() {
-                let group = self.right_runs[&locator.run].group(locator).index();
-                by_key[group].push(locator);
-            }
+            let by_key = group_locators(&self.right_runs[&run_id], self.keys.len(), locators);
             for (group, rows) in by_key.into_iter().enumerate() {
                 if rows.is_empty() {
                     continue;
@@ -1142,7 +1157,9 @@ impl ColumnarState {
                 };
                 let (before, after) = {
                     let runs = &self.right_runs;
-                    column.merge(rows, |left, right| compare_identity(runs, left, right))
+                    column.merge(rows, false, |left, right| {
+                        compare_identity(runs, left, right)
+                    })
                 };
                 self.adjust_index(before, after);
             }
