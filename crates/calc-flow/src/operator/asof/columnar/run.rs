@@ -522,6 +522,17 @@ impl Run {
         true
     }
 
+    pub(super) fn can_clear_identities_densely(&self) -> bool {
+        self.identity_rows == 0 || self.identity_rows >= self.identity_live.len().div_ceil(2)
+    }
+
+    pub(super) fn clear_identities(&mut self) {
+        if self.identity_rows != 0 {
+            self.identity_live.fill(false);
+            self.identity_rows = 0;
+        }
+    }
+
     pub(super) fn drop_identity(&mut self, locator: RowLocator) -> bool {
         let row = locator.row as usize;
         if !std::mem::take(&mut self.identity_live[row]) {

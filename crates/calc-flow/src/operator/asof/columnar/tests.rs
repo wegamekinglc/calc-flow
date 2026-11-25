@@ -1097,6 +1097,127 @@ fn test_eviction_preserves_equality_then_retires_payload_before_identity() {
 }
 
 #[test]
+fn right_only_watermark_expires_complete_identity_runs_without_scattering() {
+    let declaration = spec(0, 256, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let mut source = state(&declaration, &pool);
+    for start in [0_i64, 32] {
+        let rows = (start..start + 32)
+            .map(|t| (t % 4, t, t, None))
+            .collect::<Vec<_>>();
+        admit(&mut source, 1, &record(&rows)).unwrap();
+    }
+    let right_only = |watermark| super::Progress {
+        right_watermark: Some(watermark),
+        ..super::Progress::default()
+    };
+    let first = source.evict(right_only(16));
+    assert_eq!((first.payloads, first.identities), (0, 16));
+    let saved = source.capture(1 << 20).unwrap();
+    let mut restored = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &saved,
+    )
+    .unwrap();
+    super::state::RETIRED_IDENTITY_LOCATORS.set(0);
+    let all = restored.evict(right_only(64));
+    assert_eq!((all.payloads, all.identities), (0, 48));
+    assert_eq!(super::state::RETIRED_IDENTITY_LOCATORS.get(), 0);
+    assert_eq!(restored.evict(right_only(65)).identities, 0);
+    assert_eq!(restored.right_payload_rows(), 64);
+    let saved = restored.capture(1 << 20).unwrap();
+    let mut restored = ColumnarState::restore(
+        "asof-columnar-test",
+        &declaration,
+        &[input_schema(), input_schema()],
+        &pool,
+        &saved,
+    )
+    .unwrap();
+    let left = (0..64).map(|t| (t % 4, t, t, None)).collect::<Vec<_>>();
+    admit(&mut restored, 0, &record(&left)).unwrap();
+    let selection = select(&restored, None, true, 64);
+    assert_eq!(selection.matched(), 64);
+}
+
+#[test]
+fn small_right_watermark_steps_only_touch_remaining_identity_rows() {
+    let declaration = spec(0, 256, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(8 << 20));
+    let mut state = state(&declaration, &pool);
+    let right_only = |watermark| super::Progress {
+        right_watermark: Some(watermark),
+        ..super::Progress::default()
+    };
+    let rows = (0..64).map(|t| (0, t, t, None)).collect::<Vec<_>>();
+    admit(&mut state, 1, &record(&rows)).unwrap();
+    assert_eq!(state.evict(right_only(63)).identities, 63);
+    super::state::BULK_IDENTITY_RUN_VISITS.set(0);
+    assert_eq!(state.evict(right_only(64)).identities, 1);
+    assert_eq!(super::state::BULK_IDENTITY_RUN_VISITS.get(), 0);
+    for time in 64..128 {
+        admit(&mut state, 1, &record(&[(0, time, time, None)])).unwrap();
+        assert_eq!(state.evict(right_only(time + 1)).identities, 1);
+    }
+    assert_eq!(state.evict(right_only(130)).identities, 0);
+    assert_eq!(super::state::BULK_IDENTITY_RUN_VISITS.get(), 0);
+    assert_eq!(state.right_payload_rows(), 128);
+}
+
+#[test]
+fn right_only_watermark_reclaims_restored_spare_on_empty_columns() {
+    let declaration = spec(0, 64, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(4 << 20));
+    let right_only = |watermark| super::Progress {
+        right_watermark: Some(watermark),
+        ..super::Progress::default()
+    };
+    for new_identities in [false, true] {
+        let mut source = state(&declaration, &pool);
+        admit(&mut source, 1, &record(&[(1, 0, 0, None)])).unwrap();
+        admit(&mut source, 0, &record(&[(2, 0, 0, None)])).unwrap();
+        assert_eq!(source.evict(right_only(1)).identities, 1);
+        if new_identities {
+            admit(&mut source, 1, &record(&[(1, 1, 1, None), (1, 2, 2, None)])).unwrap();
+        }
+        let mut capacity = source.index_capacities();
+        let slot = size_of::<super::RowLocator>() as u64;
+        assert_eq!(capacity.right_payloads[1], 0);
+        assert_eq!(capacity.right_identities[1], 0);
+        capacity.right_payloads[1] = slot;
+        capacity.right_identities[1] = slot;
+        source.restore_index_capacities(&capacity).unwrap();
+        let saved = source.capture(1 << 20).unwrap();
+        let mut restored = ColumnarState::restore(
+            "asof-columnar-test",
+            &declaration,
+            &[input_schema(), input_schema()],
+            &pool,
+            &saved,
+        )
+        .unwrap();
+        let before = restored.persistent_bytes();
+        super::state::BULK_IDENTITY_RUN_VISITS.set(0);
+        let evicted = restored.evict(right_only(3));
+        assert_eq!(
+            super::state::BULK_IDENTITY_RUN_VISITS.get(),
+            2 * usize::from(new_identities)
+        );
+        assert_eq!(
+            (evicted.payloads, evicted.identities),
+            (0, 2 * u64::from(new_identities))
+        );
+        let after = restored.index_capacities();
+        assert_eq!(after.right_identities[1], 0);
+        assert_eq!(after.right_payloads[1], 0);
+        assert!(before - restored.persistent_bytes() >= 2 * size_of::<super::RowLocator>());
+    }
+}
+
+#[test]
 fn expired_payload_prefix_keeps_identities_without_copying_locators() {
     let declaration = spec(0, 4_096, 8 << 20);
     let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(32 << 20));
