@@ -1435,7 +1435,6 @@ impl ColumnarState {
         identity_bound: i128,
     ) -> EvictionSummary {
         let mut summary = EvictionSummary::default();
-        let mut dead_runs = BTreeSet::new();
         for bucket in &mut self.right_by_key {
             let expired = bucket.payloads.rows().partition_point(|locator| {
                 i128::from(self.right_runs[&locator.run].time(*locator)) + tolerance < threshold
@@ -1452,59 +1451,47 @@ impl ColumnarState {
                 i128::from(self.right_runs[&locator.run].time(*locator)) < identity_bound
             });
             for &locator in &bucket.payloads.rows()[..payload_count] {
-                let run = self
-                    .right_runs
-                    .get_mut(&locator.run)
-                    .expect("retained ASOF payload run");
-                let has_identity = run.has_identity(locator);
-                let before = run.charge();
-                if run.drop_payload(locator) {
-                    summary.payloads += 1;
-                    self.right_payloads -= 1;
-                    if has_identity {
-                        self.right_identity_only += 1;
-                    } else {
-                        self.right_rows -= 1;
-                    }
-                }
-                let after = run.charge();
-                self.run_bytes = self.run_bytes - before + after;
-                if !run.is_live() {
-                    dead_runs.insert(locator.run);
-                }
+                retire_from_run(
+                    &mut self.right_runs,
+                    &mut self.run_bytes,
+                    locator.run,
+                    |run| {
+                        let has_identity = run.has_identity(locator);
+                        if run.drop_payload(locator) {
+                            summary.payloads += 1;
+                            self.right_payloads -= 1;
+                            if has_identity {
+                                self.right_identity_only += 1;
+                            } else {
+                                self.right_rows -= 1;
+                            }
+                        }
+                    },
+                );
             }
             #[cfg(test)]
             RETIRED_IDENTITY_LOCATORS.set(RETIRED_IDENTITY_LOCATORS.get() + identity_count);
             for &locator in &bucket.identities.rows()[..identity_count] {
-                let run = self
-                    .right_runs
-                    .get_mut(&locator.run)
-                    .expect("retained ASOF identity run");
-                let has_payload = run.has_payload(locator);
-                let before = run.charge();
-                if run.drop_identity(locator) {
-                    summary.identities += 1;
-                    if !has_payload {
-                        self.right_rows -= 1;
-                        self.right_identity_only -= 1;
-                    }
-                }
-                let after = run.charge();
-                self.run_bytes = self.run_bytes - before + after;
-                if !run.is_live() {
-                    dead_runs.insert(locator.run);
-                }
+                retire_from_run(
+                    &mut self.right_runs,
+                    &mut self.run_bytes,
+                    locator.run,
+                    |run| {
+                        let has_payload = run.has_payload(locator);
+                        if run.drop_identity(locator) {
+                            summary.identities += 1;
+                            if !has_payload {
+                                self.right_rows -= 1;
+                                self.right_identity_only -= 1;
+                            }
+                        }
+                    },
+                );
             }
             let (before, after) = bucket.payloads.drop_prefix(payload_count);
             self.index_bytes = self.index_bytes - before + after;
             let (before, after) = bucket.identities.drop_prefix(identity_count);
             self.index_bytes = self.index_bytes - before + after;
-        }
-        for run in dead_runs {
-            if self.right_runs.get(&run).is_some_and(|run| !run.is_live()) {
-                let run = self.right_runs.remove(&run).expect("dead ASOF right run");
-                self.run_bytes -= run.charge();
-            }
         }
         self.finish_retirement();
         summary
@@ -1790,6 +1777,24 @@ impl ColumnarState {
 
     pub(in crate::operator::asof) fn is_empty(&self) -> bool {
         self.state_rows() == 0
+    }
+}
+
+fn retire_from_run(
+    runs: &mut BTreeMap<u64, Run>,
+    run_bytes: &mut usize,
+    id: u64,
+    retire: impl FnOnce(&mut Run),
+) {
+    let std::collections::btree_map::Entry::Occupied(mut entry) = runs.entry(id) else {
+        unreachable!("retained ASOF right run");
+    };
+    *run_bytes -= entry.get().charge();
+    retire(entry.get_mut());
+    if entry.get().is_live() {
+        *run_bytes += entry.get().charge();
+    } else {
+        entry.remove();
     }
 }
 
