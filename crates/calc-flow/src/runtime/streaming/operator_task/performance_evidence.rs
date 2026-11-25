@@ -1276,6 +1276,17 @@ fn retention_scan_requires_confirmed_disappearance_after_access_denial() {
     );
 }
 
+fn epochs_through(epochs: &[u64], cutoff: u64) -> &[u64] {
+    &epochs[..epochs.partition_point(|&epoch| epoch <= cutoff)]
+}
+
+#[test]
+fn retention_scan_counts_only_epochs_completed_at_the_cutoff() {
+    let observed = [1, 2];
+    assert_eq!(epochs_through(&observed, 1), &[1]);
+    assert!(epochs_through(&observed, 0).is_empty());
+}
+
 async fn timed_nonterminal_epochs(root: &std::path::Path) -> (Vec<u64>, f64) {
     let started = Instant::now();
     let root = root.to_owned();
@@ -1343,8 +1354,13 @@ async fn runner_arm(
     tokio::time::sleep(Duration::from_secs(seconds)).await;
     let accepted_input_rows = sink.accepted_rows();
     assert!(accepted_input_rows > 0);
-    let status_at_cutoff = serde_json::to_value(job.status()).unwrap();
-    let (epochs, manifest_validation_seconds) = timed_nonterminal_epochs(root.path()).await;
+    let status_at_cutoff = job.status();
+    let (observed, manifest_validation_seconds) = timed_nonterminal_epochs(root.path()).await;
+    let cutoff = status_at_cutoff
+        .checkpoint
+        .last_completed_epoch
+        .map_or(0, Epoch::as_u64);
+    let epochs = epochs_through(&observed, cutoff);
     assert!(
         epochs.len() >= minimum_epochs,
         "checkpoint coverage: {epochs:?}"
