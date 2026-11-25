@@ -6,7 +6,7 @@ use crate::operator::asof::arrow_error;
 use datafusion::arrow::{
     array::{Array, ArrayRef, UInt32Array, new_null_array},
     buffer::{BooleanBuffer, NullBuffer},
-    compute::{interleave, take},
+    compute::{concat, interleave, take},
     datatypes::{DataType, SchemaRef},
     error::ArrowError,
     record_batch::RecordBatch,
@@ -15,6 +15,7 @@ use std::{collections::HashMap, convert::AsRef};
 
 enum SideSources<'a> {
     AllNull,
+    CompleteRuns(Vec<&'a RecordBatch>),
     Take {
         record: &'a RecordBatch,
         indices: UInt32Array,
@@ -99,6 +100,12 @@ impl ColumnarState {
         locators: &[RowLocator],
         validity: Option<&BooleanBuffer>,
     ) -> SideSources<'_> {
+        let nulls = validity.filter(|bits| bits.count_set_bits() != locators.len());
+        if nulls.is_none()
+            && let Some(records) = self.complete_runs(side, locators)
+        {
+            return SideSources::CompleteRuns(records);
+        }
         let mut by_run = HashMap::new();
         let mut runs = Vec::new();
         for (index, locator) in locators.iter().copied().enumerate() {
@@ -114,7 +121,6 @@ impl ColumnarState {
         if runs.is_empty() {
             return SideSources::AllNull;
         }
-        let nulls = validity.filter(|validity| validity.count_set_bits() != locators.len());
         if let [run] = runs.as_slice() {
             let record = self
                 .run(side, *run)
@@ -145,6 +151,30 @@ impl ColumnarState {
         }
     }
 
+    // Only forward whole payloads. A small output must not pin a larger source array.
+    fn complete_runs(&self, side: usize, mut rows: &[RowLocator]) -> Option<Vec<&RecordBatch>> {
+        let mut records = Vec::new();
+        let mut previous = None;
+        while let Some(first) = rows.first() {
+            if first.row != 0 || previous.is_some_and(|run| run >= first.run) {
+                return None;
+            }
+            let record = self.run(side, first.run).payload_record()?;
+            let (selected, rest) = rows.split_at_checked(record.num_rows())?;
+            if !selected
+                .iter()
+                .enumerate()
+                .all(|(i, row)| row.run == first.run && row.row as usize == i)
+            {
+                return None;
+            }
+            records.push(record);
+            previous = Some(first.run);
+            rows = rest;
+        }
+        (!records.is_empty()).then_some(records)
+    }
+
     fn materialize_side(
         &self,
         side: usize,
@@ -155,6 +185,16 @@ impl ColumnarState {
     ) -> Result<ArrayRef> {
         let (runs, positions, has_nulls) = match sources {
             SideSources::AllNull => return Ok(new_null_array(data_type, rows)),
+            SideSources::CompleteRuns(records) => {
+                if let [record] = records.as_slice() {
+                    return Ok(record.column(column).clone());
+                }
+                let arrays = records
+                    .iter()
+                    .map(|record| record.column(column).as_ref())
+                    .collect::<Vec<_>>();
+                return concat(&arrays).map_err(|error| arrow_error(&error));
+            }
             SideSources::Take { record, indices } => {
                 return take(record.column(column).as_ref(), indices, None)
                     .map_err(|error| arrow_error(&error));

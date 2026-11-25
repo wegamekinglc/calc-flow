@@ -278,8 +278,10 @@ capture, and restore.
 For each finalizable left row, selection chooses the greatest right
 `(time, sequence)` within the inclusive tolerance from that key's ordered
 payload locators. A selection contains left and right locators plus right
-validity. Materialization uses Arrow `take` for one run and `interleave` for
-multiple runs, inserting a null source for unmatched right rows. Direct-consumer
+validity. When a side selects complete input runs in their original row and
+run order, materialization shares the columns of a single run or concatenates
+columns from several runs. Other selections use Arrow `take` for one run and
+`interleave` for multiple runs, inserting nulls for unmatched right rows. Direct-consumer
 projection limits the materialized columns without changing retained input
 schemas or checkpoint identity.
 
