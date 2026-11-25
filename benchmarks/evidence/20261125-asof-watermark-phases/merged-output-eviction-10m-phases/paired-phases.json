@@ -1,0 +1,1876 @@
+{
+  "native": {
+    "outcome": {
+      "state": "complete",
+      "case": "job",
+      "cpus": [
+        2,
+        4,
+        16,
+        20
+      ],
+      "rounds": [
+        {
+          "median": 21.485202141046443,
+          "low": 18.0321281119872,
+          "high": 22.991143847877083,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 22.538239654006688,
+          "low": 18.48191430563,
+          "high": 26.752511127166123,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 726.5397949999999,
+          "p95": 756.6574956000001
+        },
+        "head": {
+          "p50": 880.0099534999999,
+          "p95": 926.0008876
+        }
+      },
+      "wall_seconds": 49.25012112499826
+    },
+    "outer": {
+      "release_p50": 726.5397949999999,
+      "candidate_p50": 880.0099534999999,
+      "release_p95": 756.6574956000001,
+      "candidate_p95": 926.0008876,
+      "mean_delta_ms": 156.98672995,
+      "rounds": [
+        {
+          "median": 21.485202141046443,
+          "low": 18.0321281119872,
+          "high": 22.991143847877083,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 22.538239654006688,
+          "low": 18.48191430563,
+          "high": 26.752511127166123,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "regression"
+    },
+    "phases": {
+      "all": {
+        "wall_ns": {
+          "release_p50": 176.2493215,
+          "candidate_p50": 227.969088,
+          "release_p95": 187.47208785,
+          "candidate_p95": 245.9389473,
+          "mean_delta_ms": 53.92656485,
+          "rounds": [
+            {
+              "median": 28.080987169420812,
+              "low": 19.964838046329803,
+              "high": 37.36423438588301,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 34.17793702446515,
+              "low": 27.81473921691495,
+              "high": 39.609179309399025,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "matching_ns": {
+          "release_p50": 84.1169385,
+          "candidate_p50": 168.1558765,
+          "release_p95": 98.038928,
+          "candidate_p95": 185.24250085,
+          "mean_delta_ms": 83.89509835,
+          "rounds": [
+            {
+              "median": 90.79208297189527,
+              "low": 66.4178627716017,
+              "high": 124.57390696875383,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 108.39127001584734,
+              "low": 84.15181945121626,
+              "high": 127.86559273845577,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_output_ns": {
+          "release_p50": 0.2937055,
+          "candidate_p50": 16.1948425,
+          "release_p95": 0.41261820000000005,
+          "candidate_p95": 17.29894455,
+          "mean_delta_ms": 15.8798295,
+          "rounds": [
+            {
+              "median": 5394.556279549097,
+              "low": 5028.997888206956,
+              "high": 6027.148585710208,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5207.894261581858,
+              "low": 3735.2405538377766,
+              "high": 5756.45837356852,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "left_commit_ns": {
+          "release_p50": 0.37264450000000005,
+          "candidate_p50": 13.932075,
+          "release_p95": 0.43422560000000004,
+          "candidate_p95": 15.0302325,
+          "mean_delta_ms": 13.5518128,
+          "rounds": [
+            {
+              "median": 3661.207764590468,
+              "low": 3063.9901889949424,
+              "high": 5341.004574950708,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 3510.4274654944093,
+              "low": 3303.1659636804484,
+              "high": 4908.490989334315,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "right_eviction_ns": {
+          "release_p50": 89.27214749999999,
+          "candidate_p50": 21.5173275,
+          "release_p95": 101.398627,
+          "candidate_p95": 36.22148965000001,
+          "mean_delta_ms": -66.4025232,
+          "rounds": [
+            {
+              "median": -71.57512324597904,
+              "low": -81.35832910915201,
+              "high": -64.07984483959362,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -76.61638081487436,
+              "low": -78.61002091541593,
+              "high": -71.3737663178166,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "emit_ns": {
+          "release_p50": 0.084092,
+          "candidate_p50": 0.1382205,
+          "release_p95": 0.10195135,
+          "candidate_p95": 0.149236,
+          "mean_delta_ms": 0.05305995,
+          "rounds": [
+            {
+              "median": 69.4678661184337,
+              "low": 47.74176827206959,
+              "high": 79.03472600430507,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 64.63301852631805,
+              "low": 43.14973558512452,
+              "high": 76.26126926322337,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "residual_ns": {
+          "release_p50": 0.1222555,
+          "candidate_p50": 7.203199,
+          "release_p95": 0.14498760000000002,
+          "candidate_p95": 9.049847749999998,
+          "mean_delta_ms": 6.94928745,
+          "rounds": [
+            {
+              "median": 5033.741862625135,
+              "low": 4634.2698515382535,
+              "high": 6645.252802562342,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 6253.969051177552,
+              "low": 3886.667606560459,
+              "high": 7295.511698880976,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_charge_ns": {
+          "release_p50": 0.15515,
+          "candidate_p50": 15.9929925,
+          "release_p95": 0.26996135,
+          "candidate_p95": 17.0746184,
+          "mean_delta_ms": 15.8135938,
+          "rounds": [
+            {
+              "median": 10321.739215906022,
+              "low": 9208.219874126682,
+              "high": 12142.419094971823,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 9894.961164141627,
+              "low": 5679.226096487155,
+              "high": 10673.37687002299,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_columns_ns": {
+          "release_p50": 0.049218,
+          "candidate_p50": 0.0273545,
+          "release_p95": 0.058379350000000024,
+          "candidate_p95": 0.03638085,
+          "mean_delta_ms": -0.02260475,
+          "rounds": [
+            {
+              "median": -42.39245510225018,
+              "low": -46.647078811137085,
+              "high": -36.876193073356966,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -45.626292839072086,
+              "low": -52.56835901070615,
+              "high": -36.36188541812578,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "arrow_assembly_ns": {
+          "release_p50": 0.0338705,
+          "candidate_p50": 0.04822,
+          "release_p95": 0.049394049999999995,
+          "candidate_p95": 0.051219299999999995,
+          "mean_delta_ms": 0.0123369,
+          "rounds": [
+            {
+              "median": 41.85821171227559,
+              "low": 22.322380783098872,
+              "high": 48.253790336853285,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 45.72177116477374,
+              "low": 2.7143200017455404,
+              "high": 51.144861836976304,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "inconclusive"
+        },
+        "arrow_bookkeeping_ns": {
+          "release_p50": 0.051134,
+          "candidate_p50": 0.12926100000000001,
+          "release_p95": 0.0627231,
+          "candidate_p95": 0.14807574999999998,
+          "mean_delta_ms": 0.07650355,
+          "rounds": [
+            {
+              "median": 135.3954162473984,
+              "low": 119.72195542821797,
+              "high": 152.0240209085649,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 159.6434271611788,
+              "low": 111.37067588275569,
+              "high": 180.1749271137026,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        }
+      },
+      "emitting": {
+        "wall_ns": {
+          "release_p50": 176.1227385,
+          "candidate_p50": 210.95495,
+          "release_p95": 187.34735045,
+          "candidate_p95": 228.76614374999997,
+          "mean_delta_ms": 36.2419357,
+          "rounds": [
+            {
+              "median": 17.74794885659452,
+              "low": 9.853855213626272,
+              "high": 23.827580510602587,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 23.674915665400462,
+              "low": 19.611901431535237,
+              "high": 30.809246684788928,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "matching_ns": {
+          "release_p50": 84.1027625,
+          "candidate_p50": 168.146565,
+          "release_p95": 98.0218987,
+          "candidate_p95": 185.23313275,
+          "mean_delta_ms": 83.90253625,
+          "rounds": [
+            {
+              "median": 90.8318880333937,
+              "low": 66.44113120897195,
+              "high": 124.6122959766418,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 108.4176417989092,
+              "low": 84.17521096689296,
+              "high": 127.89854877979856,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_output_ns": {
+          "release_p50": 0.2937055,
+          "candidate_p50": 16.1948425,
+          "release_p95": 0.41261820000000005,
+          "candidate_p95": 17.29894455,
+          "mean_delta_ms": 15.8798295,
+          "rounds": [
+            {
+              "median": 5394.556279549097,
+              "low": 5028.997888206956,
+              "high": 6027.148585710208,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5207.894261581858,
+              "low": 3735.2405538377766,
+              "high": 5756.45837356852,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "left_commit_ns": {
+          "release_p50": 0.37264450000000005,
+          "candidate_p50": 13.932075,
+          "release_p95": 0.43422560000000004,
+          "candidate_p95": 15.0302325,
+          "mean_delta_ms": 13.5518128,
+          "rounds": [
+            {
+              "median": 3661.207764590468,
+              "low": 3063.9901889949424,
+              "high": 5341.004574950708,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 3510.4274654944093,
+              "low": 3303.1659636804484,
+              "high": 4908.490989334315,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "right_eviction_ns": {
+          "release_p50": 89.2649605,
+          "candidate_p50": 6.0620415,
+          "release_p95": 101.3922814,
+          "candidate_p95": 8.90527825,
+          "mean_delta_ms": -84.14896055,
+          "rounds": [
+            {
+              "median": -92.6719519109463,
+              "low": -95.61688518505046,
+              "high": -90.10725714748969,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -93.45513895545716,
+              "low": -94.6797227154563,
+              "high": -91.03522920414468,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "emit_ns": {
+          "release_p50": 0.084092,
+          "candidate_p50": 0.1382205,
+          "release_p95": 0.10195135,
+          "candidate_p95": 0.149236,
+          "mean_delta_ms": 0.05305995,
+          "rounds": [
+            {
+              "median": 69.4678661184337,
+              "low": 47.74176827206959,
+              "high": 79.03472600430507,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 64.63301852631805,
+              "low": 43.14973558512452,
+              "high": 76.26126926322337,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "residual_ns": {
+          "release_p50": 0.0263715,
+          "candidate_p50": 7.1543244999999995,
+          "release_p95": 0.03142955000000001,
+          "candidate_p95": 8.998468599999999,
+          "mean_delta_ms": 7.00365775,
+          "rounds": [
+            {
+              "median": 27073.17312039178,
+              "low": 22125.124877089474,
+              "high": 29879.664251634567,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 26601.087644352054,
+              "low": 18859.811452513968,
+              "high": 30883.097845284352,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_charge_ns": {
+          "release_p50": 0.15515,
+          "candidate_p50": 15.9929925,
+          "release_p95": 0.26996135,
+          "candidate_p95": 17.0746184,
+          "mean_delta_ms": 15.8135938,
+          "rounds": [
+            {
+              "median": 10321.739215906022,
+              "low": 9208.219874126682,
+              "high": 12142.419094971823,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 9894.961164141627,
+              "low": 5679.226096487155,
+              "high": 10673.37687002299,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_columns_ns": {
+          "release_p50": 0.049218,
+          "candidate_p50": 0.0273545,
+          "release_p95": 0.058379350000000024,
+          "candidate_p95": 0.03638085,
+          "mean_delta_ms": -0.02260475,
+          "rounds": [
+            {
+              "median": -42.39245510225018,
+              "low": -46.647078811137085,
+              "high": -36.876193073356966,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -45.626292839072086,
+              "low": -52.56835901070615,
+              "high": -36.36188541812578,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "arrow_assembly_ns": {
+          "release_p50": 0.0338705,
+          "candidate_p50": 0.04822,
+          "release_p95": 0.049394049999999995,
+          "candidate_p95": 0.051219299999999995,
+          "mean_delta_ms": 0.0123369,
+          "rounds": [
+            {
+              "median": 41.85821171227559,
+              "low": 22.322380783098872,
+              "high": 48.253790336853285,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 45.72177116477374,
+              "low": 2.7143200017455404,
+              "high": 51.144861836976304,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "inconclusive"
+        },
+        "arrow_bookkeeping_ns": {
+          "release_p50": 0.051134,
+          "candidate_p50": 0.12926100000000001,
+          "release_p95": 0.0627231,
+          "candidate_p95": 0.14807574999999998,
+          "mean_delta_ms": 0.07650355,
+          "rounds": [
+            {
+              "median": 135.3954162473984,
+              "low": 119.72195542821797,
+              "high": 152.0240209085649,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 159.6434271611788,
+              "low": 111.37067588275569,
+              "high": 180.1749271137026,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        }
+      },
+      "other": {
+        "wall_ns": {
+          "release_p50": 0.11671799999999999,
+          "candidate_p50": 15.052449500000002,
+          "release_p95": 0.14138965,
+          "candidate_p95": 27.611358700000004,
+          "mean_delta_ms": 17.68462915,
+          "rounds": [
+            {
+              "median": 15090.161051961117,
+              "low": 10978.284309434182,
+              "high": 21646.989032148453,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 13077.28258916272,
+              "low": 12079.852913541863,
+              "high": 23195.978660305587,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "matching_ns": {
+          "release_p50": 0.0160035,
+          "candidate_p50": 0.0093665,
+          "release_p95": 0.02003745000000001,
+          "candidate_p95": 0.010232199999999999,
+          "mean_delta_ms": -0.007437900000000001,
+          "rounds": [
+            {
+              "median": -48.586148404303245,
+              "low": -54.448262695685365,
+              "high": -38.45994188459942,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -37.596826436656116,
+              "low": -49.51852932594106,
+              "high": -32.4147359332278,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "arrow_output_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "left_commit_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "right_eviction_ns": {
+          "release_p50": 0.0063685,
+          "candidate_p50": 14.9938365,
+          "release_p95": 0.0077271499999999995,
+          "candidate_p95": 27.558501350000004,
+          "mean_delta_ms": 17.74643735,
+          "rounds": [
+            {
+              "median": 276186.721837167,
+              "low": 243608.15543695798,
+              "high": 338326.1956918583,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 229438.18203554652,
+              "low": 217785.43213543211,
+              "high": 314400.4876514079,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "emit_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "residual_ns": {
+          "release_p50": 0.09448200000000001,
+          "candidate_p50": 0.040438,
+          "release_p95": 0.11771575000000001,
+          "candidate_p95": 0.052302350000000004,
+          "mean_delta_ms": -0.0543703,
+          "rounds": [
+            {
+              "median": -54.9309818158077,
+              "low": -66.71192438748784,
+              "high": -49.27420531705767,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -55.67168078591152,
+              "low": -63.70088151800388,
+              "high": -46.526734059418175,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "arrow_charge_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "arrow_columns_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "arrow_assembly_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "arrow_bookkeeping_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        }
+      }
+    },
+    "cpus": [
+      2,
+      4,
+      16,
+      20
+    ],
+    "callback_inventory": {
+      "release": {
+        "all": {
+          "callbacks_per_job": {
+            "min": 23,
+            "median": 23.0,
+            "max": 23
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 10,
+              "median": 10.0,
+              "max": 10
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "emitting": {
+          "callbacks_per_job": {
+            "min": 10,
+            "median": 10.0,
+            "max": 10
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 10,
+              "median": 10.0,
+              "max": 10
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "other": {
+          "callbacks_per_job": {
+            "min": 13,
+            "median": 13.0,
+            "max": 13
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        }
+      },
+      "candidate": {
+        "all": {
+          "callbacks_per_job": {
+            "min": 23,
+            "median": 23.0,
+            "max": 23
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "emitting": {
+          "callbacks_per_job": {
+            "min": 10,
+            "median": 10.0,
+            "max": 10
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "other": {
+          "callbacks_per_job": {
+            "min": 13,
+            "median": 13.0,
+            "max": 13
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        }
+      }
+    },
+    "instrumentation_overhead_percent": {
+      "release": 1.7899100999845707,
+      "candidate": 1.349018842982841
+    }
+  },
+  "python": {
+    "outcome": {
+      "elapsed": 77.72080377000384,
+      "state": "completed"
+    },
+    "outer": {
+      "release_p50": 617.6707715,
+      "candidate_p50": 776.247831,
+      "release_p95": 640.1488407999999,
+      "candidate_p95": 823.16221795,
+      "mean_delta_ms": 163.85375875000003,
+      "rounds": [
+        {
+          "median": 25.83658714106634,
+          "low": 19.977069670795423,
+          "high": 33.29939877495902,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 25.175883912244235,
+          "low": 19.665314287858806,
+          "high": 34.908982844184,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "regression"
+    },
+    "phases": {
+      "all": {
+        "wall_ns": {
+          "release_p50": 174.49481500000002,
+          "candidate_p50": 208.344173,
+          "release_p95": 204.12608395,
+          "candidate_p95": 233.13453865,
+          "mean_delta_ms": 34.5004453,
+          "rounds": [
+            {
+              "median": 19.188473230265515,
+              "low": 11.372163450526207,
+              "high": 26.777669389327375,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 18.42287173820436,
+              "low": 13.157498375087862,
+              "high": 39.84899575435252,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "matching_ns": {
+          "release_p50": 80.99066099999999,
+          "candidate_p50": 154.37445400000001,
+          "release_p95": 92.90534775,
+          "candidate_p95": 185.15913565,
+          "mean_delta_ms": 75.77383875000001,
+          "rounds": [
+            {
+              "median": 90.88511096678074,
+              "low": 72.5127697141219,
+              "high": 112.5743659377541,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 85.27852638537945,
+              "low": 73.03053990244483,
+              "high": 143.33487562149352,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_output_ns": {
+          "release_p50": 0.2786995,
+          "candidate_p50": 15.9366915,
+          "release_p95": 0.31729625000000006,
+          "candidate_p95": 16.9344478,
+          "mean_delta_ms": 15.76718915,
+          "rounds": [
+            {
+              "median": 5560.303980587225,
+              "low": 5131.807065302812,
+              "high": 6163.068188483149,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5600.2843570123005,
+              "low": 5468.6078985812965,
+              "high": 6310.967637567301,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "left_commit_ns": {
+          "release_p50": 0.2314,
+          "candidate_p50": 13.177195000000001,
+          "release_p95": 0.26678630000000003,
+          "candidate_p95": 14.517628950000002,
+          "mean_delta_ms": 13.1321835,
+          "rounds": [
+            {
+              "median": 5567.310807950902,
+              "low": 5263.277594506345,
+              "high": 6381.331651864052,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5567.001722531959,
+              "low": 4772.234390776146,
+              "high": 6322.492378300184,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "right_eviction_ns": {
+          "release_p50": 90.857902,
+          "candidate_p50": 18.8422765,
+          "release_p95": 107.02299280000001,
+          "candidate_p95": 29.215429999999998,
+          "mean_delta_ms": -74.20607045,
+          "rounds": [
+            {
+              "median": -78.90061731594324,
+              "low": -86.40797565466345,
+              "high": -69.01018828855068,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -80.8163934764172,
+              "low": -86.95400033159876,
+              "high": -75.10520525092537,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "emit_ns": {
+          "release_p50": 0.07688249999999999,
+          "candidate_p50": 0.15046700000000002,
+          "release_p95": 0.0813972,
+          "candidate_p95": 0.16512095,
+          "mean_delta_ms": 0.07426795,
+          "rounds": [
+            {
+              "median": 98.10027803700493,
+              "low": 83.8394454662613,
+              "high": 104.76996814281203,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 97.29178681640933,
+              "low": 91.6485351414259,
+              "high": 114.7034441178687,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "residual_ns": {
+          "release_p50": 0.0724185,
+          "candidate_p50": 4.243459,
+          "release_p95": 0.0888845,
+          "candidate_p95": 5.14236515,
+          "mean_delta_ms": 3.9590364,
+          "rounds": [
+            {
+              "median": 5751.118241485779,
+              "low": 4157.4237981966035,
+              "high": 6889.64487455803,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5744.698304424635,
+              "low": 3209.1332346627723,
+              "high": 6481.43790012804,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_charge_ns": {
+          "release_p50": 0.1446025,
+          "candidate_p50": 15.735036000000001,
+          "release_p95": 0.165803,
+          "candidate_p95": 16.6988372,
+          "mean_delta_ms": 15.6988115,
+          "rounds": [
+            {
+              "median": 10446.961833102638,
+              "low": 9800.161753095455,
+              "high": 12508.554118742104,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 10962.994681095654,
+              "low": 9746.706833577871,
+              "high": 14405.733506903203,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_columns_ns": {
+          "release_p50": 0.0495005,
+          "candidate_p50": 0.0285385,
+          "release_p95": 0.06502085,
+          "candidate_p95": 0.04068445000000001,
+          "mean_delta_ms": -0.02189945,
+          "rounds": [
+            {
+              "median": -48.5112826999768,
+              "low": -53.8030992213399,
+              "high": -9.136674259681099,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -44.12737357028084,
+              "low": -52.34073092635532,
+              "high": -38.14239076384235,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "arrow_assembly_ns": {
+          "release_p50": 0.035393499999999994,
+          "candidate_p50": 0.0521555,
+          "release_p95": 0.047875400000000005,
+          "candidate_p95": 0.059541,
+          "mean_delta_ms": 0.01640335,
+          "rounds": [
+            {
+              "median": 45.81574532733235,
+              "low": 30.121332566288373,
+              "high": 53.94957521101978,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 55.75612097792795,
+              "low": 39.24940930820375,
+              "high": 65.66418317281484,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_bookkeeping_ns": {
+          "release_p50": 0.046522499999999994,
+          "candidate_p50": 0.124144,
+          "release_p95": 0.06148290000000001,
+          "candidate_p95": 0.13248315000000002,
+          "mean_delta_ms": 0.07387375,
+          "rounds": [
+            {
+              "median": 159.20403143491,
+              "low": 129.87587863688938,
+              "high": 185.8384982387301,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 163.8224087810568,
+              "low": 127.78935164218038,
+              "high": 200.35190887412315,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        }
+      },
+      "emitting": {
+        "wall_ns": {
+          "release_p50": 174.41729500000002,
+          "candidate_p50": 191.34582999999998,
+          "release_p95": 204.0419586,
+          "candidate_p95": 222.4987996,
+          "mean_delta_ms": 18.770860649999996,
+          "rounds": [
+            {
+              "median": 10.502750559857333,
+              "low": 1.916476341710971,
+              "high": 17.183760520516245,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 10.130944634268168,
+              "low": 4.398422470125518,
+              "high": 33.90725319714078,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "inconclusive"
+        },
+        "matching_ns": {
+          "release_p50": 80.97785250000001,
+          "candidate_p50": 154.36395549999997,
+          "release_p95": 92.89141405000001,
+          "candidate_p95": 185.1483353,
+          "mean_delta_ms": 75.77958939999999,
+          "rounds": [
+            {
+              "median": 90.89676163022914,
+              "low": 72.5259977481969,
+              "high": 112.6609015186495,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 85.295772714749,
+              "low": 73.04442144614998,
+              "high": 143.3657302342261,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_output_ns": {
+          "release_p50": 0.2786995,
+          "candidate_p50": 15.9366915,
+          "release_p95": 0.31729625000000006,
+          "candidate_p95": 16.9344478,
+          "mean_delta_ms": 15.76718915,
+          "rounds": [
+            {
+              "median": 5560.303980587225,
+              "low": 5131.807065302812,
+              "high": 6163.068188483149,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5600.2843570123005,
+              "low": 5468.6078985812965,
+              "high": 6310.967637567301,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "left_commit_ns": {
+          "release_p50": 0.2314,
+          "candidate_p50": 13.177195000000001,
+          "release_p95": 0.26678630000000003,
+          "candidate_p95": 14.517628950000002,
+          "mean_delta_ms": 13.1321835,
+          "rounds": [
+            {
+              "median": 5567.310807950902,
+              "low": 5263.277594506345,
+              "high": 6381.331651864052,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 5567.001722531959,
+              "low": 4772.234390776146,
+              "high": 6322.492378300184,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "right_eviction_ns": {
+          "release_p50": 90.8523405,
+          "candidate_p50": 3.6269410000000004,
+          "release_p95": 107.01682300000002,
+          "candidate_p95": 6.334092399999999,
+          "mean_delta_ms": -89.945324,
+          "rounds": [
+            {
+              "median": -95.59724776858165,
+              "low": -98.42682906059039,
+              "high": -93.00143097504501,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -96.51662326498555,
+              "low": -98.30566492810632,
+              "high": -94.16043750917288,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "emit_ns": {
+          "release_p50": 0.07688249999999999,
+          "candidate_p50": 0.15046700000000002,
+          "release_p95": 0.0813972,
+          "candidate_p95": 0.16512095,
+          "mean_delta_ms": 0.07426795,
+          "rounds": [
+            {
+              "median": 98.10027803700493,
+              "low": 83.8394454662613,
+              "high": 104.76996814281203,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 97.29178681640933,
+              "low": 91.6485351414259,
+              "high": 114.7034441178687,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "residual_ns": {
+          "release_p50": 0.027441,
+          "candidate_p50": 4.2032495,
+          "release_p95": 0.0343487,
+          "candidate_p95": 5.103391500000001,
+          "mean_delta_ms": 3.9629546500000004,
+          "rounds": [
+            {
+              "median": 13712.321959664165,
+              "low": 11343.702779201674,
+              "high": 19426.653345870553,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 14830.276646305236,
+              "low": 11903.29416018803,
+              "high": 15823.333333333336,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_charge_ns": {
+          "release_p50": 0.1446025,
+          "candidate_p50": 15.735036000000001,
+          "release_p95": 0.165803,
+          "candidate_p95": 16.6988372,
+          "mean_delta_ms": 15.6988115,
+          "rounds": [
+            {
+              "median": 10446.961833102638,
+              "low": 9800.161753095455,
+              "high": 12508.554118742104,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 10962.994681095654,
+              "low": 9746.706833577871,
+              "high": 14405.733506903203,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_columns_ns": {
+          "release_p50": 0.0495005,
+          "candidate_p50": 0.0285385,
+          "release_p95": 0.06502085,
+          "candidate_p95": 0.04068445000000001,
+          "mean_delta_ms": -0.02189945,
+          "rounds": [
+            {
+              "median": -48.5112826999768,
+              "low": -53.8030992213399,
+              "high": -9.136674259681099,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -44.12737357028084,
+              "low": -52.34073092635532,
+              "high": -38.14239076384235,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "improved"
+        },
+        "arrow_assembly_ns": {
+          "release_p50": 0.035393499999999994,
+          "candidate_p50": 0.0521555,
+          "release_p95": 0.047875400000000005,
+          "candidate_p95": 0.059541,
+          "mean_delta_ms": 0.01640335,
+          "rounds": [
+            {
+              "median": 45.81574532733235,
+              "low": 30.121332566288373,
+              "high": 53.94957521101978,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 55.75612097792795,
+              "low": 39.24940930820375,
+              "high": 65.66418317281484,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "arrow_bookkeeping_ns": {
+          "release_p50": 0.046522499999999994,
+          "candidate_p50": 0.124144,
+          "release_p95": 0.06148290000000001,
+          "candidate_p95": 0.13248315000000002,
+          "mean_delta_ms": 0.07387375,
+          "rounds": [
+            {
+              "median": 159.20403143491,
+              "low": 129.87587863688938,
+              "high": 185.8384982387301,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 163.8224087810568,
+              "low": 127.78935164218038,
+              "high": 200.35190887412315,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        }
+      },
+      "other": {
+        "wall_ns": {
+          "release_p50": 0.064486,
+          "candidate_p50": 14.566076500000001,
+          "release_p95": 0.09311910000000001,
+          "candidate_p95": 23.037043800000003,
+          "mean_delta_ms": 15.72958465,
+          "rounds": [
+            {
+              "median": 23045.828341890636,
+              "low": 15807.506212199354,
+              "high": 37434.41911499788,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 20586.038955665335,
+              "low": 15069.565020799419,
+              "high": 30560.12927611727,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "matching_ns": {
+          "release_p50": 0.0138015,
+          "candidate_p50": 0.01037,
+          "release_p95": 0.037502850000000004,
+          "candidate_p95": 0.0118562,
+          "mean_delta_ms": -0.00575065,
+          "rounds": [
+            {
+              "median": -21.888911960682677,
+              "low": -35.073879288755315,
+              "high": -4.59700691228776,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -25.696264075171854,
+              "low": -41.53467533287058,
+              "high": -16.726936985458185,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "no-confirmed-regression"
+        },
+        "arrow_output_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "left_commit_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "right_eviction_ns": {
+          "release_p50": 0.005432,
+          "candidate_p50": 14.5127545,
+          "release_p95": 0.00620385,
+          "candidate_p95": 22.984301450000004,
+          "mean_delta_ms": 15.739253549999999,
+          "rounds": [
+            {
+              "median": 308413.7926959313,
+              "low": 164727.44641967103,
+              "high": 479238.1320518178,
+              "coverage": 0.978515625
+            },
+            {
+              "median": 263491.27450759243,
+              "low": 190260.05005775896,
+              "high": 361800.5451127819,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "regression"
+        },
+        "emit_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "residual_ns": {
+          "release_p50": 0.0440965,
+          "candidate_p50": 0.041296,
+          "release_p95": 0.05156610000000002,
+          "candidate_p95": 0.050965750000000004,
+          "mean_delta_ms": -0.00391825,
+          "rounds": [
+            {
+              "median": -6.757633935187902,
+              "low": -12.760633861551296,
+              "high": -2.100850287771483,
+              "coverage": 0.978515625
+            },
+            {
+              "median": -9.720372810454002,
+              "low": -22.255092721280235,
+              "high": -0.7975125204718658,
+              "coverage": 0.978515625
+            }
+          ],
+          "verdict": "no-confirmed-regression"
+        },
+        "arrow_charge_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "arrow_columns_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "arrow_assembly_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        },
+        "arrow_bookkeeping_ns": {
+          "release_p50": 0.0,
+          "candidate_p50": 0.0,
+          "release_p95": 0.0,
+          "candidate_p95": 0.0,
+          "mean_delta_ms": 0.0,
+          "rounds": [],
+          "verdict": null
+        }
+      }
+    },
+    "cpus": [
+      2,
+      4,
+      16,
+      20
+    ],
+    "callback_inventory": {
+      "release": {
+        "all": {
+          "callbacks_per_job": {
+            "min": 23,
+            "median": 23.0,
+            "max": 23
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 10,
+              "median": 10.0,
+              "max": 10
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "emitting": {
+          "callbacks_per_job": {
+            "min": 10,
+            "median": 10.0,
+            "max": 10
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 10,
+              "median": 10.0,
+              "max": 10
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "other": {
+          "callbacks_per_job": {
+            "min": 13,
+            "median": 13.0,
+            "max": 13
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        }
+      },
+      "candidate": {
+        "all": {
+          "callbacks_per_job": {
+            "min": 23,
+            "median": 23.0,
+            "max": 23
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "emitting": {
+          "callbacks_per_job": {
+            "min": 10,
+            "median": 10.0,
+            "max": 10
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        },
+        "other": {
+          "callbacks_per_job": {
+            "min": 13,
+            "median": 13.0,
+            "max": 13
+          },
+          "admitted_tickets_per_job": {
+            "matching_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "arrow_output_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "left_commit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "right_eviction_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "emit_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            },
+            "residual_ns": {
+              "min": 0,
+              "median": 0.0,
+              "max": 0
+            }
+          }
+        }
+      }
+    },
+    "instrumentation_overhead_percent": {
+      "release": -0.4394747000982302,
+      "candidate": -1.6661530891372567
+    }
+  }
+}
