@@ -381,7 +381,11 @@ fn test_recurrent_tick_error_rolls_back_and_retries_restored_windows() {
         let before = table.canonical_state_for_test();
         let locals: Vec<_> = (0..order.len()).cycle().take(rows).collect();
         let inputs = [Some(2.0), None, Some(f64::NAN), Some(7.0), Some(1.0)];
-        let values = Float64Array::from_iter(inputs.into_iter().cycle().take(rows));
+        let values = inputs
+            .into_iter()
+            .cycle()
+            .take(rows)
+            .collect::<Float64Array>();
         table.begin().unwrap();
         let stop_at = rows - 2;
         let mut emitted = 0;
