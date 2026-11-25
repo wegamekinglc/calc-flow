@@ -5,7 +5,7 @@ on:
       mode:
         description: Standard benchmarks, fixed diagnostics, or sealed-wheel recovery
         type: choice
-        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog]
+        options: [standard, dal301-groupby, suite-recovery, issue406-groupby, sparse-changelog, asof-watermark-10m]
         default: standard
       release_run_id:
         description: Original complete-suite run containing both sealed wheels
@@ -560,5 +560,54 @@ jobs:
             target/benchmark-results/**/*.log
             target/benchmark-results/**/*.md
             !target/benchmark-results/**/site/**
+          if-no-files-found: error
+          retention-days: 30
+
+  asof-watermark-10m:
+    name: Native ASOF release and watermark phases at 10M
+    if: inputs.mode == 'asof-watermark-10m'
+    runs-on: ubuntu-latest
+    timeout-minutes: 135
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/asof-study-cargo
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      PYTHONPATH: ${{ github.workspace }}
+      STUDY: benchmarks/evidence/20261125-hosted-asof-watermark
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version-file: .python-version
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
+      - name: Prepare locked benchmark environment
+        run: |
+          uv venv target/study-venv
+          uv pip sync --python target/study-venv/bin/python benchmarks/requirements.lock
+          lscpu --json > "$STUDY/host-cpu.json"
+          git rev-parse HEAD > "$STUDY/registration-commit.txt"
+          (cd "$STUDY" && sha256sum --check registered.sha256)
+      - name: Build the original and instrumented products
+        timeout-minutes: 120
+        run: target/study-venv/bin/python "$STUDY/study.py" build
+      - name: Collect paired native products and phases
+        timeout-minutes: 9
+        run: target/study-venv/bin/python "$STUDY/study.py" measure
+      - name: Retain source identity, raw observations and resource stops
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hosted-asof-watermark-10m-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            benchmarks/evidence/20261125-hosted-asof-watermark/*.json
+            benchmarks/evidence/20261125-hosted-asof-watermark/*.log
+            benchmarks/evidence/20261125-hosted-asof-watermark/*.stderr
+            benchmarks/evidence/20261125-hosted-asof-watermark/*.txt
+            benchmarks/evidence/20261125-hosted-asof-watermark/*.diff.gz
+            benchmarks/evidence/20261125-hosted-asof-watermark/obs-job-*/
           if-no-files-found: error
           retention-days: 30
