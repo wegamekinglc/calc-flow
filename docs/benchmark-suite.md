@@ -620,8 +620,10 @@ anchor at the newest `calc-flow-python-v*` release tag reachable from the
 head, so a regression keeps failing the gate until it is fixed or a release
 is deliberately cut; the first parent is used only when no release tag is
 reachable or the release commit is the head itself. Manual dispatch runs keep
-the first-parent default. There is no silent fallback to a different
-successful run or debug wheel.
+the first-parent default. To reproduce the scheduled comparison on demand,
+select `scheduled_baseline` or run
+`gh workflow run benchmark-suite.yml --ref main -f scheduled_baseline=true`.
+There is no silent fallback to a different successful run or debug wheel.
 
 The Rust family is the exception: it builds and validates against the first
 parent — the explicit SHA when one is supplied — even on scheduled runs,
@@ -1187,7 +1189,8 @@ FINANCE_PYTHON_PYTHON=target/finance-python-venv/bin/python \
 ```
 
 The example pairs against the head's first parent, which matches manual
-dispatch runs and the Rust shard; a scheduled run's engine/warm shards pair
+dispatch defaults and the Rust shard. Scheduled runs and dispatches with
+`scheduled_baseline=true` pair their engine/warm shards
 against the newest reachable `calc-flow-python-v*` release tag, so check that
 tag out as `target/base` to reproduce them.
 
