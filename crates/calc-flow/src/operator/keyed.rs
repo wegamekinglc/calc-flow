@@ -16,7 +16,7 @@ use smallvec::SmallVec;
 use std::{mem::size_of, sync::Arc};
 
 pub(crate) const MORSEL_ROWS: usize = 4096;
-const VARIABLE_STEP_BYTES: usize = 64 * 1024;
+pub(crate) const VARIABLE_STEP_BYTES: usize = 64 * 1024;
 const KEY_COLUMN_PAGE_ROWS: usize = 1024;
 const CANONICAL_PAGE_BYTES: usize = 64 * 1024;
 
