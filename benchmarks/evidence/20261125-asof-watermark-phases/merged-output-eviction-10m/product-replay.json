@@ -1,0 +1,129 @@
+{
+  "bound_raw_replay": {
+    "native_qualifications": [
+      "baseline",
+      "candidate"
+    ],
+    "native_observations": {
+      "base-warmup": 2,
+      "head-warmup": 2,
+      "base-timed": 20,
+      "head-timed": 20
+    },
+    "python_requests": {
+      "0-baseline-hello": 1,
+      "0-baseline-prepare": 1,
+      "0-baseline-sample": 10,
+      "0-baseline-finish": 1,
+      "0-candidate-hello": 1,
+      "0-candidate-prepare": 1,
+      "0-candidate-sample": 10,
+      "0-candidate-finish": 1,
+      "1-baseline-hello": 1,
+      "1-baseline-prepare": 1,
+      "1-baseline-sample": 10,
+      "1-baseline-finish": 1,
+      "1-candidate-hello": 1,
+      "1-candidate-prepare": 1,
+      "1-candidate-sample": 10,
+      "1-candidate-finish": 1
+    }
+  },
+  "native-release": {
+    "replay": {
+      "case": "job",
+      "state": "complete",
+      "observations": 44,
+      "resource_intervals": 46,
+      "verdict": "regression"
+    },
+    "outcome": {
+      "state": "complete",
+      "case": "job",
+      "cpus": [
+        2,
+        4,
+        16,
+        20
+      ],
+      "rounds": [
+        {
+          "median": 18.707590303296172,
+          "low": 12.403138763504785,
+          "high": 25.404229902022955,
+          "coverage": 0.978515625
+        },
+        {
+          "median": 21.075730403157934,
+          "low": 14.66112040138745,
+          "high": 27.311737936732584,
+          "coverage": 0.978515625
+        }
+      ],
+      "verdict": "regression",
+      "pooled_ms": {
+        "base": {
+          "p50": 713.76406,
+          "p95": 770.3049334000001
+        },
+        "head": {
+          "p50": 868.2964704999999,
+          "p95": 907.5725488
+        }
+      },
+      "wall_seconds": 48.29351380400112
+    }
+  },
+  "python-release": {
+    "outcome": {
+      "elapsed": 77.91265595799996,
+      "state": "completed"
+    },
+    "completed_requests": {
+      "prepare": 4,
+      "sample": 40
+    },
+    "result": {
+      "base_p50": 0.6203972605,
+      "base_p95": 0.69993234885,
+      "change_percent": 27.241124560059205,
+      "cpus": [
+        2,
+        4,
+        16,
+        20
+      ],
+      "head_max": 0.899689188,
+      "head_min": 0.737719556,
+      "head_p50": 0.789400451,
+      "head_p95": 0.8621424139999999,
+      "oracle_checked_executions": 44,
+      "round_changes": [
+        24.82302626089772,
+        27.157360438011636
+      ],
+      "round_intervals": [
+        {
+          "coverage": 0.978515625,
+          "high": 36.03074119415008,
+          "low": 22.77268148243825,
+          "median": 24.82302626089772
+        },
+        {
+          "coverage": 0.978515625,
+          "high": 29.799515242635998,
+          "low": 23.24399173708045,
+          "median": 27.157360438011636
+        }
+      ],
+      "round_min_changes": [
+        27.654272635771182,
+        22.200047568134764
+      ],
+      "rows_per_second": 12667841.761848701,
+      "samples": 20,
+      "verdict": "regression"
+    },
+    "verified_requests": 44
+  }
+}
