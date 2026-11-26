@@ -15,7 +15,10 @@ from scripts.benchmark_suite.catalog import (
     worker_thread_count,
 )
 from scripts.benchmark_suite.dependency_migrations import validate_dependency_migrations
-from scripts.benchmark_suite.measure import validate_stream_sample
+from scripts.benchmark_suite.measure import (
+    validate_report_operator_sample,
+    validate_stream_sample,
+)
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import SAMPLES, comparison, validate_shards
 from scripts.toolkit import FULL_SHA
@@ -76,6 +79,7 @@ def _validate_round(case: dict, evidence: dict, releases: dict) -> None:
         _validate_measurements(samples)
         for sample in samples:
             validate_stream_sample(case, sample)
+            validate_report_operator_sample(case, sample)
     if case["family"] == "warm":
         _validate_cursors(case, evidence)
 

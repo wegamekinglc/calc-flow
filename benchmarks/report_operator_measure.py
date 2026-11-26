@@ -8,7 +8,11 @@ from pathlib import Path
 
 import numpy as np
 
-from benchmarks.report_operator_cases import FINANCE_BACKEND, STREAM_BACKEND
+from benchmarks.report_operator_cases import (
+    BACKEND_SCOPES,
+    FINANCE_BACKEND,
+    STREAM_BACKEND,
+)
 from benchmarks.report_operator_comparison import NativeCase, start_finance
 from benchmarks.report_operator_inputs import OperatorWorkload, columns
 from benchmarks.report_operator_oracles import oracle
@@ -18,6 +22,9 @@ class ReportOperatorCase:
     """Own one backend, its input, warm result, and fixture for a worker round."""
 
     def __init__(self, case: dict, root: Path) -> None:
+        backend = case["backend"]
+        if backend not in BACKEND_SCOPES:
+            raise ValueError(f"unsupported report operator backend: {backend}")
         self.workload = OperatorWorkload(
             case["rows"], case["entities"], case["chunk_ticks"]
         )
@@ -27,7 +34,6 @@ class ReportOperatorCase:
         self.loop = None
         self.warm = None
         name = case["scenario"]
-        backend = case["backend"]
         if backend == FINANCE_BACKEND:
             python = os.environ.get("FINANCE_PYTHON_PYTHON")
             if not python:
@@ -45,11 +51,10 @@ class ReportOperatorCase:
                 self.loop = asyncio.new_event_loop()
 
     def sample(self) -> dict:
-        correctness = {"passed": True, "rows": self.workload.rows}
         if self.finance is not None:
             return {
                 "seconds": self.finance.sample(1),
-                "correctness": correctness,
+                "correctness": {"passed": True, "rows": self.finance.identity["rows"]},
                 "finance_python": self.finance.identity,
             }
         if self.loop is None:
@@ -64,7 +69,10 @@ class ReportOperatorCase:
             self.warm = values
         else:
             np.testing.assert_array_equal(values, self.warm)
-        return {"seconds": seconds, "correctness": correctness}
+        return {
+            "seconds": seconds,
+            "correctness": {"passed": True, "rows": output.num_rows},
+        }
 
     def finish(self) -> dict:
         return {"state": "completed"}

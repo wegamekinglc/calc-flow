@@ -132,3 +132,19 @@ def test_scheduled_report_worker_validates_and_repeats_outputs(tmp_path, backend
         complete, active = dispatch({"operation": "finish"}, active, tmp_path)
         assert complete["state"] == "completed"
         assert active is None
+
+
+def test_scheduled_report_rejects_unknown_backend(tmp_path):
+    from benchmarks.report_operator_measure import ReportOperatorCase
+
+    with pytest.raises(ValueError, match="unsupported report operator backend"):
+        ReportOperatorCase(
+            {
+                "rows": 96,
+                "entities": 4,
+                "chunk_ticks": 5,
+                "scenario": "cs_mean",
+                "backend": "unknown",
+            },
+            tmp_path,
+        )

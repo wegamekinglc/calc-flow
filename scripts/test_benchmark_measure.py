@@ -11,6 +11,43 @@ from scripts.benchmark_suite.legacy import observe_workers
 
 
 class BenchmarkMeasureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_operator_measurement_rejects_invalid_sample_evidence(self):
+        case = {"family": "report-operators", "rows": 64_000, "scenario": "rank20"}
+        for backend, sample, error in (
+            (
+                "calc-flow-stream",
+                {"correctness": {"passed": True, "rows": 63_999}},
+                "row count",
+            ),
+            (
+                "finance-python",
+                {"correctness": {"passed": True, "rows": 64_000}},
+                "Finance-Python identity",
+            ),
+            (
+                "finance-python",
+                {
+                    "correctness": {"passed": True, "rows": 64_000},
+                    "finance_python": {"sha256": []},
+                },
+                "Finance-Python identity",
+            ),
+        ):
+            with (
+                self.subTest(backend=backend, error=error),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                worker = SimpleNamespace(
+                    request=AsyncMock(return_value={"seconds": 0.01, **sample})
+                )
+                with self.assertRaisesRegex(ValueError, error):
+                    await measure._samples(
+                        {"candidate": worker},
+                        {**case, "backend": backend},
+                        {"candidate": {}},
+                        Path(directory),
+                    )
+
     async def test_successful_round_settles_all_workers_after_cleanup_failure(self):
         first_error = OSError("baseline cleanup failed")
         workers = {

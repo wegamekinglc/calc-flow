@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 SHARD_FAMILY = "report-operators"
 WORKLOAD_CONTRACT = "report-operators-complete-ticks-v1"
 SCHEDULED_ROWS = 64_000
@@ -91,3 +93,23 @@ NO_FINANCE_EQUIVALENT = {
     "rsi20": "Wilder smoothing and warm-up differ from Finance-Python RSI",
     "cs_demean": "no Finance-Python equivalent for the report’s demean contract",
 }
+
+
+def validate_finance_identity(identity: object, operator: str, rows: int, /) -> None:
+    """Check the legacy worker's warm result and resolved operator identity."""
+    if not isinstance(identity, dict):
+        raise ValueError("missing report operator Finance-Python identity")
+    python_version = identity.get("python_version")
+    digest = identity.get("sha256")
+    if (
+        identity.get("event") != "ready"
+        or identity.get("indicator") != REPORT_INDICATOR_PREFIX + operator
+        or identity.get("finance_python_version") != "0.9.10"
+        or type(identity.get("rows")) is not int
+        or identity["rows"] != rows
+        or not isinstance(python_version, str)
+        or re.fullmatch(r"3\.9\.\d+", python_version) is None
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+    ):
+        raise ValueError("invalid report operator Finance-Python identity")

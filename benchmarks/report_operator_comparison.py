@@ -29,6 +29,7 @@ from benchmarks.report_operator_cases import (
     SCHEDULED_CHUNK_TICKS,
     SCHEDULED_ENTITIES,
     SCHEDULED_ROWS,
+    validate_finance_identity,
 )
 from benchmarks.report_operator_inputs import OperatorWorkload, columns
 from benchmarks.report_operator_oracles import oracle
@@ -241,17 +242,12 @@ WORKLOADS = {
 
 
 def _verified_finance(
-    worker: FinancePythonWorker, warm_path: Path, expected: np.ndarray
+    worker: FinancePythonWorker, warm_path: Path, operator: str, expected: np.ndarray
 ) -> None:
     identity = worker.identity
-    if identity.get("finance_python_version") != "0.9.10" or not str(
-        identity.get("python_version", "")
-    ).startswith("3.9."):
-        raise ValueError(
-            "report comparison requires Finance-Python 0.9.10 on Python 3.9"
-        )
+    validate_finance_identity(identity, operator, len(expected))
     values = np.load(warm_path, allow_pickle=False)
-    if hashlib.sha256(values.tobytes()).hexdigest() != identity.get("sha256"):
+    if hashlib.sha256(values.tobytes()).hexdigest() != identity["sha256"]:
         raise ValueError(
             "Finance-Python warm output checksum differs from worker reply"
         )
@@ -277,7 +273,7 @@ def start_finance(
         indicator=REPORT_INDICATOR_PREFIX + name,
     )
     try:
-        _verified_finance(worker, warm_path, expected)
+        _verified_finance(worker, warm_path, name, expected)
     except BaseException:
         worker.close()
         raise

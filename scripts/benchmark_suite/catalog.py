@@ -685,32 +685,50 @@ def _baseline_warm_ids(constants: dict[str, tuple[str, ...]]) -> frozenset[str]:
 
 def _baseline_report_operator_ids(source: Path) -> frozenset[str] | None:
     path = source / "benchmarks" / "report_operator_cases.py"
-    if not path.is_file():
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
         return frozenset()
+    except (OSError, SyntaxError, UnicodeError):
+        return None
     constants: dict[str, _CatalogConstant] = {}
-    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+    for node in tree.body:
         if (assignment := _assigned_constant(node, constants)) is not None:
             name, value = assignment
             constants[name] = value
-    if constants.get("WORKLOAD_CONTRACT") != report_operators.WORKLOAD_CONTRACT:
-        return frozenset()
-    dimensions = {
-        "SCHEDULED_ROWS": report_operators.SCHEDULED_ROWS,
-        "SCHEDULED_ENTITIES": report_operators.SCHEDULED_ENTITIES,
-        "SCHEDULED_CHUNK_TICKS": report_operators.SCHEDULED_CHUNK_TICKS,
-    }
-    if any(constants.get(name) != value for name, value in dimensions.items()):
-        return frozenset()
-    groups = (constants.get(name) for name in ("TIME_SERIES", "CROSS_SECTION", "ROW"))
-    operators = set()
-    for group in groups:
-        if not isinstance(group, tuple):
-            return None
-        operators.update(group)
+    contract = constants.get("WORKLOAD_CONTRACT")
     scopes = {
         report_operators.BATCH_BACKEND: constants.get("BATCH_SCOPE"),
         report_operators.STREAM_BACKEND: constants.get("STREAM_SCOPE"),
     }
+    if any(
+        not isinstance(value, str) or not value.strip()
+        for value in (contract, *scopes.values())
+    ):
+        return None
+    dimensions = tuple(
+        constants.get(name)
+        for name in ("SCHEDULED_ROWS", "SCHEDULED_ENTITIES", "SCHEDULED_CHUNK_TICKS")
+    )
+    if any(type(value) is not int or value <= 0 for value in dimensions):
+        return None
+    rows, entities, _ = dimensions
+    if rows % entities:
+        return None
+    operators = set()
+    for name in ("TIME_SERIES", "CROSS_SECTION", "ROW"):
+        group = constants.get(name)
+        if not isinstance(group, tuple) or any(
+            not operator.strip() for operator in group
+        ):
+            return None
+        operators.update(group)
+    if contract != report_operators.WORKLOAD_CONTRACT or dimensions != (
+        report_operators.SCHEDULED_ROWS,
+        report_operators.SCHEDULED_ENTITIES,
+        report_operators.SCHEDULED_CHUNK_TICKS,
+    ):
+        return frozenset()
     return frozenset(
         case["id"]
         for case in report_operator_cases()

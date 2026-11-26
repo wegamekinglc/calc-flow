@@ -493,6 +493,60 @@ class BenchmarkSuiteTests(unittest.TestCase):
                 {case["id"] for case in cases if case["backend"] == "calc-flow-batch"},
             )
 
+    def test_incomplete_report_operator_inventory_keeps_pairs(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cases = catalog.shard_cases(shard)
+        source = (
+            Path(__file__).resolve().parents[1] / "benchmarks/report_operator_cases.py"
+        )
+        original = source.read_text(encoding="utf-8")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "benchmarks" / source.name
+            baseline.parent.mkdir()
+            for invalid in (
+                original.replace(
+                    'WORKLOAD_CONTRACT = "report-operators-complete-ticks-v1"', ""
+                ),
+                original.replace(
+                    "SCHEDULED_ROWS = 64_000", "SCHEDULED_ROWS = rows_from_config()"
+                ),
+                original.replace("SCHEDULED_ENTITIES = 64", "SCHEDULED_ENTITIES = 0"),
+                original.replace(
+                    "SCHEDULED_CHUNK_TICKS = 100", 'SCHEDULED_CHUNK_TICKS = "100"'
+                ),
+                original.replace(
+                    'BATCH_SCOPE = "native-expression-execute-to-arrow/'
+                    'report-operator-v1"',
+                    "BATCH_SCOPE = None",
+                ),
+                original.replace(
+                    'STREAM_SCOPE = "ready-enqueue-to-arrow/report-operator-v1"',
+                    'STREAM_SCOPE = ""',
+                ),
+                original + "\n(",
+            ):
+                with self.subTest(invalid=invalid[-70:]):
+                    baseline.write_text(invalid, encoding="utf-8")
+                    ids = baseline_case_ids(root, shard)
+                    self.assertIsNone(ids)
+                    self.assertEqual(
+                        catalog.comparison_kind(cases[0], ids), "interleaved"
+                    )
+            baseline.write_bytes(b"\xff")
+            self.assertIsNone(baseline_case_ids(root, shard))
+            baseline.unlink()
+            baseline.mkdir()
+            self.assertIsNone(baseline_case_ids(root, shard))
+            baseline.rmdir()
+            baseline.write_text(
+                original.replace(
+                    "SCHEDULED_CHUNK_TICKS = 100", "SCHEDULED_CHUNK_TICKS = 64"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(baseline_case_ids(root, shard), frozenset())
+
     def test_native_throughput_matrix_excludes_runner_startup(self):
         cases = [
             c
