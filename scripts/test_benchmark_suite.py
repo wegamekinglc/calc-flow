@@ -427,23 +427,24 @@ class BenchmarkSuiteTests(unittest.TestCase):
     def test_report_operators_extend_one_bounded_third_party_shard(self):
         shard = catalog.get_shard("report-operators-64000")
         cells = catalog.shard_cases(shard)
-        self.assertEqual(len(cells), len({case["id"] for case in cells}))
-        self.assertEqual({case["rows"] for case in cells}, {64_000})
-        self.assertEqual({case["entities"] for case in cells}, {64})
-        self.assertEqual({case["chunk_ticks"] for case in cells}, {100})
-        matrices = {
-            backend: {case["scenario"] for case in cells if case["backend"] == backend}
-            for backend in ("calc-flow-batch", "calc-flow-stream", "finance-python")
-        }
-        self.assertEqual(len(matrices["calc-flow-batch"]), 60)
-        self.assertEqual(matrices["calc-flow-stream"], matrices["calc-flow-batch"])
+        identifiers = set()
+        matrices: dict[str, set[str]] = {}
+        for case in cells:
+            self.assertEqual(
+                (case["rows"], case["entities"], case["chunk_ticks"]), (64_000, 64, 100)
+            )
+            identifiers.add(case["id"])
+            matrices.setdefault(case["backend"], set()).add(case["scenario"])
+        self.assertEqual(len(cells), len(identifiers))
+        self.assertEqual(len(cells), 178)
         self.assertEqual(
-            matrices["finance-python"],
-            matrices["calc-flow-batch"] - {"rsi20", "cs_demean"},
+            set(matrices), {"calc-flow-batch", "calc-flow-stream", "finance-python"}
         )
-        self.assertFalse(
-            {case["id"] for case in cells} & {case["id"] for case in engine_cases()}
-        )
+        batch = matrices["calc-flow-batch"]
+        self.assertEqual(len(batch), 60)
+        self.assertEqual(matrices["calc-flow-stream"], batch)
+        self.assertEqual(matrices["finance-python"], batch - {"rsi20", "cs_demean"})
+        self.assertTrue(identifiers.isdisjoint(case["id"] for case in engine_cases()))
 
     def test_report_operator_table_keeps_unsupported_finance_cells_explicit(self):
         shard = catalog.get_shard("report-operators-64000")

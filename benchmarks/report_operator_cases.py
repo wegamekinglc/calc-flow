@@ -95,21 +95,24 @@ NO_FINANCE_EQUIVALENT = {
 }
 
 
+def _matches_identity_field(value: object, pattern: str) -> bool:
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
 def validate_finance_identity(identity: object, operator: str, rows: int, /) -> None:
     """Check the legacy worker's warm result and resolved operator identity."""
     if not isinstance(identity, dict):
         raise ValueError("missing report operator Finance-Python identity")
-    python_version = identity.get("python_version")
-    digest = identity.get("sha256")
+    expected = {
+        "event": "ready",
+        "indicator": REPORT_INDICATOR_PREFIX + operator,
+        "finance_python_version": "0.9.10",
+        "rows": rows,
+    }
     if (
-        identity.get("event") != "ready"
-        or identity.get("indicator") != REPORT_INDICATOR_PREFIX + operator
-        or identity.get("finance_python_version") != "0.9.10"
+        any(identity.get(name) != value for name, value in expected.items())
         or type(identity.get("rows")) is not int
-        or identity["rows"] != rows
-        or not isinstance(python_version, str)
-        or re.fullmatch(r"3\.9\.\d+", python_version) is None
-        or not isinstance(digest, str)
-        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or not _matches_identity_field(identity.get("python_version"), r"3\.9\.\d+")
+        or not _matches_identity_field(identity.get("sha256"), r"[0-9a-f]{64}")
     ):
         raise ValueError("invalid report operator Finance-Python identity")

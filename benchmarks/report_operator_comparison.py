@@ -280,6 +280,35 @@ def start_finance(
     return worker
 
 
+def _collect_samples(
+    native: NativeCase,
+    warm: dict[str, np.ndarray],
+    root: Path,
+    samples: int,
+    worker: FinancePythonWorker | None,
+) -> dict[str, list[float]]:
+    def checked_seconds(output: tuple[pa.Table, float], engine: str) -> float:
+        table, seconds = output
+        np.testing.assert_array_equal(native.validate(table), warm[engine])
+        return seconds
+
+    runners = {
+        "batch": lambda _: checked_seconds(native.batch(), "batch"),
+        "stream": lambda index: checked_seconds(
+            asyncio.run(native.stream(root / f"stream-{index}")), "stream"
+        ),
+    }
+    if worker is not None:
+        runners["finance"] = lambda _: worker.sample(1)
+    engines = tuple(runners)
+    observations: dict[str, list[float]] = {"batch": [], "stream": [], "finance": []}
+    for index in range(samples):
+        offset = index % len(engines)
+        for engine in engines[offset:] + engines[:offset]:
+            observations[engine].append(runners[engine](index))
+    return observations
+
+
 def collect_case(
     name: str,
     workload: OperatorWorkload,
@@ -305,36 +334,18 @@ def collect_case(
         if finance_python is not None and unsupported is None
         else nullcontext()
     )
-    observations = {"batch": [], "stream": [], "finance": []}
     with finance_worker as worker:
-        engines = ("batch", "stream")
-        if worker is not None:
-            engines = (*engines, "finance")
-        for index in range(samples):
-            offset = index % len(engines)
-            for engine in engines[offset:] + engines[:offset]:
-                if engine == "finance":
-                    assert worker is not None
-                    seconds = worker.sample(1)
-                else:
-                    output, seconds = (
-                        native.batch()
-                        if engine == "batch"
-                        else asyncio.run(native.stream(root / f"stream-{index}"))
-                    )
-                    np.testing.assert_array_equal(native.validate(output), warm[engine])
-                observations[engine].append(seconds)
-        finance = (
-            {"status": "unsupported", "reason": unsupported}
-            if unsupported is not None
-            else {"status": "not_requested"}
-            if worker is None
-            else {
+        observations = _collect_samples(native, warm, root, samples, worker)
+        if unsupported is not None:
+            finance = {"status": "unsupported", "reason": unsupported}
+        elif worker is None:
+            finance = {"status": "not_requested"}
+        else:
+            finance = {
                 "status": "passed",
                 "identity": worker.identity,
                 "seconds": observations["finance"],
             }
-        )
     medians = {
         engine: median(seconds) for engine, seconds in observations.items() if seconds
     }
@@ -348,7 +359,7 @@ def collect_case(
     }
 
 
-def main() -> None:
+def _parse_args() -> tuple[argparse.Namespace, list[str] | tuple[str, ...]]:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workload", choices=WORKLOADS, default="64k")
     parser.add_argument("--case", action="append", choices=OPERATORS)
@@ -371,7 +382,13 @@ def main() -> None:
     )
     if len(set(names)) != len(names):
         parser.error("each operator may be selected once")
+    return args, names
+
+
+def main() -> None:
+    args, names = _parse_args()
     workload = WORKLOADS[args.workload]
+    samples = 0 if args.validate_only else args.samples
     build = (
         release_identity(args.build)
         if args.build is not None
@@ -391,7 +408,7 @@ def main() -> None:
                     name,
                     workload,
                     Path(temporary) / name,
-                    samples=0 if args.validate_only else args.samples,
+                    samples=samples,
                     finance_python=args.finance_python,
                 )
             )
@@ -414,7 +431,7 @@ def main() -> None:
                         Path(__file__).parent.glob("report_operator_*.py")
                     )
                 },
-                "samples_per_engine": 0 if args.validate_only else args.samples,
+                "samples_per_engine": samples,
                 "timing_scopes": {
                     "batch": "compiled native expression execution to Arrow output",
                     "stream": "ready native runner from enqueue through Arrow output",
