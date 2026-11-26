@@ -122,7 +122,21 @@ fn checkpoint_buffered_quote(
     Ok(session.checkpoint()?.as_u64())
 }
 
-fn recover_buffered_quote() -> Result<(u64, Vec<Option<f64>>), Box<dyn Error>> {
+fn restore_buffered_quote(
+    root: &Path,
+    config: &StreamRuntimeConfig,
+) -> Result<Vec<Option<f64>>, Box<dyn Error>> {
+    let mut restored = StreamSession::restore(
+        build_plan()?,
+        config,
+        BTreeMap::new(),
+        ManagedCheckpointRuntime::new(root)?,
+    )?;
+    let result = restored.finish()?;
+    mean_values(&result, restored.output_ids()[0])
+}
+
+fn check_recovery(expected: &[Option<f64>]) -> Result<(), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().join("managed");
     let config = StreamRuntimeConfig {
@@ -130,20 +144,8 @@ fn recover_buffered_quote() -> Result<(u64, Vec<Option<f64>>), Box<dyn Error>> {
         ..Default::default()
     };
     let epoch = checkpoint_buffered_quote(&root, &config)?;
-
     // Closing the first session leaves its checkpoint available at the same root.
-    let mut restored = StreamSession::restore(
-        build_plan()?,
-        &config,
-        BTreeMap::new(),
-        ManagedCheckpointRuntime::new(&root)?,
-    )?;
-    let result = restored.finish()?;
-    Ok((epoch, mean_values(&result, restored.output_ids()[0])?))
-}
-
-fn check_recovery(expected: &[Option<f64>]) -> Result<(), Box<dyn Error>> {
-    let (epoch, restored) = recover_buffered_quote()?;
+    let restored = restore_buffered_quote(&root, &config)?;
     if epoch != 1 || restored != expected {
         return Err(format!("unexpected recovery at epoch {epoch}: {restored:?}").into());
     }
