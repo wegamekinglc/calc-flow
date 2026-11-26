@@ -21,8 +21,10 @@ use std::{
 const MIN_PACKED_BUCKETS: usize = 8;
 const MAX_PACKED_BUCKETS: usize = 128;
 const MAX_PACKED_LOCATORS: usize = 16_384;
+const MAX_PACKED_EXPIRATION_LOCATORS: usize = 4 * MAX_PACKED_LOCATORS;
 const PER_KEY_CONTROL_VERSION: u32 = 1;
 const PACKED_CONTROL_VERSION: u32 = 2;
+const COMBINED_CONTROL_VERSION: u32 = 3;
 const PACKED_BUCKET_PAGES: [&str; 2] = ["left/buckets", "right/buckets"];
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +51,7 @@ pub(in crate::operator::join) struct NativePageCache {
     runs: [BTreeMap<RunId, CachedRunPages>; 2],
     groups: [BTreeMap<GroupId, NativePage>; 2],
     packed_buckets: [Option<NativePage>; 2],
+    combine_expiration: bool,
     prefer_packed: [bool; 2],
     retired_packing: [bool; 2],
     expiration: [Option<NativePage>; 2],
@@ -69,13 +72,18 @@ struct CachedRunPages {
 }
 
 impl NativePageCache {
-    pub(in crate::operator::join) fn from_restored_segments(
-        segments: &BTreeMap<String, StateSegment>,
-    ) -> Self {
+    pub(in crate::operator::join) fn new(combine_expiration: bool) -> Self {
         Self {
-            prefer_packed: PACKED_BUCKET_PAGES.map(|name| segments.contains_key(name)),
+            combine_expiration,
             ..Self::default()
         }
+    }
+
+    pub(in crate::operator::join) fn remember_restored_packing(
+        &mut self,
+        segments: &BTreeMap<String, StateSegment>,
+    ) {
+        self.prefer_packed = PACKED_BUCKET_PAGES.map(|name| segments.contains_key(name));
     }
 
     #[cfg(test)]
@@ -110,30 +118,13 @@ pub(super) fn capture(
             capture_run(state, side, id, epoch, cache, &mut changes)?;
         }
         capture_buckets(state, side, epoch, cache, &mut changes)?;
-        if !initialized || state.dirty.expiration[side] {
-            let prefix = if side == 0 { "left" } else { "right" };
-            let rows = u64::try_from(state.sides[side].expiration.len())
-                .map_err(|_| page_error("expiration rows exceed u64"))?;
-            let page = NativePage::arrow(
-                format!("{prefix}/expiration"),
-                &expiration_record(&state.sides[side])?,
-                epoch,
-                0..rows,
-            );
-            changes.push(NativePageChange::upsert(
-                page.clone(),
-                cache.expiration[side].as_ref(),
-            )?);
-            cache.expiration[side] = Some(page);
-        } else {
-            #[cfg(test)]
-            {
-                cache.reused_indexes += 1;
-            }
-        }
+        capture_expiration(state, side, epoch, cache, &mut changes)?;
     }
     let control = Control {
-        version: control_version(cache.packed_buckets.iter().any(Option::is_some)),
+        version: control_version(
+            cache.packed_buckets.iter().any(Option::is_some),
+            cache.combine_expiration,
+        ),
         next_run: state.next_run,
         next_output: state.next_output,
         match_limit_failures: state.match_limit_failures,
@@ -166,12 +157,59 @@ pub(super) fn capture(
     NativePageSet::new(cache.lineage.clone(), changes)
 }
 
-fn control_version(packed: bool) -> u32 {
-    if packed {
-        PACKED_CONTROL_VERSION
-    } else {
-        PER_KEY_CONTROL_VERSION
+fn control_version(packed: bool, combine_expiration: bool) -> u32 {
+    match (packed, combine_expiration) {
+        (true, true) => COMBINED_CONTROL_VERSION,
+        (true, false) => PACKED_CONTROL_VERSION,
+        (false, _) => PER_KEY_CONTROL_VERSION,
     }
+}
+
+fn capture_expiration(
+    state: &RunState,
+    side: usize,
+    epoch: u64,
+    cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
+) -> Result<()> {
+    if cache.combine_expiration && cache.packed_buckets[side].is_some() {
+        if let Some(previous) = cache.expiration[side].take() {
+            changes.push(NativePageChange::remove(&previous)?);
+        }
+        return Ok(());
+    }
+    capture_standalone_expiration(state, side, epoch, cache, changes)
+}
+
+fn capture_standalone_expiration(
+    state: &RunState,
+    side: usize,
+    epoch: u64,
+    cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
+) -> Result<()> {
+    if cache.initialized && cache.expiration[side].is_some() && !state.dirty.expiration[side] {
+        #[cfg(test)]
+        {
+            cache.reused_indexes += 1;
+        }
+        return Ok(());
+    }
+    let prefix = if side == 0 { "left" } else { "right" };
+    let rows = u64::try_from(state.sides[side].expiration.len())
+        .map_err(|_| page_error("expiration rows exceed u64"))?;
+    let page = NativePage::arrow(
+        format!("{prefix}/expiration"),
+        &expiration_record(&state.sides[side])?,
+        epoch,
+        0..rows,
+    );
+    changes.push(NativePageChange::upsert(
+        page.clone(),
+        cache.expiration[side].as_ref(),
+    )?);
+    cache.expiration[side] = Some(page);
+    Ok(())
 }
 
 fn packed_bucket_rows(buckets: &BTreeMap<GroupId, Bucket>) -> Option<usize> {
@@ -184,6 +222,18 @@ fn packed_bucket_rows(buckets: &BTreeMap<GroupId, Bucket>) -> Option<usize> {
     })
 }
 
+fn packed_index_rows(side: &Side, combine_expiration: bool) -> Option<usize> {
+    let buckets = packed_bucket_rows(&side.buckets)?;
+    if !combine_expiration {
+        return Some(buckets);
+    }
+    let expiration = side.expiration.len();
+    if expiration > MAX_PACKED_EXPIRATION_LOCATORS {
+        return None;
+    }
+    buckets.checked_add(expiration)
+}
+
 fn capture_buckets(
     state: &RunState,
     side: usize,
@@ -191,7 +241,9 @@ fn capture_buckets(
     cache: &mut NativePageCache,
     changes: &mut Vec<NativePageChange>,
 ) -> Result<()> {
-    if cache.initialized && state.dirty.groups[side].is_empty() {
+    let packed_expiration_dirty =
+        cache.combine_expiration && cache.prefer_packed[side] && state.dirty.expiration[side];
+    if cache.initialized && state.dirty.groups[side].is_empty() && !packed_expiration_dirty {
         #[cfg(test)]
         {
             cache.reused_indexes +=
@@ -199,27 +251,35 @@ fn capture_buckets(
         }
         return Ok(());
     }
-    let buckets = &state.sides[side].buckets;
-    // Keep an existing packed page through transient depletion so its slot is reused.
-    let pack = cache.prefer_packed[side] || buckets.len() >= MIN_PACKED_BUCKETS;
-    if !cache.retired_packing[side]
-        && pack
-        && let Some(rows) = packed_bucket_rows(buckets)
-    {
-        return capture_packed_buckets(buckets, side, rows, epoch, cache, changes);
+    if let Some(rows) = eligible_packed_rows(&state.sides[side], side, cache) {
+        return capture_packed_buckets(&state.sides[side], side, rows, epoch, cache, changes);
     }
     capture_group_pages(state, side, epoch, cache, changes)
 }
 
+fn eligible_packed_rows(side_state: &Side, side: usize, cache: &NativePageCache) -> Option<usize> {
+    // Keep an existing packed page through transient depletion so its slot is reused.
+    let pack = cache.prefer_packed[side] || side_state.buckets.len() >= MIN_PACKED_BUCKETS;
+    if cache.retired_packing[side] || !pack {
+        return None;
+    }
+    packed_index_rows(side_state, cache.combine_expiration)
+}
+
 fn capture_packed_buckets(
-    buckets: &BTreeMap<GroupId, Bucket>,
+    side_state: &Side,
     side: usize,
     rows: usize,
     epoch: u64,
     cache: &mut NativePageCache,
     changes: &mut Vec<NativePageChange>,
 ) -> Result<()> {
-    let record = bucket_record(buckets, LocatorColumns::with_capacity(rows))?;
+    let mut columns = LocatorColumns::with_capacity(rows);
+    append_buckets(&side_state.buckets, &mut columns);
+    if cache.combine_expiration {
+        append_expiration(side_state, &mut columns);
+    }
+    let record = locator_record(columns)?;
     let end = u64::try_from(rows).expect("packed bucket rows fit u64");
     let page = NativePage::arrow(PACKED_BUCKET_PAGES[side], &record, epoch, 0..end);
     changes.push(NativePageChange::upsert(
@@ -460,6 +520,14 @@ fn bucket_record<'a>(
     buckets: impl IntoIterator<Item = (&'a GroupId, &'a Bucket)>,
     mut columns: LocatorColumns,
 ) -> Result<RecordBatch> {
+    append_buckets(buckets, &mut columns);
+    locator_record(columns)
+}
+
+fn append_buckets<'a>(
+    buckets: impl IntoIterator<Item = (&'a GroupId, &'a Bucket)>,
+    columns: &mut LocatorColumns,
+) {
     for (&group, bucket) in buckets {
         for entry in &bucket.entries {
             columns.push(
@@ -471,11 +539,15 @@ fn bucket_record<'a>(
             );
         }
     }
-    locator_record(columns)
 }
 
 fn expiration_record(side: &Side) -> Result<RecordBatch> {
     let mut columns = LocatorColumns::default();
+    append_expiration(side, &mut columns);
+    locator_record(columns)
+}
+
+fn append_expiration(side: &Side, columns: &mut LocatorColumns) {
     for entry in &side.expiration {
         columns.push(
             1,
@@ -485,7 +557,6 @@ fn expiration_record(side: &Side) -> Result<RecordBatch> {
             side.expiration.capacity(),
         );
     }
-    locator_record(columns)
 }
 
 fn locator_record(columns: LocatorColumns) -> Result<RecordBatch> {
@@ -527,9 +598,7 @@ pub(super) fn restore(
     let packed = PACKED_BUCKET_PAGES
         .iter()
         .any(|name| segments.contains_key(*name));
-    if control.version != control_version(packed) {
-        return Err(page_error("unsupported native Join control version"));
-    }
+    let combine_expiration = combined_index_layout(control.version, packed, spec.join_type)?;
     let key_record = decode_record(
         segments
             .get("keys")
@@ -537,18 +606,20 @@ pub(super) fn restore(
     )?;
     keys.restore(&key_record)
         .map_err(|error| page_error(error.to_string()))?;
-    let mut expected = BTreeSet::from([
-        "control".to_owned(),
-        "keys".to_owned(),
-        "left/expiration".to_owned(),
-        "right/expiration".to_owned(),
-    ]);
+    let mut expected = BTreeSet::from(["control".to_owned(), "keys".to_owned()]);
     let mut seen_runs = BTreeSet::new();
     let mut sides = [Side::empty(), Side::empty()];
     for (side, state) in sides.iter_mut().enumerate() {
         let prefix = if side == 0 { "left" } else { "right" };
         let allow_witnesses = side == 0 && spec.join_type != super::StreamJoinType::Inner;
-        restore_index_pages(state, prefix, segments, &mut expected, allow_witnesses)?;
+        restore_index_pages(
+            state,
+            prefix,
+            segments,
+            &mut expected,
+            allow_witnesses,
+            combine_expiration,
+        )?;
         for (name, payload) in segments.iter().filter(|(name, _)| {
             name.starts_with(&format!("{prefix}/run-")) && name.ends_with("/payload")
         }) {
@@ -614,22 +685,40 @@ pub(super) fn restore(
     })
 }
 
+fn combined_index_layout(
+    version: u32,
+    packed: bool,
+    join_type: super::StreamJoinType,
+) -> Result<bool> {
+    match (version, packed, join_type) {
+        (PER_KEY_CONTROL_VERSION, false, _) | (PACKED_CONTROL_VERSION, true, _) => Ok(false),
+        (COMBINED_CONTROL_VERSION, true, super::StreamJoinType::Inner) => Ok(true),
+        _ => Err(page_error("unsupported native Join control version")),
+    }
+}
+
 fn restore_index_pages(
     state: &mut Side,
     prefix: &str,
     segments: &BTreeMap<String, StateSegment>,
     expected: &mut BTreeSet<String>,
     allow_witnesses: bool,
+    combine_expiration: bool,
 ) -> Result<()> {
-    let mut records = vec![read_expiration_page(prefix, segments)?];
     let group_prefix = format!("{prefix}/group-");
     let packed_name = format!("{prefix}/buckets");
-    if let Some(segment) = segments.get(&packed_name) {
+    let packed = segments.get(&packed_name);
+    let mut records = Vec::new();
+    if !combine_expiration || packed.is_none() {
+        let expiration = format!("{prefix}/expiration");
+        records.push(read_expiration_page(&expiration, segments)?);
+        expected.insert(expiration);
+    }
+    if let Some(segment) = packed {
         if segments.keys().any(|name| name.starts_with(&group_prefix)) {
             return Err(page_error("packed and per-key bucket pages are mixed"));
         }
-        let record = decode_bucket_record(segment, allow_witnesses)?;
-        validate_packed_bucket_record(&record)?;
+        let record = read_packed_index(segment, allow_witnesses, combine_expiration)?;
         expected.insert(packed_name);
         records.push(record);
     } else {
@@ -644,12 +733,41 @@ fn restore_index_pages(
     restore_index(state, &records)
 }
 
+fn read_packed_index(
+    segment: &StateSegment,
+    allow_witnesses: bool,
+    combine_expiration: bool,
+) -> Result<RecordBatch> {
+    if combine_expiration {
+        let record = decode_index_record(segment)?;
+        validate_combined_index_record(&record)?;
+        return Ok(record);
+    }
+    let record = decode_bucket_record(segment, allow_witnesses)?;
+    validate_packed_bucket_record(&record)?;
+    Ok(record)
+}
+
+fn validate_combined_index_record(record: &RecordBatch) -> Result<()> {
+    if record.num_rows() > MAX_PACKED_LOCATORS + MAX_PACKED_EXPIRATION_LOCATORS {
+        return Err(page_error("combined index locator count is invalid"));
+    }
+    let kinds = uint8s(record, 0)?;
+    let bucket_rows = kinds.iter().take_while(|kind| **kind == 0).count();
+    let expiration = &kinds[bucket_rows..];
+    if expiration.len() > MAX_PACKED_EXPIRATION_LOCATORS || expiration.iter().any(|kind| *kind != 1)
+    {
+        return Err(page_error("combined index expiration suffix is invalid"));
+    }
+    validate_packed_bucket_record(&record.slice(0, bucket_rows))
+}
+
 fn read_expiration_page(
-    prefix: &str,
+    name: &str,
     segments: &BTreeMap<String, StateSegment>,
 ) -> Result<RecordBatch> {
     let segment = segments
-        .get(&format!("{prefix}/expiration"))
+        .get(name)
         .ok_or_else(|| page_error("missing expiration index"))?;
     let expiration = decode_index_record(segment)?;
     if uint8s(&expiration, 0)?.iter().any(|kind| *kind != 1) {
@@ -946,6 +1064,30 @@ fn uint8s(record: &RecordBatch, column: usize) -> Result<Vec<u8>> {
 fn page_error(message: impl Into<String>) -> CalcFlowError {
     CalcFlowError::CheckpointMismatch {
         message: format!("Join native pages: {}", message.into()),
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn test_combined_packed_index_requires_an_expiration_suffix() {
+    let group = GroupId::new(0).unwrap();
+    let entry = LocatorEntry {
+        time: EventTime::from_micros(5),
+        row_id: 0,
+        group,
+        locator: RowLocator {
+            run: RunId(0),
+            row: 0,
+            witnessed: false,
+        },
+    };
+    for (kinds, accepted) in [([0, 1], true), ([1, 0], false), ([0, 2], false)] {
+        let mut columns = LocatorColumns::default();
+        for kind in kinds {
+            columns.push(kind, group, &entry, 0, 1);
+        }
+        let record = locator_record(columns).unwrap();
+        assert_eq!(validate_combined_index_record(&record).is_ok(), accepted);
     }
 }
 

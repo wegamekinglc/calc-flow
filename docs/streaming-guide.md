@@ -1625,10 +1625,13 @@ sequences. Capture reuses clean run identity, bucket, expiration and shared-key
 pages and retires removed runs and buckets from its cache. A side starts using
 a packed bucket page at 8 to 128 buckets and up to 16,384 stored bucket entries,
 including consumed prefixes. The page keeps its slot through sparse and empty
-states. A side that exceeds either upper bound uses per-key pages until the
-state is reset or restored. Restore supports both packed and per-key v4
-snapshots. Capture assembles only changes against the previous page lineage
-and maintains reservation summaries incrementally.
+states. An inner Join stores up to 65,536 expiration entries in the same
+packed page. Once a packed side exceeds an applicable upper bound, it uses
+per-key pages until the state is reset or restored. Restore supports v4
+per-key snapshots and packed snapshots with either a combined or a separate
+expiration page.
+Capture assembles only changes against the previous page lineage and
+maintains reservation summaries incrementally.
 Persistence applies those changes directly to the previous partition index and
 writes only changed payloads plus metadata.
 Direct snapshots materialize every page, and each epoch serializes a

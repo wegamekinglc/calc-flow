@@ -1028,6 +1028,18 @@ impl RollingKernelPlan {
         numeric_rows::SharedRowsShape::compile(&self.groups)
     }
 
+    pub(super) fn is_shared_rows_mean_difference(&self) -> bool {
+        self.shared_rows.is_some()
+            && matches!(
+                self.outputs.as_slice(),
+                [TypedOutputPlan {
+                    kind: TypedOutputKind::Difference { left, right },
+                    ..
+                }] if left.kind == TypedFloatReadoutKind::Mean
+                    && right.kind == TypedFloatReadoutKind::Mean
+            )
+    }
+
     #[cfg(test)]
     pub(super) fn decay_pool_for_test(
         &self,

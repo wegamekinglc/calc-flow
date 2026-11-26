@@ -237,7 +237,7 @@ impl V4Store {
             (result, directory_worker.stats)
         })
         .await
-        .map_err(|error| worker_failure("object installation", error))?;
+        .map_err(|error| worker_failure("object installation", &error))?;
         self.stats.staging_directory_syncs += directory_stats.staging_directory_syncs;
         self.stats.committed_directory_syncs += directory_stats.committed_directory_syncs;
         result
@@ -257,7 +257,7 @@ impl V4Store {
             Ok((worker, encoded))
         })
         .await
-        .map_err(|error| worker_failure("directory preparation", error))?
+        .map_err(|error| worker_failure("directory preparation", &error))?
     }
 
     pub(crate) fn read_opaque(&mut self, handle: &V4Handle) -> Result<Vec<u8>> {
@@ -417,11 +417,11 @@ async fn settle_workers<T>(
     }
     settled
         .into_iter()
-        .map(|result| result.map_err(|error| worker_failure(worker, error))?)
+        .map(|result| result.map_err(|error| worker_failure(worker, &error))?)
         .collect()
 }
 
-fn worker_failure(worker: &str, error: tokio::task::JoinError) -> CalcFlowError {
+fn worker_failure(worker: &str, error: &tokio::task::JoinError) -> CalcFlowError {
     format_error(format!("checkpoint-v4 {worker} worker failed: {error}"))
 }
 
@@ -513,7 +513,8 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        DirectoryIoPhase, DirectoryIoTrace, NewObject, ObjectPayload, OpaqueObject, V4Store,
+        DirectoryIoPhase, DirectoryIoTrace, NewObject, ObjectPayload, OpaqueObject,
+        V4PersistenceStats, V4Store,
     };
     use crate::{CalcFlowError, state::v4::ObjectKind};
     use futures::FutureExt as _;
@@ -571,7 +572,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert_eq!(*store.stats(), Default::default());
+        assert_eq!(*store.stats(), V4PersistenceStats::default());
         assert!(!root.exists());
     }
 

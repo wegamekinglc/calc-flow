@@ -13,7 +13,7 @@ use std::{
 
 use tokio::sync::Notify;
 
-use crate::{CalcFlowError, CancellationToken, Result};
+use crate::{CalcFlowError, Result};
 
 mod job;
 #[cfg(test)]
@@ -73,20 +73,23 @@ struct Inner {
     ready: Condvar,
     settled: Condvar,
     settled_async: Notify,
-    cancellation: CancellationToken,
+    // Running leases poll this flag without locking.
+    cancelled: Arc<AtomicBool>,
     next_ticket: AtomicU64,
 }
 
 /// Cooperative cancellation visible to a running morsel.
 pub(crate) struct MorselLease {
-    cancellation: CancellationToken,
-    cancelled: Arc<AtomicBool>,
+    pool_cancelled: Arc<AtomicBool>,
+    ticket_cancelled: Arc<AtomicBool>,
     run_id: String,
 }
 
 impl MorselLease {
     pub(crate) fn check(&self) -> Result<()> {
-        if self.cancellation.is_cancelled() || self.cancelled.load(Ordering::Acquire) {
+        if self.pool_cancelled.load(Ordering::Acquire)
+            || self.ticket_cancelled.load(Ordering::Acquire)
+        {
             return Err(CalcFlowError::Cancelled {
                 run_id: self.run_id.clone(),
             });
@@ -98,13 +101,13 @@ impl MorselLease {
 /// A cancellation handle that also wakes blocked workers and admission.
 #[derive(Clone)]
 pub(crate) struct MorselCancellation {
-    token: CancellationToken,
+    cancelled: Arc<AtomicBool>,
     pool: Weak<Inner>,
 }
 
 impl MorselCancellation {
     pub(crate) fn cancel(&self) {
-        self.token.cancel();
+        self.cancelled.store(true, Ordering::Release);
         if let Some(pool) = self.pool.upgrade() {
             pool.ready.notify_all();
             pool.settled.notify_all();
@@ -242,8 +245,8 @@ where
             .take()
             .expect("morsel operation is owned once");
         let lease = MorselLease {
-            cancellation: pool.cancellation.clone(),
-            cancelled: Arc::clone(&self.ticket.cancelled),
+            pool_cancelled: Arc::clone(&pool.cancelled),
+            ticket_cancelled: Arc::clone(&self.ticket.cancelled),
             run_id: pool.name.clone(),
         };
         lease.check()?;
@@ -401,8 +404,8 @@ impl MorselClient {
         self.inner.check_open()?;
         if cost.rows <= self.inner.config.inline_rows {
             let lease = MorselLease {
-                cancellation: self.inner.cancellation.clone(),
-                cancelled: Arc::new(AtomicBool::new(false)),
+                pool_cancelled: Arc::clone(&self.inner.cancelled),
+                ticket_cancelled: Arc::new(AtomicBool::new(false)),
                 run_id: self.inner.name.clone(),
             };
             let result = catch_unwind(AssertUnwindSafe(|| operation(input, &lease)))
@@ -443,7 +446,7 @@ impl MorselPool {
             ready: Condvar::new(),
             settled: Condvar::new(),
             settled_async: Notify::new(),
-            cancellation: CancellationToken::new(),
+            cancelled: Arc::new(AtomicBool::new(false)),
             next_ticket: AtomicU64::new(1),
         });
         let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(config.workers);
@@ -455,7 +458,7 @@ impl MorselPool {
             {
                 Ok(handle) => handle,
                 Err(error) => {
-                    inner.cancellation.cancel();
+                    inner.cancelled.store(true, Ordering::Release);
                     lock(&inner.state).closed = true;
                     inner.ready.notify_all();
                     inner.settled.notify_all();
@@ -485,7 +488,7 @@ impl MorselPool {
 
     pub(crate) fn cancellation(&self) -> MorselCancellation {
         MorselCancellation {
-            token: self.inner.cancellation.clone(),
+            cancelled: Arc::clone(&self.inner.cancelled),
             pool: Arc::downgrade(&self.inner),
         }
     }
@@ -507,7 +510,7 @@ impl MorselPool {
             );
         }
         self.closed = true;
-        self.inner.cancellation.cancel();
+        self.inner.cancelled.store(true, Ordering::Release);
         {
             lock(&self.inner.state).closed = true;
         }
@@ -560,7 +563,7 @@ impl Inner {
     }
 
     fn check_open(&self) -> Result<()> {
-        if lock(&self.state).closed || self.cancellation.is_cancelled() {
+        if lock(&self.state).closed || self.cancelled.load(Ordering::Acquire) {
             return Err(CalcFlowError::Cancelled {
                 run_id: self.name.clone(),
             });
@@ -605,7 +608,7 @@ impl Inner {
         cost: MorselCost,
         bytes: usize,
     ) -> Result<Option<u64>> {
-        if state.closed || self.cancellation.is_cancelled() {
+        if state.closed || self.cancelled.load(Ordering::Acquire) {
             return Err(CalcFlowError::Cancelled {
                 run_id: self.name.clone(),
             });
@@ -644,7 +647,7 @@ impl Inner {
         F: FnOnce(T, &MorselLease) -> Result<O> + Send + 'static,
     {
         let mut state = lock(&self.state);
-        if state.closed || self.cancellation.is_cancelled() {
+        if state.closed || self.cancelled.load(Ordering::Acquire) {
             drop(state);
             work.ticket.settle(
                 Err(CalcFlowError::Cancelled {
@@ -664,7 +667,7 @@ impl Inner {
     fn next_job(&self) -> Option<Box<dyn Job>> {
         let mut state = lock(&self.state);
         loop {
-            if self.cancellation.is_cancelled() {
+            if self.cancelled.load(Ordering::Acquire) {
                 if let Some(job) = state.queue.pop_front() {
                     drop(state);
                     job.cancel(self);
@@ -717,7 +720,7 @@ impl Inner {
     }
 
     fn fail(&self) {
-        self.cancellation.cancel();
+        self.cancelled.store(true, Ordering::Release);
         self.cancel_queued();
         self.ready.notify_all();
         self.settled.notify_all();

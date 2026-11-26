@@ -590,8 +590,30 @@ mod tests {
         manifest
     }
 
+    fn left_packed_slot(
+        store: &mut crate::state::v4::V4Store,
+        manifest: &crate::state::v4::V4Manifest,
+    ) -> Option<u64> {
+        let crate::state::v4::OperatorV4::Table { partitions, .. } = &manifest.operators["match"]
+        else {
+            panic!("expected native partition");
+        };
+        let crate::state::v4::ObjectPayload::Bytes(bytes) =
+            store.read_object(&partitions[0].root).unwrap()
+        else {
+            panic!("expected partition index bytes");
+        };
+        let index: Value = serde_json::from_slice(&bytes).unwrap();
+        index["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["column"] == "left/buckets")
+            .map(|entry| entry["page_id"]["slot"].as_u64().unwrap())
+    }
+
     #[tokio::test]
-    async fn test_packed_native_index_persists_twelve_files_and_restores_exactly() {
+    async fn test_packed_native_index_persists_ten_files_and_restores_exactly() {
         let mut original =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         original.enable_native_checkpoint().unwrap();
@@ -612,7 +634,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
         let first = persist_native_epoch(&mut original, &mut store, 1).await;
-        assert_eq!(store.stats().file_syncs, 12);
+        assert_eq!(store.stats().file_syncs, 10);
         let crate::state::v4::OperatorV4::Table { partitions, .. } = &first.operators["match"]
         else {
             panic!("expected native partition");
@@ -620,20 +642,25 @@ mod tests {
         let pages =
             crate::state::v4::native::native_partition_handles(&mut store, &partitions[0], 1)
                 .unwrap();
-        assert_eq!(pages.len(), 11);
+        assert_eq!(pages.len(), 9);
         assert!(
             pages
                 .iter()
                 .all(|page| temp.path().join(&page.relative_path).is_file())
         );
         let snapshot = crate::state::v4::native::load_native(&mut store, &first, "match").unwrap();
-        for name in ["left/buckets", "right/buckets"] {
-            assert!(snapshot.segments.contains_key(name));
+        for side in ["left", "right"] {
+            assert!(snapshot.segments.contains_key(&format!("{side}/buckets")));
+            assert!(
+                !snapshot
+                    .segments
+                    .contains_key(&format!("{side}/expiration"))
+            );
         }
 
         persist_native_epoch(&mut original, &mut store, 2).await;
-        assert_eq!(store.stats().file_syncs, 14);
-        assert_eq!(store.stats().carried_objects, 10);
+        assert_eq!(store.stats().file_syncs, 12);
+        assert_eq!(store.stats().carried_objects, 8);
         let mut restored =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         restored.restore(&snapshot).unwrap();
@@ -642,10 +669,7 @@ mod tests {
             restored.run_core.as_ref().unwrap().fingerprint()
         );
         persist_native_epoch(&mut restored, &mut store, 3).await;
-        assert_eq!(
-            restored.run_core.as_ref().unwrap().native_change_count(),
-            10
-        );
+        assert_eq!(restored.run_core.as_ref().unwrap().native_change_count(), 8);
 
         let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
         let suffix = keyed_right_batch(&keys[..16], &[300; 16]);
@@ -802,29 +826,8 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
-        let packed_slot = |store: &mut crate::state::v4::V4Store,
-                           manifest: &crate::state::v4::V4Manifest|
-         -> Option<u64> {
-            let crate::state::v4::OperatorV4::Table { partitions, .. } =
-                &manifest.operators["match"]
-            else {
-                panic!("expected native partition");
-            };
-            let crate::state::v4::ObjectPayload::Bytes(bytes) =
-                store.read_object(&partitions[0].root).unwrap()
-            else {
-                panic!("expected partition index bytes");
-            };
-            let index: Value = serde_json::from_slice(&bytes).unwrap();
-            index["pages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["column"] == "left/buckets")
-                .map(|entry| entry["page_id"]["slot"].as_u64().unwrap())
-        };
         let first = persist_native_epoch(&mut operator, &mut store, 1).await;
-        let slot = packed_slot(&mut store, &first).expect("initial packed bucket slot");
+        let slot = left_packed_slot(&mut store, &first).expect("initial packed bucket slot");
         operator
             .on_ingress_progress(
                 "right",
@@ -838,14 +841,14 @@ mod tests {
             .unwrap();
         assert_eq!(operator.status().left.retained_rows, 0);
         let empty = persist_native_epoch(&mut operator, &mut store, 2).await;
-        assert_eq!(packed_slot(&mut store, &empty), Some(slot));
+        assert_eq!(left_packed_slot(&mut store, &empty), Some(slot));
         let snapshot = crate::state::v4::native::load_native(&mut store, &empty, "match").unwrap();
         let mut restored =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
         restored.restore(&snapshot).unwrap();
         assert_eq!(restored.status().left.retained_rows, 0);
         let empty_again = persist_native_epoch(&mut restored, &mut store, 3).await;
-        assert_eq!(packed_slot(&mut store, &empty_again), Some(slot));
+        assert_eq!(left_packed_slot(&mut store, &empty_again), Some(slot));
 
         restored
             .process_data(
@@ -858,7 +861,7 @@ mod tests {
             .unwrap();
         assert_eq!(restored.status().left.retained_rows, 64);
         let refilled = persist_native_epoch(&mut restored, &mut store, 4).await;
-        assert_eq!(packed_slot(&mut store, &refilled), Some(slot));
+        assert_eq!(left_packed_slot(&mut store, &refilled), Some(slot));
         let snapshot =
             crate::state::v4::native::load_native(&mut store, &refilled, "match").unwrap();
         operator.restore(&snapshot).unwrap();
@@ -867,6 +870,63 @@ mod tests {
             operator.run_core.as_ref().unwrap().fingerprint(),
             restored.run_core.as_ref().unwrap().fingerprint()
         );
+    }
+
+    #[tokio::test]
+    async fn test_packed_native_index_imports_separate_expiration_at_the_same_slot() {
+        let mut legacy =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        legacy.enable_native_checkpoint().unwrap();
+        legacy
+            .run_core
+            .as_mut()
+            .unwrap()
+            .write_separate_packed_pages_for_test();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(legacy.output_ports().to_vec());
+        legacy
+            .process_data(
+                "left",
+                keyed_left_batch(&(0..64).collect::<Vec<_>>(), &[1000; 64]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
+        let first = persist_native_epoch(&mut legacy, &mut store, 1).await;
+        let slot = left_packed_slot(&mut store, &first).expect("legacy packed slot");
+        let previous = crate::state::v4::native::load_native(&mut store, &first, "match").unwrap();
+        let control: Value = serde_json::from_slice(previous.segments["control"].bytes()).unwrap();
+        assert_eq!(control["version"], 2);
+        assert!(previous.segments.contains_key("left/expiration"));
+
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.restore(&previous).unwrap();
+        let combined = persist_native_epoch(&mut operator, &mut store, 2).await;
+        assert_eq!(left_packed_slot(&mut store, &combined), Some(slot));
+        let restored =
+            crate::state::v4::native::load_native(&mut store, &combined, "match").unwrap();
+        let control: Value = serde_json::from_slice(restored.segments["control"].bytes()).unwrap();
+        assert_eq!(control["version"], 3);
+        assert!(!restored.segments.contains_key("left/expiration"));
+        assert!(restored.segments.contains_key("right/expiration"));
+        operator.restore(&restored).unwrap();
+        assert_eq!(
+            operator.run_core.as_ref().unwrap().fingerprint(),
+            legacy.run_core.as_ref().unwrap().fingerprint()
+        );
+
+        let mut mixed = restored;
+        mixed.segments.insert(
+            "left/expiration".into(),
+            previous.segments["left/expiration"].clone(),
+        );
+        assert!(operator.restore(&mixed).is_err());
     }
 
     #[tokio::test]
