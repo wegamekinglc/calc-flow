@@ -181,6 +181,59 @@ class BenchmarkNormalizeTests(unittest.TestCase):
             ):
                 self.assertEqual(result["status"], "error")
 
+    def test_reviewed_symbolic_projection_keeps_python_and_lifecycle_pairing(self):
+        from scripts.toolkit import fingerprint_json
+
+        original = "4c4b583bbc55a1593a9427f374f6adae380e8a95ad823ffb0885fe9af3eb7380"
+        current = "7001c9da8376288d8257862fbd35da0a0f2efdec17bcb3e84aaf2f2dfaba5935"
+        helper = "ed5f917ac167a31ca29e28e31c362dd2795ab9b045db136b060ed3426bcd03f9"
+
+        def block(name, source, symbolic_support=helper):
+            metadata = {
+                "benchmark_source_sha256": source,
+                "benchmark_symbolic_support_sha256": symbolic_support,
+                "benchmark_support_sha256": "b" * 64,
+            }
+            for key in ("machine", "dependency", "workload"):
+                identity = {"fixture": key}
+                metadata[f"{key}_identity"] = identity
+                metadata[f"{key}_fingerprint"] = fingerprint_json(identity)
+            return {
+                name: {
+                    "samples": [1.0],
+                    "rows": 1,
+                    "scope": "test",
+                    "metadata": metadata,
+                }
+            }
+
+        for family, node in (
+            ("python", "test_sce08_temporal_milestone_pair[overhead]"),
+            ("python", "test_table_matmul[standard-jax]"),
+            ("lifecycle", "test_stream_window_checkpoint_and_recovery[standard]"),
+        ):
+            with self.subTest(node=node):
+                name = f"benchmarks/test_symbolic_baseline.py::{node}"
+                shard = {"id": family, "family": family}
+                base, head = block(name, original), block(name, current)
+                blocks = {"baseline": [base, base], "candidate": [head, head]}
+                row = combine_blocks(shard, blocks)[0]
+                self.assertEqual(row["status"], "ok", row.get("error"))
+                self.assertEqual(
+                    row["metadata"]["symbolic_projection_source_sha256"],
+                    {"baseline": original, "candidate": current},
+                )
+                self.assertEqual(row["metadata"]["benchmark_source_sha256"], current)
+                for unreviewed in (
+                    block(name, "d" * 64),
+                    block(name, current, "f" * 64),
+                    base,
+                ):
+                    row = combine_blocks(
+                        shard, {**blocks, "candidate": [head, unreviewed]}
+                    )[0]
+                    self.assertEqual(row["status"], "error")
+
     def test_empty_blocks_cannot_pass(self):
         with self.assertRaises(ValueError):
             combine_blocks(

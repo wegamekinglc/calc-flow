@@ -27,7 +27,7 @@ _ROLLING_EXPLAIN_SOURCES = {
     "baseline": "9abc1fc9a800ee545bc70c83b7c5550e0323f49eb34959b2d3f699a0d0b6fd4f",
     "candidate": "947f95f5b2093dd36a83a2f12cbcfeff76f56b72a992cabdcb57515dc847ed9a",
 }
-_ROLLING_SYMBOLIC_SUPPORT = (
+_SYMBOLIC_SUPPORT_SHA256 = (
     "ed5f917ac167a31ca29e28e31c362dd2795ab9b045db136b060ed3426bcd03f9"
 )
 _ROLLING_EXPLAIN_CASES = frozenset(
@@ -35,17 +35,37 @@ _ROLLING_EXPLAIN_CASES = frozenset(
     for indicator in ("sma20", "dual_sma")
     for scale in LEGACY_SCALES
 )
+_SYMBOLIC_BENCHMARK_SOURCE = "benchmarks/test_symbolic_baseline.py"
+# This transition changes only the untimed query-count check for SCE08, but
+# every benchmark in the file records its full source hash.
+_SYMBOLIC_PROJECTION_SOURCES = {
+    "baseline": "4c4b583bbc55a1593a9427f374f6adae380e8a95ad823ffb0885fe9af3eb7380",
+    "candidate": "7001c9da8376288d8257862fbd35da0a0f2efdec17bcb3e84aaf2f2dfaba5935",
+}
 
 
-def _reviewed_rolling_explain(name: str, blocks: dict) -> bool:
-    return name in _ROLLING_EXPLAIN_CASES and all(
-        _matches_rolling_source(block[name]["metadata"], expected)
-        for side, expected in _ROLLING_EXPLAIN_SOURCES.items()
+def _reviewed_pytest_source(family: str, name: str, blocks: dict) -> dict:
+    if family == "python" and name in _ROLLING_EXPLAIN_CASES:
+        label, sources = "rolling_explain_source_sha256", _ROLLING_EXPLAIN_SOURCES
+    elif family in ("python", "lifecycle") and (
+        name.partition("::")[0] == _SYMBOLIC_BENCHMARK_SOURCE
+    ):
+        label, sources = (
+            "symbolic_projection_source_sha256",
+            _SYMBOLIC_PROJECTION_SOURCES,
+        )
+    else:
+        return {}
+    if all(
+        _matches_reviewed_source(block[name]["metadata"], expected)
+        for side, expected in sources.items()
         for block in blocks[side]
-    )
+    ):
+        return {label: sources.copy()}
+    return {}
 
 
-def _matches_rolling_source(metadata: dict, expected: str) -> bool:
+def _matches_reviewed_source(metadata: dict, expected: str) -> bool:
     try:
         validate_identity(metadata)
     except ValueError:
@@ -54,7 +74,7 @@ def _matches_rolling_source(metadata: dict, expected: str) -> bool:
     return (
         metadata.get("benchmark_source_sha256") == expected
         and metadata.get("benchmark_symbolic_support_sha256")
-        == _ROLLING_SYMBOLIC_SUPPORT
+        == _SYMBOLIC_SUPPORT_SHA256
         and isinstance(support, str)
         and re.fullmatch(r"[0-9a-f]{64}", support) is not None
     )
@@ -63,7 +83,10 @@ def _matches_rolling_source(metadata: dict, expected: str) -> bool:
 def _pytest_source_hashes(source: Path, name: str) -> dict:
     benchmark = source / name.split("::", 1)[0]
     hashes = {"benchmark_source_sha256": sha256_file(benchmark)}
-    if name in _ROLLING_EXPLAIN_CASES:
+    if (
+        name in _ROLLING_EXPLAIN_CASES
+        or benchmark == source / _SYMBOLIC_BENCHMARK_SOURCE
+    ):
         hashes["benchmark_symbolic_support_sha256"] = sha256_file(
             source / "benchmarks/symbolic_support.py"
         )
@@ -192,17 +215,15 @@ def _block_row(shard: dict, name: str, descriptor: dict, blocks: dict) -> dict:
             ),
         }
     problem = block_problem(name, blocks, rust=shard["family"] == "rust")
-    if (
-        problem == _SOURCE_CHANGE
-        and shard["family"] == "python"
-        and _reviewed_rolling_explain(name, blocks)
-    ):
-        row["metadata"] = {
-            **row["metadata"],
-            "rolling_explain_source_sha256": _ROLLING_EXPLAIN_SOURCES.copy(),
-        }
-    elif problem:
-        return {**row, "status": "error", "error": problem}
+    if problem:
+        transition = (
+            _reviewed_pytest_source(shard["family"], name, blocks)
+            if problem == _SOURCE_CHANGE
+            else {}
+        )
+        if not transition:
+            return {**row, "status": "error", "error": problem}
+        row["metadata"] = {**row["metadata"], **transition}
     row = {
         **row,
         "status": "ok",

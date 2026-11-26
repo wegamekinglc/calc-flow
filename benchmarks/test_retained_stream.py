@@ -281,6 +281,8 @@ def test_interval_small_batches_cover_pipeline_skew_and_recovery(tmp_path, check
             assert evidence["recovery"] == "verified"
             assert evidence["nonterminal_epochs"]
             assert 0 < evidence["rows_before_checkpoint"] < case["rows"]
+            latest = evidence["resumed_last_completed_epoch"]
+            assert type(latest) is int and latest >= evidence["nonterminal_epochs"][0]
     finally:
         runner.close()
 

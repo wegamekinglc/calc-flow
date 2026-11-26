@@ -878,11 +878,13 @@ def test_sce08_temporal_milestone_pair(
     assert hand_built_plan.fingerprint == symbolic_plan.fingerprint
     inputs = {"input": utc_event_time_batch(workload.batch)}
 
-    hand_built_output = hand_built_plan.execute(inputs).outputs["output"].to_pyarrow()
+    hand_built_warm_result = hand_built_plan.execute(inputs)
+    hand_built_output = hand_built_warm_result.outputs["output"].to_pyarrow()
     symbolic_warm_result = symbolic_plan.execute(inputs)
     symbolic_output = symbolic_warm_result.outputs["output"].to_pyarrow()
     _assert_sce08_outputs_equal(hand_built_output, symbolic_output)
-    assert len(symbolic_warm_result.datafusion_metrics) == 1
+    assert not hand_built_warm_result.datafusion_metrics
+    assert not symbolic_warm_result.datafusion_metrics
     paired_samples = alternating_plan_samples(
         hand_built_plan,
         symbolic_plan,
