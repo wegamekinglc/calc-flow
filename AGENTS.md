@@ -221,9 +221,10 @@ dashes span the full column width, including cell spaces.
   bounded atomic project-document store.
 
 Apache DataFusion 55 is the SQL and general expression engine. Native table
-operators also execute on Arrow. Each SQL node accepts one read-only `SELECT`
-or CTE statement. The project contract rejects DDL, DML, utility statements,
-multiple statements, and table backend selectors.
+operators also execute on Arrow. Each SQL node accepts one read-only `SELECT`,
+optionally with common table expressions. The project contract rejects data
+definition, data modification, utility statements, multiple statements, and
+table backend selectors.
 
 ### Python application API and binding
 

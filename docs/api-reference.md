@@ -567,8 +567,9 @@ finished, closed, or busy session.
 ## Version and compatibility
 
 The Rust crate and Python binding are versioned `2026.11.14` in this checkout.
-Projects use format `3`. Managed runner and durable session checkpoints use
-manifest version `4` with `job_kind="runner"` or `job_kind="session"`.
+Project format version `3` governs serialized projects. Managed runner and
+durable session checkpoints use manifest version `4` with `job_kind="runner"`
+or `job_kind="session"`.
 The Rust `CheckpointManifest` format `3` applies to direct state transactions.
 These protocol versions are independent of the package version. Studio lives in the
 [calc-flow-studio](https://github.com/wegamekinglc/calc-flow-studio)

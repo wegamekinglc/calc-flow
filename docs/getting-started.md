@@ -191,10 +191,10 @@ use `maturin develop` for this release-style installation, and do not leave
 
 ## Verify the installation
 
-For a source build, compare the reported Calc Flow version with the workspace
-package version in [Cargo.toml](../Cargo.toml). For a published installation,
-compare it with the selected release. Confirm that the native extension path
-is inside the installation environment.
+For a build from this checkout, confirm that Calc Flow reports version `2026.11.14`.
+A published installation reports the release selected by the package manager,
+which can differ from the current source version. Confirm that the native
+extension loads from the installation environment.
 
 ### Linux and WSL
 

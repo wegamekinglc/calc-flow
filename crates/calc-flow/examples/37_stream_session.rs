@@ -1,6 +1,6 @@
 //! Push ordered rows and recover a caller-driven stream session.
 
-use std::{collections::BTreeMap, error::Error, sync::Arc};
+use std::{collections::BTreeMap, error::Error, path::Path, sync::Arc};
 
 use calc_flow::arrow::{
     array::{ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
@@ -108,6 +108,20 @@ fn run_session() -> Result<(SessionOutput, SessionOutput, SessionOutput, String)
     Ok((first, second, final_output, output))
 }
 
+fn checkpoint_buffered_quote(
+    root: &Path,
+    config: &StreamRuntimeConfig,
+) -> Result<u64, Box<dyn Error>> {
+    let mut session = StreamSession::new_with_checkpoints(
+        build_plan()?,
+        config,
+        BTreeMap::new(),
+        ManagedCheckpointRuntime::new(root)?,
+    )?;
+    push_quotes(&mut session)?;
+    Ok(session.checkpoint()?.as_u64())
+}
+
 fn recover_buffered_quote() -> Result<(u64, Vec<Option<f64>>), Box<dyn Error>> {
     let directory = tempfile::tempdir()?;
     let root = directory.path().join("managed");
@@ -115,16 +129,7 @@ fn recover_buffered_quote() -> Result<(u64, Vec<Option<f64>>), Box<dyn Error>> {
         checkpointing: true,
         ..Default::default()
     };
-    let epoch = {
-        let mut session = StreamSession::new_with_checkpoints(
-            build_plan()?,
-            &config,
-            BTreeMap::new(),
-            ManagedCheckpointRuntime::new(&root)?,
-        )?;
-        push_quotes(&mut session)?;
-        session.checkpoint()?.as_u64()
-    };
+    let epoch = checkpoint_buffered_quote(&root, &config)?;
 
     // Closing the first session leaves its checkpoint available at the same root.
     let mut restored = StreamSession::restore(
@@ -135,6 +140,16 @@ fn recover_buffered_quote() -> Result<(u64, Vec<Option<f64>>), Box<dyn Error>> {
     )?;
     let result = restored.finish()?;
     Ok((epoch, mean_values(&result, restored.output_ids()[0])?))
+}
+
+fn check_recovery(expected: &[Option<f64>]) -> Result<(), Box<dyn Error>> {
+    let (epoch, restored) = recover_buffered_quote()?;
+    if epoch != 1 || restored != expected {
+        return Err(format!("unexpected recovery at epoch {epoch}: {restored:?}").into());
+    }
+    println!("checkpoint epoch: {epoch}");
+    println!("restored finish: {restored:?}");
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -155,11 +170,5 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("second push: {second:?}");
     println!("finish: {final_values:?}");
 
-    let (epoch, restored) = recover_buffered_quote()?;
-    if epoch != 1 || restored != final_values {
-        return Err(format!("unexpected recovery at epoch {epoch}: {restored:?}").into());
-    }
-    println!("checkpoint epoch: {epoch}");
-    println!("restored finish: {restored:?}");
-    Ok(())
+    check_recovery(&final_values)
 }
