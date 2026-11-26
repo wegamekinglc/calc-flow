@@ -1,6 +1,7 @@
 use crate::Result;
 use crate::operator::asof::{
-    admission::{AcceptedRows, ValidatedInput},
+    AsofJoinSide,
+    admission::{self, AcceptedRows, ValidatedInput},
     arrow_error,
 };
 use crate::operator::keyed::GroupId;
@@ -464,7 +465,7 @@ fn retained_identity_charge(
 pub(super) struct Run {
     pub(super) payload: Option<Arc<RecordBatch>>,
     pub(super) groups: Vec<GroupId>,
-    pub(super) times: Vec<i64>,
+    pub(super) times: ScalarBuffer<i64>,
     pub(super) sequences: SequenceColumn,
     payload_live: Vec<bool>,
     identity_live: Vec<bool>,
@@ -478,11 +479,19 @@ impl Run {
     pub(super) fn new(
         record: RecordBatch,
         groups: Vec<GroupId>,
-        times: Vec<i64>,
+        declaration: &AsofJoinSide,
         sequences: SequenceColumn,
     ) -> Self {
         let payload_rows = record.num_rows();
         debug_assert_ne!(payload_rows, 0);
+        let values = admission::times(&record, declaration).values();
+        let buffer = values.inner();
+        // Times can outlive the retained payload.
+        let times = if buffer.capacity() == buffer.len() {
+            values.clone()
+        } else {
+            values.to_vec().into()
+        };
         let payload_charge = retained_payload_charge(&record);
         let identity_charge = retained_identity_charge(&groups, &times, &sequences);
         Self {
@@ -614,7 +623,7 @@ impl Run {
         Ok(Self {
             payload,
             groups,
-            times,
+            times: times.into(),
             sequences,
             payload_live,
             identity_live,

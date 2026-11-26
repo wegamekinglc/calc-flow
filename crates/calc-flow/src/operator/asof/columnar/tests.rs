@@ -1,7 +1,7 @@
 use super::{ColumnarState, Selection};
 use crate::operator::asof::{
     AsofJoinSide, AsofStateLimits, StreamAsofJoinSpec,
-    admission::{AcceptedRows, PreparedRecord, ValidatedInput},
+    admission::{AcceptedRows, PreparedRecord, ValidatedInput, times as input_times},
     schema,
 };
 use crate::{Result, StreamingFailureReason};
@@ -1043,6 +1043,10 @@ fn test_late_drop_excludes_rows_before_key_birth_and_retains_watermark_equality(
         .unwrap();
     assert_eq!(state.right_payload_rows(), 1);
     assert_eq!(state.keys.len(), 1);
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    let retained_times = input_times(run.payload_record().unwrap(), declaration.right()).values();
+    assert_eq!(run.times(), &[5]);
+    assert_eq!(run.times().as_ptr(), retained_times.as_ptr());
     admit(&mut state, 0, &record(&[(1, 5, 1, Some("left"))])).unwrap();
     let selection = select(&state, Some(6), false, 10);
     assert_eq!(selection.matched(), 1);
@@ -1775,8 +1779,51 @@ fn test_sliced_payload_does_not_retain_large_backing_allocation() {
         (1, 100, 2, Some("z")),
         (1, 101, 3, Some(&"x".repeat(4 * 1024 * 1024))),
     ]);
-    admit(&mut state, 1, &input.slice(1, 1)).unwrap();
+    let input = input.slice(1, 1);
+    admit(&mut state, 1, &input).unwrap();
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    let retained_times = input_times(run.payload_record().unwrap(), declaration.right()).values();
+    let source_times = input_times(&input, declaration.right()).values();
+    assert_ne!(retained_times.as_ptr(), source_times.as_ptr());
+    assert_eq!(retained_times.inner().capacity(), size_of::<i64>());
+    assert_eq!(run.times().as_ptr(), retained_times.as_ptr());
     assert!(state.persistent_bytes() < 16_384);
+}
+
+#[test]
+fn test_oversized_assembled_timestamp_buffer_is_not_shared_for_identity() {
+    use datafusion::execution::memory_pool::MemoryConsumer;
+
+    let declaration = spec(0, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    let mut times = Vec::with_capacity(1_024);
+    times.push(5);
+    let input = record(&[(1, 5, 1, Some("payload"))]);
+    let mut columns = input.columns().to_vec();
+    columns[1] = Arc::new(TimestampMicrosecondArray::new(times.into(), None).with_timezone("UTC"));
+    let assembled = RecordBatch::try_new(input.schema(), columns).unwrap();
+    let times = input_times(&assembled, declaration.right()).values();
+    assert!(times.inner().capacity() > times.inner().len());
+    let payload_times = times.as_ptr();
+
+    state
+        .admit(
+            PreparedRecord::Assembled {
+                record: assembled,
+                workspace: MemoryConsumer::new("assembled ASOF test").register(&pool),
+            },
+            ValidatedInput {
+                index: 1,
+                watermark: None,
+                accepted: 1,
+            },
+            &mut || Ok(()),
+        )
+        .unwrap();
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    assert_eq!(run.times(), &[5]);
+    assert_ne!(run.times().as_ptr(), payload_times);
 }
 
 #[test]

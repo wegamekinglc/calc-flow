@@ -748,7 +748,6 @@ impl ColumnarState {
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
         let groups = self.route_run_keys(&key_arrays, record.num_rows(), check)?;
-        let times = admission::times(&record, declaration).values().to_vec();
         let run_id = self.next_run;
         let next_run = self.next_run.checked_add(1).ok_or_else(|| {
             reason(
@@ -757,7 +756,7 @@ impl ColumnarState {
                 "ASOF run identifier space is exhausted",
             )
         })?;
-        let run = Run::new(record, groups, times, sequences);
+        let run = Run::new(record, groups, declaration, sequences);
         Ok(PreparedRun {
             run,
             workspace,
