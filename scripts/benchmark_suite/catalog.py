@@ -5,8 +5,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from benchmarks import report_operator_cases as report_operators
+
 ROW_SCALES = tuple(10**power for power in range(1, 8))
 LEGACY_SCALES = ("overhead", "small", "standard", "nightly")
+CATALOG_FAMILIES = frozenset(("engines", "warm", report_operators.SHARD_FAMILY))
 SQL_CASES = (
     "projection",
     "filter",
@@ -318,6 +321,28 @@ def warm_cases(history: int) -> list[dict]:
     ]
 
 
+def report_operator_cases() -> list[dict]:
+    rows = report_operators.SCHEDULED_ROWS
+    family = report_operators.SHARD_FAMILY
+    return [
+        {
+            "id": f"{family}/{rows}/{backend}/{operator}",
+            "family": family,
+            "backend": backend,
+            "scenario": operator,
+            "scope": scope,
+            "workload": report_operators.WORKLOAD_CONTRACT,
+            "rows": rows,
+            "entities": report_operators.SCHEDULED_ENTITIES,
+            "chunk_ticks": report_operators.SCHEDULED_CHUNK_TICKS,
+        }
+        for operator in report_operators.OPERATORS
+        for backend, scope in report_operators.BACKEND_SCOPES.items()
+        if backend != report_operators.FINANCE_BACKEND
+        or operator not in report_operators.NO_FINANCE_EQUIVALENT
+    ]
+
+
 def shards() -> list[dict]:
     return [
         *(
@@ -329,6 +354,11 @@ def shards() -> list[dict]:
             for family in ("engines", "warm")
             for rows in ROW_SCALES
         ),
+        {
+            "id": f"{report_operators.SHARD_FAMILY}-{report_operators.SCHEDULED_ROWS}",
+            "family": report_operators.SHARD_FAMILY,
+            "rows": report_operators.SCHEDULED_ROWS,
+        },
         *({"id": family, "family": family} for family in ("rust", "lifecycle")),
     ]
 
@@ -341,6 +371,8 @@ def get_shard(identifier: str) -> dict:
 
 
 def shard_cases(shard: dict) -> list[dict]:
+    if shard["family"] == report_operators.SHARD_FAMILY:
+        return report_operator_cases()
     if shard["family"] == "engines":
         return engine_cases(shard["rows"])
     if shard["family"] == "warm":
@@ -651,6 +683,42 @@ def _baseline_warm_ids(constants: dict[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(ids)
 
 
+def _baseline_report_operator_ids(source: Path) -> frozenset[str] | None:
+    path = source / "benchmarks" / "report_operator_cases.py"
+    if not path.is_file():
+        return frozenset()
+    constants: dict[str, _CatalogConstant] = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if (assignment := _assigned_constant(node, constants)) is not None:
+            name, value = assignment
+            constants[name] = value
+    if constants.get("WORKLOAD_CONTRACT") != report_operators.WORKLOAD_CONTRACT:
+        return frozenset()
+    dimensions = {
+        "SCHEDULED_ROWS": report_operators.SCHEDULED_ROWS,
+        "SCHEDULED_ENTITIES": report_operators.SCHEDULED_ENTITIES,
+        "SCHEDULED_CHUNK_TICKS": report_operators.SCHEDULED_CHUNK_TICKS,
+    }
+    if any(constants.get(name) != value for name, value in dimensions.items()):
+        return frozenset()
+    groups = (constants.get(name) for name in ("TIME_SERIES", "CROSS_SECTION", "ROW"))
+    operators = set()
+    for group in groups:
+        if not isinstance(group, tuple):
+            return None
+        operators.update(group)
+    scopes = {
+        report_operators.BATCH_BACKEND: constants.get("BATCH_SCOPE"),
+        report_operators.STREAM_BACKEND: constants.get("STREAM_SCOPE"),
+    }
+    return frozenset(
+        case["id"]
+        for case in report_operator_cases()
+        if case["scenario"] in operators
+        and scopes.get(case["backend"]) == case["scope"]
+    )
+
+
 def baseline_case_ids(
     baseline_source: Path | None, shard: dict
 ) -> frozenset[str] | None:
@@ -658,6 +726,8 @@ def baseline_case_ids(
 
     if baseline_source is None:
         return None
+    if shard["family"] == report_operators.SHARD_FAMILY:
+        return _baseline_report_operator_ids(baseline_source)
     catalog_path = baseline_source / "scripts" / "benchmark_suite" / "catalog.py"
     if not catalog_path.is_file():
         return None

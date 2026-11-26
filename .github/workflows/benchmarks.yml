@@ -449,8 +449,8 @@ jobs:
           uv venv target/benchmark-venv
           uv pip sync --python target/benchmark-venv/bin/python \
             --require-hashes benchmarks/requirements.lock
-      - name: Install pinned Finance-Python for engine recovery
-        if: startsWith(inputs.shard, 'engines-')
+      - name: Install pinned Finance-Python for third-party recovery
+        if: startsWith(inputs.shard, 'engines-') || startsWith(inputs.shard, 'report-operators-')
         run: |
           uv python install 3.9
           uv venv target/finance-python-venv --python 3.9
@@ -482,7 +482,7 @@ jobs:
           import os
           import subprocess
           from pathlib import Path
-          from scripts.benchmark_suite.catalog import get_shard
+          from scripts.benchmark_suite.catalog import CATALOG_FAMILIES, get_shard
           from scripts.benchmark_suite.release import load_release
           for side, expected, source in (
               ("baseline", os.environ["EXPECTED_BASE"], "target/base"),
@@ -495,7 +495,7 @@ jobs:
               if manifest["git_sha"] != expected or actual != expected:
                   raise ValueError(f"{side}: release/source does not match expected SHA")
           shard = get_shard(os.environ["BENCHMARK_SHARD"])
-          if shard["family"] not in ("engines", "warm", "python"):
+          if shard["family"] not in CATALOG_FAMILIES and shard["family"] != "python":
               raise ValueError("recovery supports Python wheel shards")
           PY
       - name: Run complete recovery shard with resource diagnostics

@@ -161,11 +161,17 @@ class FinancePythonWorker:
         indicator: str = INDICATOR_ROLLING_MEAN,
         fast_window: int = DEFAULT_FAST_WINDOW,
     ) -> None:
-        runner = Path(__file__).with_name("finance_python_rolling_runner.py")
+        root = Path(__file__).resolve().parent.parent
+        executable = shutil.which(str(python))
+        if executable is None:
+            raise FileNotFoundError(
+                f"Finance-Python interpreter is not executable: {python}"
+            )
         self._process = subprocess.Popen(  # nosec B603  # nosemgrep
             [
-                str(python),
-                str(runner),
+                str(Path(executable).absolute()),
+                "-m",
+                "benchmarks.finance_python_rolling_runner",
                 "--rows",
                 str(rows),
                 "--entities",
@@ -177,8 +183,9 @@ class FinancePythonWorker:
                 "--fast-window",
                 str(fast_window),
                 "--warm-output",
-                str(warm_output),
+                str(warm_output.resolve()),
             ],
+            cwd=root,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

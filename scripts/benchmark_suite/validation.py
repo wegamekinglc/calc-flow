@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from scripts.benchmark_suite.catalog import (
+    CATALOG_FAMILIES,
     CONTRACT,
     POLARS_ENGINE,
     comparison_kind,
@@ -167,7 +168,7 @@ def validate_fragment(
             "measurement harness or dependency lock differs from the candidate"
         )
     _validate_inventory(report, shard)
-    if shard["family"] in ("engines", "warm"):
+    if shard["family"] in CATALOG_FAMILIES:
         _validate_catalog_cases(report, shard)
     if shard["family"] == "rust":
         validate_dependency_migrations(report)
@@ -176,7 +177,7 @@ def validate_fragment(
 def _validate_inventory(report: dict, shard: dict) -> None:
     expected = (
         [case["id"] for case in shard_cases(shard)]
-        if shard["family"] in ("engines", "warm")
+        if shard["family"] in CATALOG_FAMILIES
         else report["expected_case_ids"]
     )
     if not expected:

@@ -83,6 +83,36 @@ class ReleaseIdentityTests(unittest.TestCase):
             )
             self.assertEqual(json.loads(record.read_text()), original)
 
+    def test_canonical_benchmark_manifest_verifies_wheel_and_installed_native(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, legacy, modules = release_fixture(root)
+            wheel = Path(legacy["wheel"])
+            benchmark = {
+                "contract": "benchmark-release-v1",
+                "build_profile": "release",
+                "git_clean": True,
+                "git_sha": legacy["source_sha"],
+                "wheel": wheel.name,
+                "native_sha256": legacy["native_sha256"],
+                "wheel_sha256": legacy["wheel_sha256"],
+            }
+            record = root / "release.json"
+            record.write_text(json.dumps(benchmark), encoding="utf-8")
+            native = Path(modules["calc_flow._native"].__file__)
+            with patch.dict(sys.modules, modules):
+                identity = release_identity(record)
+                self.assertEqual(identity["build"]["git_sha"], benchmark["git_sha"])
+                self.assertEqual(identity["native_sha256"], benchmark["native_sha256"])
+                original = native.read_bytes()
+                native.write_bytes(b"mismatched installed native")
+                with self.assertRaisesRegex(ValueError, "installed native"):
+                    release_identity(record)
+                native.write_bytes(original)
+                wheel.write_bytes(b"mismatched wheel")
+                with self.assertRaisesRegex(ValueError, "wheel/native hash"):
+                    release_identity(record)
+
     def test_dev_dirty_unknown_source_and_stale_native_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             record, build, modules = release_fixture(Path(directory))

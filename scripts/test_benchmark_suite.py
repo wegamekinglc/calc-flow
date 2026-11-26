@@ -422,7 +422,76 @@ class BenchmarkSuiteTests(unittest.TestCase):
             <= {s["family"] for s in matrix}
         )
         self.assertEqual(len(matrix), len({s["id"] for s in matrix}))
-        self.assertEqual(len(matrix), 20)
+        self.assertEqual(len(matrix), 21)
+
+    def test_report_operators_extend_one_bounded_third_party_shard(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cells = catalog.shard_cases(shard)
+        self.assertEqual(len(cells), len({case["id"] for case in cells}))
+        self.assertEqual({case["rows"] for case in cells}, {64_000})
+        self.assertEqual({case["entities"] for case in cells}, {64})
+        self.assertEqual({case["chunk_ticks"] for case in cells}, {100})
+        matrices = {
+            backend: {case["scenario"] for case in cells if case["backend"] == backend}
+            for backend in ("calc-flow-batch", "calc-flow-stream", "finance-python")
+        }
+        self.assertEqual(len(matrices["calc-flow-batch"]), 60)
+        self.assertEqual(matrices["calc-flow-stream"], matrices["calc-flow-batch"])
+        self.assertEqual(
+            matrices["finance-python"],
+            matrices["calc-flow-batch"] - {"rsi20", "cs_demean"},
+        )
+        self.assertFalse(
+            {case["id"] for case in cells} & {case["id"] for case in engine_cases()}
+        )
+
+    def test_report_operator_table_keeps_unsupported_finance_cells_explicit(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cases = [
+            measured_case(
+                **case,
+                baseline=[],
+                comparison=catalog.comparison_kind(case, frozenset()),
+            )
+            for case in catalog.shard_cases(shard)
+        ]
+        markdown = render_report(cases, [])
+        operator_table = markdown.split("## Report operator comparison", 1)[1]
+        rows = [row for row in operator_table.splitlines() if row.startswith("|")]
+        self.assertEqual(len(rows), 62)
+        unsupported = [row for row in rows if "unsupported" in row]
+        self.assertEqual(
+            {row.split("|")[1].strip() for row in unsupported}, {"rsi20", "cs_demean"}
+        )
+        self.assertNotIn("missing", operator_table)
+
+    def test_report_operator_baseline_tracks_each_native_scope(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cases = catalog.shard_cases(shard)
+        native_ids = {
+            case["id"] for case in cases if case["backend"].startswith("calc-flow")
+        }
+        source = (
+            Path(__file__).resolve().parents[1] / "benchmarks/report_operator_cases.py"
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(baseline_case_ids(root, shard), frozenset())
+            baseline = root / "benchmarks" / source.name
+            baseline.parent.mkdir()
+            declaration = source.read_text(encoding="utf-8")
+            baseline.write_text(declaration, encoding="utf-8")
+            self.assertEqual(baseline_case_ids(root, shard), native_ids)
+            baseline.write_text(
+                declaration.replace(
+                    "ready-enqueue-to-arrow/report-operator-v1", "older-stream-scope"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                baseline_case_ids(root, shard),
+                {case["id"] for case in cases if case["backend"] == "calc-flow-batch"},
+            )
 
     def test_native_throughput_matrix_excludes_runner_startup(self):
         cases = [

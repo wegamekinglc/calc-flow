@@ -19,14 +19,21 @@ import subprocess  # nosec B404
 import zipfile
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 
+def sha256_stream(source: BinaryIO) -> str:
+    digest = hashlib.sha256()
+    for block in iter(lambda: source.read(1 << 20), b""):
+        digest.update(block)
+    return digest.hexdigest()
+
+
 def sha256_file(path: Path) -> str:
     with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
+        return sha256_stream(source)
 
 
 def wheel_native_sha256(path: Path) -> str:
@@ -39,7 +46,7 @@ def wheel_native_sha256(path: Path) -> str:
         if len(names) != 1:
             raise ValueError("wheel must contain exactly one native module")
         with wheel.open(names[0]) as native:
-            return hashlib.file_digest(native, "sha256").hexdigest()
+            return sha256_stream(native)
 
 
 def canonical_json(

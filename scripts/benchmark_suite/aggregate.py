@@ -7,7 +7,12 @@ import json
 from collections import Counter
 from pathlib import Path
 
-from scripts.benchmark_suite.catalog import get_shard, shard_cases, shards
+from scripts.benchmark_suite.catalog import (
+    CATALOG_FAMILIES,
+    get_shard,
+    shard_cases,
+    shards,
+)
 from scripts.benchmark_suite.normalize import read_json
 from scripts.benchmark_suite.refs import describe_baseline
 from scripts.benchmark_suite.report import (
@@ -19,7 +24,7 @@ from scripts.benchmark_suite.validation import validate_fragment, validate_shape
 
 
 def unavailable_cases(shard: dict, error: str, received: list[dict] = ()) -> list[dict]:
-    expected = shard_cases(shard) if shard["family"] in ("engines", "warm") else []
+    expected = shard_cases(shard) if shard["family"] in CATALOG_FAMILIES else []
     fallback = [
         {
             "id": case["id"],
@@ -64,7 +69,7 @@ def _read_fragment(
 
 
 def fill_missing_cases(shard: dict, cases: list[dict]) -> list[dict]:
-    if shard["family"] not in ("engines", "warm"):
+    if shard["family"] not in CATALOG_FAMILIES:
         return list(cases)
     received = {case["id"] for case in cases}
     return [

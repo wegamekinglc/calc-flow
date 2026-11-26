@@ -37,6 +37,7 @@ On this page:
 - [Native Array interfaces](#native-array-interfaces)
 - [Inputs, correctness and timing boundaries](#inputs-correctness-and-timing-boundaries)
 - [Streaming operator examples](#streaming-operator-examples)
+- [Report operator comparisons](#report-operator-comparisons)
 - [ASOF settlement measurements](#asof-settlement-measurements)
 - [Join materialization measurements](#join-materialization-measurements)
 - [Revision comparisons and regression gate](#revision-comparisons-and-regression-gate)
@@ -78,7 +79,7 @@ scheduled inventory or its verdict calculation.
 ## Complete inventory
 
 The catalog is executable: `python -m scripts.benchmark_suite catalog` emits
-the same 20 shards consumed by the scheduled and manual suite. The Python
+the same 21 shards consumed by the scheduled and manual suite. The Python
 matrix includes overhead, small, standard and nightly scales.
 The separate engine and warm-state matrices still run every decade
 through 10M rows. Dynamic pytest and Criterion inventories preserve
@@ -99,14 +100,15 @@ deletes entries a newer cache in the same ref and key family has replaced when
 no run has restored them for 24 hours since. Preview a cleanup with
 `python -m scripts.prune_actions_caches --repository wegamekinglc/calc-flow --dry-run`.
 
-| Family         | Dimensions                                          | Cases per dimension                                       |
-|----------------|-----------------------------------------------------|-----------------------------------------------------------|
-| Python         | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
-| Engines        | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 71 through 10k, 79 at 100k/1M, 65 at 10M                  |
-| Warm streaming | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
-| Warm append    | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
-| Rust           | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
-| Lifecycle      | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
+| Family           | Dimensions                                          | Cases per dimension                                       |
+|------------------|-----------------------------------------------------|-----------------------------------------------------------|
+| Python           | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
+| Engines          | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 71 through 10k, 79 at 100k/1M, 65 at 10M                  |
+| Report operators | 64k rows, 64 entities, 100 ticks per stream chunk   | 60 Batch, 60 Streaming, 58 Finance-Python                 |
+| Warm streaming   | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
+| Warm append      | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
+| Rust             | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
+| Lifecycle        | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
 
 The Python shard includes nine streaming operator examples at every Python
 scale and four selected `Program.execute` cases. The Rust `stream_union` target
@@ -423,6 +425,67 @@ returns one full aggregate snapshot per 640-row batch and runs with the
 convenience defaults, without checkpoints. Inputs cap at 20,000
 rows. Existing compiled-plan and direct `Program.stream` case identities and
 timing boundaries remain unchanged.
+
+## Report operator comparisons
+
+The scheduled `report-operators-64000` shard covers all 60 individual operator
+expressions at 64,000 rows. It has 178 measured cells across native compiled
+Batch, native ready Streaming and the isolated Finance-Python 0.9.10 worker.
+The same scope and fixture are used for paired native revisions when the
+baseline declares the case. The consolidated Markdown and raw shard artifacts
+include the full inventory. The existing engine IDs and timing scopes have
+their original meanings. Use `scripts.benchmark_suite run` or the
+`suite-recovery` workflow to run this shard from release wheels.
+
+The [standalone collector](../benchmarks/report_operator_comparison.py) shares
+the operators, validation and engine adapters. It also supports the two larger
+workloads from the Alpha-Mind report for local comparisons.
+
+| Workload      | Rows        | Entities | Ticks per stream chunk | Cases                     |
+|---------------|------------:|---------:|-----------------------:|--------------------------:|
+| `64k`         | 64,000      | 64       | 100                    | 60                        |
+| `762k`        | 762,048     | 64       | 100                    | 60                        |
+| `3000-stocks` | 762,000     | 3,000    | 10                     | 11 cross-section cases    |
+
+Each full operator set has 26 time-series, 11 cross-section and 23 row-local
+or arithmetic cases. The stream source sends explicit watermarks after each
+complete timestamp chunk and finalizes the last group before timing ends.
+Every engine is checked against an independent NumPy or scalar oracle in
+sequence order. The native validator checks the UInt64 sequence and the
+operator’s Arrow value type before numerical normalization. The oracles cover
+partial rolling windows and missing values
+where the case uses them. Finance-Python has 58 supported cases in the full
+set. `rsi20` and `cs_demean` record their Finance status as unsupported, and
+`cs_percentile` rescales Finance ranks to the same endpoint convention.
+The generator uses deterministic synthetic inputs with the report's workload
+sizes. Use the JSON from a single run for its cross-engine ratios.
+
+Batch timing covers compiled native expression execution and Arrow output.
+Streaming timing covers ready-runner enqueue through combined Arrow output.
+Finance timing covers only the public transform over a prepared pandas frame.
+Construction, warm-up, validation and stream shutdown are outside the timers.
+The standalone collector rotates engine order and records raw samples and
+medians. The scheduled collector uses two rounds of ten samples per backend
+cell and publishes candidate medians across engines.
+Treat these observations as descriptive cross-engine measurements under the
+selected workload and timing scopes. Revision regression decisions use the
+[paired protocol](#revision-comparisons-and-regression-gate).
+
+Run from the repository root using an installed Calc Flow package and the
+benchmark dependencies. Set `FINANCE_PYTHON_PYTHON` to the pinned interpreter
+prepared in [the benchmark setup](../benchmarks/README.md#rolling-indicator-implementation-comparison).
+Repeat `--case` to select individual operators, and add `--validate-only` to
+check the selected workload without retaining timing samples. Omitting the
+Finance interpreter runs Batch and Streaming only. Pass the `release.json`
+produced by `python -m scripts.benchmark_suite build` to `--build` to verify
+the wheel beside the manifest and the installed native module before execution.
+
+```bash
+FINANCE_PYTHON_PYTHON=target/finance-python-venv/bin/python \
+  python -m benchmarks.report_operator_comparison \
+  --workload 3000-stocks --case cs_mean --case cs_rank \
+  --output target/report-operator-comparison.json
+```
 
 ## ASOF settlement measurements
 

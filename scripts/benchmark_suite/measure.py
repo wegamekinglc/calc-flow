@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 
+from benchmarks.report_operator_cases import SHARD_FAMILY
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
     POLARS_ENGINE,
@@ -315,7 +316,10 @@ async def measure_shard(
         side: await install(release, root / side) for side, release in releases.items()
     }
     workers_by_side = {
-        side: (site, ROOT if shard["family"] == "engines" else sources[side])
+        side: (
+            site,
+            ROOT if shard["family"] in ("engines", SHARD_FAMILY) else sources[side],
+        )
         for side, site in sites.items()
     }
     baseline_ids = baseline_case_ids(baseline_source, shard)

@@ -52,6 +52,22 @@ class BenchmarkWorkflowTests(unittest.TestCase):
         self.assertIn("if: always()", recovery)
         self.assertNotIn("--benchmark-disable", recovery)
 
+    def test_report_operator_shard_installs_finance_in_schedule_and_recovery(self):
+        suite = (ROOT / ".github/workflows/benchmark-suite.yml").read_text(
+            encoding="utf-8"
+        )
+        recovery = (
+            (ROOT / ".github/workflows/benchmarks.yml")
+            .read_text(encoding="utf-8")
+            .split("  suite-recovery:\n", 1)[1]
+        )
+        self.assertIn(
+            "matrix.family == 'engines' || matrix.family == 'report-operators'", suite
+        )
+        self.assertIn("startsWith(inputs.shard, 'report-operators-')", recovery)
+        self.assertIn('shard["family"] not in CATALOG_FAMILIES', recovery)
+        self.assertIn("benchmarks/test_report_operator_comparison.py", suite)
+
     def test_recovery_bounds_memory_and_preserves_resource_evidence(self):
         workflow = (ROOT / ".github/workflows/benchmarks.yml").read_text(
             encoding="utf-8"

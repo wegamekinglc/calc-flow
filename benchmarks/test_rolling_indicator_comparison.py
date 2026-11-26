@@ -122,3 +122,32 @@ def test_calc_flow_rolling_methods_match_incremental_oracle() -> None:
     for method in methods.values():
         actual = method.execute()
         np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_finance_worker_resolves_a_bare_interpreter_from_path(tmp_path, monkeypatch):
+    from pathlib import Path
+    from unittest.mock import Mock
+
+    from benchmarks.rolling_indicator_comparison import FinancePythonWorker
+
+    executable = tmp_path / "legacy-python"
+    executable.touch(mode=0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    process = Mock()
+    process.poll.return_value = 0
+    process.stdout.readline.return_value = (
+        '{"event": "ready", "rows": 24, "indicator": "rolling_mean"}\n'
+    )
+    launch = Mock(return_value=process)
+    monkeypatch.setattr(
+        "benchmarks.rolling_indicator_comparison.subprocess.Popen", launch
+    )
+
+    with FinancePythonWorker(
+        Path(executable.name),
+        rows=24,
+        entities=4,
+        window=20,
+        warm_output=tmp_path / "warm.npy",
+    ):
+        assert launch.call_args.args[0][0] == str(executable)

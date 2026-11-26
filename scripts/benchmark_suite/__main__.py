@@ -7,7 +7,12 @@ import asyncio
 import json
 from pathlib import Path
 
-from scripts.benchmark_suite.catalog import CONTRACT, get_shard, shards
+from scripts.benchmark_suite.catalog import (
+    CATALOG_FAMILIES,
+    CONTRACT,
+    get_shard,
+    shards,
+)
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import build_report
 
@@ -62,7 +67,7 @@ async def run_shard(args: argparse.Namespace) -> int:
             "candidate": load_release(args.candidate),
         }
         report["releases"] = releases
-        if shard["family"] in ("engines", "warm"):
+        if shard["family"] in CATALOG_FAMILIES:
             report = await measure_shard(shard, releases, output, args.baseline_source)
         else:
             from scripts.benchmark_suite.legacy import measure_legacy

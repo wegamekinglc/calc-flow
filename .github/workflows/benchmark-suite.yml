@@ -217,7 +217,7 @@ jobs:
           uv pip sync --python target/benchmark-venv/bin/python \
             --require-hashes benchmarks/requirements.lock
       - name: Install pinned Finance-Python in Python 3.9
-        if: matrix.family == 'engines'
+        if: matrix.family == 'engines' || matrix.family == 'report-operators'
         run: |
           uv python install 3.9
           uv venv target/finance-python-venv --python 3.9
@@ -270,7 +270,7 @@ jobs:
             target/benchmark-venv/bin/python -m pytest \
             benchmarks/test_engine_comparison.py benchmarks/test_engine_stream.py \
             benchmarks/test_retained_stream.py benchmarks/test_sql_operators.py \
-            benchmarks/test_polars_operators.py -q
+            benchmarks/test_polars_operators.py benchmarks/test_report_operator_comparison.py -q
       - name: Verify native Array benchmark scenarios
         if: matrix.id == 'python-overhead'
         run: |
