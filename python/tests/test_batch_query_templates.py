@@ -177,3 +177,79 @@ def test_warm_batch_templates_isolate_concurrent_calls_and_cancellation():
         assert await execute(8) == [9]
 
     asyncio.run(run())
+
+
+def test_batch_sql_only_executes_the_calculation_between_projections():
+    table = pa.table({"value": [1, None, -2], "label": ["a", "b", "c"]})
+    source = cf.table_input("events", schema=table.schema)
+    declarations = (
+        source.select("label", result=source["value"] + 1),
+        source.sql("SELECT label, value + 1 AS result FROM input"),
+    )
+    batch = cf.Batch.from_pyarrow(table)
+    expected = pa.table({"label": ["a", "b", "c"], "result": [2, None, -1]})
+
+    for declaration in declarations:
+        plan = cf.Program("projection", mode="batch").output("result", declaration)
+        result = plan.compile_batch().execute({"input": batch})
+        assert _result(result).equals(expected, check_metadata=True)
+        assert len(result.datafusion_metrics) == 1
+
+
+def test_batch_column_projection_retains_input_buffers_and_nulls():
+    table = pa.table(
+        {"value": pa.chunked_array([[1, None], [-2]]), "unused": [0, 0, 0]}
+    )
+    source = cf.table_input("events", schema=table.schema)
+    program = cf.Program("rename", mode="batch").output(
+        "result", source.select(result=source["value"])
+    )
+    plan = program.compile_batch()
+    for data in (table, table.slice(0, 0)):
+        result = plan.execute({"input": cf.Batch.from_pyarrow(data)})
+        output = _result(result)
+        assert output.equals(data.select(["value"]).rename_columns(["result"]))
+        assert result.node_timings["result"]["output_rows"] == {"output": data.num_rows}
+        assert result.datafusion_metrics == []
+        if data.num_rows:
+            assert [
+                chunk.buffers()[1].address for chunk in output["result"].chunks
+            ] == [chunk.buffers()[1].address for chunk in data["value"].chunks]
+
+
+def test_auto_plan_applies_the_same_partition_policy_to_equivalent_projections():
+    batch, table = _batch([1, None, -2])
+    builder = cf.PipelineBuilder("equivalent-projections").with_datafusion_config(
+        parallelism_mode="auto_plan"
+    )
+    declarations = (
+        builder.expression("query", "", select=("value + 1 AS result",)),
+        builder.sql("query", "SELECT value + 1 AS result FROM input"),
+    )
+    for declaration in declarations:
+        result = declaration.compile_batch().execute({"input": batch})
+        assert _result(result)["result"].equals(pc.add(table["value"], 1))
+        assert (
+            result.datafusion_metrics[0]["partition_limit_reason"]
+            == "row_local_projection"
+        )
+
+
+def test_batch_column_projection_uses_the_complete_select_statement():
+    table = pa.table({"value": [1, None, 3], "last": [7, 8, 9]})
+    source = cf.table_input("events", schema=table.schema)
+    project = (
+        cf.Program("projection", mode="batch")
+        .output("result", source.select("value", "last"))
+        .to_project()
+        .model_dump()
+    )
+    project["graph"]["nodes"][0]["operator"]["select"] = [
+        "value -- the following comma is part of this comment",
+        "\nlast",
+    ]
+    plan = cf.Runtime().compile_batch_project(
+        cf.ProjectDocument.model_validate(project).canonical_json()
+    )
+    actual = _result(plan.execute({"input": cf.Batch.from_pyarrow(table)}))
+    assert actual.equals(table.select(["value"]).rename_columns(["last"]))

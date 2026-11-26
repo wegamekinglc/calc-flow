@@ -1107,11 +1107,23 @@ pub(crate) fn push_bounded_sql_batch(
     max_rows: usize,
     max_bytes: usize,
 ) -> Result<()> {
+    (*rows, *bytes) = bounded_sql_batch_size(*rows, *bytes, &batch, max_rows, max_bytes)?;
+    batches.push(batch);
+    Ok(())
+}
+
+pub(crate) fn bounded_sql_batch_size(
+    rows: usize,
+    bytes: usize,
+    batch: &RecordBatch,
+    max_rows: usize,
+    max_bytes: usize,
+) -> Result<(usize, usize)> {
     let next_rows = rows.checked_add(batch.num_rows());
     let next_bytes = batch
         .columns()
         .iter()
-        .try_fold(Some(*bytes), |total, array| {
+        .try_fold(Some(bytes), |total, array| {
             let size = array.to_data().get_slice_memory_size().map_err(|error| {
                 CalcFlowError::InvalidArgument {
                     field: "query.result".into(),
@@ -1130,10 +1142,10 @@ pub(crate) fn push_bounded_sql_batch(
             ),
         });
     }
-    *rows = next_rows.expect("bounded row count is present");
-    *bytes = next_bytes.expect("bounded byte count is present");
-    batches.push(batch);
-    Ok(())
+    Ok((
+        next_rows.expect("bounded row count is present"),
+        next_bytes.expect("bounded byte count is present"),
+    ))
 }
 
 #[derive(Default)]

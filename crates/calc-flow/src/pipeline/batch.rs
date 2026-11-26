@@ -334,9 +334,13 @@ impl PipelineBuilder {
         let row_parallel_sql = self.nodes.values().any(
             |node| matches!(&node.operator, NodeOperator::Sql(sql) if sql.input_ports().len() > 1),
         );
-        let row_local_projection = !self.nodes.is_empty()
-            && self.nodes.values().all(|node| {
-                matches!(&node.operator, NodeOperator::Sql(sql) if sql.is_simple_projection())
+        let row_local_projection = graph.table.as_ref().is_some_and(|table| {
+            table.config.parallelism_mode == crate::DataFusionParallelismMode::AutoPlan
+        }) && !self.nodes.is_empty()
+            && self.nodes.values().all(|node| match &node.operator {
+                NodeOperator::Expression(expression) => expression.is_simple_projection(),
+                NodeOperator::Sql(sql) => sql.is_simple_projection(),
+                _ => false,
             });
         let mut native_statics = crate::array::NativeStaticPlan::default();
         native_statics.set_endpoints(&graph.external_inputs);

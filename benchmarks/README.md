@@ -139,6 +139,19 @@ the corresponding finite or per-batch snapshot oracle. These cases have new
 identities, so the existing compiled-plan and `Program.stream` histories retain
 their original timing contracts.
 
+`test_batch_expression_parity.py` compares native and SQL declarations for
+arithmetic projection, cumulative average by entity, and mean by exact
+timestamp. Both declarations use the same fixture and compile before timing.
+The timed call executes the batch plan and converts its output to Arrow.
+Each result is compared with the independent reference by sequence number
+outside the timer.
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=overhead \
+  uv run --extra benchmark pytest benchmarks/test_batch_expression_parity.py \
+  --benchmark-only
+```
+
 Python scales included in the scheduled and manual suite:
 
 | Scale      | Table rows | Array elements | Matrix dimension |

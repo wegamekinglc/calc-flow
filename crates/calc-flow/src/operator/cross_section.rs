@@ -17,10 +17,7 @@ use std::{
 
 use async_trait::async_trait;
 use datafusion::arrow::{
-    array::{
-        Array, ArrayRef, Float64Array, Float64Builder, StringArray, TimestampMicrosecondArray,
-        UInt8Array, UInt64Array, new_null_array,
-    },
+    array::{ArrayRef, StringArray, UInt8Array, new_null_array},
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
     ipc::{
         convert::IpcSchemaEncoder,
@@ -50,6 +47,7 @@ use super::{
     validate_operator_name,
 };
 
+mod columnar;
 mod late;
 
 /// Semantic configuration version of the first cross-section release.
@@ -611,29 +609,34 @@ impl OperatorMetadata for CrossSectionOperator {
 }
 
 impl CrossSectionOperator {
-    fn batch_groups(
+    fn batch_record(
         &self,
         inputs: &BTreeMap<String, Batch>,
         context: &BatchOperatorContext<'_>,
-    ) -> Result<Groups> {
+    ) -> Result<RecordBatch> {
         let input = required_input(inputs, "input", &self.name, None)?;
         self.input_ports[0].validate(input, &format!("{}.input", self.name))?;
         context.run.check_cancelled()?;
-        let rows = read_rows(input.table_payload()?, &self.compiled, &self.name)?;
-        self.assemble(rows, &self.name)
+        let table = input.table_payload()?;
+        if self.supports_columnar_input()
+            && let Some(record) = columnar::canonical_record(table.batches(), &self.compiled, None)
+        {
+            return columnar::build_record(
+                &record,
+                &self.compiled,
+                self.output_schema(),
+                &self.name,
+            );
+        }
+        let rows = read_rows(table, &self.compiled, &self.name)?;
+        let groups = self.assemble(rows, &self.name)?;
+        build_grouped_record(&groups, &self.compiled, self.output_schema(), &self.name)
     }
 
-    fn grouped_batch(&self, groups: &Groups) -> Result<Batch> {
-        let record = build_grouped_record(
-            groups,
-            &self.compiled,
-            self.output_ports[0]
-                .schema()
-                .expect("cross-section output always has an exact schema"),
-            &self.name,
-        )?;
-        let metadata = BatchMetadata::new(&self.name, 0, BTreeMap::new())?;
-        Batch::table(vec![record], metadata)
+    fn output_schema(&self) -> &SchemaRef {
+        self.output_ports[0]
+            .schema()
+            .expect("cross-section output always has an exact schema")
     }
 }
 
@@ -648,8 +651,9 @@ impl BatchOperator for CrossSectionOperator {
         context: &BatchOperatorContext<'_>,
     ) -> Result<BTreeMap<String, Batch>> {
         reject_batch_mode(self.spec.late_policy, &self.name)?;
-        let groups = self.batch_groups(inputs, context)?;
-        let batch = self.grouped_batch(&groups)?;
+        let record = self.batch_record(inputs, context)?;
+        let metadata = BatchMetadata::new(&self.name, 0, BTreeMap::new())?;
+        let batch = Batch::table(vec![record], metadata)?;
         Ok(BTreeMap::from([("output".into(), batch)]))
     }
 }
@@ -661,7 +665,7 @@ struct CrossSectionStreamState {
     groups: Groups,
     charge: StateCharge,
     /// One proven canonical batch awaiting a complete-group watermark.
-    pending_mean: Option<RecordBatch>,
+    pending_columnar: Option<RecordBatch>,
     /// Duplicate evidence for every open identity: one row identity maps to
     /// its owning open group (SCE-00 D11).
     identity_groups: BTreeMap<RowIdentity, GroupKey>,
@@ -758,41 +762,13 @@ fn charged_groups(groups: &Groups, node_id: &str) -> Result<StateCharge> {
         })
 }
 
-fn bounded_pending_mean_charge(
+fn bounded_pending_columnar_charge(
     record: &RecordBatch,
     compiled: &CompiledCrossSectionSpec,
     node_id: &str,
 ) -> Result<Option<StateCharge>> {
-    // Only flat scalar columns have a simple upper bound on the future
-    // ScalarValue representation. Nested and dictionary columns take the
-    // ordinary row path instead of speculating about their expansion.
-    let schema = record.schema();
-    let flat = schema.fields().iter().all(|field| {
-        matches!(
-            field.data_type(),
-            DataType::Null
-                | DataType::Boolean
-                | DataType::Int8
-                | DataType::Int16
-                | DataType::Int32
-                | DataType::Int64
-                | DataType::UInt8
-                | DataType::UInt16
-                | DataType::UInt32
-                | DataType::UInt64
-                | DataType::Float16
-                | DataType::Float32
-                | DataType::Float64
-                | DataType::Date32
-                | DataType::Date64
-                | DataType::Timestamp(_, _)
-                | DataType::Utf8
-                | DataType::LargeUtf8
-                | DataType::Binary
-                | DataType::LargeBinary
-        )
-    });
-    if !flat {
+    let schema = record.schema_ref();
+    if !columnar::supports_payload(schema) {
         return Ok(None);
     }
     let Some(payload_bytes) = super::row_cost::RowCosts::try_total(record)? else {
@@ -802,7 +778,7 @@ fn bounded_pending_mean_charge(
         .column(compiled.entity_columns[0].index)
         .as_any()
         .downcast_ref::<StringArray>()
-        .expect("columnar mean has a validated UTF-8 entity column");
+        .expect("columnar input has a validated UTF-8 entity column");
     let rows = u64::try_from(record.num_rows())
         .map_err(|_| operator_error(node_id, "cross-section state row charge overflowed"))?;
     let fields = u64::try_from(schema.fields().len())
@@ -830,9 +806,13 @@ fn bounded_pending_mean_charge(
         .and_then(|bytes| bytes.checked_add(u64::try_from(payload_bytes).ok()?))
         .and_then(|bytes| {
             bytes.checked_add(
-                u64::try_from(entity.value_data().len())
-                    .ok()?
-                    .checked_mul(2)?,
+                u64::try_from(
+                    super::row_cost::variable_offsets(entity)
+                        .expect("UTF-8 entity column has offsets")
+                        .total_width(),
+                )
+                .ok()?
+                .checked_mul(2)?,
             )
         })
         .ok_or_else(|| operator_error(node_id, "cross-section state byte charge overflowed"))?;
@@ -904,123 +884,86 @@ impl CrossSectionOperator {
         Ok((accepted, metrics, next_metrics))
     }
 
-    fn try_buffer_columnar_mean(
+    fn try_buffer_columnar(
         &mut self,
         ingress: &str,
         batch: &Batch,
         context: &StreamOperatorContext<'_>,
     ) -> Result<bool> {
-        if !self.supports_columnar_mean()
+        if !self.supports_columnar_input()
+            || self.spec.allowed_lateness_micros != 0
             || !self.state.groups.is_empty()
-            || self.state.pending_mean.is_some()
         {
             return Ok(false);
         }
         self.validate_stream_data(ingress, batch, context)?;
-        let records = batch.table_payload()?.batches();
-        let record = match records {
-            [] => return Ok(false),
-            [record] => record.clone(),
-            [first, ..] => {
-                let Ok(record) =
-                    datafusion::arrow::compute::concat_batches(&first.schema(), records)
-                else {
-                    return Ok(false);
-                };
-                record
-            }
-        };
-        if record.num_rows() == 0
-            || !self.columnar_mean_order_is_proven(&record, context.input_watermark())
-        {
+        let Some(incoming) = columnar::canonical_record(
+            batch.table_payload()?.batches(),
+            &self.compiled,
+            context.input_watermark(),
+        ) else {
             return Ok(false);
-        }
-        let Some(charge) =
-            bounded_pending_mean_charge(&record, &self.compiled, context.operator_id())?
+        };
+        let Some(incoming_charge) =
+            bounded_pending_columnar_charge(&incoming, &self.compiled, context.operator_id())?
+        else {
+            return Ok(false);
+        };
+        let Ok(charge) = self
+            .state
+            .charge
+            .checked_add(incoming_charge, context.operator_id())
         else {
             return Ok(false);
         };
         if !self.state_budget.allows(charge.rows, charge.bytes) {
             return Ok(false);
         }
+        let record = if let Some(pending) = &self.state.pending_columnar {
+            let Some(joined) = columnar::join_advancing(pending, &incoming, &self.compiled) else {
+                return Ok(false);
+            };
+            joined
+        } else {
+            incoming
+        };
         context.record_window_metrics(0, None, 0)?;
-        self.state.pending_mean = Some(record);
+        self.state.pending_columnar = Some(record);
         self.state.charge = charge;
         self.install_context_identity(context);
         Ok(true)
     }
 
-    fn supports_columnar_mean(&self) -> bool {
+    fn supports_columnar_input(&self) -> bool {
         if !matches!(self.spec.grouping, CrossSectionGroupingSpec::ExactTime)
             || !self.spec.partition_by.is_empty()
-            || self.spec.allowed_lateness_micros != 0
             || self.compiled.entity_columns.len() != 1
             || self.compiled.sequence_columns.len() != 1
         {
             return false;
         }
-        let [output] = self.compiled.outputs.as_slice() else {
-            return false;
-        };
         let schema = self.input_ports[0]
             .schema()
             .expect("cross-section input has an exact schema");
-        matches!(output.evaluation, CompiledEvaluation::Mean { .. })
-            && schema.field(output.input_index).data_type() == &DataType::Float64
-            && schema
-                .field(self.compiled.entity_columns[0].index)
-                .data_type()
-                == &DataType::Utf8
+        schema
+            .field(self.compiled.entity_columns[0].index)
+            .data_type()
+            == &DataType::Utf8
             && schema
                 .field(self.compiled.sequence_columns[0].index)
                 .data_type()
                 == &DataType::UInt64
+            && columnar::supports_payload(schema)
+            && self.compiled.outputs.iter().all(|output| {
+                schema.field(output.input_index).data_type() == &DataType::Float64
+                    && output
+                        .independent_index
+                        .is_none_or(|index| schema.field(index).data_type() == &DataType::Float64)
+            })
     }
 
-    fn columnar_mean_order_is_proven(
-        &self,
-        record: &RecordBatch,
-        watermark: Option<EventTime>,
-    ) -> bool {
-        let Some(times) = record
-            .column(self.compiled.event_time_index)
-            .as_any()
-            .downcast_ref::<TimestampMicrosecondArray>()
-        else {
-            return false;
-        };
-        let Some(entities) = record
-            .column(self.compiled.entity_columns[0].index)
-            .as_any()
-            .downcast_ref::<StringArray>()
-        else {
-            return false;
-        };
-        let Some(sequences) = record
-            .column(self.compiled.sequence_columns[0].index)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-        else {
-            return false;
-        };
-        if times.null_count() != 0 || sequences.null_count() != 0 {
-            return false;
-        }
-        if watermark.is_some_and(|watermark| times.value(0) <= watermark.as_micros()) {
-            return false;
-        }
-        (1..record.num_rows()).all(|index| {
-            let entity = |row| entities.is_valid(row).then(|| entities.value(row));
-            (
-                times.value(index - 1),
-                entity(index - 1),
-                sequences.value(index - 1),
-            ) < (times.value(index), entity(index), sequences.value(index))
-        })
-    }
-
-    fn materialize_pending_mean(&mut self, node_id: &str) -> Result<()> {
-        let Some(record) = self.state.pending_mean.as_ref() else {
+    fn materialize_pending_columnar(&mut self, node_id: &str) -> Result<()> {
+        let Some(record) = self.state.pending_columnar.as_ref() else {
             return Ok(());
         };
         let accepted = (0..record.num_rows())
@@ -1037,7 +980,7 @@ impl CrossSectionOperator {
             self.state.charge = pending_charge;
             return Err(error);
         }
-        self.state.pending_mean = None;
+        self.state.pending_columnar = None;
         Ok(())
     }
 
@@ -1109,12 +1052,12 @@ impl StreamOperator for CrossSectionOperator {
                 .process_late_data(&batch, watermark, context, output)
                 .await;
         }
-        if self.try_buffer_columnar_mean(ingress, &batch, context)? {
+        if self.try_buffer_columnar(ingress, &batch, context)? {
             return Ok(());
         }
-        let pending = self.state.pending_mean.clone();
+        let pending = self.state.pending_columnar.clone();
         let pending_charge = self.state.charge;
-        self.materialize_pending_mean(context.operator_id())?;
+        self.materialize_pending_columnar(context.operator_id())?;
         let result = self.prepare_stream_data(ingress, &batch, context).and_then(
             |(accepted, metrics, next_metrics)| {
                 self.install_stream_data(accepted, metrics, next_metrics, context)
@@ -1126,7 +1069,7 @@ impl StreamOperator for CrossSectionOperator {
             self.state.groups.clear();
             self.state.identity_groups.clear();
             self.state.charge = pending_charge;
-            self.state.pending_mean = Some(record);
+            self.state.pending_columnar = Some(record);
         }
         result
     }
@@ -1153,21 +1096,16 @@ impl StreamOperator for CrossSectionOperator {
                 "input watermark did not advance strictly",
             ));
         }
-        if let Some(record) = self.state.pending_mean.clone() {
-            let times = record
-                .column(self.compiled.event_time_index)
-                .as_any()
-                .downcast_ref::<TimestampMicrosecondArray>()
-                .expect("columnar mean batch has validated event time");
-            if times.value(record.num_rows() - 1) <= watermark.as_micros() {
-                self.emit_columnar_mean(&record, context, output).await?;
-                self.state.pending_mean = None;
-                self.state.charge = StateCharge::default();
+        if let Some(record) = self.state.pending_columnar.clone() {
+            if self
+                .emit_columnar_prefix(&record, watermark, context, output)
+                .await?
+            {
                 self.install_context_identity(context);
                 self.state.last_input_watermark = Some(watermark);
                 return Ok(());
             }
-            self.materialize_pending_mean(context.operator_id())?;
+            self.materialize_pending_columnar(context.operator_id())?;
         }
         let closing = self.take_closing_groups(watermark.as_micros(), context.operator_id())?;
         if let Err(error) = self.emit_groups(&closing, context, output).await {
@@ -1194,9 +1132,9 @@ impl StreamOperator for CrossSectionOperator {
         if self.state.ended {
             return Ok(());
         }
-        if let Some(record) = self.state.pending_mean.clone() {
-            self.emit_columnar_mean(&record, context, output).await?;
-            self.state.pending_mean = None;
+        if let Some(record) = self.state.pending_columnar.clone() {
+            self.emit_columnar(&record, context, output).await?;
+            self.state.pending_columnar = None;
             self.state.charge = StateCharge::default();
             self.install_context_identity(context);
             self.state.ended = true;
@@ -1231,7 +1169,7 @@ impl StreamOperator for CrossSectionOperator {
             ));
         }
         let node_id = self.name.clone();
-        self.materialize_pending_mean(&node_id)?;
+        self.materialize_pending_columnar(&node_id)?;
         let encoded = self.encode_state(epoch)?;
         let (descriptor, segments) = match encoded {
             Some(prepared) => {
@@ -1300,7 +1238,7 @@ impl StreamOperator for CrossSectionOperator {
             groups,
             charge,
             identity_groups,
-            pending_mean: None,
+            pending_columnar: None,
             last_input_watermark: metadata.last_input_watermark,
             next_output_sequence: metadata.next_output_sequence,
             next_late_output_sequence,
@@ -1524,26 +1462,53 @@ impl CrossSectionOperator {
         let record = build_grouped_record(
             groups,
             &self.compiled,
-            self.output_ports[0]
-                .schema()
-                .expect("cross-section output always has an exact schema"),
+            self.output_schema(),
             context.operator_id(),
         )?;
         self.emit_record(record, context, output).await
     }
 
-    async fn emit_columnar_mean(
+    async fn emit_columnar_prefix(
+        &mut self,
+        input: &RecordBatch,
+        watermark: EventTime,
+        context: &StreamOperatorContext<'_>,
+        output: &mut dyn StreamCollector,
+    ) -> Result<bool> {
+        let closed = columnar::closed_rows(input, &self.compiled, watermark);
+        if closed == 0 {
+            return Ok(true);
+        }
+        let (pending, charge) = if closed == input.num_rows() {
+            (None, StateCharge::default())
+        } else {
+            let Some(tail) =
+                columnar::compact_last_group(input, closed, &self.compiled, context.operator_id())?
+            else {
+                return Ok(false);
+            };
+            let charge =
+                bounded_pending_columnar_charge(&tail, &self.compiled, context.operator_id())?
+                    .expect("a compacted columnar group has bounded state");
+            (Some(tail), charge)
+        };
+        self.emit_columnar(&input.slice(0, closed), context, output)
+            .await?;
+        self.state.pending_columnar = pending;
+        self.state.charge = charge;
+        Ok(true)
+    }
+
+    async fn emit_columnar(
         &mut self,
         input: &RecordBatch,
         context: &StreamOperatorContext<'_>,
         output: &mut dyn StreamCollector,
     ) -> Result<()> {
-        let record = build_columnar_mean_record(
+        let record = columnar::build_record(
             input,
             &self.compiled,
-            self.output_ports[0]
-                .schema()
-                .expect("cross-section output always has an exact schema"),
+            self.output_schema(),
             context.operator_id(),
         )?;
         self.emit_record(record, context, output).await
@@ -1577,58 +1542,6 @@ impl CrossSectionOperator {
             .ok_or_else(|| operator_error(context.operator_id(), "output sequence overflowed"))?;
         Ok(())
     }
-}
-
-fn build_columnar_mean_record(
-    input: &RecordBatch,
-    compiled: &CompiledCrossSectionSpec,
-    output_schema: &SchemaRef,
-    node_id: &str,
-) -> Result<RecordBatch> {
-    let output = &compiled.outputs[0];
-    let CompiledEvaluation::Mean { min_samples } = output.evaluation else {
-        return Err(internal_error(
-            "columnar mean path received a different output",
-        ));
-    };
-    let times = input
-        .column(compiled.event_time_index)
-        .as_any()
-        .downcast_ref::<TimestampMicrosecondArray>()
-        .expect("columnar mean batch has validated event time");
-    let values = input
-        .column(output.input_index)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("columnar mean batch has validated Float64 input");
-    let mut means = Float64Builder::with_capacity(input.num_rows());
-    let mut start = 0;
-    while start < input.num_rows() {
-        let time = times.value(start);
-        let mut end = start + 1;
-        while end < input.num_rows() && times.value(end) == time {
-            end += 1;
-        }
-        let mut accumulator = StatisticAccumulator::default();
-        for index in start..end {
-            if values.is_valid(index) && !values.value(index).is_nan() {
-                accumulator.add(values.value(index));
-            }
-        }
-        let mean = (accumulator.count >= min_samples).then(|| accumulator.classified_mean());
-        for _ in start..end {
-            means.append_option(mean);
-        }
-        start = end;
-    }
-    let columns = input
-        .columns()
-        .iter()
-        .cloned()
-        .chain(std::iter::once(Arc::new(means.finish()) as ArrayRef))
-        .collect();
-    RecordBatch::try_new(Arc::clone(output_schema), columns)
-        .map_err(|error| operator_error(node_id, &error.to_string()))
 }
 
 impl CrossSectionOperator {
@@ -2197,6 +2110,7 @@ struct CompiledCrossSectionSpec {
     grouping: CrossSectionGroupingSpec,
     allowed_lateness_micros: u64,
     outputs: Vec<CompiledCrossSectionOutput>,
+    ordered_inputs: BTreeSet<usize>,
     configuration_hash: String,
     state_schema_fingerprint: String,
 }
@@ -2266,6 +2180,20 @@ enum CompiledEvaluation {
     MeanFill {
         min_samples: u64,
     },
+}
+
+impl CompiledEvaluation {
+    fn requires_order(&self) -> bool {
+        matches!(
+            self,
+            Self::Rank { .. }
+                | Self::Percentile { .. }
+                | Self::Winsorize { .. }
+                | Self::TopSelection { .. }
+                | Self::BottomSelection { .. }
+                | Self::FractionSelection { .. }
+        )
+    }
 }
 
 impl CompiledCrossSectionSpec {
@@ -2589,24 +2517,51 @@ fn compute_group(
     rows: &BTreeMap<RowIdentity, BufferedRow>,
     compiled: &CompiledCrossSectionSpec,
 ) -> Vec<Vec<ScalarValue>> {
+    compute_group_outputs(
+        compiled,
+        |index, ordered| {
+            let values = rows.values().map(|row| row.values[index].clone()).collect();
+            PreparedCrossSectionColumn::from_values(values, ordered)
+        },
+        |dependent, independent, min_samples| {
+            let pairs = rows
+                .values()
+                .map(|row| {
+                    match (
+                        classify_sample(&row.values[independent]),
+                        classify_sample(&row.values[dependent]),
+                    ) {
+                        (Sample::Valid(x), Sample::Valid(y)) => Some((x, y)),
+                        _ => None,
+                    }
+                })
+                .collect();
+            regression_residual_pairs(pairs, min_samples)
+        },
+    )
+}
+
+fn compute_group_outputs(
+    compiled: &CompiledCrossSectionSpec,
+    prepare: impl Fn(usize, bool) -> PreparedCrossSectionColumn,
+    residual: impl Fn(usize, usize, u64) -> Vec<ScalarValue>,
+) -> Vec<Vec<ScalarValue>> {
     let mut columns = Vec::with_capacity(compiled.outputs.len());
     let mut prepared = BTreeMap::new();
     for output in &compiled.outputs {
-        if let CompiledEvaluation::Residual { min_samples } = &output.evaluation {
+        if let CompiledEvaluation::Residual { min_samples } = output.evaluation {
             let independent_index = output
                 .independent_index
                 .expect("compiled regression has an independent column");
-            columns.push(regression_residual_column(
-                rows,
-                output.input_index,
-                independent_index,
-                *min_samples,
-            ));
+            columns.push(residual(output.input_index, independent_index, min_samples));
             continue;
         }
-        let prepared = prepared
-            .entry(output.input_index)
-            .or_insert_with(|| PreparedCrossSectionColumn::new(rows, output.input_index));
+        let prepared = prepared.entry(output.input_index).or_insert_with(|| {
+            prepare(
+                output.input_index,
+                compiled.ordered_inputs.contains(&output.input_index),
+            )
+        });
         let column = match &output.evaluation {
             CompiledEvaluation::Rank {
                 direction,
@@ -2685,24 +2640,7 @@ fn compute_group(
     clippy::cast_precision_loss,
     reason = "regression means and residuals use the declared Float64 domain"
 )]
-fn regression_residual_column(
-    rows: &BTreeMap<RowIdentity, BufferedRow>,
-    dependent_index: usize,
-    independent_index: usize,
-    min_samples: u64,
-) -> Vec<ScalarValue> {
-    let pairs = rows
-        .values()
-        .map(|row| {
-            match (
-                classify_sample(&row.values[independent_index]),
-                classify_sample(&row.values[dependent_index]),
-            ) {
-                (Sample::Valid(x), Sample::Valid(y)) => Some((x, y)),
-                _ => None,
-            }
-        })
-        .collect::<Vec<_>>();
+fn regression_residual_pairs(pairs: Vec<Option<(f64, f64)>>, min_samples: u64) -> Vec<ScalarValue> {
     let sample_count = pairs.iter().flatten().count();
     if u64::try_from(sample_count).unwrap_or(u64::MAX) < min_samples {
         return vec![ScalarValue::Float64(None); pairs.len()];
@@ -2841,20 +2779,24 @@ struct PreparedCrossSectionColumn {
 }
 
 impl PreparedCrossSectionColumn {
-    fn new(rows: &BTreeMap<RowIdentity, BufferedRow>, input_index: usize) -> Self {
-        let values = rows
-            .values()
-            .map(|row| row.values[input_index].clone())
-            .collect::<Vec<_>>();
+    fn from_values(values: Vec<ScalarValue>, ordered: bool) -> Self {
         let samples = values.iter().map(classify_sample).collect::<Vec<_>>();
-        let order_samples = values.iter().map(classify_order_sample).collect::<Vec<_>>();
-        let mut ascending_value_indices = order_samples
-            .iter()
-            .enumerate()
-            .filter_map(|(index, sample)| matches!(sample, OrderSample::Valid(_)).then_some(index))
-            .collect::<Vec<_>>();
-        ascending_value_indices
-            .sort_by(|left, right| compare_order_sample_indices(&order_samples, *left, *right));
+        let (order_samples, ascending_value_indices) = if ordered {
+            let order_samples = values.iter().map(classify_order_sample).collect::<Vec<_>>();
+            let mut indices = order_samples
+                .iter()
+                .enumerate()
+                .filter_map(|(index, sample)| {
+                    matches!(sample, OrderSample::Valid(_)).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            indices.sort_unstable_by(|left, right| {
+                compare_order_sample_indices(&order_samples, *left, *right)
+            });
+            (order_samples, indices)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let accumulator = accumulate_statistics(&samples);
         Self {
             values,
@@ -3656,6 +3598,11 @@ fn compile_spec_against_schema(
         .enumerate()
         .map(|(ordinal, output)| compile_output(input_schema, output, ordinal))
         .collect::<Result<Vec<_>>>()?;
+    let ordered_inputs = outputs
+        .iter()
+        .filter(|output| output.evaluation.requires_order())
+        .map(|output| output.input_index)
+        .collect();
     Ok(CompiledCrossSectionSpec {
         input_width: input_schema.fields().len(),
         event_time_index,
@@ -3665,6 +3612,7 @@ fn compile_spec_against_schema(
         grouping: spec.grouping,
         allowed_lateness_micros: spec.allowed_lateness_micros,
         outputs,
+        ordered_inputs,
         configuration_hash,
         state_schema_fingerprint: state_schema_fingerprint(input_schema),
     })
@@ -4030,6 +3978,8 @@ fn format_error(error: &serde_json::Error) -> CalcFlowError {
 
 #[cfg(test)]
 mod tests {
+    use datafusion::arrow::array::{Array, Float64Array, TimestampMicrosecondArray, UInt64Array};
+
     mod late;
 
     fn mean_input_record() -> RecordBatch {
@@ -4244,14 +4194,89 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_some());
+        assert!(operator.state.pending_columnar.is_some());
         assert!(operator.state.groups.is_empty());
         operator
             .on_watermark(EventTime::from_micros(2), &context, &mut output)
             .await
             .unwrap();
         assert_mean_output(&mut output, &[2.0, 2.0, 5.0, 5.0]);
-        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.pending_columnar.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_columnar_rank_batch_reuses_canonical_input_columns() {
+        let record = mean_input_record();
+        let mut operator = rank_operator();
+        let run =
+            crate::RunContext::new(BTreeMap::new(), None, crate::CancellationToken::new()).unwrap();
+        let result = BatchOperator::process(
+            &mut operator,
+            &BTreeMap::from([("input".into(), mean_batch(record.clone()))]),
+            &BatchOperatorContext { run: &run },
+        )
+        .await
+        .unwrap();
+        let emitted = &result["output"].table_payload().unwrap().batches()[0];
+        assert_eq!(
+            emitted.column(5).as_ref(),
+            &Float64Array::from(vec![1.0, 2.0, 1.0, 2.0])
+        );
+        assert!(Arc::ptr_eq(emitted.column(1), record.column(1)));
+    }
+
+    #[tokio::test]
+    async fn test_columnar_rank_stream_retains_the_open_group_across_sorted_envelopes() {
+        let mut operator = rank_operator();
+        let job = mean_job();
+        let context = StreamOperatorContext::new(&job, "features", None);
+        let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let record = mean_input_record();
+        operator
+            .process_data("input", mean_batch(record.clone()), &context, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.state.pending_columnar.is_some());
+        operator
+            .on_watermark(EventTime::from_micros(1), &context, &mut output)
+            .await
+            .unwrap();
+        assert_mean_output(&mut output, &[1.0, 2.0]);
+        let tail = operator.state.pending_columnar.as_ref().unwrap();
+        assert_eq!(tail.num_rows(), 2);
+        let entities = tail
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(entities.value_data(), b"AB");
+
+        let next = RecordBatch::try_new(
+            record.schema(),
+            vec![
+                Arc::new(TimestampMicrosecondArray::from(vec![2, 3]).with_timezone("UTC")),
+                Arc::new(StringArray::from(vec!["C", "A"])),
+                Arc::new(StringArray::from(vec![None::<&str>; 2])),
+                Arc::new(UInt64Array::from(vec![5, 6])),
+                Arc::new(Float64Array::from(vec![5.0, 7.0])),
+            ],
+        )
+        .unwrap();
+        let after_one =
+            StreamOperatorContext::new(&job, "features", Some(EventTime::from_micros(1)));
+        operator
+            .process_data("input", mean_batch(next), &after_one, &mut output)
+            .await
+            .unwrap();
+        assert!(operator.state.groups.is_empty());
+        assert!(operator.state.pending_columnar.is_some());
+        operator
+            .on_watermark(EventTime::from_micros(2), &after_one, &mut output)
+            .await
+            .unwrap();
+        assert_mean_output(&mut output, &[1.0, 3.0, 2.0]);
+        operator.on_end(&after_one, &mut output).await.unwrap();
+        assert_mean_output(&mut output, &[1.0]);
     }
 
     #[test]
@@ -4300,7 +4325,7 @@ mod tests {
         let schema = Arc::new(Schema::new(fields));
         let record = RecordBatch::try_new(schema.clone(), columns).unwrap();
         let operator = CrossSectionOperator::new("features", schema, valid_mean_spec()).unwrap();
-        let bound = bounded_pending_mean_charge(&record, &operator.compiled, "features")
+        let bound = bounded_pending_columnar_charge(&record, &operator.compiled, "features")
             .unwrap()
             .unwrap();
         let accepted = (0..record.num_rows())
@@ -4329,7 +4354,7 @@ mod tests {
             .collect::<Result<AcceptedRows>>()
             .unwrap();
         let exact = charged_accepted(&accepted, "features").unwrap();
-        let bound = bounded_pending_mean_charge(&record, &operator.compiled, "features")
+        let bound = bounded_pending_columnar_charge(&record, &operator.compiled, "features")
             .unwrap()
             .unwrap();
         assert!(bound.bytes > exact.bytes);
@@ -4343,7 +4368,7 @@ mod tests {
             .process_data("input", mean_batch(record), &context, &mut output)
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.pending_columnar.is_none());
         assert!(!operator.state.groups.is_empty());
     }
 
@@ -4377,7 +4402,7 @@ mod tests {
             .collect::<Result<AcceptedRows>>()
             .unwrap();
         let materialized = charged_accepted(&accepted, "features").unwrap().bytes;
-        let bounded = bounded_pending_mean_charge(&record, &operator.compiled, "features")
+        let bounded = bounded_pending_columnar_charge(&record, &operator.compiled, "features")
             .unwrap()
             .unwrap();
         assert!(materialized > previous_estimate);
@@ -4395,7 +4420,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("state budget"), "{error}");
-        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.pending_columnar.is_none());
     }
 
     #[tokio::test]
@@ -4419,7 +4444,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("state budget"), "{error}");
-        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.pending_columnar.is_none());
         assert!(operator.state.groups.is_empty());
     }
 
@@ -4439,7 +4464,7 @@ mod tests {
             .process_data("input", batch, &context, &mut output)
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_some());
+        assert!(operator.state.pending_columnar.is_some());
         operator
             .on_watermark(EventTime::from_micros(2), &context, &mut output)
             .await
@@ -4466,7 +4491,7 @@ mod tests {
             .process_data("input", mean_batch(record), &context, &mut output)
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_some());
+        assert!(operator.state.pending_columnar.is_some());
         operator
             .on_watermark(EventTime::from_micros(2), &context, &mut output)
             .await
@@ -4506,8 +4531,11 @@ mod tests {
             .on_watermark(EventTime::from_micros(1), &context, &mut output)
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_none());
-        assert_eq!(operator.state.groups.len(), 1);
+        assert_eq!(
+            operator.state.pending_columnar.as_ref().unwrap().num_rows(),
+            2
+        );
+        assert!(operator.state.groups.is_empty());
         assert_mean_output(&mut output, &[2.0, 2.0]);
         let snapshot = StreamOperator::checkpoint(&mut operator, Epoch::new(1).unwrap()).unwrap();
         let mut restored = mean_operator();
@@ -4534,9 +4562,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_some());
+        assert!(operator.state.pending_columnar.is_some());
         let snapshot = StreamOperator::checkpoint(&mut operator, Epoch::new(1).unwrap()).unwrap();
-        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.pending_columnar.is_none());
         let mut restored = mean_operator();
         StreamOperator::restore(&mut restored, &snapshot).unwrap();
         restored
@@ -4574,7 +4602,7 @@ mod tests {
                 .to_string()
                 .contains("duplicate row identity")
         );
-        assert!(operator.state.pending_mean.is_some());
+        assert!(operator.state.pending_columnar.is_some());
         assert!(operator.state.groups.is_empty());
         operator
             .on_watermark(EventTime::from_micros(2), &context, &mut output)
@@ -4599,7 +4627,7 @@ mod tests {
             .process_data("input", mean_batch(shuffled), &context, &mut output)
             .await
             .unwrap();
-        assert!(operator.state.pending_mean.is_none());
+        assert!(operator.state.pending_columnar.is_none());
         operator
             .on_watermark(EventTime::from_micros(2), &context, &mut output)
             .await
@@ -4674,6 +4702,12 @@ mod tests {
             null_placement: NullPlacement::Exclude,
             min_samples: 1,
         }
+    }
+
+    fn rank_operator() -> CrossSectionOperator {
+        let mut spec = valid_spec();
+        spec.partition_by.clear();
+        CrossSectionOperator::new("features", Arc::new(input_schema()), spec).unwrap()
     }
 
     fn valid_spec() -> CrossSectionSpec {

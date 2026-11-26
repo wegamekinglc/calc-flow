@@ -7,14 +7,10 @@ use datafusion::{
         datatypes::{Schema, SchemaRef},
         record_batch::RecordBatch,
     },
-    sql::sqlparser::{
-        ast::{BinaryOperator, Expr, Ident, SelectItem, SetExpr, Statement},
-        dialect::GenericDialect,
-        parser::Parser,
-    },
+    sql::sqlparser::ast::{BinaryOperator, Expr, Ident, SelectItem},
 };
 
-use crate::{Batch, CalcFlowError, Result, batch::TableBatchShell};
+use crate::{Batch, CalcFlowError, Result, batch::TableBatchShell, expression::ValidatedQuery};
 
 mod dependencies;
 pub(super) use dependencies::required_columns;
@@ -25,10 +21,15 @@ pub(crate) struct ColumnProjection {
 }
 
 impl ColumnProjection {
-    pub(super) fn parse(select: &[String]) -> Option<Self> {
+    pub(super) fn from_query(query: &ValidatedQuery) -> Option<Self> {
+        let select = dependencies::row_local_select(query.sql_statement()?)?;
+        if select.selection.is_some() {
+            return None;
+        }
         let columns = select
+            .projection
             .iter()
-            .map(|item| parse_column(item))
+            .map(parse_column)
             .collect::<Option<Vec<_>>>()?;
         let names = columns
             .iter()
@@ -164,22 +165,7 @@ fn projection_error(node_id: &str, error: &datafusion::arrow::error::ArrowError)
     }
 }
 
-fn parse_column(source: &str) -> Option<(String, String)> {
-    let statements = Parser::parse_sql(&GenericDialect {}, &format!("SELECT {source}")).ok()?;
-    let [Statement::Query(query)] = statements.as_slice() else {
-        return None;
-    };
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return None;
-    };
-    let [item] = select.projection.as_slice() else {
-        return None;
-    };
-    // Reject every additional query clause, including DISTINCT, FROM, LIMIT,
-    // and ORDER BY embedded in a configured select item.
-    if query.to_string() != format!("SELECT {item}") {
-        return None;
-    }
+fn parse_column(item: &SelectItem) -> Option<(String, String)> {
     let (expression, alias) = match item {
         SelectItem::UnnamedExpr(expression) => (expression, None),
         SelectItem::ExprWithAlias { expr, alias } => (expr, Some(alias)),
@@ -203,7 +189,7 @@ fn parse_column(source: &str) -> Option<(String, String)> {
 
 /// Match a row-preserving projection of columns followed by one Float64 product.
 pub(super) fn matches_product(
-    query: &crate::expression::ValidatedQuery,
+    query: &ValidatedQuery,
     sequences: &[(&str, &str)],
     left: &str,
     right: &str,

@@ -799,9 +799,9 @@ create no DataFusion session or UDF snapshot.
 whole-run external-row policy for batch graphs containing multi-input SQL, and
 opt-in `AutoRows` derives the request from input rows without requiring trusted
 entity statistics. `AutoPlan` additionally pins a batch graph to one partition
-when every node is a proven simple row-local SQL projection, and otherwise uses
-the external-row policy. Other `Auto` graphs and runtimes additionally require
-the trusted `calc_flow.datafusion.active_entities` batch metadata value;
+when every native expression or SQL node is a proven simple row-local projection.
+It uses the external-row policy for other shapes. Other `Auto` graphs and
+runtimes additionally require the trusted `calc_flow.datafusion.active_entities` batch metadata value;
 `AutoRows` and the standalone/streaming `AutoPlan` fallback use input rows
 instead. No policy scans input rows. See
 [SQL and DataFusion performance controls](sql-datafusion-performance.md) for

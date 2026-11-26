@@ -17,6 +17,11 @@ DataFusion partition policy or aggregate reduction order; stream callback
 metrics cover both paths, while private SQL query metrics describe SQL fallback
 executions.
 
+Batch expression nodes with a proven column-only projection and an exact input
+schema can reuse the Arrow arrays. This also covers projection nodes around
+symbolic SQL declarations. Node timings include those projections, and
+DataFusion query metrics record the nodes that execute DataFusion queries.
+
 ## Configuration
 
 `DataFusionConfig` is part of project-v3 and is also available through Rust's
@@ -90,8 +95,9 @@ input row count. Batch graphs containing multi-input SQL use the same
 whole-run external-row policy as `auto`. The default remains `fixed`.
 
 `parallelism_mode="auto_plan"` is a separate batch opt-in. If every graph node
-is a proven simple row-local SQL projection, the run freezes one partition and
-reports `row_local_projection`. The SQL AST proof rejects filters, aggregates,
+is a proven simple row-local projection, the run freezes one partition and
+reports `row_local_projection`. Native expressions and SQL nodes use the same
+SQL AST proof. It rejects filters, aggregates,
 windows, ordering, joins, subqueries, CTEs, limits, and other complex shapes;
 those workloads use the same external-row policy as `auto_rows`. Standalone and
 streaming runtimes retain the `auto_rows` fallback. No policy scans input rows
