@@ -4,7 +4,7 @@ mod indicator;
 
 use std::{sync::Arc, time::Instant};
 
-use datafusion::arrow::array::{ArrayRef, Float64Builder, UInt64Builder};
+use datafusion::arrow::array::{ArrayRef, Float64Array, Float64Builder, UInt64Builder};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::ScalarValue;
 
@@ -602,6 +602,55 @@ impl RollingKernelPlan {
         Ok(())
     }
 
+    fn write_numeric_slab_ticks(
+        &self,
+        table: &mut StateTable,
+        resolved: &[EntityId],
+        locals: &[usize],
+        values: &Float64Array,
+        builders: &mut [SlabBuilder],
+    ) -> Result<bool> {
+        match (builders, self.outputs.as_slice()) {
+            (
+                [SlabBuilder::Float(builder)],
+                [
+                    TypedOutputPlan {
+                        group: 0,
+                        kind: TypedOutputKind::Statistic(Statistic::Mean),
+                        min_periods,
+                        ..
+                    },
+                ],
+            ) => {
+                let minimum = (*min_periods).max(1);
+                table.write_numeric_full_tick(
+                    0,
+                    resolved,
+                    locals,
+                    values,
+                    self.nan_as_value,
+                    |_, accumulators| {
+                        let accumulator = accumulators
+                            .first()
+                            .ok_or_else(|| internal_error("rolling slab output group is absent"))?;
+                        builder.append_option(
+                            (accumulator.valid_count >= minimum).then(|| accumulator.mean()),
+                        );
+                        Ok(())
+                    },
+                )
+            }
+            (builders, outputs) => table.write_numeric_full_tick(
+                0,
+                resolved,
+                locals,
+                values,
+                self.nan_as_value,
+                |_, accumulators| Self::append_slab_outputs(builders, outputs, accumulators),
+            ),
+        }
+    }
+
     fn append_slab_row(
         &self,
         table: &mut StateTable,
@@ -675,15 +724,12 @@ impl RollingKernelPlan {
                 let Some(TypedGroupInput::Single(values)) = inputs.first() else {
                     return Err(internal_error("rolling numeric slab input mismatch"));
                 };
-                table.write_numeric_full_tick(
-                    0,
+                self.write_numeric_slab_ticks(
+                    table,
                     &resolved,
                     &routing.entity_ids,
                     values,
-                    self.nan_as_value,
-                    |_, accumulators| {
-                        Self::append_slab_outputs(&mut builders, &self.outputs, accumulators)
-                    },
+                    &mut builders,
                 )?
             } else {
                 false
