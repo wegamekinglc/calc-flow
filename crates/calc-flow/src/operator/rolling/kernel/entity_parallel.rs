@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use super::numeric_rows::RowsTape;
 use super::{
     Array, ArrayRef, DataType, DerivedBuilder, ENTITY_PARALLEL_MIN_ROWS, Float64Array,
     Float64Builder, KernelSelection, OutputStorage, PreparedTypedFill, RecordBatch,
@@ -38,6 +39,7 @@ thread_local! {
     pub(super) static MERGE_VALIDATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(in crate::operator::rolling) static QUALIFICATION_ENTITY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static ROUTE_ENTITY_DECODE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static SHARED_ROW_SAMPLE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1374,6 +1376,15 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
         }
     }
 
+    fn shared_row_sample(&self, row: u32) -> Option<f64> {
+        #[cfg(test)]
+        SHARED_ROW_SAMPLE_VISITS.set(SHARED_ROW_SAMPLE_VISITS.get() + 1);
+        let TypedGroupInput::Single(values) = self.column(0) else {
+            unreachable!("shared lane rows have Single inputs");
+        };
+        valid_float64(values, row as usize, self.input.nan_as_value)
+    }
+
     fn numeric_values<'b>(
         &'b self,
         column: &'b TypedGroupInput,
@@ -1430,15 +1441,19 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
         row: LaneRow,
         progress: &mut LaneProgress,
     ) -> std::result::Result<(), NumericLaneStop> {
-        if entity.shared_rows.is_some() {
-            let TypedGroupInput::Single(values) = self.column(0) else {
-                unreachable!("shared lane rows have Single inputs");
-            };
-            entity.push_shared_row(valid_float64(
-                values,
-                row.original_row as usize,
-                self.input.nan_as_value,
-            ));
+        let group_count = self.group_count.min(entity.groups.len());
+        if let Some(tape) = &mut entity.shared_rows {
+            debug_assert!(entity.shared_duration.is_none());
+            let sample = self.shared_row_sample(row.original_row);
+            return RowsTape::apply_row(tape, sample, |tape| {
+                self.visit_group_updates(row, group_count, progress, |site| {
+                    tape.update_group(
+                        &mut entity.groups[site.ordinal],
+                        sample,
+                        &self.input.node_id,
+                    )
+                })
+            });
         }
         let duration_sample = entity.shared_duration.as_ref().map(|_| {
             let TypedGroupInput::Single(values) = self.column(0) else {
@@ -1450,8 +1465,23 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
                 value: valid_float64(values, index, self.input.nan_as_value),
             }
         });
-        for ordinal in 0..self.group_count.min(entity.groups.len()) {
-            let column = self.column(ordinal);
+        self.visit_group_updates(row, group_count, progress, |site| {
+            self.update_group_state(entity, site, duration_sample)
+        })?;
+        if let (Some(samples), Some(sample)) = (&mut entity.shared_duration, duration_sample) {
+            samples.commit(sample, |_| {});
+        }
+        Ok(())
+    }
+
+    fn visit_group_updates(
+        &self,
+        row: LaneRow,
+        group_count: usize,
+        progress: &mut LaneProgress,
+        mut update: impl FnMut(NumericSite) -> Result<()>,
+    ) -> std::result::Result<(), NumericLaneStop> {
+        for ordinal in 0..group_count {
             check_cancelled(self.cancellation, progress)?;
             let site = NumericSite {
                 row: row.original_row,
@@ -1461,17 +1491,11 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
             progress.active_site = Some(site);
             #[cfg(test)]
             self.observe(NumericTestPoint::BeforeGroup(site));
-            self.update_group_state(entity, column, site, duration_sample)
+            update(site)
                 .map_err(|error| NumericLaneStop::Ordinary(TaggedNumericError { site, error }))?;
             #[cfg(test)]
             self.observe(NumericTestPoint::AfterGroup(site));
             check_cancelled(self.cancellation, progress)?;
-        }
-        if entity.shared_rows.is_some() {
-            entity.trim_shared_rows();
-        }
-        if let (Some(samples), Some(sample)) = (&mut entity.shared_duration, duration_sample) {
-            samples.commit(sample, |_| {});
         }
         Ok(())
     }
@@ -1479,7 +1503,6 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
     fn update_group_state(
         &self,
         entity: &mut TypedEntityState,
-        column: &TypedGroupInput,
         site: NumericSite,
         duration_sample: Option<TimedSample<f64>>,
     ) -> Result<()> {
@@ -1491,16 +1514,7 @@ impl<'a, const GROUPS: usize, C: NumericLaneCancellation + ?Sized>
                 &self.input.node_id,
             );
         }
-        if entity.shared_rows.is_some() {
-            let TypedGroupInput::Single(values) = self.column(0) else {
-                unreachable!("shared lane rows have Single inputs");
-            };
-            return entity.update_shared_group(
-                site.ordinal,
-                valid_float64(values, site.row as usize, self.input.nan_as_value),
-                &self.input.node_id,
-            );
-        }
+        let column = self.column(site.ordinal);
         let state = &mut entity.groups[site.ordinal];
         // Expiration and numerical repair use the serial transition unchanged.
         let event_time = self.input.event_times.value(site.row as usize);

@@ -591,6 +591,360 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_packed_native_index_persists_twelve_files_and_restores_exactly() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        original.enable_native_checkpoint().unwrap();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(original.output_ports().to_vec());
+        let keys = (0..64).collect::<Vec<_>>();
+        for (ingress, batch) in [
+            ("left", keyed_left_batch(&keys, &[100; 64])),
+            ("right", keyed_right_batch(&keys, &[200; 64])),
+        ] {
+            original
+                .process_data(ingress, batch, &context, &mut output)
+                .await
+                .unwrap();
+        }
+        assert!(!output.drain("output").is_empty());
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
+        let first = persist_native_epoch(&mut original, &mut store, 1).await;
+        assert_eq!(store.stats().file_syncs, 12);
+        let crate::state::v4::OperatorV4::Table { partitions, .. } = &first.operators["match"]
+        else {
+            panic!("expected native partition");
+        };
+        let pages =
+            crate::state::v4::native::native_partition_handles(&mut store, &partitions[0], 1)
+                .unwrap();
+        assert_eq!(pages.len(), 11);
+        assert!(
+            pages
+                .iter()
+                .all(|page| temp.path().join(&page.relative_path).is_file())
+        );
+        let snapshot = crate::state::v4::native::load_native(&mut store, &first, "match").unwrap();
+        for name in ["left/buckets", "right/buckets"] {
+            assert!(snapshot.segments.contains_key(name));
+        }
+
+        persist_native_epoch(&mut original, &mut store, 2).await;
+        assert_eq!(store.stats().file_syncs, 14);
+        assert_eq!(store.stats().carried_objects, 10);
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+        persist_native_epoch(&mut restored, &mut store, 3).await;
+        assert_eq!(
+            restored.run_core.as_ref().unwrap().native_change_count(),
+            10
+        );
+
+        let mut restored_output = EdgeCollector::new(restored.output_ports().to_vec());
+        let suffix = keyed_right_batch(&keys[..16], &[300; 16]);
+        for (operator, output) in [
+            (&mut original, &mut output),
+            (&mut restored, &mut restored_output),
+        ] {
+            operator
+                .process_data("right", suffix.clone(), &context, output)
+                .await
+                .unwrap();
+        }
+        let expected = output.drain("output");
+        let actual = restored_output.drain("output");
+        assert_eq!(expected.len(), 1);
+        assert_eq!(actual.len(), 1);
+        let expected = expected[0].as_data().unwrap();
+        let actual = actual[0].as_data().unwrap();
+        assert_eq!(expected.num_rows(), 16);
+        assert_eq!(
+            actual.table_payload().unwrap().batches(),
+            expected.table_payload().unwrap().batches()
+        );
+        assert_eq!(actual.metadata(), expected.metadata());
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_packed_native_index_replaces_per_key_files_across_transitions() {
+        let mut original =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        original.enable_native_checkpoint().unwrap();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(original.output_ports().to_vec());
+        original
+            .process_data(
+                "left",
+                keyed_left_batch(
+                    &[0, 1, 2, 3, 4, 5, 6],
+                    &[0, 1000, 1000, 1000, 1000, 1000, 1000],
+                ),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
+        let first = persist_native_epoch(&mut original, &mut store, 1).await;
+        let old = crate::state::v4::native::load_native(&mut store, &first, "match").unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&old).unwrap();
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+        assert!(old.segments.contains_key("left/group-0"));
+
+        original
+            .process_data(
+                "left",
+                keyed_left_batch(&[7], &[1000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let second = persist_native_epoch(&mut original, &mut store, 2).await;
+        let packed = crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
+        assert!(packed.segments.contains_key("left/buckets"));
+        assert!(
+            !packed
+                .segments
+                .keys()
+                .any(|name| name.starts_with("left/group-"))
+        );
+        let mut mixed = packed.clone();
+        mixed
+            .segments
+            .insert("left/group-0".into(), old.segments["left/group-0"].clone());
+        assert!(restored.restore(&mixed).is_err());
+
+        original
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(60_000_001)),
+                ),
+            )
+            .await
+            .unwrap();
+        let third = persist_native_epoch(&mut original, &mut store, 3).await;
+        let sparse = crate::state::v4::native::load_native(&mut store, &third, "match").unwrap();
+        assert!(sparse.segments.contains_key("left/buckets"));
+        assert!(
+            !sparse
+                .segments
+                .keys()
+                .any(|name| name.starts_with("left/group-"))
+        );
+        restored.restore(&sparse).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 7);
+        assert_eq!(
+            original.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+
+        original
+            .process_data(
+                "left",
+                keyed_left_batch(&[8], &[2_000]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let fourth = persist_native_epoch(&mut original, &mut store, 4).await;
+        let fourth_snapshot =
+            crate::state::v4::native::load_native(&mut store, &fourth, "match").unwrap();
+        assert!(fourth_snapshot.segments.contains_key("left/buckets"));
+        assert!(
+            !fourth_snapshot
+                .segments
+                .keys()
+                .any(|name| name.starts_with("left/group-"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_packed_native_index_keeps_its_slot_across_an_empty_side() {
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        operator.enable_native_checkpoint().unwrap();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        let keys = (0..64).collect::<Vec<_>>();
+        operator
+            .process_data(
+                "left",
+                keyed_left_batch(&keys, &[1000; 64]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
+        let packed_slot = |store: &mut crate::state::v4::V4Store,
+                           manifest: &crate::state::v4::V4Manifest|
+         -> Option<u64> {
+            let crate::state::v4::OperatorV4::Table { partitions, .. } =
+                &manifest.operators["match"]
+            else {
+                panic!("expected native partition");
+            };
+            let crate::state::v4::ObjectPayload::Bytes(bytes) =
+                store.read_object(&partitions[0].root).unwrap()
+            else {
+                panic!("expected partition index bytes");
+            };
+            let index: Value = serde_json::from_slice(&bytes).unwrap();
+            index["pages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["column"] == "left/buckets")
+                .map(|entry| entry["page_id"]["slot"].as_u64().unwrap())
+        };
+        let first = persist_native_epoch(&mut operator, &mut store, 1).await;
+        let slot = packed_slot(&mut store, &first).expect("initial packed bucket slot");
+        operator
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(60_010_000)),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(operator.status().left.retained_rows, 0);
+        let empty = persist_native_epoch(&mut operator, &mut store, 2).await;
+        assert_eq!(packed_slot(&mut store, &empty), Some(slot));
+        let snapshot = crate::state::v4::native::load_native(&mut store, &empty, "match").unwrap();
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 0);
+        let empty_again = persist_native_epoch(&mut restored, &mut store, 3).await;
+        assert_eq!(packed_slot(&mut store, &empty_again), Some(slot));
+
+        restored
+            .process_data(
+                "left",
+                keyed_left_batch(&keys, &[61_000_000; 64]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        assert_eq!(restored.status().left.retained_rows, 64);
+        let refilled = persist_native_epoch(&mut restored, &mut store, 4).await;
+        assert_eq!(packed_slot(&mut store, &refilled), Some(slot));
+        let snapshot =
+            crate::state::v4::native::load_native(&mut store, &refilled, "match").unwrap();
+        operator.restore(&snapshot).unwrap();
+        assert_eq!(operator.status().left.retained_rows, 64);
+        assert_eq!(
+            operator.run_core.as_ref().unwrap().fingerprint(),
+            restored.run_core.as_ref().unwrap().fingerprint()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_packed_native_index_retires_after_exceeding_the_group_limit() {
+        let mut join_spec = spec();
+        join_spec.limits = JoinStateLimits::new(256, 1_000_000, 1_000).unwrap();
+        let mut operator =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), join_spec.clone())
+                .unwrap();
+        operator.enable_native_checkpoint().unwrap();
+        let job = job().with_checkpointing(false);
+        let context = StreamOperatorContext::new(&job, "match", None);
+        let mut output = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "left",
+                keyed_left_batch(&(0..8).collect::<Vec<_>>(), &[2_000; 8]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = crate::state::v4::V4Store::new(temp.path().join("lineage"));
+        let first = persist_native_epoch(&mut operator, &mut store, 1).await;
+        let snapshot = crate::state::v4::native::load_native(&mut store, &first, "match").unwrap();
+        assert!(snapshot.segments.contains_key("left/buckets"));
+
+        operator
+            .process_data(
+                "left",
+                keyed_left_batch(&(8..129).collect::<Vec<_>>(), &[1_000; 121]),
+                &context,
+                &mut output,
+            )
+            .await
+            .unwrap();
+        let assert_per_key = |snapshot: &OperatorStateSnapshot, groups| {
+            assert!(!snapshot.segments.contains_key("left/buckets"));
+            assert_eq!(
+                snapshot
+                    .segments
+                    .keys()
+                    .filter(|name| name.starts_with("left/group-"))
+                    .count(),
+                groups
+            );
+        };
+        let second = persist_native_epoch(&mut operator, &mut store, 2).await;
+        let snapshot = crate::state::v4::native::load_native(&mut store, &second, "match").unwrap();
+        assert_per_key(&snapshot, 129);
+
+        operator
+            .on_ingress_progress(
+                "right",
+                &progress_context(
+                    &job,
+                    (IngressState::Active, None),
+                    (IngressState::Active, Some(60_001_500)),
+                ),
+            )
+            .await
+            .unwrap();
+        let third = persist_native_epoch(&mut operator, &mut store, 3).await;
+        let snapshot = crate::state::v4::native::load_native(&mut store, &third, "match").unwrap();
+        assert_per_key(&snapshot, 8);
+        let mut restored =
+            StreamJoinOperator::new("match", left_schema(), right_schema(), join_spec).unwrap();
+        restored.restore(&snapshot).unwrap();
+        assert_eq!(restored.status().left.retained_rows, 8);
+        assert_eq!(
+            restored.run_core.as_ref().unwrap().fingerprint(),
+            operator.run_core.as_ref().unwrap().fingerprint()
+        );
+    }
+
+    #[tokio::test]
     async fn test_dropped_row_frontier_commits_only_after_a_successful_retry_and_v4_cut() {
         let mut operator =
             StreamJoinOperator::new("match", left_schema(), right_schema(), spec()).unwrap();

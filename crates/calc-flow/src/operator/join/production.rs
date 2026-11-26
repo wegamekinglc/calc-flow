@@ -307,6 +307,7 @@ impl RunCore {
         let mut core = Self::new(operator)?;
         core.state =
             RunState::restore_native(&operator.name, &metadata.spec, segments, &mut core.keys)?;
+        core.pages = NativePageCache::from_restored_segments(segments);
         core.deferred_left = DeferredLeft::Disabled;
         Ok(core)
     }

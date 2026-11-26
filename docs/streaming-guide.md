@@ -1613,19 +1613,24 @@ does not select a separate retained-state implementation.
 
 Native layout 12 stores inner join state. Layout 13 for left semi joins and
 layout 14 for left anti joins record witnessed rows in left key buckets.
-A witness-only update rewrites the affected bucket at the next checkpoint.
-All three layouts store payload and identity pages, per-key and expiration
+A witness-only update rewrites the affected bucket page at the next checkpoint.
+All three layouts store payload and identity pages, key bucket and expiration
 indexes, shared keys, control counters and operator metadata. The managed runner
 persists `NativeCapture` pages through manifest v4. Direct
 `checkpoint()`/`restore()` uses the same encoding and validates page inventory,
 run identity and prefixes, row-ID uniqueness and frontiers, locator ordering and
 coverage, expiration order, and logical accounting before installing state.
 Compatible continuation produces identical subsequent output records and
-sequences. Capture reuses clean run identity, per-key bucket, expiration and
-shared-key pages and retires removed runs and buckets from its cache. Capture
-assembles only changes against the previous page lineage and maintains
-reservation summaries incrementally. Persistence applies those changes directly
-to the previous partition index and writes only changed payloads plus metadata.
+sequences. Capture reuses clean run identity, bucket, expiration and shared-key
+pages and retires removed runs and buckets from its cache. A side starts using
+a packed bucket page at 8 to 128 buckets and up to 16,384 stored bucket entries,
+including consumed prefixes. The page keeps its slot through sparse and empty
+states. A side that exceeds either upper bound uses per-key pages until the
+state is reset or restored. Restore supports both packed and per-key v4
+snapshots. Capture assembles only changes against the previous page lineage
+and maintains reservation summaries incrementally.
+Persistence applies those changes directly to the previous partition index and
+writes only changed payloads plus metadata.
 Direct snapshots materialize every page, and each epoch serializes a
 complete partition index.
 

@@ -15,6 +15,18 @@ use crate::CalcFlowError;
 
 const MAX_WORKERS: usize = 4;
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DirectoryIoPhase {
+    Prepare,
+    SyncStaging,
+    Install,
+}
+
+#[cfg(test)]
+type DirectoryIoTrace =
+    std::sync::Arc<std::sync::Mutex<Vec<(DirectoryIoPhase, std::thread::ThreadId)>>>;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct V4PersistenceStats {
     pub(crate) content_hashes: u64,
@@ -34,6 +46,8 @@ pub(crate) struct V4PersistenceStats {
 pub(crate) struct V4Store {
     root: PathBuf,
     stats: V4PersistenceStats,
+    #[cfg(test)]
+    directory_io_trace: Option<DirectoryIoTrace>,
     #[cfg(all(test, unix))]
     real_parent_sync_failure: Option<crate::state::ManifestParentSyncOsFailureProbe>,
 }
@@ -51,6 +65,8 @@ impl V4Store {
         Self {
             root: root.into(),
             stats: V4PersistenceStats::default(),
+            #[cfg(test)]
+            directory_io_trace: None,
             #[cfg(all(test, unix))]
             real_parent_sync_failure: None,
         }
@@ -118,8 +134,7 @@ impl V4Store {
         sort_encoded(&mut encoded);
         self.stats.content_hashes += encoded.len() as u64;
         self.apply_fault(fault)?;
-        self.persist_encoded(&encoded).await?;
-        Ok(encoded)
+        self.persist_encoded(encoded).await
     }
 
     async fn encode_objects(
@@ -180,8 +195,7 @@ impl V4Store {
     ) -> Result<Vec<EncodedObject>> {
         sort_encoded(&mut encoded);
         self.stats.opaque_blocks += encoded.len() as u64;
-        self.persist_encoded(&encoded).await?;
-        Ok(encoded)
+        self.persist_encoded(encoded).await
     }
 
     async fn encode_opaque(
@@ -205,10 +219,45 @@ impl V4Store {
         Ok(encoded)
     }
 
-    async fn persist_encoded(&mut self, encoded: &[EncodedObject]) -> Result<()> {
-        self.prepare_directories(encoded)?;
-        self.write_encoded_files(encoded).await?;
-        self.install_encoded_files(encoded)
+    async fn persist_encoded(&mut self, encoded: Vec<EncodedObject>) -> Result<Vec<EncodedObject>> {
+        if encoded.is_empty() {
+            return Ok(encoded);
+        }
+
+        let (mut directory_worker, encoded) = self.prepare_directory_worker(encoded).await?;
+        self.stats.directory_creation_syncs += directory_worker.stats.directory_creation_syncs;
+
+        self.write_encoded_files(&encoded).await?;
+
+        let (result, directory_stats) = tokio::task::spawn_blocking(move || {
+            let result = directory_worker
+                .sync_staging_directories(&encoded)
+                .and_then(|()| directory_worker.install_encoded_files(&encoded))
+                .map(|()| encoded);
+            (result, directory_worker.stats)
+        })
+        .await
+        .map_err(|error| worker_failure("object installation", error))?;
+        self.stats.staging_directory_syncs += directory_stats.staging_directory_syncs;
+        self.stats.committed_directory_syncs += directory_stats.committed_directory_syncs;
+        result
+    }
+
+    async fn prepare_directory_worker(
+        &self,
+        encoded: Vec<EncodedObject>,
+    ) -> Result<(Self, Vec<EncodedObject>)> {
+        let mut worker = Self {
+            #[cfg(test)]
+            directory_io_trace: self.directory_io_trace.clone(),
+            ..Self::new(&self.root)
+        };
+        tokio::task::spawn_blocking(move || {
+            worker.prepare_directories(&encoded)?;
+            Ok((worker, encoded))
+        })
+        .await
+        .map_err(|error| worker_failure("directory preparation", error))?
     }
 
     pub(crate) fn read_opaque(&mut self, handle: &V4Handle) -> Result<Vec<u8>> {
@@ -275,6 +324,8 @@ impl V4Store {
     }
 
     fn prepare_directories(&mut self, objects: &[EncodedObject]) -> Result<()> {
+        #[cfg(test)]
+        self.record_directory_io(DirectoryIoPhase::Prepare);
         let mut parents = BTreeSet::new();
         for object in objects {
             let committed = self.absolute(&object.handle);
@@ -286,10 +337,8 @@ impl V4Store {
         for directory in parents {
             std::fs::create_dir_all(&directory).map_err(|source| io_error(&directory, source))?;
         }
-        if !objects.is_empty() {
-            sync_directory(&self.root)?;
-            self.stats.directory_creation_syncs += 1;
-        }
+        sync_directory(&self.root)?;
+        self.stats.directory_creation_syncs += 1;
         Ok(())
     }
 
@@ -306,10 +355,12 @@ impl V4Store {
             settle_workers(&mut handles, "write").await?;
         }
         self.stats.file_syncs += objects.len() as u64;
-        self.sync_staging_directories(objects)
+        Ok(())
     }
 
     fn sync_staging_directories(&mut self, objects: &[EncodedObject]) -> Result<()> {
+        #[cfg(test)]
+        self.record_directory_io(DirectoryIoPhase::SyncStaging);
         let mut directories = BTreeSet::new();
         for object in objects {
             if let Some(parent) = staging_path(&self.absolute(&object.handle)).parent() {
@@ -324,6 +375,8 @@ impl V4Store {
     }
 
     fn install_encoded_files(&mut self, objects: &[EncodedObject]) -> Result<()> {
+        #[cfg(test)]
+        self.record_directory_io(DirectoryIoPhase::Install);
         let mut directories = BTreeSet::new();
         for object in objects {
             let committed = self.absolute(&object.handle);
@@ -342,6 +395,16 @@ impl V4Store {
         }
         Ok(())
     }
+
+    #[cfg(test)]
+    fn record_directory_io(&self, phase: DirectoryIoPhase) {
+        if let Some(trace) = &self.directory_io_trace {
+            trace
+                .lock()
+                .unwrap()
+                .push((phase, std::thread::current().id()));
+        }
+    }
 }
 
 async fn settle_workers<T>(
@@ -354,12 +417,12 @@ async fn settle_workers<T>(
     }
     settled
         .into_iter()
-        .map(|result| {
-            result.map_err(|error| {
-                format_error(format!("checkpoint-v4 {worker} worker failed: {error}"))
-            })?
-        })
+        .map(|result| result.map_err(|error| worker_failure(worker, error))?)
         .collect()
+}
+
+fn worker_failure(worker: &str, error: tokio::task::JoinError) -> CalcFlowError {
+    format_error(format!("checkpoint-v4 {worker} worker failed: {error}"))
 }
 
 fn sort_encoded(encoded: &mut [EncodedObject]) {
@@ -449,8 +512,11 @@ fn io_error(path: &Path, source: std::io::Error) -> CalcFlowError {
 mod tests {
     use std::path::Path;
 
-    use super::{NewObject, ObjectPayload, OpaqueObject, V4Store};
-    use crate::state::v4::ObjectKind;
+    use super::{
+        DirectoryIoPhase, DirectoryIoTrace, NewObject, ObjectPayload, OpaqueObject, V4Store,
+    };
+    use crate::{CalcFlowError, state::v4::ObjectKind};
+    use futures::FutureExt as _;
     use sha2::{Digest, Sha256};
 
     fn object(id: &str) -> NewObject {
@@ -461,6 +527,52 @@ mod tests {
             generation: 1,
             payload: ObjectPayload::Bytes(id.as_bytes().to_vec()),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn object_directory_io_runs_off_the_async_executor() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut store = V4Store::new(temporary.path().join("lineage"));
+        let trace = DirectoryIoTrace::default();
+        store.directory_io_trace = Some(trace.clone());
+        let executor = std::thread::current().id();
+
+        store.write_objects(7, vec![object("page")]).await.unwrap();
+
+        let calls = trace.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(phase, _)| *phase).collect::<Vec<_>>(),
+            [
+                DirectoryIoPhase::Prepare,
+                DirectoryIoPhase::SyncStaging,
+                DirectoryIoPhase::Install,
+            ],
+        );
+        let on_executor = calls
+            .iter()
+            .filter_map(|(phase, thread)| (*thread == executor).then_some(*phase))
+            .collect::<Vec<_>>();
+        assert!(
+            on_executor.is_empty(),
+            "directory I/O on executor: {on_executor:?}"
+        );
+    }
+
+    #[test]
+    fn empty_object_persistence_completes_without_a_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("lineage");
+        let mut store = V4Store::new(&root);
+        assert!(
+            store
+                .write_encoded_objects(Vec::new())
+                .now_or_never()
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(*store.stats(), Default::default());
+        assert!(!root.exists());
     }
 
     #[tokio::test]
@@ -516,7 +628,27 @@ mod tests {
             .remove(0);
         let path = root.parent().unwrap().join(&first.handle.relative_path);
         std::fs::write(&path, b"different").unwrap();
-        assert!(store.write_objects(7, vec![object("same")]).await.is_err());
+        let before = store.stats().clone();
+        let error = store
+            .write_objects(7, vec![object("same")])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CalcFlowError::Conflict { key, .. } if key == path.to_string_lossy())
+        );
+        assert_eq!(
+            store.stats().directory_creation_syncs,
+            before.directory_creation_syncs + 1
+        );
+        assert_eq!(store.stats().file_syncs, before.file_syncs + 1);
+        assert_eq!(
+            store.stats().staging_directory_syncs,
+            before.staging_directory_syncs + 1
+        );
+        assert_eq!(
+            store.stats().committed_directory_syncs,
+            before.committed_directory_syncs
+        );
         assert_eq!(std::fs::read(path).unwrap(), b"different");
     }
 

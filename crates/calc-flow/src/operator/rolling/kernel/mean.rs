@@ -252,12 +252,7 @@ fn update_mean_groups<const GROUPS: usize, const SHARED: bool>(
 ) -> Result<()> {
     if SHARED && entity.shared_rows.is_some() {
         let sample = valid_float64(values[0], row, plan.nan_as_value);
-        entity.push_shared_row(sample);
-        for ordinal in 0..GROUPS {
-            entity.update_shared_group(ordinal, sample, node_id)?;
-        }
-        entity.trim_shared_rows();
-        Ok(())
+        entity.update_shared_sample(sample, GROUPS, node_id)
     } else {
         update_owned_groups(entity, values, row, event_time, plan, node_id)
     }

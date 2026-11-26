@@ -18,6 +18,13 @@ use std::{
     sync::Arc,
 };
 
+const MIN_PACKED_BUCKETS: usize = 8;
+const MAX_PACKED_BUCKETS: usize = 128;
+const MAX_PACKED_LOCATORS: usize = 16_384;
+const PER_KEY_CONTROL_VERSION: u32 = 1;
+const PACKED_CONTROL_VERSION: u32 = 2;
+const PACKED_BUCKET_PAGES: [&str; 2] = ["left/buckets", "right/buckets"];
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Control {
@@ -41,6 +48,9 @@ struct SideControl {
 pub(in crate::operator::join) struct NativePageCache {
     runs: [BTreeMap<RunId, CachedRunPages>; 2],
     groups: [BTreeMap<GroupId, NativePage>; 2],
+    packed_buckets: [Option<NativePage>; 2],
+    prefer_packed: [bool; 2],
+    retired_packing: [bool; 2],
     expiration: [Option<NativePage>; 2],
     control: Option<(Control, NativePage)>,
     pub(in crate::operator::join) lineage: Option<Arc<NativePageSet>>,
@@ -59,6 +69,15 @@ struct CachedRunPages {
 }
 
 impl NativePageCache {
+    pub(in crate::operator::join) fn from_restored_segments(
+        segments: &BTreeMap<String, StateSegment>,
+    ) -> Self {
+        Self {
+            prefer_packed: PACKED_BUCKET_PAGES.map(|name| segments.contains_key(name)),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     pub(in crate::operator::join) fn reuse_counts(&self) -> [usize; 2] {
         [self.reused_identities, self.reused_indexes]
@@ -90,22 +109,7 @@ pub(super) fn capture(
         for id in dirty {
             capture_run(state, side, id, epoch, cache, &mut changes)?;
         }
-        let dirty_groups = if initialized {
-            state.dirty.groups[side].clone()
-        } else {
-            state.sides[side].buckets.keys().copied().collect()
-        };
-        #[cfg(test)]
-        if initialized {
-            let dirty_existing = dirty_groups
-                .iter()
-                .filter(|group| cache.groups[side].contains_key(group))
-                .count();
-            cache.reused_indexes += cache.groups[side].len().saturating_sub(dirty_existing);
-        }
-        for group in dirty_groups {
-            capture_group(state, side, group, epoch, cache, &mut changes)?;
-        }
+        capture_buckets(state, side, epoch, cache, &mut changes)?;
         if !initialized || state.dirty.expiration[side] {
             let prefix = if side == 0 { "left" } else { "right" };
             let rows = u64::try_from(state.sides[side].expiration.len())
@@ -129,7 +133,7 @@ pub(super) fn capture(
         }
     }
     let control = Control {
-        version: 1,
+        version: control_version(cache.packed_buckets.iter().any(Option::is_some)),
         next_run: state.next_run,
         next_output: state.next_output,
         match_limit_failures: state.match_limit_failures,
@@ -160,6 +164,108 @@ pub(super) fn capture(
     cache.control = Some((control, control_page));
     cache.initialized = true;
     NativePageSet::new(cache.lineage.clone(), changes)
+}
+
+fn control_version(packed: bool) -> u32 {
+    if packed {
+        PACKED_CONTROL_VERSION
+    } else {
+        PER_KEY_CONTROL_VERSION
+    }
+}
+
+fn packed_bucket_rows(buckets: &BTreeMap<GroupId, Bucket>) -> Option<usize> {
+    if buckets.len() > MAX_PACKED_BUCKETS {
+        return None;
+    }
+    buckets.values().try_fold(0usize, |rows, bucket| {
+        rows.checked_add(bucket.entries.len())
+            .filter(|rows| *rows <= MAX_PACKED_LOCATORS)
+    })
+}
+
+fn capture_buckets(
+    state: &RunState,
+    side: usize,
+    epoch: u64,
+    cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
+) -> Result<()> {
+    if cache.initialized && state.dirty.groups[side].is_empty() {
+        #[cfg(test)]
+        {
+            cache.reused_indexes +=
+                cache.groups[side].len() + usize::from(cache.packed_buckets[side].is_some());
+        }
+        return Ok(());
+    }
+    let buckets = &state.sides[side].buckets;
+    // Keep an existing packed page through transient depletion so its slot is reused.
+    let pack = cache.prefer_packed[side] || buckets.len() >= MIN_PACKED_BUCKETS;
+    if !cache.retired_packing[side]
+        && pack
+        && let Some(rows) = packed_bucket_rows(buckets)
+    {
+        return capture_packed_buckets(buckets, side, rows, epoch, cache, changes);
+    }
+    capture_group_pages(state, side, epoch, cache, changes)
+}
+
+fn capture_packed_buckets(
+    buckets: &BTreeMap<GroupId, Bucket>,
+    side: usize,
+    rows: usize,
+    epoch: u64,
+    cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
+) -> Result<()> {
+    let record = bucket_record(buckets, LocatorColumns::with_capacity(rows))?;
+    let end = u64::try_from(rows).expect("packed bucket rows fit u64");
+    let page = NativePage::arrow(PACKED_BUCKET_PAGES[side], &record, epoch, 0..end);
+    changes.push(NativePageChange::upsert(
+        page.clone(),
+        cache.packed_buckets[side].as_ref(),
+    )?);
+    for previous in cache.groups[side].values() {
+        changes.push(NativePageChange::remove(previous)?);
+    }
+    cache.groups[side].clear();
+    cache.packed_buckets[side] = Some(page);
+    cache.prefer_packed[side] = true;
+    Ok(())
+}
+
+fn capture_group_pages(
+    state: &RunState,
+    side: usize,
+    epoch: u64,
+    cache: &mut NativePageCache,
+    changes: &mut Vec<NativePageChange>,
+) -> Result<()> {
+    let previous = cache.packed_buckets[side].take();
+    let initialized = cache.initialized && previous.is_none();
+    if let Some(previous) = previous {
+        changes.push(NativePageChange::remove(&previous)?);
+    }
+    // Re-entering packed mode would allocate new slots on each threshold crossing.
+    cache.retired_packing[side] |= std::mem::take(&mut cache.prefer_packed[side]);
+    let dirty_groups = if initialized {
+        state.dirty.groups[side].clone()
+    } else {
+        state.sides[side].buckets.keys().copied().collect()
+    };
+    #[cfg(test)]
+    if initialized {
+        let dirty_existing = dirty_groups
+            .iter()
+            .filter(|group| cache.groups[side].contains_key(group))
+            .count();
+        cache.reused_indexes += cache.groups[side].len().saturating_sub(dirty_existing);
+    }
+    for group in dirty_groups {
+        capture_group(state, side, group, epoch, cache, changes)?;
+    }
+    Ok(())
 }
 
 fn capture_run(
@@ -247,7 +353,7 @@ fn capture_group(
         u64::try_from(bucket.entries.len()).map_err(|_| page_error("bucket rows exceed u64"))?;
     let page = NativePage::arrow(
         format!("{prefix}/group-{}", group.index()),
-        &bucket_record(group, bucket)?,
+        &bucket_record([(&group, bucket)], LocatorColumns::default())?,
         epoch,
         0..rows,
     );
@@ -315,6 +421,19 @@ struct LocatorColumns {
 }
 
 impl LocatorColumns {
+    fn with_capacity(rows: usize) -> Self {
+        Self {
+            kind: Vec::with_capacity(rows),
+            groups: Vec::with_capacity(rows),
+            times: Vec::with_capacity(rows),
+            row_ids: Vec::with_capacity(rows),
+            runs: Vec::with_capacity(rows),
+            rows: Vec::with_capacity(rows),
+            heads: Vec::with_capacity(rows),
+            capacities: Vec::with_capacity(rows),
+        }
+    }
+
     fn push(
         &mut self,
         value: u8,
@@ -337,16 +456,20 @@ impl LocatorColumns {
     }
 }
 
-fn bucket_record(group: GroupId, bucket: &Bucket) -> Result<RecordBatch> {
-    let mut columns = LocatorColumns::default();
-    for entry in &bucket.entries {
-        columns.push(
-            if entry.locator.witnessed { 2 } else { 0 },
-            group,
-            entry,
-            bucket.head,
-            bucket.entries.capacity(),
-        );
+fn bucket_record<'a>(
+    buckets: impl IntoIterator<Item = (&'a GroupId, &'a Bucket)>,
+    mut columns: LocatorColumns,
+) -> Result<RecordBatch> {
+    for (&group, bucket) in buckets {
+        for entry in &bucket.entries {
+            columns.push(
+                if entry.locator.witnessed { 2 } else { 0 },
+                group,
+                entry,
+                bucket.head,
+                bucket.entries.capacity(),
+            );
+        }
     }
     locator_record(columns)
 }
@@ -401,7 +524,10 @@ pub(super) fn restore(
             .get("control")
             .ok_or_else(|| page_error("missing control"))?,
     )?;
-    if control.version != 1 {
+    let packed = PACKED_BUCKET_PAGES
+        .iter()
+        .any(|name| segments.contains_key(*name));
+    if control.version != control_version(packed) {
         return Err(page_error("unsupported native Join control version"));
     }
     let key_record = decode_record(
@@ -495,55 +621,96 @@ fn restore_index_pages(
     expected: &mut BTreeSet<String>,
     allow_witnesses: bool,
 ) -> Result<()> {
-    let expiration_name = format!("{prefix}/expiration");
-    let expiration = decode_index_record(
-        segments
-            .get(&expiration_name)
-            .ok_or_else(|| page_error("missing expiration index"))?,
-    )?;
+    let mut records = vec![read_expiration_page(prefix, segments)?];
+    let group_prefix = format!("{prefix}/group-");
+    let packed_name = format!("{prefix}/buckets");
+    if let Some(segment) = segments.get(&packed_name) {
+        if segments.keys().any(|name| name.starts_with(&group_prefix)) {
+            return Err(page_error("packed and per-key bucket pages are mixed"));
+        }
+        let record = decode_bucket_record(segment, allow_witnesses)?;
+        validate_packed_bucket_record(&record)?;
+        expected.insert(packed_name);
+        records.push(record);
+    } else {
+        restore_group_pages(
+            &group_prefix,
+            segments,
+            expected,
+            allow_witnesses,
+            &mut records,
+        )?;
+    }
+    restore_index(state, &records)
+}
+
+fn read_expiration_page(
+    prefix: &str,
+    segments: &BTreeMap<String, StateSegment>,
+) -> Result<RecordBatch> {
+    let segment = segments
+        .get(&format!("{prefix}/expiration"))
+        .ok_or_else(|| page_error("missing expiration index"))?;
+    let expiration = decode_index_record(segment)?;
     if uint8s(&expiration, 0)?.iter().any(|kind| *kind != 1) {
         return Err(page_error("expiration page contains a bucket entry"));
     }
-    let mut records = vec![expiration];
-    let group_prefix = format!("{prefix}/group-");
+    Ok(expiration)
+}
+
+fn validate_packed_bucket_record(record: &RecordBatch) -> Result<()> {
+    if record.num_rows() > MAX_PACKED_LOCATORS {
+        return Err(page_error("packed bucket locator count is invalid"));
+    }
+    let groups = uint32s(record, 1)?;
+    let count = usize::from(!groups.is_empty())
+        + groups.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    if count > MAX_PACKED_BUCKETS || groups.windows(2).any(|pair| pair[0] > pair[1]) {
+        return Err(page_error("packed bucket groups are invalid or unordered"));
+    }
+    Ok(())
+}
+
+fn restore_group_pages(
+    group_prefix: &str,
+    segments: &BTreeMap<String, StateSegment>,
+    expected: &mut BTreeSet<String>,
+    allow_witnesses: bool,
+    records: &mut Vec<RecordBatch>,
+) -> Result<()> {
     let mut seen_groups = BTreeSet::new();
     for (name, segment) in segments
         .iter()
-        .filter(|(name, _)| name.starts_with(&group_prefix))
+        .filter(|(name, _)| name.starts_with(group_prefix))
     {
-        let group = name[group_prefix.len()..]
-            .parse::<usize>()
-            .ok()
-            .and_then(|group| GroupId::new(group).ok())
-            .ok_or_else(|| page_error("invalid bucket page group"))?;
-        let record = decode_index_record(segment)?;
-        if uint8s(&record, 0)?
-            .iter()
-            .any(|kind| *kind != 0 && !(allow_witnesses && *kind == 2))
-        {
-            return Err(page_error(
-                "bucket page contains an incompatible entry kind",
-            ));
-        }
-        let groups = uint32s(&record, 1)?;
-        let record_group_id = groups
-            .first()
-            .copied()
-            .and_then(|group| usize::try_from(group).ok())
-            .and_then(|group| GroupId::new(group).ok())
-            .ok_or_else(|| page_error("empty bucket page"))?;
-        let record_group =
-            u32::try_from(record_group_id.index()).expect("GroupId is backed by u32");
-        if group != record_group_id
-            || groups.iter().any(|value| *value != record_group)
-            || !seen_groups.insert(group)
-        {
+        let (group, record) =
+            read_group_page(&name[group_prefix.len()..], segment, allow_witnesses)?;
+        if !seen_groups.insert(group) {
             return Err(page_error("duplicated or mismatched bucket page group"));
         }
         expected.insert(name.clone());
         records.push(record);
     }
-    restore_index(state, &records)
+    Ok(())
+}
+
+fn read_group_page(
+    group: &str,
+    segment: &StateSegment,
+    allow_witnesses: bool,
+) -> Result<(u32, RecordBatch)> {
+    let group = group
+        .parse()
+        .map_err(|_| page_error("invalid bucket page group"))?;
+    let record = decode_bucket_record(segment, allow_witnesses)?;
+    let groups = uint32s(&record, 1)?;
+    if groups.is_empty() {
+        return Err(page_error("empty bucket page"));
+    }
+    if groups.iter().any(|value| *value != group) {
+        return Err(page_error("duplicated or mismatched bucket page group"));
+    }
+    Ok((group, record))
 }
 
 fn restore_run(payload: &StateSegment, identity: &RecordBatch) -> Result<(RunId, LiveRun)> {
@@ -630,6 +797,19 @@ fn decode_index_record(segment: &StateSegment) -> Result<RecordBatch> {
     let record = decode_record(segment)?;
     if record.num_columns() != 8 || record.columns().iter().any(|array| array.null_count() != 0) {
         return Err(page_error("index schema differs"));
+    }
+    Ok(record)
+}
+
+fn decode_bucket_record(segment: &StateSegment, allow_witnesses: bool) -> Result<RecordBatch> {
+    let record = decode_index_record(segment)?;
+    if uint8s(&record, 0)?
+        .iter()
+        .any(|kind| *kind != 0 && !(allow_witnesses && *kind == 2))
+    {
+        return Err(page_error(
+            "bucket page contains an incompatible entry kind",
+        ));
     }
     Ok(record)
 }
@@ -767,6 +947,83 @@ fn page_error(message: impl Into<String>) -> CalcFlowError {
     CalcFlowError::CheckpointMismatch {
         message: format!("Join native pages: {}", message.into()),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn test_packs_moderately_skewed_buckets_with_consumed_prefixes() {
+    let buckets = (0..64)
+        .map(|index| {
+            let group = GroupId::new(index).unwrap();
+            let entry = LocatorEntry {
+                time: EventTime::from_micros(5),
+                row_id: 0,
+                group,
+                locator: RowLocator {
+                    run: RunId(0),
+                    row: 0,
+                    witnessed: false,
+                },
+            };
+            (
+                group,
+                Bucket {
+                    entries: vec![entry; 96],
+                    head: 64,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(packed_bucket_rows(&buckets), Some(64 * 96));
+}
+
+#[cfg(test)]
+#[test]
+fn test_packed_buckets_preserve_witnesses_and_count_consumed_entries() {
+    let per_bucket = MAX_PACKED_LOCATORS / MAX_PACKED_BUCKETS;
+    let mut buckets = BTreeMap::new();
+    for group in (0..MAX_PACKED_BUCKETS).map(|group| GroupId::new(group).unwrap()) {
+        let entry = LocatorEntry {
+            time: EventTime::from_micros(5),
+            row_id: 0,
+            group,
+            locator: RowLocator {
+                run: RunId(0),
+                row: 0,
+                witnessed: true,
+            },
+        };
+        let mut entries = Vec::with_capacity(per_bucket + 1);
+        entries.resize(per_bucket, entry);
+        buckets.insert(
+            group,
+            Bucket {
+                entries,
+                head: per_bucket - 1,
+            },
+        );
+    }
+    assert_eq!(packed_bucket_rows(&buckets), Some(MAX_PACKED_LOCATORS));
+    let record =
+        bucket_record(&buckets, LocatorColumns::with_capacity(MAX_PACKED_LOCATORS)).unwrap();
+    validate_packed_bucket_record(&record).unwrap();
+    let mut restored = Side::empty();
+    restore_index(&mut restored, &[record]).unwrap();
+    let first = GroupId::new(0).unwrap();
+    let bucket = &restored.buckets[&first];
+    assert_eq!(bucket.head, per_bucket - 1);
+    assert_eq!(bucket.entries.capacity(), per_bucket + 1);
+    assert_eq!(bucket.entries, buckets[&first].entries);
+
+    let bucket = buckets.get_mut(&first).unwrap();
+    bucket.entries.push(bucket.entries[0]);
+    assert_eq!(packed_bucket_rows(&buckets), None);
+    let removed = buckets.pop_last().unwrap().1;
+    assert!(packed_bucket_rows(&buckets).is_some());
+    buckets.insert(GroupId::new(MAX_PACKED_BUCKETS).unwrap(), removed.clone());
+    buckets.insert(GroupId::new(MAX_PACKED_BUCKETS + 1).unwrap(), removed);
+    assert_eq!(packed_bucket_rows(&buckets), None);
 }
 
 #[cfg(test)]

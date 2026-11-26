@@ -74,6 +74,8 @@ pub(super) fn shared_rows_test_pool(
 
 const ROLLING_KERNEL_PLAN_VERSION: u32 = 1;
 const ENTITY_PARALLEL_MIN_ROWS: usize = 64_000;
+const REPEATED_UTF8_MIN_ROWS: usize = 1_024;
+const REPEATED_UTF8_MAX_PERIOD: usize = 128;
 
 #[cfg(test)]
 thread_local! {
@@ -81,6 +83,7 @@ thread_local! {
     pub(super) static INSTALLATION_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static ENTITY_SIZE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static DIRECT_ENTITY_KEY_ENCODINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static DENSE_ENTITY_ROUTE_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -3069,6 +3072,8 @@ impl<K: Copy + Eq + std::hash::Hash> DenseRouter<K> {
     }
 
     fn route(&mut self, row: usize, key: K) -> usize {
+        #[cfg(test)]
+        DENSE_ENTITY_ROUTE_VISITS.with(|counter| counter.set(counter.get() + 1));
         let guess = self
             .previous
             .map(|previous| self.successors[previous])
@@ -3109,14 +3114,66 @@ fn direct_entity_column<'a>(
         .filter(|entities| entities.null_count() == 0)
 }
 
+fn repeated_utf8_period(entities: &StringArray) -> Option<usize> {
+    if entities.len() < REPEATED_UTF8_MIN_ROWS || entities.null_count() != 0 {
+        return None;
+    }
+    let first = entities.value(0);
+    let period = (1..=REPEATED_UTF8_MAX_PERIOD).find(|&row| entities.value(row) == first)?;
+    let offsets = entities.value_offsets();
+    let displacement = offsets[period] - offsets[0];
+    let repeated = utf8_byte_lag_matches(entities, displacement)?
+        && offsets[period..]
+            .iter()
+            .zip(offsets)
+            .all(|(&later, &earlier)| later - earlier == displacement);
+    repeated.then_some(period)
+}
+
+fn utf8_byte_lag_matches(entities: &StringArray, displacement: i32) -> Option<bool> {
+    let lag = usize::try_from(displacement).ok().filter(|&lag| lag != 0)?;
+    let offsets = entities.value_offsets();
+    let start = usize::try_from(offsets[0]).ok()?;
+    let end = usize::try_from(offsets[entities.len()]).ok()?;
+    let bytes = entities.value_data().get(start..end)?;
+    let prefix = bytes.len().checked_sub(lag)?;
+    // Equality at the lag proves every cycle, including the trailing prefix.
+    Some(bytes[lag..] == bytes[..prefix])
+}
+
+fn repeated_utf8_entity_ids(entities: &StringArray) -> Option<(Vec<&str>, EntityRows, Vec<usize>)> {
+    let period = repeated_utf8_period(entities)?;
+    let (keys, mut rows, cycle) =
+        dense_entity_ids((0..period).map(|row| entities.value(row)), period);
+    if keys.len() != period {
+        return None;
+    }
+    let full_cycles = entities.len() / period;
+    let tail = entities.len() % period;
+    for (index, row) in rows.iter_mut().enumerate() {
+        row.count = full_cycles + usize::from(index < tail);
+    }
+    let mut ids = Vec::new();
+    ids.try_reserve_exact(entities.len()).ok()?;
+    ids.extend_from_slice(&cycle);
+    while ids.len() < entities.len() {
+        let copy = ids.len().min(entities.len() - ids.len());
+        ids.extend_from_within(..copy);
+    }
+    Some((keys, rows, ids))
+}
+
 /// Routes by string value and row-encodes each distinct entity once.
 fn direct_entity_routing(
     entities: &StringArray,
     expected_entities: usize,
     node_id: &str,
 ) -> Result<EntityRouting> {
-    let values = (0..entities.len()).map(|row| entities.value(row));
-    let (distinct, entity_rows, entity_ids) = dense_entity_ids(values, expected_entities);
+    let (distinct, entity_rows, entity_ids) =
+        repeated_utf8_entity_ids(entities).unwrap_or_else(|| {
+            let values = (0..entities.len()).map(|row| entities.value(row));
+            dense_entity_ids(values, expected_entities)
+        });
     let distinct: ArrayRef = Arc::new(StringArray::from_iter_values(distinct));
     let rows = encode_arrays(&[distinct], node_id)?;
     #[cfg(test)]
@@ -6754,6 +6811,73 @@ mod tests {
                 format!("{:?}", encoded.states)
             );
         }
+    }
+
+    #[test]
+    fn test_repeated_utf8_routing_matches_encoded_routing_with_bounded_row_visits() {
+        let symbols = (0..64)
+            .map(|symbol| format!("S{symbol:03}"))
+            .collect::<Vec<_>>();
+        let fixed_width = symbols.iter().map(String::as_str).collect::<Vec<_>>();
+        for cycle in [fixed_width.as_slice(), &["long", "é", "", "多"]] {
+            let rows = 1_101;
+            let entities = StringArray::from_iter_values(
+                std::iter::once("outside")
+                    .chain(cycle.iter().copied().cycle().take(rows + 1))
+                    .chain(std::iter::once("outside suffix")),
+            )
+            .slice(2, rows);
+            let visits = assert_repeated_utf8_routing_parity(&entities);
+            assert!(
+                visits <= cycle.len(),
+                "{visits} DenseRouter row visits for {} distinct entities",
+                cycle.len()
+            );
+        }
+    }
+
+    fn assert_repeated_utf8_routing_parity(entities: &StringArray) -> usize {
+        DENSE_ENTITY_ROUTE_VISITS.with(|counter| counter.set(0));
+        let actual = direct_entity_routing(entities, 16, "r").unwrap();
+        let visits = DENSE_ENTITY_ROUTE_VISITS.with(|counter| counter.replace(0));
+        let encoded = encode_arrays(&[Arc::new(entities.clone())], "r").unwrap();
+        let (keys, rows, entity_ids) = dense_entity_ids(encoded_keys(&encoded, entities.len()), 16);
+        assert_eq!(
+            actual.keys.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            keys
+        );
+        assert_eq!(actual.rows, rows);
+        assert_eq!(actual.entity_ids, entity_ids);
+        visits
+    }
+
+    #[test]
+    fn test_repeated_utf8_routing_rejects_inexact_cycles() {
+        let mut changed_bytes = ["S000", "S001"].repeat(550);
+        *changed_bytes.last_mut().unwrap() = "late";
+        let mut changed_offsets = ["abc", "d"].repeat(550);
+        changed_offsets[1098..].copy_from_slice(&["ab", "cd"]);
+        for values in [
+            changed_bytes,
+            changed_offsets,
+            ["S000", "S001", "S001", "S002"].repeat(275),
+            vec![""; 1_100],
+        ] {
+            let entities = StringArray::from_iter_values(values);
+            assert!(assert_repeated_utf8_routing_parity(&entities) >= entities.len());
+        }
+    }
+
+    #[test]
+    fn test_repeated_utf8_routing_handles_small_and_nullable_input() {
+        for entities in [
+            StringArray::from_iter_values(std::iter::empty::<&str>()),
+            StringArray::from(vec!["once"]),
+        ] {
+            assert_eq!(assert_repeated_utf8_routing_parity(&entities), 0);
+        }
+        let nullable = order_rows(&[(1, Some("a"), 0), (2, None, 1)]);
+        assert!(direct_entity_column(&stream_order_plan(), &nullable).is_none());
     }
 
     #[test]
