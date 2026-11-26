@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from scripts.benchmark_suite.catalog import (
+    CATALOG_FAMILIES,
     CONTRACT,
     POLARS_ENGINE,
     comparison_kind,
@@ -14,7 +15,10 @@ from scripts.benchmark_suite.catalog import (
     worker_thread_count,
 )
 from scripts.benchmark_suite.dependency_migrations import validate_dependency_migrations
-from scripts.benchmark_suite.measure import validate_stream_sample
+from scripts.benchmark_suite.measure import (
+    validate_report_operator_sample,
+    validate_stream_sample,
+)
 from scripts.benchmark_suite.provenance import harness_sha256
 from scripts.benchmark_suite.report import SAMPLES, comparison, validate_shards
 from scripts.toolkit import FULL_SHA
@@ -75,6 +79,7 @@ def _validate_round(case: dict, evidence: dict, releases: dict) -> None:
         _validate_measurements(samples)
         for sample in samples:
             validate_stream_sample(case, sample)
+            validate_report_operator_sample(case, sample)
     if case["family"] == "warm":
         _validate_cursors(case, evidence)
 
@@ -167,7 +172,7 @@ def validate_fragment(
             "measurement harness or dependency lock differs from the candidate"
         )
     _validate_inventory(report, shard)
-    if shard["family"] in ("engines", "warm"):
+    if shard["family"] in CATALOG_FAMILIES:
         _validate_catalog_cases(report, shard)
     if shard["family"] == "rust":
         validate_dependency_migrations(report)
@@ -176,7 +181,7 @@ def validate_fragment(
 def _validate_inventory(report: dict, shard: dict) -> None:
     expected = (
         [case["id"] for case in shard_cases(shard)]
-        if shard["family"] in ("engines", "warm")
+        if shard["family"] in CATALOG_FAMILIES
         else report["expected_case_ids"]
     )
     if not expected:

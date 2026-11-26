@@ -17,12 +17,20 @@ import json
 import platform
 import sys
 import time
+from collections.abc import Callable
+from functools import partial
 from importlib.metadata import version
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from PyFin.api.Analysis import AVG, MA, MARGMAX, MUCOUNT, CSMean
+
+from benchmarks.report_operator_cases import (
+    NO_FINANCE_EQUIVALENT,
+    OPERATORS,
+    REPORT_INDICATOR_PREFIX,
+)
 
 _ROLLING_MEAN = "rolling_mean"
 _DUAL_SMA_SPREAD = "dual_sma_spread"
@@ -44,7 +52,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--window", type=int, required=True)
     parser.add_argument(
         "--indicator",
-        choices=(_ROLLING_MEAN, _DUAL_SMA_SPREAD, *_SUITE_SCENARIOS),
+        choices=(
+            _ROLLING_MEAN,
+            _DUAL_SMA_SPREAD,
+            *_SUITE_SCENARIOS,
+            *(
+                REPORT_INDICATOR_PREFIX + name
+                for name in OPERATORS
+                if name not in NO_FINANCE_EQUIVALENT
+            ),
+        ),
         default=_ROLLING_MEAN,
     )
     parser.add_argument("--fast-window", type=int, default=5)
@@ -159,14 +176,14 @@ def _timed_execute(
     return output, seconds / iterations
 
 
-def _serve(frame: pd.DataFrame, args: argparse.Namespace) -> None:
+def _serve(run: Callable[[int], tuple[np.ndarray, float]]) -> None:
     """Serve benchmark commands until the parent asks the worker to stop."""
     for line in sys.stdin:
         command = json.loads(line)
         if command == {"command": "stop"}:
             return
         iterations = _validated_iterations(command)
-        output, seconds = _timed_execute(frame, args, iterations)
+        output, seconds = run(iterations)
         _reply(
             {
                 "event": "sample",
@@ -178,15 +195,8 @@ def _serve(frame: pd.DataFrame, args: argparse.Namespace) -> None:
         )
 
 
-def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
+def _prepare(warm_output: np.ndarray, args: argparse.Namespace) -> None:
     """Write the untimed warm output and announce immutable worker identity."""
-    warm_output = _execute(
-        frame,
-        args.window,
-        indicator=args.indicator,
-        fast_window=args.fast_window,
-        suite_scenario=_suite_scenario(args),
-    )
     np.save(args.warm_output, warm_output, allow_pickle=False)
     _reply(
         {
@@ -206,11 +216,27 @@ def _prepare(frame: pd.DataFrame, args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = _parse_args()
-    frame = _input_frame(
-        args.rows, args.entities, suite=_suite_scenario(args) is not None
-    )
-    _prepare(frame, args)
-    _serve(frame, args)
+    if args.indicator.startswith(REPORT_INDICATOR_PREFIX):
+        from benchmarks.report_operator_finance import frame_for, sample
+
+        name = args.indicator[len(REPORT_INDICATOR_PREFIX) :]
+        frame = frame_for(args.rows, args.entities)
+        run = partial(sample, frame, name, args.entities)
+        warm_output, _ = run(1)
+    else:
+        frame = _input_frame(
+            args.rows, args.entities, suite=_suite_scenario(args) is not None
+        )
+        run = partial(_timed_execute, frame, args)
+        warm_output = _execute(
+            frame,
+            args.window,
+            indicator=args.indicator,
+            fast_window=args.fast_window,
+            suite_scenario=_suite_scenario(args),
+        )
+    _prepare(warm_output, args)
+    _serve(run)
 
 
 if __name__ == "__main__":

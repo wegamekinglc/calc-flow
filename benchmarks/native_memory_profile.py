@@ -24,11 +24,12 @@ from datetime import timedelta
 from importlib.metadata import version
 from pathlib import Path
 
+from benchmarks.native_release_identity import file_hash
+
 
 def prove_release(manifest: dict, native: Path) -> dict:
     """Reject stale/dev/unknown binaries before producing profile evidence."""
-    with native.open("rb") as stream:
-        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    digest = file_hash(native)
     if (
         manifest.get("profile") != "release"
         or manifest.get("tracked_source_clean") is not True

@@ -364,6 +364,62 @@ class BenchmarkAggregateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_fragment(report, BASE, HEAD)
 
+    def test_report_operator_fragment_rechecks_rows_and_finance_identity(self):
+        report = fragment()
+        report["shard"] = get_shard("report-operators-64000")
+        case = next(
+            case
+            for case in shard_cases(report["shard"])
+            if case["backend"] == "finance-python" and case["scenario"] == "rank20"
+        )
+        row = measured_case(**case, comparison="external", baseline=[])
+        sample = {
+            "seconds": row["candidate"][0][0],
+            "correctness": {"passed": True, "rows": case["rows"]},
+            "finance_python": {
+                "event": "ready",
+                "finance_python_version": "0.9.10",
+                "python_version": "3.9.25",
+                "indicator": "report-operator/rank20",
+                "sha256": "a" * 64,
+                "rows": case["rows"],
+            },
+        }
+        row["evidence"] = [
+            {
+                "environment": {"polars_threads": 4, "tokio_worker_threads": "4"},
+                "native_sha256": {"candidate": "a" * 64},
+                "completion": {"candidate": {"state": "completed"}},
+                "samples": {"candidate": [sample] * 10},
+            }
+            for _ in range(2)
+        ]
+        report["cases"] = [row]
+        _validate_catalog_cases(report, report["shard"])
+        for changed, error in (
+            ({"correctness": {"passed": True, "rows": case["rows"] - 1}}, "row count"),
+            ({"finance_python": None}, "Finance-Python identity"),
+            (
+                {
+                    "finance_python": {
+                        **sample["finance_python"],
+                        "indicator": "report-operator/average",
+                    }
+                },
+                "Finance-Python identity",
+            ),
+            (
+                {"finance_python": {**sample["finance_python"], "sha256": "z" * 64}},
+                "Finance-Python identity",
+            ),
+        ):
+            with (
+                self.subTest(changed=changed),
+                self.assertRaisesRegex(ValueError, error),
+            ):
+                row["evidence"][1]["samples"]["candidate"][0] = {**sample, **changed}
+                _validate_catalog_cases(report, report["shard"])
+
     def test_raw_samples_and_release_hashes_are_revalidated(self):
         report = fragment()
         row = measured_case(**shard_cases(report["shard"])[0])

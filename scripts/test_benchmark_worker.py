@@ -69,6 +69,26 @@ class BenchmarkWorkerTests(unittest.TestCase):
         )
         active.close.assert_called_once_with()
 
+    def test_report_operator_uses_the_same_worker_lifecycle(self):
+        adapter = ModuleType("benchmarks.report_operator_measure")
+        adapter.ReportOperatorCase = Mock()
+        active = adapter.ReportOperatorCase.return_value
+        active.sample.return_value = {"seconds": 1.0, "correctness": {"passed": True}}
+        active.finish.return_value = {"state": "completed"}
+        case = {"family": "report-operators"}
+        with patch.dict("sys.modules", {adapter.__name__: adapter}):
+            response, prepared = dispatch(
+                {"operation": "prepare", "case": case}, None, self.root
+            )
+            self.assertIs(prepared, active)
+            self.assertEqual(response["warmup"], active.sample.return_value)
+            self.assertEqual(
+                dispatch({"operation": "finish"}, prepared, self.root),
+                ({"state": "completed"}, None),
+            )
+        adapter.ReportOperatorCase.assert_called_once_with(case, self.root)
+        active.close.assert_called_once_with()
+
     def test_failed_warmup_closes_the_unpublished_case(self):
         active = self.factory.return_value
         active.sample.side_effect = ValueError("invalid output")

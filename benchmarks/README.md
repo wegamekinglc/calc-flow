@@ -12,7 +12,7 @@ Historical `rolling/*.json` reports use Git LFS. Install Git LFS and run
 `git lfs pull --include='benchmarks/rolling/*.json'` to inspect them locally.
 
 The Python scale shards and separate 10-to-10M engine and warm-state matrices
-are part of the complete 20-shard scheduled and manual suite. Native
+are part of the complete 21-shard scheduled and manual suite. Native
 streaming in the cross-library table starts from an already-ready runner with
 empty rolling state; runner startup and EOF/shutdown are outside its timer.
 Source/task/channel, rolling, watermarks and Arrow output remain included.
@@ -22,6 +22,10 @@ cross-section operators are checked against independent oracles before timing
 is accepted. The report includes new average, 64/256-row argmax, 64-row unique
 count, cross-section mean, ten-second tumbling sum, and backward ASOF cases.
 Unsupported library/scenario combinations remain explicit cells.
+
+The [report operator shard](../docs/benchmark-suite.md#report-operator-comparisons)
+adds 60 individual operators at 64,000 rows. It compares Calc Flow's native
+Batch and Streaming expressions and includes 58 Finance-Python references.
 
 Calc Flow SQL and native streaming each report 1T and 4T configurations.
 Raw DataFusion uses 4T. All other multi-thread engine, warm and diagnostic workers
@@ -138,6 +142,19 @@ cumulative `SUM`. Each instance selects its engine before timing. Inputs use
 the corresponding finite or per-batch snapshot oracle. These cases have new
 identities, so the existing compiled-plan and `Program.stream` histories retain
 their original timing contracts.
+
+`test_batch_expression_parity.py` compares native and SQL declarations for
+arithmetic projection, cumulative average by entity, and mean by exact
+timestamp. Both declarations use the same fixture and compile before timing.
+The timed call executes the batch plan and converts its output to Arrow.
+Each result is compared with the independent reference by sequence number
+outside the timer.
+
+```bash
+CALC_FLOW_BENCHMARK_SCALE=overhead \
+  uv run --extra benchmark pytest benchmarks/test_batch_expression_parity.py \
+  --benchmark-only
+```
 
 Python scales included in the scheduled and manual suite:
 

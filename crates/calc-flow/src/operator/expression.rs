@@ -7,6 +7,7 @@ use serde_json::Value;
 use crate::{
     Batch, CalcFlowError, DataFusionConfig, DataFusionRuntime, Epoch, EventTime, JsonMap,
     OperatorStateSnapshot, Port, Result, RunContext, UdfReference, UdfRegistrySnapshot,
+    datafusion::{MAX_SQL_RESULT_BYTES, MAX_SQL_RESULT_ROWS, bounded_sql_batch_size},
     datafusion_template::{CompiledExpression, CompiledExpressionState},
     expression::{ValidatedQuery, parse_select_query, sql_projection},
 };
@@ -184,7 +185,7 @@ impl ExpressionOperator {
         let expression = has_expression.then(|| expression.into());
         let query = expression_query(expression.as_deref(), &select, filter_expression.as_deref())?;
         let column_projection = (expression.is_none() && filter_expression.is_none())
-            .then(|| ColumnProjection::parse(&select))
+            .then(|| ColumnProjection::from_query(&query))
             .flatten();
         Ok(Self {
             name: name.into(),
@@ -219,6 +220,10 @@ impl ExpressionOperator {
     /// The normalized read-only query executed by this operator.
     pub(crate) fn query_text(&self) -> &str {
         self.query.text()
+    }
+
+    pub(crate) fn is_simple_projection(&self) -> bool {
+        self.query.is_simple_projection()
     }
 
     pub(crate) fn is_exact_column_projection(
@@ -424,6 +429,30 @@ impl ExpressionOperator {
     ) -> Result<BTreeMap<String, Batch>> {
         run.check_cancelled()?;
         let input = required_input(inputs, "input", self.name(), run.node_id())?;
+        if let Some(projection) = self.prepared_column_projection(self.input_ports[0].schema()) {
+            let output = projection.apply(input, run.node_id().unwrap_or(&self.name), None)?;
+            // DataFusion can coalesce record batches and change the visible
+            // byte count. Keep its collection path when the projection is at risk.
+            let within_limit = output.table_payload()?.batches().iter().try_fold(
+                (0, 0),
+                |(rows, bytes), record| {
+                    bounded_sql_batch_size(
+                        rows,
+                        bytes,
+                        record,
+                        MAX_SQL_RESULT_ROWS,
+                        MAX_SQL_RESULT_BYTES,
+                    )
+                },
+            );
+            if within_limit.is_ok() {
+                run.check_cancelled()?;
+                return Ok(BTreeMap::from([(
+                    "output".into(),
+                    output.with_source_cursor(None),
+                )]));
+            }
+        }
         let tables = BTreeMap::from([("input".into(), input.clone())]);
         let output = if self.ordered_input {
             datafusion
@@ -1114,7 +1143,8 @@ mod tests {
             Field::new("k", DataType::Int64, false),
             Field::new("\u{212A}", DataType::Int64, false),
         ]));
-        let projection = ColumnProjection::parse(&["\u{212A} AS value".into()]).unwrap();
+        let query = parse_select_query("SELECT \u{212A} AS value FROM input").unwrap();
+        let projection = ColumnProjection::from_query(&query).unwrap();
         let (columns, _) = projection.schema(&schema).unwrap();
         assert_eq!(columns, [1]);
     }

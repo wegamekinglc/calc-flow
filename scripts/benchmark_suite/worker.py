@@ -92,6 +92,10 @@ def prepare_case(case: dict, root: Path):
             factory = WarmCase
         case "engines":
             factory = EngineCase
+        case "report-operators":
+            from benchmarks.report_operator_measure import ReportOperatorCase
+
+            factory = ReportOperatorCase
         case "sparse-changelog":
             from benchmarks.sparse_changelog import SparseChangelogCase
 

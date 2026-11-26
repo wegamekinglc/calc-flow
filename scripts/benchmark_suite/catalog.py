@@ -5,8 +5,11 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from benchmarks import report_operator_cases as report_operators
+
 ROW_SCALES = tuple(10**power for power in range(1, 8))
 LEGACY_SCALES = ("overhead", "small", "standard", "nightly")
+CATALOG_FAMILIES = frozenset(("engines", "warm", report_operators.SHARD_FAMILY))
 SQL_CASES = (
     "projection",
     "filter",
@@ -318,6 +321,28 @@ def warm_cases(history: int) -> list[dict]:
     ]
 
 
+def report_operator_cases() -> list[dict]:
+    rows = report_operators.SCHEDULED_ROWS
+    family = report_operators.SHARD_FAMILY
+    return [
+        {
+            "id": f"{family}/{rows}/{backend}/{operator}",
+            "family": family,
+            "backend": backend,
+            "scenario": operator,
+            "scope": scope,
+            "workload": report_operators.WORKLOAD_CONTRACT,
+            "rows": rows,
+            "entities": report_operators.SCHEDULED_ENTITIES,
+            "chunk_ticks": report_operators.SCHEDULED_CHUNK_TICKS,
+        }
+        for operator in report_operators.OPERATORS
+        for backend, scope in report_operators.BACKEND_SCOPES.items()
+        if backend != report_operators.FINANCE_BACKEND
+        or operator not in report_operators.NO_FINANCE_EQUIVALENT
+    ]
+
+
 def shards() -> list[dict]:
     return [
         *(
@@ -329,6 +354,11 @@ def shards() -> list[dict]:
             for family in ("engines", "warm")
             for rows in ROW_SCALES
         ),
+        {
+            "id": f"{report_operators.SHARD_FAMILY}-{report_operators.SCHEDULED_ROWS}",
+            "family": report_operators.SHARD_FAMILY,
+            "rows": report_operators.SCHEDULED_ROWS,
+        },
         *({"id": family, "family": family} for family in ("rust", "lifecycle")),
     ]
 
@@ -341,6 +371,8 @@ def get_shard(identifier: str) -> dict:
 
 
 def shard_cases(shard: dict) -> list[dict]:
+    if shard["family"] == report_operators.SHARD_FAMILY:
+        return report_operator_cases()
     if shard["family"] == "engines":
         return engine_cases(shard["rows"])
     if shard["family"] == "warm":
@@ -361,15 +393,20 @@ def _baseline_catalog_constants(
     closed so an unparseable baseline keeps every paired case gated.
     """
 
-    tree = ast.parse(catalog_path.read_text(encoding="utf-8"))
+    constants = _declarative_constants(catalog_path)
+    required = ("ROW_SCALES", "SQL_CASES", "ROLLING_CASES")
+    if any(not isinstance(constants.get(name), tuple) for name in required):
+        return None
+    return constants
+
+
+def _declarative_constants(path: Path) -> dict[str, _CatalogConstant]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     constants: dict[str, _CatalogConstant] = {}
     for node in tree.body:
         assigned = _assigned_constant(node, constants)
         if assigned is not None:
             constants[assigned[0]] = assigned[1]
-    required = ("ROW_SCALES", "SQL_CASES", "ROLLING_CASES")
-    if any(not isinstance(constants.get(name), tuple) for name in required):
-        return None
     return constants
 
 
@@ -651,6 +688,75 @@ def _baseline_warm_ids(constants: dict[str, tuple[str, ...]]) -> frozenset[str]:
     return frozenset(ids)
 
 
+def _baseline_report_operator_ids(source: Path) -> frozenset[str] | None:
+    path = source / "benchmarks" / "report_operator_cases.py"
+    try:
+        constants = _declarative_constants(path)
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+    return _matching_report_operator_ids(constants)
+
+
+def _report_operator_dimensions(
+    constants: dict[str, _CatalogConstant],
+) -> tuple[int, int, int] | None:
+    rows = constants.get("SCHEDULED_ROWS")
+    entities = constants.get("SCHEDULED_ENTITIES")
+    chunk_ticks = constants.get("SCHEDULED_CHUNK_TICKS")
+    if any(
+        type(value) is not int or value <= 0 for value in (rows, entities, chunk_ticks)
+    ):
+        return None
+    return None if rows % entities else (rows, entities, chunk_ticks)
+
+
+def _report_operator_names(constants: dict[str, _CatalogConstant]) -> set[str] | None:
+    operators = set()
+    for name in ("TIME_SERIES", "CROSS_SECTION", "ROW"):
+        group = constants.get(name)
+        if not isinstance(group, tuple) or any(
+            not operator.strip() for operator in group
+        ):
+            return None
+        operators.update(group)
+    return operators
+
+
+def _present_report_operator_labels(*values: _CatalogConstant | None) -> bool:
+    return all(isinstance(value, str) and value.strip() for value in values)
+
+
+def _matching_report_operator_ids(
+    constants: dict[str, _CatalogConstant],
+) -> frozenset[str] | None:
+    contract = constants.get("WORKLOAD_CONTRACT")
+    scopes = {
+        report_operators.BATCH_BACKEND: constants.get("BATCH_SCOPE"),
+        report_operators.STREAM_BACKEND: constants.get("STREAM_SCOPE"),
+    }
+    dimensions = _report_operator_dimensions(constants)
+    operators = _report_operator_names(constants)
+    if not _present_report_operator_labels(contract, *scopes.values()):
+        return None
+    if dimensions is None or operators is None:
+        return None
+    expected = (
+        report_operators.SCHEDULED_ROWS,
+        report_operators.SCHEDULED_ENTITIES,
+        report_operators.SCHEDULED_CHUNK_TICKS,
+    )
+    if (contract, dimensions) != (report_operators.WORKLOAD_CONTRACT, expected):
+        return frozenset()
+    return frozenset(
+        case["id"]
+        for case in report_operator_cases()
+        if case["scenario"] in operators
+        and scopes.get(case["backend"]) == case["scope"]
+    )
+
+
 def baseline_case_ids(
     baseline_source: Path | None, shard: dict
 ) -> frozenset[str] | None:
@@ -658,6 +764,8 @@ def baseline_case_ids(
 
     if baseline_source is None:
         return None
+    if shard["family"] == report_operators.SHARD_FAMILY:
+        return _baseline_report_operator_ids(baseline_source)
     catalog_path = baseline_source / "scripts" / "benchmark_suite" / "catalog.py"
     if not catalog_path.is_file():
         return None

@@ -422,7 +422,131 @@ class BenchmarkSuiteTests(unittest.TestCase):
             <= {s["family"] for s in matrix}
         )
         self.assertEqual(len(matrix), len({s["id"] for s in matrix}))
-        self.assertEqual(len(matrix), 20)
+        self.assertEqual(len(matrix), 21)
+
+    def test_report_operators_extend_one_bounded_third_party_shard(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cells = catalog.shard_cases(shard)
+        identifiers = set()
+        matrices: dict[str, set[str]] = {}
+        for case in cells:
+            self.assertEqual(
+                (case["rows"], case["entities"], case["chunk_ticks"]), (64_000, 64, 100)
+            )
+            identifiers.add(case["id"])
+            matrices.setdefault(case["backend"], set()).add(case["scenario"])
+        self.assertEqual(len(cells), len(identifiers))
+        self.assertEqual(len(cells), 178)
+        self.assertEqual(
+            set(matrices), {"calc-flow-batch", "calc-flow-stream", "finance-python"}
+        )
+        batch = matrices["calc-flow-batch"]
+        self.assertEqual(len(batch), 60)
+        self.assertEqual(matrices["calc-flow-stream"], batch)
+        self.assertEqual(matrices["finance-python"], batch - {"rsi20", "cs_demean"})
+        self.assertTrue(identifiers.isdisjoint(case["id"] for case in engine_cases()))
+
+    def test_report_operator_table_keeps_unsupported_finance_cells_explicit(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cases = [
+            measured_case(
+                **case,
+                baseline=[],
+                comparison=catalog.comparison_kind(case, frozenset()),
+            )
+            for case in catalog.shard_cases(shard)
+        ]
+        markdown = render_report(cases, [])
+        operator_table = markdown.split("## Report operator comparison", 1)[1]
+        rows = [row for row in operator_table.splitlines() if row.startswith("|")]
+        self.assertEqual(len(rows), 62)
+        unsupported = [row for row in rows if "unsupported" in row]
+        self.assertEqual(
+            {row.split("|")[1].strip() for row in unsupported}, {"rsi20", "cs_demean"}
+        )
+        self.assertNotIn("missing", operator_table)
+
+    def test_report_operator_baseline_tracks_each_native_scope(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cases = catalog.shard_cases(shard)
+        native_ids = {
+            case["id"] for case in cases if case["backend"].startswith("calc-flow")
+        }
+        source = (
+            Path(__file__).resolve().parents[1] / "benchmarks/report_operator_cases.py"
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(baseline_case_ids(root, shard), frozenset())
+            baseline = root / "benchmarks" / source.name
+            baseline.parent.mkdir()
+            declaration = source.read_text(encoding="utf-8")
+            baseline.write_text(declaration, encoding="utf-8")
+            self.assertEqual(baseline_case_ids(root, shard), native_ids)
+            baseline.write_text(
+                declaration.replace(
+                    "ready-enqueue-to-arrow/report-operator-v1", "older-stream-scope"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                baseline_case_ids(root, shard),
+                {case["id"] for case in cases if case["backend"] == "calc-flow-batch"},
+            )
+
+    def test_incomplete_report_operator_inventory_keeps_pairs(self):
+        shard = catalog.get_shard("report-operators-64000")
+        cases = catalog.shard_cases(shard)
+        source = (
+            Path(__file__).resolve().parents[1] / "benchmarks/report_operator_cases.py"
+        )
+        original = source.read_text(encoding="utf-8")
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "benchmarks" / source.name
+            baseline.parent.mkdir()
+            for invalid in (
+                original.replace(
+                    'WORKLOAD_CONTRACT = "report-operators-complete-ticks-v1"', ""
+                ),
+                original.replace(
+                    "SCHEDULED_ROWS = 64_000", "SCHEDULED_ROWS = rows_from_config()"
+                ),
+                original.replace("SCHEDULED_ENTITIES = 64", "SCHEDULED_ENTITIES = 0"),
+                original.replace(
+                    "SCHEDULED_CHUNK_TICKS = 100", 'SCHEDULED_CHUNK_TICKS = "100"'
+                ),
+                original.replace(
+                    'BATCH_SCOPE = "native-expression-execute-to-arrow/'
+                    'report-operator-v1"',
+                    "BATCH_SCOPE = None",
+                ),
+                original.replace(
+                    'STREAM_SCOPE = "ready-enqueue-to-arrow/report-operator-v1"',
+                    'STREAM_SCOPE = ""',
+                ),
+                original + "\n(",
+            ):
+                with self.subTest(invalid=invalid[-70:]):
+                    baseline.write_text(invalid, encoding="utf-8")
+                    ids = baseline_case_ids(root, shard)
+                    self.assertIsNone(ids)
+                    self.assertEqual(
+                        catalog.comparison_kind(cases[0], ids), "interleaved"
+                    )
+            baseline.write_bytes(b"\xff")
+            self.assertIsNone(baseline_case_ids(root, shard))
+            baseline.unlink()
+            baseline.mkdir()
+            self.assertIsNone(baseline_case_ids(root, shard))
+            baseline.rmdir()
+            baseline.write_text(
+                original.replace(
+                    "SCHEDULED_CHUNK_TICKS = 100", "SCHEDULED_CHUNK_TICKS = 64"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(baseline_case_ids(root, shard), frozenset())
 
     def test_native_throughput_matrix_excludes_runner_startup(self):
         cases = [

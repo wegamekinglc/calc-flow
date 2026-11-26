@@ -6,6 +6,11 @@ import json
 import math
 from pathlib import Path
 
+from benchmarks.report_operator_cases import (
+    FINANCE_BACKEND,
+    SHARD_FAMILY,
+    validate_finance_identity,
+)
 from scripts.benchmark_suite.catalog import (
     CONTRACT,
     POLARS_ENGINE,
@@ -74,6 +79,19 @@ def validate_stream_sample(case: dict, sample: dict) -> None:
         _validate_checkpoint_proof(case, sample, evidence)
 
 
+def validate_report_operator_sample(case: dict, sample: dict) -> None:
+    """Validate the complete row and legacy worker evidence of a report cell."""
+    if case.get("family") != SHARD_FAMILY:
+        return
+    rows = sample["correctness"].get("rows")
+    if type(rows) is not int or rows != case["rows"]:
+        raise ValueError(
+            "report operator output row count differs from the prepared case"
+        )
+    if case["backend"] == FINANCE_BACKEND:
+        validate_finance_identity(sample.get("finance_python"), case["scenario"], rows)
+
+
 def _validate_stream_dimensions(case: dict, evidence: object) -> None:
     if not isinstance(evidence, dict) or any(
         key not in evidence or evidence[key] != case[key]
@@ -124,6 +142,7 @@ async def _prepare(workers: dict, releases: dict, case: dict, contexts: dict) ->
             raise ValueError("worker prepared a different workload")
         validate_sample(response["warmup"])
         validate_stream_sample(case, response["warmup"])
+        validate_report_operator_sample(case, response["warmup"])
     if "baseline" in identities and identities["baseline"] != identities["candidate"]:
         raise ValueError("base/head machine, dependency or thread fingerprints differ")
     return identities["candidate"]
@@ -144,6 +163,7 @@ async def _samples(workers: dict, case: dict, contexts: dict, root: Path) -> dic
             )
             validate_sample(sample)
             validate_stream_sample(case, sample)
+            validate_report_operator_sample(case, sample)
             collected[side].append(sample)
             persist(
                 root / "partial.json",
@@ -315,7 +335,10 @@ async def measure_shard(
         side: await install(release, root / side) for side, release in releases.items()
     }
     workers_by_side = {
-        side: (site, ROOT if shard["family"] == "engines" else sources[side])
+        side: (
+            site,
+            ROOT if shard["family"] in ("engines", SHARD_FAMILY) else sources[side],
+        )
         for side, site in sites.items()
     }
     baseline_ids = baseline_case_ids(baseline_source, shard)

@@ -7,6 +7,7 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass
 
+from benchmarks import report_operator_cases as report_operators
 from scripts.benchmark_suite.catalog import (
     CAPABILITIES,
     INTERVAL_MAX_ROWS,
@@ -260,6 +261,7 @@ def build_report(
     parts = [
         *_result_tables(cases, rows, metrics, baseline, rust_baseline),
         *_variant_sections(cases),
+        *_report_operator_section(cases),
         *_finding_section("Confirmed performance regressions", regressions),
         *_finding_section("Incomplete or invalid evidence", failures),
     ]
@@ -342,6 +344,54 @@ def _result_tables(
             ]
         )
     return parts
+
+
+def _report_operator_section(cases: list[dict]) -> list[str]:
+    cells = {
+        (case["scenario"], case["backend"]): case
+        for case in cases
+        if case.get("family") == report_operators.SHARD_FAMILY
+    }
+    if not cells:
+        return []
+
+    def cell(operator: str, backend: str) -> str:
+        if (
+            backend == report_operators.FINANCE_BACKEND
+            and operator in report_operators.NO_FINANCE_EQUIVALENT
+        ):
+            return "unsupported"
+        result = cells.get((operator, backend))
+        return _head_p50_cell(result) if result else "missing"
+
+    return [
+        "",
+        "## Report operator comparison",
+        "",
+        "Head P50 milliseconds on 64,000 rows and 64 entities. Native Batch "
+        "executes compiled expressions. Streaming measures a ready runner over "
+        "ten complete timestamp chunks. Finance-Python measures the public "
+        "transform over the prepared frame.",
+        "",
+        table(
+            ["Operator", "Native Batch", "Native Streaming", "Finance-Python"],
+            [
+                [
+                    operator,
+                    *(
+                        cell(operator, backend)
+                        for backend in report_operators.BACKEND_SCOPES
+                    ),
+                ]
+                for operator in report_operators.OPERATORS
+            ],
+        ),
+        "",
+        *(
+            f"- `{name}`: {reason}."
+            for name, reason in report_operators.NO_FINANCE_EQUIVALENT.items()
+        ),
+    ]
 
 
 def _variant_sections(cases: list[dict]) -> list[str]:
