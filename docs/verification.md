@@ -8,7 +8,8 @@ command groups and toolchain rules. Its [verification policy](../AGENTS.md#verif
 defines the smallest local checks, three exceptions for local full testing, and
 one non-blocking CI snapshot. Full regression gates run in regular CI; routine
 benchmarks run twice daily on a separate schedule. The Python package release
-verifies artifacts and runs post-build unit tests. Pending required CI results
+verifies both distributions, runs portable installed-wheel unit tests, and
+checks a clean v3 installation. Pending required CI results
 permit handoff but do not permit merge. Keep build, coverage, release, and cache
 outputs under `target/` in a constrained checkout.
 
@@ -30,10 +31,11 @@ uv run --no-sync ruff format --check examples
 git diff --check
 ```
 
-The runner discovers numbered Python programs in order, including the SQL and
-streaming pipeline examples. It skips the service-backed connector
-read/write examples by default, runs the maintained Rust user-example list,
-and stops with the first failing program's exit code. Add `--include-services`
+The runner discovers numbered Python programs in order and runs the maintained
+Rust user-example list. Use `--surface python` or `--surface rust` to select
+one language. It skips the service-backed connector
+read/write examples by default and stops with the first failing program's exit
+code. Add `--include-services`
 only after the [connector setup](connectors/README.md) has prepared native
 features, services, source data, and empty sink destinations.
 Schema exporters are separate tools because generation updates a tracked
@@ -122,10 +124,12 @@ and [warm-stream measurements](warm-stream-performance.md) for timing work.
 Do not run benchmarks alongside builds or tests. Preserve raw failed and
 inconclusive results as well as successful ones.
 
-The [Python release workflow](python-release.md) builds and verifies the core
-wheels and sdist, tests the installed Linux wheels across supported Python
-versions, and publishes the core package on a pushed release tag. Benchmarks
-and other verification remain outside that workflow. Select local checks under
-the same scope and exception policy.
+The [Python release workflow](python-release.md) builds and verifies the
+portable wheels and source distribution and a separate set of x86-64-v3
+wheels. It tests installed portable Linux wheels across Python 3.9–3.14,
+checks v3 Linux wheel vector instructions, and smoke-tests a clean installation
+of the v3 Linux CPython 3.13 wheel. A pushed release tag publishes each
+distribution through its own gates. Benchmarks, soaks, audits, crate packaging,
+and documentation checks run outside this workflow.
 
 Next: [benchmark suite](benchmark-suite.md).

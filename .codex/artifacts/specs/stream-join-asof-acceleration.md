@@ -7,7 +7,7 @@
 - [Introduction](../../../docs/introduction.md),
   [streaming guide](../../../docs/streaming-guide.md),
   [ASOF contract](../../../docs/asof-join-guide.md), and
-  [frozen ASOF invariants](../../../docs/plans/2026-09-30-streaming-asof-acceleration.md#3-必须保持的不变量).
+  [frozen ASOF invariants](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-09-30-streaming-asof-acceleration.md#3-必须保持的不变量).
 - Implementation base: `9b1535bc`; the evidence-foundation delivery covers
   Phase 0.1, 0.5, and 0.7. This specification covers remaining Phase 0.2–0.4,
   0.6, J1.1–J1.6, J2a/J2b, J3, and A1–A5.

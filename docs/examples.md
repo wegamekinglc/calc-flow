@@ -4,10 +4,9 @@
 
 The runnable inventory, commands, dependencies, and expected results live in
 [examples/README.md](../examples/README.md). Choose a path below after
-[installation](getting-started.md). Every numbered Python file runs on its own;
-the learning order does not require importing or running an earlier example.
-The [Rust inventory](../crates/calc-flow/examples/README.md) maps every runnable
-Python example to a native Rust counterpart.
+[installation](getting-started.md). Each Python example runs independently.
+The [Rust inventory](../crates/calc-flow/examples/README.md) maps numbered and
+named Python examples to their native equivalents.
 
 ## Calculate a finite dataset
 
@@ -22,6 +21,9 @@ and a following column expression, then
 [32_sql_expression_pipeline.py](../examples/32_sql_expression_pipeline.py)
 for reusable `pipe` functions around SQL. The checked final values are
 `doubled=[140, 216, 72]` and `net=[18.0, 27.0]`, respectively.
+Example 32 also runs a
+[replacement aggregate](streaming-guide.md#restricted-replacement-aggregates)
+with an explicit state budget and checks successive results of 1 and 6.
 Example 03 covers explicit typed UDF registration. Runtime contributors can pair
 Rust's `01_datafusion_pipeline` with `02_sql_join` for the same order datasets and
 results as Python 01 and 02. The additional `expression_pipeline` keeps the
@@ -38,6 +40,10 @@ the final `total=6` matches in both modes.
 Read the [array guide](array-guide.md) while running 06 → 07 → 11: center a
 NumPy array, multiply Arrow columns by NumPy/JAX weights, then reuse static
 weights in a symbolic batch or continuous program.
+For built-in native arrays, run [native_arrays.py](../examples/native_arrays.py),
+[native_matrices.py](../examples/native_matrices.py), and
+[native_macd.py](../examples/native_macd.py). They cover synchronous array
+operations, packed matrices, and the shared MACD recurrence.
 
 ## Consume a stateful pipeline
 
@@ -58,7 +64,9 @@ sinks and a stable checkpoint root for durable recovery.
 Run [37_stream_session.py](../examples/37_stream_session.py) for the synchronous
 caller-driven alternative. It pushes ordered rows through a two-row rolling mean,
 uses an explicit watermark to close the first push, and calls `finish()` for the
-last row before context exit closes the in-memory session.
+last row. It then checkpoints a durable session at epoch 1, reopens it, and
+checks that `finish()` returns the same buffered quote's mean of 13.5.
+See [stream sessions](python-api.md#stream-sessions) for setup and ownership.
 
 Run [26_late_side_output.py](../examples/26_late_side_output.py) for paired
 normal/late outputs of one rolling stage. A single Program iterator checks
@@ -125,5 +133,15 @@ Run [35_stream_asof_join.py](../examples/35_stream_asof_join.py) for each
 trade's latest eligible historical quote. It checks that equal watermarks do
 not emit, then produces one matched price and one null after progress. Read the
 [ASOF guide](asof-join-guide.md) for strict types, tie ordering, and delivery limits.
+
+## Compare finite and bounded execution
+
+The [named relational examples](../examples/README.md#finite-and-bounded-relations)
+cover union, inner join, backward ASOF, fixed event windows, bounded ordering,
+DISTINCT, and analytic OVER. Start with
+[finite_union.py](../examples/finite_union.py) for DataFrame and SQL parity
+across Batch and Streaming, then run
+[bounded_analytic_over.py](../examples/bounded_analytic_over.py) to compare
+complete finite input with one final result at stream EOF.
 
 Next: [batch calculations](batch-guide.md).

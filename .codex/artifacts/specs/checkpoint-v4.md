@@ -3,7 +3,7 @@
 Date: 2026-11-16. Source checkout: `f09d4e45`. Delivery: implementation steps
 are commits in the single integrated re-architecture PR #619, not separate PRs.
 Plan:
-[streaming core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md),
+[streaming core re-architecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md),
 especially decisions 3–5, §4.2, §6 and §7.4. P2 dependency:
 [Rolling kernel v2](rolling-kernel-v2.md), §5.1, §5.4, §7 and §9.
 

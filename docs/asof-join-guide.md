@@ -120,9 +120,9 @@ cannot establish the next join's identity. A nested inner join still needs its
 complete canonical pair ordering. Export uses the same project-v3 native ASOF
 node and physical bindings; logical Python input names are not serialized.
 
-Revision 7 analysis can prove `final_relation / accepted_history /
-all_sources_eof / unordered` conditionally: both runs must succeed over the same
-complete accepted history, within their own budgets, with no stream late discard.
+Query analysis conditionally proves `final_relation / accepted_history /
+all_sources_eof / unordered`. Both runs must succeed over the same complete
+accepted history, within their own budgets, with no stream late discard.
 Compare all append outputs at EOF against the finite relation. Stream intermediate
 events and chunk boundaries need not match. Explicit latest semantics reject
 snapshot inputs at either stream ingress before opening sources; legacy append
@@ -262,18 +262,21 @@ allocations, and caller-owned tables have their own ownership and budgets.
 
 Accepted rows from one admitted batch form an immutable Arrow run. A run owns
 an optional payload RecordBatch plus parallel group-ID, event-time, sequence,
-and payload/identity liveness columns. Admission materializes the accepted rows
-with Arrow `take` before retention, so dropped rows do not remain reachable
-through the run. A stable `(run ID, row offset)` locator
-identifies each retained row. Dropped late rows create no persistent state, and
-a duplicate or budget rejection installs no partial key, run, or output.
+and payload/identity liveness columns. Admission detaches the retained columns
+from the source buffers. For partially admitted inputs, it gathers only
+accepted rows. A stable `(run ID, row offset)` locator identifies each retained
+row. Dropped late rows create no persistent state, and a duplicate or budget
+rejection installs no partial key, run, or output.
 
 Per-key right payload and identity indexes merge locators in `(time, sequence)`
 order. Pending left locators merge in canonical `(time, key, sequence)` order,
 using typed key ranks rather than group birth order. Out-of-order admission
 merges locator columns without rewriting the Arrow payloads. The same run and
 locator identities are used by duplicate validation, selection, checkpoint
-capture, and restore.
+capture, and restore. Runs with a single non-null `UInt64` sequence column
+compare values directly when both hold typed sequence buffers. Checkpoint
+capture and runs retaining identities after their last live payload use the
+canonical binary sequence encoding.
 
 For each finalizable left row, selection chooses the greatest right
 `(time, sequence)` within the inclusive tolerance from that key's ordered

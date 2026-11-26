@@ -8,10 +8,10 @@ Status: proposed for API design and adversarial critique before implementation.
 
 Normative inputs:
 
-- [Approved streaming-core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md), especially decisions 3, 4 and 6; §§3.5, 4.2–4.3, 4.6, 6, 7.5–7.6 and 7.9.
+- [Approved streaming-core re-architecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md), especially decisions 3, 4 and 6; §§3.5, 4.2–4.3, 4.6, 6, 7.5–7.6 and 7.9.
 - [Domain vocabulary](../../../docs/introduction.md), [streaming SQL contract](../../../docs/streaming-guide.md#stream-ownership-and-sql-boundaries), and [ASOF contract](../../../docs/asof-join-guide.md).
 - Join evidence: [single-thread results](../analysis/join-single-thread-performance.md), [remaining gap analysis](../analysis/join-remaining-gaps-2026-10-17.md), and [Issue 406 diagnosis](../analysis/issue406-eight-workload-diagnosis.md).
-- Grouped-state evidence: [SUM-state index](../../../benchmarks/sum-state/README.md), [withdrawn key sharding](../../../benchmarks/sum-state/sum-key-sharding-20261107.md), [withdrawn delta delegation](../../../benchmarks/sum-state/sum-delta-delegation-20261107.md), [withdrawn composite-key prototype](../../../benchmarks/sum-state/sum-columnar-keys-20261105.md), and the [core-count sweep](../../../benchmarks/stock-positions/engine-core-sweep-20261107.md).
+- Grouped-state evidence: [SUM-state index](../../../benchmarks/sum-state/README.md), [withdrawn key sharding](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-key-sharding-20261107.md), [withdrawn delta delegation](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-delta-delegation-20261107.md), [withdrawn composite-key prototype](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-columnar-keys-20261105.md), and the [core-count sweep](../../../benchmarks/stock-positions/engine-core-sweep-20261107.md).
 
 Verified current-source anchors at the inspection base:
 

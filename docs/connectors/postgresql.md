@@ -99,8 +99,10 @@ to supply physical graph bindings and explicit runtime/state settings.
 All PostgreSQL bindings require the secret slot `url`, for example:
 
 ```json
-"secrets": {
-  "url": {"resolver": "environment", "key": "CALC_FLOW_PG_URL"}
+{
+  "secrets": {
+    "url": {"resolver": "environment", "key": "CALC_FLOW_PG_URL"}
+  }
 }
 ```
 
@@ -109,13 +111,15 @@ unreplayable because a restarted process cannot recreate the same database
 transaction. Exact incremental polling uses a unique ordered composite cursor:
 
 ```json
-"options": {
-  "table": "orders",
-  "mode": "incremental_query",
-  "cursor_columns": ["updated_at", "id"],
-  "poll_interval_ms": 500,
-  "max_batch_rows": 8192,
-  "max_batch_bytes": 67108864
+{
+  "options": {
+    "table": "orders",
+    "mode": "incremental_query",
+    "cursor_columns": ["updated_at", "id"],
+    "poll_interval_ms": 500,
+    "max_batch_rows": 8192,
+    "max_batch_bytes": 67108864
+  }
 }
 ```
 
@@ -123,20 +127,22 @@ Logical CDC requires a frozen Arrow schema, an existing publication, and an
 explicit durable slot policy:
 
 ```json
-"options": {
-  "table": "orders",
-  "mode": "logical_cdc",
-  "slot": "calc_flow_orders",
-  "publication": "calc_flow_publication",
-  "slot_policy": "create_with_snapshot",
-  "require_before": true,
-  "columns": [
-    {"name": "id", "data_type": "int64", "nullable": false},
-    {"name": "event_time", "data_type": "timestamp[us]", "nullable": false},
-    {"name": "amount", "data_type": "float64", "nullable": false}
-  ],
-  "max_transaction_rows": 1000000,
-  "max_transaction_bytes": 268435456
+{
+  "options": {
+    "table": "orders",
+    "mode": "logical_cdc",
+    "slot": "calc_flow_orders",
+    "publication": "calc_flow_publication",
+    "slot_policy": "create_with_snapshot",
+    "require_before": true,
+    "columns": [
+      {"name": "id", "data_type": "int64", "nullable": false},
+      {"name": "event_time", "data_type": "timestamp[us]", "nullable": false},
+      {"name": "amount", "data_type": "float64", "nullable": false}
+    ],
+    "max_transaction_rows": 1000000,
+    "max_transaction_bytes": 268435456
+  }
 }
 ```
 

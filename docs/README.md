@@ -16,15 +16,19 @@ pages explain how the implementation provides those behaviors.
 1. [Batch calculations](batch-guide.md): `compute`, expressions, SQL, `pipe`,
    named collection, financial functions, and async execution; examples 01,
    02, 05, 09, and `32_sql_expression_pipeline.py`. Example 03 covers typed UDFs.
-2. [Arrays and matrices](array-guide.md): NumPy/JAX registration, array
-   expressions, table-to-matrix multiplication, and static weights;
-   examples 06, 07, and 11.
+2. [Arrays and matrices](array-guide.md) covers native arrays, ArrayExpr,
+   NumPy and JAX providers, table-to-matrix composition, and static weights.
+   Start with the [native Array example](../examples/native_arrays.py) or examples
+   06, 07, and 11.
 3. [Continuous streaming](streaming-guide.md): start with
    `33_streaming_pipeline.py` and `34_streaming_outputs.py` for `stream` and
    named events. Continue to sources, sinks, event time, windows, bounded joins,
    and recovery in examples 04, 08, 10, 12, and 13.
    [Backward ASOF Join](asof-join-guide.md) uses example 35 for final
    trade/quote matching, watermark waiting, state bounds, and recovery.
+   [Stream sessions](python-api.md#stream-sessions) and
+   [example 37](../examples/37_stream_session.py) show caller-driven batches
+   and watermark advancement.
 4. [Expression workflows](symbolic-workflows.md): financial features, analysis,
    composition, and batch/stream execution; examples 09–13.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
@@ -70,25 +74,14 @@ project contract.
 
 1. [Verification](verification.md): checks for examples, documentation, and
    each implementation surface.
-2. [Benchmark suite](benchmark-suite.md): workloads, correctness, timing
-   boundaries, reports, and regression gates.
+2. [Benchmark suite](benchmark-suite.md) covers correctness, timing, and
+   regression gates, including the scheduled
+   [report operator comparisons](benchmark-suite.md#report-operator-comparisons).
 3. [SQL performance controls](sql-datafusion-performance.md): partitioning,
    telemetry, rewrite limits, and measurements.
 4. [Warm-stream measurements](warm-stream-performance.md): persistent jobs,
    sparse appends, latency interpretation, and reproduction.
 5. [Python release guide](python-release.md): packaging and publication.
-6. [Original performance development plan](plans/cross-library-performance.md):
-   the initial SQL and native-streaming optimization scope and validation rules.
-7. [Bounded backward ASOF join plan, dated 2026-09-09](plans/2026-09-09-bounded-backward-asof-join.md):
-   the frozen join semantics, implementation split, and exit gates.
-8. [Streaming ASOF acceleration plan, dated 2026-09-30](plans/2026-09-30-streaming-asof-acceleration.md):
-   the measured Polars gap, root causes, phased optimizations, and gates.
-9. [TA-Lib and Arroyo performance development plan, dated 2026-11-08](plans/2026-11-08-ta-lib-arroyo-performance.md):
-   runtime fusion, incremental rolling kernels, shared history, and conditional
-   output and checkpoint work with compatibility and measurement gates.
-10. [Streaming core re-architecture plan, dated 2026-11-15](plans/2026-11-15-streaming-core-rearchitecture.md):
-    the review findings, synchronous compute core, runtime-owned state tables,
-    new rolling arithmetic, checkpoint protocol, and phased acceptance gates.
 
 ## History and maintenance
 

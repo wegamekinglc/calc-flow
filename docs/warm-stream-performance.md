@@ -8,8 +8,11 @@ and it is not directly interchangeable with a TA-Lib array call or a SQL query
 over a complete historical table.
 
 Use this guide to produce measurements for the revisions under investigation.
-The [benchmark suite](benchmark-suite.md) explains the scheduled matrix and
-regression gates. Keep individual measurement reports with their raw artifacts.
+The [benchmark suite](benchmark-suite.md#complete-inventory) documents the
+scheduled one-entity matrix. The standalone controller here defaults to 64
+entities. Compare warm measurements at matching entity counts, history depths,
+append sizes and timing boundaries. Keep individual measurement reports with
+their raw artifacts.
 
 ## What is measured
 
@@ -24,12 +27,9 @@ validation, worker IPC, checkpoints, and shutdown remain outside timing.
 
 Baseline and candidate execute the same graph and input values in separate
 persistent Python processes. The controller alternates AB/BA order; both
-workers advance through the same appended row identities. The current controller
+workers advance through the same appended row identities. The controller
 creates a fresh process pair for each scenario and shuffles scenario order with
-the recorded `--seed` (default `20260905`). The older two-round report used
-persistent workers across scenarios; its results are not silently relabeled.
-Nothing prefetches
-extra source events to improve the timing. Scheduled checkpoints are set to a
+the recorded `--seed` (default `20260905`). Scheduled checkpoints are set to a
 24-hour interval so they do not overlap these bounded runs.
 
 The default matrix has 64 entities and seven distinct (history, append) pairs:
@@ -40,10 +40,8 @@ The default matrix has 64 entities and seven distinct (history, append) pairs:
 | Incremental size | 1,024,000                                 | 64 / 640 / 6,400 / 64,000 |
 
 Each pair runs SMA(20) and SMA(5) minus SMA(20), with both forced collection
-before each sample and normal Python GC. Normal GC is not disabled; the
-controller still introduces untimed IPC gaps between appends. The two GC
-modes must be compared separately. Removing the pre-sample `gc.collect()`
-from the older harness is not an engine optimization.
+before each sample and normal Python GC. The controller introduces untimed
+IPC gaps between appends. Compare the two GC modes separately.
 
 ## Reproduce
 
@@ -64,7 +62,7 @@ uv run --extra benchmark python scripts/profile_warm_stream.py build \
 uv run --extra benchmark python scripts/profile_warm_stream.py compare \
   --baseline-build target/warm-baseline-wheels/build.json \
   --candidate-build target/warm-candidate-wheels/build.json \
---samples 30 --output target/warm-stream.json
+  --samples 30 --output target/warm-stream.json
 ```
 
 The native warm-state workload and its regression tests do not require TA-Lib.

@@ -3,6 +3,8 @@
 Follow [AGENTS.md](AGENTS.md) for repository commands, architecture, coding
 style, verification, release rules, and git conventions. It is the maintained
 source of truth for agents working on Calc Flow.
+The [Claude code-style rule](.claude/rules/code-style.md) mirrors the repository's
+[`code-style` skill](.agents/skills/code-style/SKILL.md).
 
 Published documentation lives under [docs/](docs/), starting with
 [the introduction](docs/introduction.md). Keep current behavior in those docs

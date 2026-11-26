@@ -3,7 +3,7 @@
 Status: draft for critique. D = shard the per-batch incremental update of one
 `IncrementalSql` by full group key on the job-scoped native CPU service.
 This spec unseals the parallel-aggregate question that
-[sum-batch-parallel-20261104](../../../benchmarks/sum-state/sum-batch-parallel-20261104.md)
+[sum-batch-parallel-20261104](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-batch-parallel-20261104.md)
 closed for the row-range lane design, and follows the sharding direction its
 own review and the example-30 multicore investigation both recommended.
 
@@ -15,7 +15,7 @@ own review and the example-30 multicore investigation both recommended.
   `group_aggregates.rs` (`InlineSum`, `GroupAggregates`),
   `grouped_sum.rs`, `dirty.rs`, `compact/capture.rs`,
   `compact_state/export.rs`.
-- Rejected precedent: `benchmarks/sum-state/sum-batch-parallel-20261104.md`
+- Rejected precedent: [sum-batch-parallel-20261104](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-batch-parallel-20261104.md)
   (lane variant, dense 4CPU +15.75% / 8CPU +18.60%, total CPU +37%,
   "does not prove that all batch-parallel SUM designs regress") and its
   review `.codex/artifacts/reviews/sum-batch-parallel-20261104.md`.

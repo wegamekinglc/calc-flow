@@ -46,13 +46,14 @@ or the issue body. Cover:
 
 - **Scope** — which surface(s): Rust core, PyO3 bindings, Python adapters? Public API or
   internal-only?
-- **Batch semantics** — table batches (Arrow, DataFusion) or array batches (NumPy/JAX)?
-  A new `BatchKind`? Schema contracts on ports?
+- **Batch semantics** — Arrow table batches, native array batches, or an explicitly
+  registered provider? A new `BatchKind`? Schema contracts on ports?
 - **State and checkpoints** — does the change hold state across batches? What are the
   `snapshot`/`restore`/`reset` semantics? Checkpoint version compatibility?
-- **Engine constraints** — table math stays in DataFusion; array providers interpret an
-  allowlisted AST (never Python `eval`); UDFs are referenced by
-  `UdfReference(provider, name, version)` — configs never carry callables or import paths
+- **Engine constraints** — DataFusion executes SQL and general expressions. Supported
+  operations use native Arrow or native array kernels. Optional array providers
+  interpret an allowlisted AST and never call Python `eval`. Data-only configs refer to
+  UDFs with `UdfReference(provider, name, version)`.
 - **Runner semantics** — finite batch vs continuous streaming; source cursor behavior; at-least-once
   sink delivery and what duplicates mean for this change
 - **Inputs and outputs** — types, units, valid ranges, error conditions

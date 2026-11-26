@@ -24,31 +24,25 @@ count, cross-section mean, ten-second tumbling sum, and backward ASOF cases.
 Unsupported library/scenario combinations remain explicit cells.
 
 The [report operator shard](../docs/benchmark-suite.md#report-operator-comparisons)
-adds 60 individual operators at 64,000 rows. It compares Calc Flow's native
-Batch and Streaming expressions and includes 58 Finance-Python references.
+measures 60 individual operators at 64,000 rows across 178 cells. Each case
+measures native compiled Batch and ready Streaming. Finance-Python contributes
+58 references, and the inventory marks `rsi20` and `cs_demean` unsupported in
+that backend. Compare revisions within a timing scope and use cross-engine
+medians to describe the selected workload.
 
 Calc Flow SQL and native streaming each report 1T and 4T configurations.
 Raw DataFusion uses 4T. All other multi-thread engine, warm and diagnostic workers
 also use 4T; only explicit single-thread references use 1T. Calc Flow SQL and raw
-DataFusion cover all fourteen stream scenarios, including these seven additional
-operators, at the original 10-to-10M row scales. SQL argmax returns the lag of the oldest
-tied maximum; ASOF retains the fixture's zero tolerance and records its equivalent
-left equality join. See the
+DataFusion cover all fourteen stream scenarios at scales from 10 to 10 million
+rows. SQL argmax returns the lag of the oldest tied maximum. The ASOF fixture
+uses zero tolerance, so its SQL workload uses an equivalent left equality join.
+See the
 [operator semantics](../docs/benchmark-suite.md#inputs-correctness-and-timing-boundaries)
 for timing, frame and reference-algorithm details.
-The [DAL-389 results](sql-operators/README.md) retain all 98 added cells,
-their raw samples, build identity and validation commands.
 
-Polars now covers the same fourteen scenarios in both 1T and 4T configurations.
-The six additions are average, 64/256-row argmax, 64-row unique count,
-cross-section mean and ten-second tumbling sum. The
-[DAL-394 results](polars-operators/README.md) retain the 84-cell inventory
-and all 84 complete measurements at the original seven row scales. The final
-three 10M/1T cells completed within the approved additional 360-second budget.
-The independent oracles and streaming-engine collect-to-Arrow timing boundary
-are unchanged.
+Polars covers the same fourteen scenarios in both 1T and 4T configurations.
 
-New engine/warm base/head measurements have a same-runner, two-round +5%
+Engine and warm base/head measurements have a same-runner, two-round +5%
 regression gate using paired-median confidence lower bounds; cases the
 baseline catalog never declared are measured as new coverage without the
 paired gate. Complete tables
@@ -62,28 +56,6 @@ The focused [grouped integer SUM comparison](sum-state/README.md) measures
 streaming stock positions, sparse group updates, and a finite batch control.
 It preserves per-snapshot correctness evidence, paired samples, build identity,
 CPU profiles, and resource observations without extending the scheduled suite.
-
-The [UTF-8 grouped-output follow-up](sum-state/sum-followup-columnar-20261104/README.md)
-tracks current-version profiling, the original finite control and separately
-sealed candidate comparisons under one cumulative measurement budget.
-
-The [candidate/rank SUM study](sum-state/sum-candidate-ranks-20261106.md)
-records five fresh-baseline cases and both profiles. The runtime prototype is
-withdrawn because it did not establish the required dense improvement;
-experimental source, paired evidence and source-verification records remain
-available for reproduction.
-
-The [sign CASE study](sum-state/sum-case-projection-20261106.md) verifies lower
-mixed-mask allocations and higher uniform-mask allocations. Its runtime
-comparison stops at the environment guard before workloads, so the prototype
-is withdrawn and end-to-end performance remains unmeasured.
-
-The separately authorized [quiet-environment sign CASE retest](sum-state/sum-case-retest-20261106.md)
-completes all five fixed cases, 200 formal observations, both CPU profiles and
-4,872 full snapshot checks against main `5a66b6d5`. All maintained verdicts
-are inconclusive, with no accepted dense improvement or confirmed regression.
-The runtime prototype remains withdrawn; the earlier stopped acquisition and
-this complete comparison retain separate immutable evidence.
 
 ## Layout
 
@@ -127,7 +99,7 @@ CALC_FLOW_BENCHMARK_SCALE=overhead JAX_PLATFORMS=cpu \
 The nine cases cover expression, SQL, rolling state, 64- and 256-row rolling
 scans, cross section, tumbling aggregation, bounded stream join, and backward
 ASOF join. The Rust `stream_union` Criterion target measures native Union
-forwarding, which has no symbolic Python declaration. The Python cases time a
+forwarding. The Python cases time a
 fresh `Program.stream` lifecycle through Arrow output; source tables and batch
 splits are prepared before timing. They use 16 entities and 640-row batches,
 with input capped at 20,000 rows to keep the scheduled suite bounded. The
@@ -329,7 +301,7 @@ raw pairs, command/build provenance, and failure records. Dependency-drift
 acknowledgement does not waive incompatibility.
 
 Final Join/ASOF target acquisition uses the separate
-[current-milestone policy](../docs/benchmark-suite.md#current-milestone-joinasof-acquisition-443):
+[Join/ASOF acquisition protocol](../docs/benchmark-suite.md#joinasof-acquisition-protocol):
 47 semantic cases, both sealed B/C arms including OFF, fixed preparation-aware
 budgeting, absolute LOW/ON goals and separate formal/planning reports. Historical
 stopped collections are not resumed by this policy.
@@ -597,65 +569,31 @@ CALC_FLOW_BENCHMARK_SCALE=standard \
 
 ## Sparse changelog through the Python stream API
 
-The [public changelog baseline](sum-state/public-sparse-changelog-20261123/README.md)
-measures the full async stream lifecycle for 10,000 retained groups and checks
-every emitted retract and upsert against the same sparse trades used by the
-Rust grouped SUM benchmark.
-
-The [recorded reference](sum-state/public-sparse-changelog-20261123/baseline.json)
-contains all 20 timed observations, the two warmups, and host resource samples.
-Each run returned 13,200 changes across 21 batches. The two round medians on
-the reference wheel were 399.0 and 429.6 ms.
-
-Stage 2 targets p50 ≤15 ms for this complete graph, including the opening
-10,000 rows and all 20 incremental batches, with every reconstructed
-snapshot checked. The single-hash group lookup candidate reached 23.460 ms
-p50, 8.460 ms above target. Timing an individual incremental batch requires
-a separate input-to-delivery clock. [Paired observations and checks](https://github.com/wegamekinglc/calc-flow/pull/649#issuecomment-7093482797).
-
-The reproduction command collects timings and validates outputs. For the
-recorded run, an external supervisor also set `OPENBLAS_NUM_THREADS=1` and
-`OMP_NUM_THREADS=1`, and checked three seconds of idle time before launch.
-During collection it sampled per-CPU utilization, available memory and
-`/proc/vmstat` every second. CPU 8 ran the worker. Both its SMT sibling
-(CPU 9) and mean utilization across all host CPUs had to stay below 50%.
-Each interval also required at least 10 GiB available memory, fewer than
-256 major faults and fewer than 1,024 total swap-in and swap-out pages. The
-reference JSON retains those observations. Reproducing this resource check
-requires an external monitor in addition to the timing command.
-
-The reference used the collector at commit `8438d481`; its complete file
-hash is in the reference JSON. A subsequent refactor extracted Arrow schema
-and change validation after the timer.
-
-### Compare two CI wheels on a fresh hosted runner
-
-The manual **Benchmarks** workflow accepts mode `sparse-changelog` and two
-pairs of full commit SHAs and Linux CI `python-distributions` artifact IDs.
-For the sparse grouped SUM change in PR 633, dispatch the registered comparison
-with these inputs while the two builds are retained.
+The manual **Benchmarks** workflow runs the maintained `sparse-changelog`
+comparison with two full product commit SHAs and their Linux CI
+`python-distributions` artifact IDs. Use retained wheels from the same Linux
+CI image.
 
 ```bash
 gh workflow run benchmarks.yml -f mode=sparse-changelog \
-  -f baseline_sha=fced5062c1a6f05b6302674e8eda926182bb558a \
-  -f baseline_wheel_artifact=14773009244 \
-  -f candidate_sha=7e8f6658d7893840ccf2cf8ea30bc03a336560cb \
-  -f candidate_wheel_artifact=14784320573
+  -f baseline_sha=BASELINE_SHA \
+  -f baseline_wheel_artifact=BASELINE_ARTIFACT_ID \
+  -f candidate_sha=CANDIDATE_SHA \
+  -f candidate_wheel_artifact=CANDIDATE_ARTIFACT_ID
 ```
 
-For another comparison, supply current artifacts from the same Linux CI image,
-using the intended head SHAs for both runs. The job verifies the uploaded
-artifact digest, CPython 3.13 ABI3 release build and actual checkout's full
-Git tree, then checks the installed package and loaded native hashes. A
-fresh GitHub-hosted VM runs the same locked dependencies, one pinned core,
-and one Tokio, Rayon and BLAS thread per worker.
+The job verifies each uploaded artifact digest, CPython 3.13 ABI3 release
+build, checkout tree, installed package, and loaded native module. Both
+workers use the same locked dependencies. Each uses one pinned core and one
+Tokio, Rayon and BLAS thread.
 
 Each sample covers the 21-batch public stream from declaration through retained
 Arrow output and cleanup. The fixture has 12,000 input rows, 10,000 distinct
 keys, and 13,200 emitted change rows. The untimed oracle checks ordered
 retractions, upserts and cumulative positions at every prefix. The gzip file
-in the baseline directory contains the exact Rust-generated Arrow IPC fixture
-that the original single-build run read.
+under `sum-state/public-sparse-changelog-20261123/` contains the sealed
+Rust-generated Arrow IPC fixture. See the [recorded evidence](sum-state/public-sparse-changelog-20261123/README.md)
+for its provenance.
 
 Two independent worker pairs each run one warmup per side and ten measured
 pairs, alternating AB and BA. The suite computes each round's exact paired
@@ -671,5 +609,4 @@ evidence upload. Wheel builds belong to their recorded Linux CI jobs. The
 three-minute acquisition reserves 45 seconds to close workers. The run artifact
 contains the registered inputs, release manifests, resource observations,
 per-request correctness and timings, partial pairs on interruption and the
-verdict for a complete comparison. The original WSL attempt stopped at the
-resource gate with zero pairs.
+verdict for a complete comparison.

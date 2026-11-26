@@ -1,4 +1,4 @@
-//! Push ordered rows through one stateful table session.
+//! Push ordered rows and recover a caller-driven stream session.
 
 use std::{collections::BTreeMap, error::Error, sync::Arc};
 
@@ -8,8 +8,9 @@ use calc_flow::arrow::{
     record_batch::RecordBatch,
 };
 use calc_flow::{
-    Batch, BatchMetadata, EventTime, PipelineBuilder, RollingOperator, RollingSpec, SessionOutput,
-    StreamRequirements, StreamRuntimeConfig, StreamSession, UdfRegistry,
+    Batch, BatchMetadata, EventTime, ManagedCheckpointRuntime, PipelineBuilder, RollingOperator,
+    RollingSpec, SessionOutput, StreamExecutionPlan, StreamRequirements, StreamRuntimeConfig,
+    StreamSession, UdfRegistry,
 };
 
 const BASE_MICROS: i64 = 1_767_225_600_000_000;
@@ -63,7 +64,7 @@ fn mean_values(
     Ok(values)
 }
 
-fn build_session() -> Result<(StreamSession, String, String), Box<dyn Error>> {
+fn build_plan() -> Result<StreamExecutionPlan, Box<dyn Error>> {
     let spec: RollingSpec = serde_json::from_value(serde_json::json!({
         "configuration_version": 1, "state_layout_version": 1,
         "partition_by": ["symbol"], "event_time": "ts", "sequence_by": ["seq"],
@@ -73,30 +74,67 @@ fn build_session() -> Result<(StreamSession, String, String), Box<dyn Error>> {
         "value_policy": "stateful_numeric_v1",
     }))?;
     let rolling = RollingOperator::new("rolling", schema(), spec)?;
-    let plan = PipelineBuilder::new("quotes")?
+    Ok(PipelineBuilder::new("quotes")?
         .add_node("rolling", rolling)?
         .compile_stream(
             &UdfRegistry::new().snapshot(),
             &StreamRequirements::default(),
-        )?;
-
-    // No generated policy: progress comes only from explicit watermarks and finish.
-    let session = StreamSession::new(plan, &StreamRuntimeConfig::default(), BTreeMap::new())?;
-    let input = session.input_ids()[0].to_owned();
-    let output = session.output_ids()[0].to_owned();
-    Ok((session, input, output))
+        )?)
 }
 
-fn run_session() -> Result<(SessionOutput, SessionOutput, SessionOutput, String), Box<dyn Error>> {
-    let (mut session, input, output) = build_session()?;
+fn push_quotes(
+    session: &mut StreamSession,
+) -> Result<(SessionOutput, SessionOutput), Box<dyn Error>> {
+    let input = session.input_ids()[0].to_owned();
     let first = session.push(
         &input,
         rows(0, &[10.0, 12.0])?,
         Some(EventTime::from_micros(BASE_MICROS + 1_000_000)),
     )?;
     let second = session.push(&input, rows(2, &[15.0])?, None)?;
+    Ok((first, second))
+}
+
+fn run_session() -> Result<(SessionOutput, SessionOutput, SessionOutput, String), Box<dyn Error>> {
+    // Progress comes from caller-supplied watermarks and finish.
+    let mut session = StreamSession::new(
+        build_plan()?,
+        &StreamRuntimeConfig::default(),
+        BTreeMap::new(),
+    )?;
+    let output = session.output_ids()[0].to_owned();
+    let (first, second) = push_quotes(&mut session)?;
     let final_output = session.finish()?;
     Ok((first, second, final_output, output))
+}
+
+fn recover_buffered_quote() -> Result<(u64, Vec<Option<f64>>), Box<dyn Error>> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path().join("managed");
+    let config = StreamRuntimeConfig {
+        checkpointing: true,
+        ..Default::default()
+    };
+    let epoch = {
+        let mut session = StreamSession::new_with_checkpoints(
+            build_plan()?,
+            &config,
+            BTreeMap::new(),
+            ManagedCheckpointRuntime::new(&root)?,
+        )?;
+        push_quotes(&mut session)?;
+        session.checkpoint()?.as_u64()
+    };
+
+    // Closing the first session leaves its checkpoint available at the same root.
+    let mut restored = StreamSession::restore(
+        build_plan()?,
+        &config,
+        BTreeMap::new(),
+        ManagedCheckpointRuntime::new(&root)?,
+    )?;
+    let result = restored.finish()?;
+    Ok((epoch, mean_values(&result, restored.output_ids()[0])?))
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -116,5 +154,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("first push: {first:?}");
     println!("second push: {second:?}");
     println!("finish: {final_values:?}");
+
+    let (epoch, restored) = recover_buffered_quote()?;
+    if epoch != 1 || restored != final_values {
+        return Err(format!("unexpected recovery at epoch {epoch}: {restored:?}").into());
+    }
+    println!("checkpoint epoch: {epoch}");
+    println!("restored finish: {restored:?}");
     Ok(())
 }

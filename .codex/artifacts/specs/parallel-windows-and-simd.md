@@ -5,12 +5,12 @@
 - Delivery: the single integrated re-architecture PR #619; P6/P7 are commit
   sequences in that PR, not separate PRs.
 - Approved plan:
-  `docs/plans/2026-11-15-streaming-core-rearchitecture.md` sections 2, 3.4,
+  [2026-11-15-streaming-core-rearchitecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md) sections 2, 3.4,
   4.4-4.5, 6, 7.7-7.9, 8, 9, and 10.
 - Kernel and determinism dependency:
   `.codex/artifacts/specs/rolling-kernel-v2.md` sections 4.5, 5, and 6.
 - Earlier pane constraints:
-  `docs/plans/2026-11-08-ta-lib-arroyo-performance.md` section 5.2.
+  [2026-11-08-ta-lib-arroyo-performance](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-08-ta-lib-arroyo-performance.md) section 5.2.
 - Current behavior:
   `docs/relational-frontends.md#fixed-utc-event-windows`,
   `docs/streaming-guide.md#event-time-windows`, and

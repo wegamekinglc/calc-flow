@@ -3,7 +3,7 @@
 ## Target
 
 - Spec: [stream-session.md](../specs/stream-session.md) (base `39cab2fb`).
-- Plan: [streaming core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+- Plan: [streaming core re-architecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 - The plan's approved route and goals (decisions 1-6 and the P0-P7 gates) are
   fixed inputs. This critique does not change them.
 

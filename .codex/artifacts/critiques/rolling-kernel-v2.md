@@ -4,7 +4,7 @@
 
 - Spec: `.codex/artifacts/specs/rolling-kernel-v2.md`, revision 3 (`fab246cc`):
   §4, §6.5 and §9.
-- Plan: `docs/plans/2026-11-15-streaming-core-rearchitecture.md` §2 and §5.
+- Plan: [2026-11-15-streaming-core-rearchitecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md) §2 and §5.
   These are fixed inputs.
 
 ## Verdict

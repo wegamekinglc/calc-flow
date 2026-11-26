@@ -108,7 +108,10 @@ The `.codex/agents/` definitions and descriptions are canonical. The
 `.claude/agents/` tree is a preserved compatibility mirror for Claude users;
 when a team definition changes, synchronize its semantics from
 `.codex/agents/` to `.claude/agents/`, never in the reverse direction.
-Ordinary feature work must not rewrite either team definition.
+Ordinary feature work must not rewrite either team definition. The repository's
+[`code-style` skill](.agents/skills/code-style/SKILL.md) covers code, examples,
+and documentation. Its Claude compatibility rule lives in
+[`.claude/rules/code-style.md`](.claude/rules/code-style.md).
 
 ## Coding style
 
@@ -200,9 +203,11 @@ dashes span the full column width, including cell spaces.
   `compile_batch()` and `compile_stream()` validate endpoints, kinds, schemas,
   one-writer inputs, UDFs, cycles, deterministic topology, inputs/outputs, and
   fingerprint.
-- `BatchExecutionPlan::execute` creates one run-scoped DataFusion session and
-  returns `RunResult` with named outputs, node timings, DataFusion metrics, and
-  metadata.
+- `BatchExecutionPlan::execute` returns `RunResult` with named outputs, node
+  timings, DataFusion query metrics, and metadata. Ordinary queries share a
+  lazy run-scoped session. Queries that preserve input order use dedicated
+  serial sessions. Schema-proven column projections can reuse Arrow arrays and
+  contribute node timings directly.
 - `UdfRegistry` owns trusted native implementations.
   `UdfRegistrySnapshot` is captured at compile time; configurations contain
   only `UdfReference` values.
@@ -215,10 +220,10 @@ dashes span the full column width, including cell spaces.
   public `FileCheckpointStore` are removed. `FileProjectStore` remains the
   bounded atomic project-document store.
 
-Apache DataFusion 55 is the sole table engine. Table operations accept one
-expression/projection/filter node or one read-only `SELECT`/CTE SQL node.
-Reject DDL, DML, utility statements, multiple statements, and table backend
-selectors.
+Apache DataFusion 55 is the SQL and general expression engine. Native table
+operators also execute on Arrow. Each SQL node accepts one read-only `SELECT`
+or CTE statement. The project contract rejects DDL, DML, utility statements,
+multiple statements, and table backend selectors.
 
 ### Python application API and binding
 
@@ -273,8 +278,8 @@ selectors.
   plan with one dynamic input and maps watermark policies onto session
   watermarks; synchronous caller-thread `push`, `advance`, and `finish` return
   Arrow tables (programs: every declared output name), and `close` releases
-  state without flushing. `checkpoints=None` retains in-memory behavior and
-  ignores checkpoint configuration. Supplying the public
+  state without flushing. `checkpoints=None` keeps state in memory. All
+  supplied runtime configuration still goes through validation. Supplying the public
   `ManagedCheckpointRuntime` wrapper, unwrapped at the native boundary, enables
   durable v4 capture with effective `checkpointing=True`; `restore=True`
   requires storage and selects the highest complete session epoch, and

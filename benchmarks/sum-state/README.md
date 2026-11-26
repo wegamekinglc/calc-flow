@@ -1,6 +1,6 @@
 # Grouped integer SUM state measurements
 
-The Rust example also measures an individual update on a running graph. Build
+The Rust example measures an individual update on a running graph. Build
 `grouped_sum_state_benchmark` with `--release --features benchmark-internals`
 and pass `--sparse-update sparse.arrow snapshot` or
 `--sparse-update sparse.arrow changelog`. Both modes preload the standard
@@ -10,63 +10,26 @@ when the caller receives its output from the sink. The worker retains all 21
 outputs through natural end and checks the complete positions after every batch.
 The JSON includes the 20 warm update durations in nanoseconds.
 
-In the 2026-11-23 single-CPU comparison the pooled update p50/p95 was
-251.889/335.532 µs for snapshots and 28.426/101.138 µs for changelogs.
-Each mode had 400 measured updates, grouped into 20 fresh processes. Using
-the median of each process as one paired observation, the two rounds gave
-97.85% sign intervals of −88.85% to −87.88% and −89.28% to −88.56%.
-The changelog emitted 13,200 rows per job and the snapshot emitted 210,000.
-Both reconstructed the same 10,000 positions at every boundary. This compares
-the two output modes on one binary built from the product at `644f8f15`,
-before the later grouped SUM undo-storage change. The raw data include worker
-and source fingerprints, all 44 processes, and clock and resource settings.
-[Native observations](20261123-warm-update/rust-native.json)
+Use a new fixture directory to measure the two output modes on the same build:
 
-[Complete 2026-11-06 sign CASE retest](sum-case-retest-20261106.md) records
-five fixed cases, 200 formal observations, both CPU profiles and 4,872 full
-snapshot checks in a quiet environment. All five maintained verdicts are
-inconclusive; neither dense case establishes the required improvement.
-The runtime prototype is withdrawn. This is a separate acquisition from the
-earlier zero-workload attempt below.
+```bash
+cargo build --release -p calc-flow --features benchmark-internals \
+  --example grouped_sum_state_benchmark
+target/release/examples/grouped_sum_state_benchmark \
+  --prepare target/grouped-sum-fixtures
+target/release/examples/grouped_sum_state_benchmark \
+  --sparse-update target/grouped-sum-fixtures/sparse.arrow snapshot
+target/release/examples/grouped_sum_state_benchmark \
+  --sparse-update target/grouped-sum-fixtures/sparse.arrow changelog
+```
 
-[Unmeasured 2026-11-06 sign CASE experiment](sum-case-projection-20261106.md)
-records a verified allocation tradeoff and a runtime comparison stopped by
-competing builds before any workload. The prototype is withdrawn; no new
-end-to-end timings or profiles are claimed.
-
-[Rejected 2026-11-06 candidate/rank experiment](sum-candidate-ranks-20261106.md)
-records five fixed cases, 200 formal observations and both CPU profiles.
-Removing merge-time candidate lookups did not establish the required dense
-improvement; the runtime prototype is withdrawn and current main is retained.
-
-[Rejected 2026-11-05 composite-key experiment](sum-columnar-keys-20261105.md)
-records five cases, 200 formal observations, both CPU profiles and complete
-snapshot checks. Allocation reductions did not establish dense-stream speedups;
-the runtime prototype is withdrawn and the existing key path is retained.
-
-[Accepted 2026-11-05 inline-state study](sum-inline-state-20261105.md) records
-the fresh-main comparison of dense one/four-CPU and sparse one-CPU streams,
-120 formal observations, both profiles, and the accepted compact-state change.
-The remaining sections below describe the earlier measurement cohorts.
-
-[Rejected batch-parallel experiment](sum-batch-parallel-20261104.md) records
-five fixed cases, actual multicore profiles, confirmed dense-stream regressions,
-and the decision to retain serial grouped SUM execution.
-
-[Complete 2026-11-04 results](20261104/README.md) retain all four cases, all
-160 formal observations, paired intervals and both accepted CPU profiles.
-
-[Final history-borrow verification](20261104-history-borrow/README.md) retains
-all three final-source stream cases, 120 formal observations and the cumulative
-budget receipt; final-source finite execution remains unmeasured.
+## Compare product revisions
 
 This focused comparison measures the stock-position graph from Rust examples
 29/30 on the baseline and candidate product revisions, using one common harness.
 It follows the maintained two-round paired-median method in
 `scripts/benchmark_suite/report.py`, with ten alternating pairs per round and
 its existing 5% decision rule. It does not extend the scheduled case inventory.
-
-The fixed four cases are:
 
 | Case                 | Input                            | CPUs | Partitions |
 |----------------------|----------------------------------|------|------------|
@@ -80,17 +43,15 @@ all 10,000 groups and updates only 100 of them. Stream cases require compact
 state with the same 10,000-group budget and checkpointing disabled. All cases
 use fixed DataFusion partitions, `min_rows_per_partition=1`, default batch size
 8192, and diagnostics enabled. CPU affinity is `0` or `0..7`, with matching
-`TOKIO_WORKER_THREADS`; the controller is pinned to CPU31. The eight logical
-CPUs report four core IDs on the measurement WSL2 host.
+`TOKIO_WORKER_THREADS`. The controller uses CPU 31. Run on a host with those
+CPUs available in its affinity mask.
 
 The primary timer starts after IPC input preload and covers graph construction,
 compilation, execution, output collection, natural end, and cleanup. Stream
 outputs are retained until the timer ends so every snapshot can be checked
-against an independent arithmetic reference afterward. This differs from the
-older diagnostic that retained only the final snapshot: compare only baseline
-and candidate samples generated by this identical harness. Finite output has
-one final snapshot, whereas streaming has 21, so do not compare their elapsed
-times as equivalent work.
+against an independent arithmetic reference afterward. Compare matching cases
+across builds. The finite case returns one snapshot and the streaming cases
+return 21.
 
 Every observation verifies all output rows, names/types/nullability through the
 schema digest, unique keys, every snapshot digest, input identity, and clean
@@ -102,37 +63,23 @@ not an isolated operator working-set metric.
 
 ## Reproduction
 
-The committed results use the measured Rust harness at
-`84186554b078e25e71003a74fedc91c63b2b7f70`, SHA-256
-`657de3e697907e473691c2fd0d1b99967d46577333135c50176801f6faa4e04e`.
-Subsequent analyzer fixes split the diagnostic functions and tooling without
-changing the two production SUM modules. Those diagnostic sources were not
-performance remeasured. The archived source, measurements and hashes remain
-unchanged; use the measured checkout below to reproduce their instrumentation.
-The initial candidate's product revision was `0a728e8e2e001a4dcf18c23f64b08f525b3d140b`;
-the final history-borrow product and its harness use the revision above.
+Choose compatible baseline and candidate checkouts. The builder copies the
+candidate's benchmark harness into the disposable baseline checkout. It
+verifies source seals and forces the product and example to rebuild. Build
+time is separate from the acquisition budget.
 
-Run these commands serially from the candidate repository root with other native
-builds stopped. The focused builder overlays the common diagnostic example into
-the isolated baseline, seals product/support/vendor source, forces the product
-and example to rebuild, retains Cargo compiler-artifact JSON, and copies the
-binary into each output directory. It rejects a fresh/stale product artifact.
-Builds are outside the 600-second acquisition budget (estimate 10–15 minutes per
-side with the warmed cache; the first observed build took 726 seconds).
+Run the commands from the current checkout. Replace `BASELINE_SHA` with the
+baseline commit and use a clean candidate checkout at `.`. The repository's
+`dev` extra supplies `psutil` for the Python controllers.
 
 ```bash
-git worktree add --detach 'target/sum-state-measured' \
-  '84186554b078e25e71003a74fedc91c63b2b7f70'
-git worktree add --detach 'target/sum-state-baseline' \
-  '199d70b4156591153eb6b15cc2c8ffc238b3348f'
-python -m scripts.benchmark_suite.sum_state_build \
-  --source 'target/sum-state-baseline' \
-  --harness-source 'target/sum-state-measured' \
-  --output 'target/sum-state-build/baseline' --target 'target'
-python -m scripts.benchmark_suite.sum_state_build \
-  --source 'target/sum-state-measured' \
-  --harness-source 'target/sum-state-measured' \
-  --output 'target/sum-state-build/candidate' --target 'target'
+git worktree add --detach target/sum-state-baseline BASELINE_SHA
+uv run --extra dev python -m scripts.benchmark_suite.sum_state_build \
+  --source target/sum-state-baseline --harness-source . \
+  --output target/sum-state-build/baseline --target target/sum-state-cargo/baseline
+uv run --extra dev python -m scripts.benchmark_suite.sum_state_build \
+  --source . --harness-source . \
+  --output target/sum-state-build/candidate --target target/sum-state-cargo/candidate
 ```
 
 Each `build.json` records the exact revision, command, source root and SHA-256
@@ -145,14 +92,14 @@ alongside the receipts.
 From the candidate repository root, after all builds/tests have stopped:
 
 ```bash
-python -m scripts.benchmark_suite.sum_state \
+uv run --extra dev python -m scripts.benchmark_suite.sum_state \
   --baseline-build 'target/sum-state-build/baseline/build.json' \
   --candidate-build 'target/sum-state-build/candidate/build.json' \
-  --output '/absolute/path/to/new-collection-directory'
+  --output target/sum-state-results
 ```
 
 Optional Linux CPU sampling adds `--perf '/absolute/path/to/perf'` and
-`--samply '/absolute/path/to/samply'` (0.13.1 used here), and, for an
+`--samply '/absolute/path/to/samply'` and, for an
 unpacked local perf package, `--perf-library '/absolute/path/to/libraries'`.
 Only the baseline and candidate principal one-CPU stream case are sampled, with
 six jobs per process and the first excluded. Sampling uses user-space CPU-clock
@@ -174,46 +121,5 @@ stop at the original deadline. Partial output remains explicitly incomplete.
 `acquisition.json` preserves every formal observation, config, resource receipt,
 per-snapshot digest, and pair order through the per-invocation command files.
 `summary.json` contains all per-case statistics and intervals. `plan.json`,
-`environment.json` and fixture manifests preserve provenance. The PR records
-compact copies of these outputs and any accepted profile summaries; large raw
-perf data remains local with hashes and exact windows.
-
-## History-borrow followup
-
-The second candidate removes per-touched-group integer history copies by borrowing
-immutable previous groups. Its verification keeps the same Rust harness and
-selects exactly the three stream cases above, with the original two rounds of
-ten alternating pairs. Finite execution is unmeasured on this final source;
-the earlier control remains inconclusive and does not prove final equivalence.
-
-The first collection and its analysis/publication used 471.105223936 seconds.
-The followup receives only the remaining 128.894776064 seconds of the original
-600-second total. Build and implementation time remain separate. The controller
-checks the prior sealed receipt and rejects resetting or exceeding that budget.
-A candidate-only one-CPU profile is admitted only if at least 25 seconds remain
-after all formal timings; otherwise it is explicitly skipped. All statistics,
-profile decoding and target counts, artifact generation and the stop receipt run
-automatically within the residual deadline. There is no timing-driven retry.
-
-After sealing the new candidate with the same builder, run from its worktree:
-
-```bash
-python -m scripts.benchmark_suite.sum_state \
-  --history-borrow \
-  --budget-seconds '128.894776064' \
-  --prior-measurement-seconds '471.105223936' \
-  --baseline-build '/absolute/path/to/baseline-final/build.json' \
-  --candidate-build '/absolute/path/to/history-borrow/build.json' \
-  --output '/absolute/path/to/new-history-borrow-collection' \
-  --publish-directory 'benchmarks/sum-state/20261104-history-borrow' \
-  --perf '/absolute/path/to/perf' --samply '/absolute/path/to/samply' \
-  --perf-library '/absolute/path/to/perf/libraries'
-```
-
-The final artifact directory contains 120 formal rows if all three cases finish,
-all raw warmup/formal/profile observations and source seals, per-case paired
-intervals and CPU/RSS statistics, accepted stacks, target counters, and the
-cumulative stop receipt. Any incomplete cases remain explicitly partial. The old
-baseline profile is labeled as historical context from an earlier window cohort
-with matching binary, harness, fixture and resources; it is not a new paired
-profile comparison. The first four-case evidence is preserved unchanged.
+`environment.json` and fixture manifests preserve provenance. Accepted profile
+summaries retain hashes and exact sampling windows.

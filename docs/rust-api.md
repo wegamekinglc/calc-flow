@@ -794,6 +794,10 @@ through `ProviderRegistry` and lifecycle-specific factories, covered below.
 `None` means the plan is external-only and owns no table resources, so its runs
 create no DataFusion session or UDF snapshot.
 `BatchExecutionPlan::requires_datafusion()` returns the classification alone.
+Ordinary DataFusion queries share a session that initializes on demand during
+the run. A query that preserves input order uses a dedicated serial session
+with the same memory pool. An admitted Arrow column projection can finish
+without a DataFusion session.
 `DataFusionConfig` keeps `parallelism_mode=Fixed` and
 `target_partitions=1` as its compatible default. Opt-in `Auto` freezes a
 whole-run external-row policy for batch graphs containing multi-input SQL, and
@@ -1226,7 +1230,8 @@ deterministic choice, not SQL `MIN`/`MAX` semantics, which compare them equal.
 ## Cross-section statistics
 
 `CrossSectionOperator` evaluates native complete-group rank, percentile,
-z-score, demean, winsorize, top/bottom selection, and mean-fill outputs. Its
+z-score, demean, mean, regression residual, winsorize, top/bottom selection,
+and mean-fill outputs. Its
 data-only `CrossSectionSpec` declares
 `configuration_version` and `state_layout_version` (both 1 in this release),
 a non-null UTC `timestamp[us]` `event_time` column, ordered non-empty
@@ -1310,15 +1315,21 @@ configuration-hash and schema-fingerprint metadata plus bounded inline
 manifest fields — and a restored operator reproduces the same ordered
 output, watermark frontier, output sequence, and metrics.
 
+The batch and stream lifecycles can use
+[columnar cross-section execution](runtime-envelope.md#columnar-cross-section-execution)
+for qualifying ordered Arrow input. Both paths use the same output and
+checkpoint contracts.
+
 Stream cross-section state defaults to the JSON counter range,
 9,007,199,254,740,991 rows and logical bytes, without a smaller implicit budget.
 Direct Rust users can set positive row and byte
 limits through `CrossSectionOperator::set_state_budget(StateBudget::new(...))`.
 Project-created operators use the default; the budget is runtime tuning and
-does not change project fingerprints. Charges count materialized values,
-keys, and map overhead. An envelope that would exceed either limit fails
-before any accepted row or late side output is installed, and restore rejects
-oversized state. Batch evaluation does not apply this stream-state budget.
+does not change project fingerprints. Charges cover materialized values,
+keys, and map overhead. Columnar admission conservatively accounts for pending
+rows in the general representation. An envelope that would exceed either
+limit fails before any accepted row or late side output is installed, and
+restore rejects oversized state. This budget applies to stream state.
 
 ## Late-row policy contract
 
@@ -1419,19 +1430,20 @@ exactly once before any source or operator lifecycle runs. The complete frozen
 static-input crate-root export set is `StaticInputSpec`, `StaticInputDigest`,
 `StaticMutability`, `STATIC_INPUT_DIGEST_VERSION`, `StaticArraySnapshot`, and
 `StaticArrayValues`. `Batch::static_array_snapshot()` provides an owned
-snapshot with five read-only accessors. Declarations join the plan fingerprint;
-`CheckpointManifest` records one `StaticInputDigest` per name under its
-`static_inputs` field, omitted when empty. See
+snapshot with five read-only accessors. Declarations join the plan fingerprint.
+The managed runner manifest records one `StaticInputDigest` per name in
+`static_inputs` when the plan supplies static inputs. See
 [static inputs](streaming-guide.md#static-inputs) for the full per-job,
 digest, and recovery contract.
 
-The source-driven runtime consumes that plan after a whole-job
-preflight. It runs one task per source, compiled operator, and graph output;
-preserves per-ingress FIFO; routes source control through a job-scoped progress
-driver; and converges source, operator, sink, queue, reservation, driver, and
-reaper state on every terminal path. The progress driver owns watermark
-generation, idle/reactivation, deterministic timers, and multi-ingress
-progress.
+The source-driven runtime consumes the plan after a whole-job preflight. Each
+source, compiled operator, and graph output has a logical task identity.
+Eligible operators share a physical driver or run inline in the source task.
+See [operator tasks and barrier alignment](runtime-envelope.md#operator-tasks-and-barrier-alignment).
+The runner preserves FIFO per ingress and settles sources, operators, sinks,
+queues, reservations, drivers, and the reaper on every terminal path. A
+job-scoped progress driver owns watermark generation, idle/reactivation,
+deterministic timers, and multi-ingress progress.
 
 `WindowSpec` declares fixed UTC tumbling or hopping windows and ordered
 aggregates. `TableExpr::window(spec)` and the explicit `CF_TUMBLE` / `CF_HOP`
@@ -1456,11 +1468,13 @@ exceeds the budget; checkpoint segment copies and process RSS are separate.
 The complete
 [`windowed_streaming.rs`](../crates/calc-flow/examples/windowed_streaming.rs)
 example wires a source-provided watermark through this operator to a sink.
-`StateBackend` opens an exclusive lineage session;
-`LocalStateBackend` provides immutable checksum-verified segment publication.
-`CheckpointManifest` is the strict bounded v3 state-manifest contract. Barrier
-coordination cuts live sources, aligns operator ingresses, stages operator
-state, and publishes the manifest last as the sole durable recovery truth.
+`StateBackend` opens an exclusive lineage session. `LocalStateBackend`
+provides immutable checksum-verified segment publication. The public
+`CheckpointManifest` is the strict bounded v3 contract for direct state
+transactions. Managed runners and durable sessions use v4 manifests with
+their respective `job_kind` values, `runner` and `session`. For runners,
+barrier coordination cuts live sources, aligns operator ingresses, stages
+operator state, and publishes the manifest last as the durable recovery truth.
 Transactional sinks commit only after manifest durability. Recovery restores
 mixed ended/live jobs, and terminal checkpoints capture post-`on_end` state
 without forwarding a post-end barrier. Exactly-once compatibility is proved
@@ -1537,8 +1551,8 @@ when no policy is given; see [session watermarks](streaming-guide.md#session-wat
 
 For graphs that require asynchronous adapters, the session owns one
 current-thread Tokio runtime with only the timer driver and blocks the caller on
-it; fully synchronous graphs do not create a runtime. `push`, `advance`, and
-`finish` check for a Tokio
+it. Fully synchronous graphs release their setup runtime before the session
+is returned. `push`, `advance`, and `finish` check for a Tokio
 runtime context before any work: inside one they return
 `CalcFlowError::InvalidArgument` at field `session` with the message
 `cannot run inside a Tokio runtime; call it from a blocking thread`. From async
@@ -1547,9 +1561,8 @@ code, run the session on a blocking thread, for example through
 no partial drain survives a call. Dropping a session cancels its job token and
 releases every operator; it is safe inside a runtime context.
 
-`StreamSession::new` retains the original in-memory, non-durable behavior.
-Every checkpoint field of `StreamRuntimeConfig` is ignored on that constructor,
-including `checkpointing = true`. The additional durable methods are:
+`StreamSession::new` creates an in-memory session whose job context disables
+checkpointing. Use the following methods for durable sessions.
 
 - `StreamSession::new_with_checkpoints(plan, &config, watermarks, checkpoints)`
   starts a fresh lineage in `ManagedCheckpointRuntime` storage. It requires
@@ -1581,16 +1594,16 @@ Rolling late side outputs are admitted. Every rejection is
 `CalcFlowError::InvalidArgument` and names `StreamingRunner` as the
 alternative:
 
-| Rejected at construction                                            | Field                                             |
-|---------------------------------------------------------------------|---------------------------------------------------|
-| Not exactly one dynamic source binding                              | `session.inputs`                                  |
-| Static inputs                                                       | `session.static_inputs`                           |
-| Unsupported node kind or rolling layout                          | `session.nodes.<id>`                              |
-| Output requesting `DeliveryGuarantee::ExactlyOnce`                  | `session.requirements.delivery.<output>`          |
-| `watermarks` key other than the input                               | `session.watermarks.<key>`                        |
-| Missing or non-timestamp event-time column, or no exact schema      | `session.watermarks.<input>.event_time_column`    |
-| Zero or unrepresentable `max_out_of_orderness`                      | `session.watermarks.<input>.max_out_of_orderness` |
-| Invalid `StreamRuntimeConfig`                                       | The configuration field                           |
+| Rejected at construction                                       | Field                                             |
+|----------------------------------------------------------------|---------------------------------------------------|
+| Not exactly one dynamic source binding                         | `session.inputs`                                  |
+| Static inputs                                                  | `session.static_inputs`                           |
+| Unsupported node kind                                          | `session.nodes.<id>`                              |
+| Output requesting `DeliveryGuarantee::ExactlyOnce`             | `session.requirements.delivery.<output>`          |
+| `watermarks` key other than the input                          | `session.watermarks.<key>`                        |
+| Missing or non-timestamp event-time column, or no exact schema | `session.watermarks.<input>.event_time_column`    |
+| Zero or unrepresentable `max_out_of_orderness`                 | `session.watermarks.<input>.max_out_of_orderness` |
+| Invalid `StreamRuntimeConfig`                                  | The configuration field                           |
 
 Call validation happens before any operator runs; a validation error leaves
 the session unchanged:

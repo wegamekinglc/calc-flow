@@ -3,7 +3,7 @@
 Date: 2026-11-15. Source baseline: `main` `39cab2fb` (rolling, array and
 benchmark sources are unchanged on `feature/stream-session`). Branch:
 `feature/rolling-kernel-v2`. Plan:
-[streaming core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md),
+[streaming core re-architecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md),
 phase P2 (§3.6, §4.1, §4.2, §4.4, §5, §7.3, §7 gates, §8). Status:
 revision 4, with the `cf-critic` critique applied; `cf-api-designer` still
 confirms public removals (§4.6), metrics (§6.3) and the trait in §6.4 before

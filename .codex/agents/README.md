@@ -73,12 +73,12 @@ authority. Respect client lifecycle limits; do not abandon run-owned background 
 
 ## Shared Repository Surfaces
 
-| Path                                 | Owner             | Purpose                                      |
-|--------------------------------------|-------------------|----------------------------------------------|
-| `.codex/artifacts/specs/`            | `cf-spec-writer`  | explicit, testable requirements              |
-| `.codex/artifacts/api-notes/`        | `cf-api-designer` | developer-facing API decisions               |
-| `.codex/artifacts/critiques/`        | `cf-critic`       | adversarial pre-implementation review        |
-| `.agents/skills/code-style/SKILL.md` | repository        | shared Python, web, test, and Markdown rules |
+| Path                                 | Owner             | Purpose                                  |
+|--------------------------------------|-------------------|------------------------------------------|
+| `.codex/artifacts/specs/`            | `cf-spec-writer`  | Requirements and acceptance criteria     |
+| `.codex/artifacts/api-notes/`        | `cf-api-designer` | Public API decisions                     |
+| `.codex/artifacts/critiques/`        | `cf-critic`       | Pre-implementation review                |
+| `.agents/skills/code-style/SKILL.md` | Repository        | Code, tests, examples, and documentation |
 
 One kebab-case slug follows a work item across its spec, API note, and
 critique.

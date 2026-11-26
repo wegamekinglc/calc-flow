@@ -26,18 +26,17 @@ Markdown, tests, and verification.
 * Confine necessary mutation to clearly owned stateful boundaries such as the
   Python `Runtime`, runner/store adapters, and lifecycle managers. Never use
   that exception to mutate caller-owned input values.
-* Keep pure, CPU-local transforms synchronous. Blocking convenience methods
-  must reject a running event loop; await file, stream, process, and network
-  I/O in servers and asyncio applications. Calls on an existing
-  `StreamSession` (`push`, `advance`, `finish`, `close`) are synchronous
-  caller-thread engine calls with no I/O or cross-thread waits and may run
-  inside an event loop. Session construction, including restore, and
-  `checkpoint()` follow the blocking rule and reject a running event loop;
-  checkpoint has no async alternative.
+* Keep CPU-local transforms synchronous and await file, stream, process, and
+  network I/O in asyncio applications. Blocking convenience methods reject a
+  running event loop. An existing `StreamSession` runs `push`, `advance`,
+  `finish`, and `close` synchronously on the caller's thread, including inside
+  a running loop. Construct or restore the session and call `checkpoint()`
+  outside the loop.
 * Prefer small, explicit modules over compatibility shims or duplicate
   abstraction layers.
-* Keep table behavior Arrow-backed and array behavior Array API-backed,
-  matching `docs/introduction.md`.
+* Use Arrow-backed tables. DataFusion executes SQL and general expressions,
+  and supported operations use native Arrow or native array kernels. Array
+  providers are optional and explicitly registered. See `docs/introduction.md`.
 * Do not add incomplete stubs, unused fixtures, unused CLIs, or placeholder
   modules just to reserve future structure.
 
@@ -57,12 +56,18 @@ Markdown, tests, and verification.
 * Every behavior change starts with a focused failing test that records the
   expected failure before implementation.
 
+## Examples
+
+* Reconcile current guides and examples with the public entry points, options,
+  and behavior in source. Keep the executable inventory in
+  [examples/README.md](../../examples/README.md) and the learning paths in
+  [docs/examples.md](../../docs/examples.md). Use explicit checks for
+  executable Python examples so they still verify results under `python -O`.
+
 ## Markdown
 
-* Align table columns with pipes and pad each column's separator row so dashes
-  span the full column width (including the spaces on either side of the cell
-  content). This keeps tables readable in plain text and consistent with the
-  format used in `CLAUDE.md`.
+* Align Markdown table columns and separator rows to the full column width,
+  including cell padding.
 * Remove trailing whitespace and end every Markdown file with a newline.
 
 ## Verification
@@ -71,8 +76,9 @@ Follow the local scope, CI responsibilities, and three full-test exceptions in
 [AGENTS.md](../../AGENTS.md#verification). Use the smallest checks for the
 change and necessary formatter/linter/type checks for directly affected modules.
 Full regression gates belong to regular CI; routine benchmarks run twice daily
-on their own schedule. The Python package release verifies artifacts and runs
-post-build unit tests. The complete command groups in AGENTS.md remain CI or
+on their own schedule. The Python package release verifies both distributions,
+runs installed-wheel unit tests for portable wheels, and smoke-tests a clean
+x86-64-v3 installation. The complete command groups in AGENTS.md remain CI or
 explicitly scoped full-verification references.
 Preserve the Rust 90% line coverage floor. Do not repeat
 unchanged passing checks or rebuild native code only to review documentation.

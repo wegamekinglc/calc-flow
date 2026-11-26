@@ -104,17 +104,19 @@ cursor. Snapshot mode fixes an upper bound at startup; incremental mode polls
 beyond the last accepted `(cursor, tie_breaker)` pair.
 
 ```json
-"options": {
-  "table": "orders",
-  "mode": "incremental_query",
-  "cursor_column": "event_time",
-  "tie_breaker_column": "id",
-  "tie_breaker_unique": true,
-  "columns": [
-    {"name": "event_time", "data_type": "timestamp[us]", "nullable": false},
-    {"name": "id", "data_type": "uint64", "nullable": false},
-    {"name": "amount", "data_type": "float64", "nullable": false}
-  ]
+{
+  "options": {
+    "table": "orders",
+    "mode": "incremental_query",
+    "cursor_column": "event_time",
+    "tie_breaker_column": "id",
+    "tie_breaker_unique": true,
+    "columns": [
+      {"name": "event_time", "data_type": "timestamp[us]", "nullable": false},
+      {"name": "id", "data_type": "uint64", "nullable": false},
+      {"name": "amount", "data_type": "float64", "nullable": false}
+    ]
+  }
 }
 ```
 

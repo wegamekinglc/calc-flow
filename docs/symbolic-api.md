@@ -38,19 +38,19 @@ The declaration catalog is intentionally wider than the implemented project
 lowerers. Use this availability matrix when constructing user-facing formula
 editors or validating stored declarations:
 
-| Domain                      | Construct/analyze   | Batch/stream compile           | Current lowering boundary                                               |
-|-----------------------------|---------------------|--------------------------------|-------------------------------------------------------------------------|
-| row-local columns           | yes                 | yes                            | portable scalar types and the documented SQL allowlist                  |
-| SQL table stages            | yes                 | yes; see SQL composition       | stream: one alias or exact-schema UNION ALL; native SELECT/CTE schema   |
-| rolling `ts`                | yes                 | yes                            | source/alias/row-local operands and earlier rolling results             |
-| cross-section `cs`          | yes                 | yes                            | staged values; event time and partitions resolve to inputs or aliases   |
-| relational stream joins     | yes                 | stream only                    | independent/nested native joins with proved post-join ordering          |
-| backward ASOF joins         | yes                 | batch and stream               | strict final left preservation; typed identity and bounded state        |
-| NumPy/JAX matrix            | yes                 | exact supported shape          | one static `weights` parameter and one allowlisted matmul               |
-| event `window`              | yes                 | batch/stream with aggregates   | fixed UTC tumbling/hopping; stateless table work on either side         |
-| native table-array bridge   | yes                 | batch and stream               | row-preserving work; at most one static-RHS matmul per table stage      |
-| native array outputs        | yes                 | batch only                     | single ArrayExpr.collect_array; array/table roots; no mixed outputs     |
-| NumPy/JAX array outputs     | yes                 | no                             | use the existing supported table attachment                             |
+| Domain                    | Construct/analyze | Batch/stream compile         | Current lowering boundary                                             |
+|---------------------------|-------------------|------------------------------|-----------------------------------------------------------------------|
+| row-local columns         | yes               | yes                          | portable scalar types and the documented SQL allowlist                |
+| SQL table stages          | yes               | yes; see SQL composition     | stream: one alias or exact-schema UNION ALL; native SELECT/CTE schema |
+| rolling `ts`              | yes               | yes                          | source/alias/row-local operands and earlier rolling results           |
+| cross-section `cs`        | yes               | yes                          | staged values; event time and partitions resolve to inputs or aliases |
+| bounded event-time joins  | yes               | batch and stream             | independent/nested native joins with proved post-join ordering        |
+| backward ASOF joins       | yes               | batch and stream             | strict final left preservation; typed identity and bounded state      |
+| NumPy/JAX matrix          | yes               | exact supported shape        | one static `weights` parameter and one allowlisted matmul             |
+| event `window`            | yes               | batch/stream with aggregates | fixed UTC tumbling/hopping; stateless table work on either side       |
+| native table-array bridge | yes               | batch and stream             | row-preserving work; at most one static-RHS matmul per table stage    |
+| native array outputs      | yes               | batch only                   | single ArrayExpr.collect_array; array/table roots; no mixed outputs   |
+| NumPy/JAX array outputs   | yes               | no                           | use the existing supported table attachment                           |
 
 `Program.analyze` reports `unsupported_type` for stateful operands outside
 the current materialization boundary, so a clean analysis does not advertise
@@ -183,9 +183,10 @@ Python declarations for each source batch.
 SQL has a distinct row lineage and clears entity, event-time, and sequence
 ordering facts. Row-local projections, filters, and arithmetic after SQL are
 supported. Rolling calculations can feed SQL; temporal expressions directly
-after SQL fail the missing-ordering check. An `ORDER BY` inside SQL does not
-establish symbolic temporal ordering. SQL-to-event-window composition remains
-unsupported. A native table-rooted ArrayExpr may collect its array result after
+after SQL can fail the missing-ordering check. An `ORDER BY` inside SQL does not
+establish symbolic temporal ordering. A deterministic single-input row-local
+SQL stage can feed a fixed UTC event window when it preserves the time column
+or renames it. A native table-rooted ArrayExpr may collect its array result after
 SQL with `collect_array`, using explicit native provider registration.
 `Program.collect` still returns tables; mixed table/array Program results and
 NumPy/JAX standalone outputs remain unsupported.
@@ -232,14 +233,16 @@ empty/EOF behavior, whole-message budgets, source restrictions and recovery.
 
 ## Symbolic compilation
 
-`Program.compile_batch(runtime=None, /)` and
+`Program.compile_batch(runtime=None, /, *, portability=None)` and
 `Program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0,
-late_policy="error")` lower a program to the
+late_policy="error", portability=None)` lower a program to the
 existing execution plans. Batch compilation requires `mode="batch"`; stream
 compilation requires `mode="stream"`. Legacy `engine="sql"|"streaming"` is an
 exclusive construction alias. Project export follows the selected lifecycle
 and rejects a conflicting explicit mode. `for_mode` copies declarations into
 an independent wrapper for another lifecycle.
+Use a [portability request](query-history-portability.md) to require a proved
+batch and stream comparison before compilation.
 Compilation is declaration processing only. On a preparation-cache miss, it
 captures one immutable capability snapshot and lowers one strict project-v3
 document. Native compilation performs final port, kind, schema,
@@ -570,11 +573,10 @@ create the independent `stream_asof_join@1` primitive. Required `tolerance` and
 [ASOF guide](asof-join-guide.md) defines these entry points and exact types.
 
 Each unique declaration digest owns one native ASOF state across outputs.
-Analysis verifies the native stream-only, watermark-requiring,
-`group_final_append_only`, checkpointed-stateful capability with
-`state_version=3` and a `state_layouts` inventory containing `10`
-(currently `(10,)`);
-missing or inconsistent evidence fails closed. All ordered side settings,
+Analysis verifies that the native capability supports batch and stream and
+advertises `group_final_append_only` finality, a stream watermark requirement,
+`checkpointed_stateful` support, `state_version=3`, and layout `11`.
+Missing or inconsistent evidence fails closed. All ordered side settings,
 tolerance, late policy, prefixes, and limits participate in identity. Output
 ordering derives from the left side, and every right field is nullable.
 
@@ -588,9 +590,11 @@ its candidate set. See the [composition matrix](asof-join-guide.md#composition-a
 
 `Program.explain(mode="stream")` shows resolved selection/ordering, strict
 watermark closure, limits, frontier lag, and state ownership. `compile_stream`
-lateness settings apply to rolling/cross-section stages; ASOF uses its own
-spec's late policy and has no allowed-lateness parameter. Batch analysis,
-compilation, and collection reject ASOF. There is no Python matching engine.
+lateness settings apply to rolling and cross-section stages. ASOF uses its own
+spec's late policy. Finite plans consume both complete inputs in fresh state
+within the declared row and byte limits. They finalize at input exhaustion
+without watermarks or checkpoint recovery. See
+[complete finite inputs and SQL](asof-join-guide.md#complete-finite-inputs-and-sql).
 
 ## RSI and ATR calculations
 

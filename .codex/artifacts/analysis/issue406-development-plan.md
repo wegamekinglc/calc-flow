@@ -18,7 +18,7 @@ row 7/8, ASOF10M, interval1M, native OFF execution, allocation counters and
 complete advancing ON epochs retain their gaps. The tighter planning goals
 remain separate and unmet/unmeasured. See the maintained
 [measurement controls](../../../docs/benchmark-suite.md#joinasof-acceptance-measurement-controls-428)
-and [current milestone](../../../docs/benchmark-suite.md#current-milestone-joinasof-acquisition-443).
+and [current milestone](../../../docs/benchmark-suite.md#joinasof-acquisition-protocol).
 Neither #443 nor #406 is complete.
 
 ## Current local increments, October 15, 2026

@@ -35,7 +35,7 @@ ahead of a test that demands it.
 - `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
   `AGENTS.md`
 - `.claude/rules/code-style.md` — functional-first, immutability, no caller mutation,
-  async web I/O, markdown conventions
+  async I/O, caller-thread session boundaries, and Markdown conventions
 - `.codex/artifacts/specs/`, `.codex/artifacts/api-notes/`,
   `.codex/artifacts/critiques/` — upstream artifacts from the spec writer, API designer,
   and critic agents (read these before designing or coding when they exist)
@@ -134,9 +134,10 @@ For each behavior:
    the implementation is not testing the new behavior — fix the test, don't move on.
 2. **GREEN** — write the minimum production code to pass. Follow the style rules:
    functional-first, no mutation of inputs or caller-owned objects, mutation confined to
-   owned stateful boundaries; table math in DataFusion only; array expressions through
-   the allowlisted AST, never Python `eval`; UDFs referenced by `UdfReference(provider,
-   name, version)` only.
+   owned stateful boundaries. Use DataFusion for SQL and general expressions and
+   native Arrow kernels for supported table operations. Use native array operators or
+   an explicitly registered provider. Provider expressions use the allowlisted AST.
+   Refer to UDFs with `UdfReference(provider, name, version)`.
 3. **REFACTOR** — clean up while keeping the smallest affected tests green.
    Do not repeat unchanged passing checks; diagnose recurring failures before rerunning.
 4. **Repeat** — happy path, then edge cases (empty batch, single row, boundary sizes),
@@ -185,17 +186,17 @@ PR title with a category prefix (`feat:`, `fix:`, `docs:`, `chore:`, `refactor:`
 
 ## Key Conventions at a Glance
 
-| Element        | Convention                                                                                             |
-|----------------|--------------------------------------------------------------------------------------------------------|
-| Rust           | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines                                 |
-| Python         | 3.9+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B`                    |
-| Functions      | pure transforms; never mutate inputs or caller-owned objects                                           |
-| State          | confined to owned boundaries (stateful operators, runners, stores)                                     |
-| Tables         | Arrow-backed; DataFusion is the only table engine                                                      |
-| Arrays         | Array API-backed (NumPy/JAX); allowlisted AST, never `eval`                                            |
-| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables                                 |
-| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                                              |
-| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`                              |
+| Element        | Convention                                                                          |
+|----------------|-------------------------------------------------------------------------------------|
+| Rust           | rustfmt clean; clippy `-D warnings`; harness green; llvm-cov ≥90 lines              |
+| Python         | 3.9+; `from __future__ import annotations`; `list[str]`, `dict[str, Any]`, `A \| B` |
+| Functions      | pure transforms; never mutate inputs or caller-owned objects                        |
+| State          | confined to owned boundaries (stateful operators, runners, stores)                  |
+| Tables         | Arrow-backed, with DataFusion queries and supported native operations               |
+| Arrays         | Native array kernels or optional NumPy/JAX; providers use an allowlisted AST        |
+| UDFs           | `UdfReference(provider, name, version)`; configs never carry callables              |
+| Tests          | mirror source layout; `test_<behavior>()`; local fixtures                           |
+| Generated code | never commit `python/calc_flow/_native*.so`; keep outputs under `target/`           |
 
 ## What Not to Do
 

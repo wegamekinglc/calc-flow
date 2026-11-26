@@ -5,7 +5,7 @@
 - 用户请求：2026-09-09 的有界 backward ASOF 设计，以及后续直接基于
   `feature/python-expression-api-refactor` 实施至提交 PR 的授权。
 - 基线：PR #259，`eda1583751abbd1ca4d246fcb8ee6b70f57d9b09`；不再等待它合并。
-- 背景：[原开发计划](../../../docs/plans/2026-09-09-bounded-backward-asof-join.md)、
+- 背景：[原开发计划](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-09-09-bounded-backward-asof-join.md)、
   [Introduction](../../../docs/introduction.md)、
   [streaming guide](../../../docs/streaming-guide.md)、
   [runtime envelope](../../../docs/runtime-envelope.md)。

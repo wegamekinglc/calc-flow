@@ -99,8 +99,9 @@ Filenames share a single kebab-case slug derived from the request, so work trace
 
 ## Conventions Each Agent Honors
 
-- `.claude/rules/code-style.md` — functional-first Python, immutability, no
-  caller-owned mutation, Arrow/Array-API backing rules, aligned markdown tables
+- [`.claude/rules/code-style.md`](../rules/code-style.md) mirrors the repository
+  [code-style skill](../../.agents/skills/code-style/SKILL.md) for code, tests,
+  examples, and documentation.
 - `AGENTS.md` — authoritative build/test/verify commands per surface; `CLAUDE.md`
   mirrors the maintained operational guidance for Claude users
 - `docs/introduction.md` — domain vocabulary (Batch, Port, Operator, Pipeline, Checkpoint,
