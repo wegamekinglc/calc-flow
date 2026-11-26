@@ -341,7 +341,7 @@ and ten generated files, including the manifest; manifest SHA256 is
 `ccd0921e8b661f45d6e9d665333dd2337b6bb4872bed0fd2b976e75ce6262eb1`.
 The complete raw gzip SHA256 is
 `7cfe9466fe5a4d7176bc44959ccc203b07b8b77e9551f6eadc67eb27bfabe9e5`.
-The [parent narrative](../../../benchmarks/sum-state/sum-columnar-keys-20261105.md)
+The [parent narrative](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-columnar-keys-20261105.md)
 and [sealed results](../../../benchmarks/sum-state/sum-columnar-keys-20261105/README.md)
 accurately describe the source identities, timer boundary, resource/profiling
 limits and unmeasured paths. Nullable/UInt64/generic/checkpoint/finite,

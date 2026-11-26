@@ -1,8 +1,8 @@
 # Calc Flow Rust examples
 
 The 37 numbered Python examples in [`examples/`](../../../examples/README.md)
-have Rust counterparts with the same number and filename stem below. The native
-array and matrix examples use matching descriptive filenames.
+have Rust counterparts with the same number and filename stem below. Named
+counterparts cover native arrays, matrices, and bounded relations.
 Core examples live here; examples using native
 connectors live in [`calc-flow-connectors/examples/`](../../calc-flow-connectors/examples/).
 Run commands from the repository root. No Python interpreter or native Python
@@ -34,7 +34,8 @@ The array demonstrations register an illustrative `rust-array` provider using
 owned Float64 arrays and Rust arithmetic in place of Python's NumPy/JAX hosts.
 They preserve the calculations, immutable inputs, matrix shapes, provider gate,
 and one-time static-weight placement. They do not call NumPy or JAX. Table
-expressions and SQL continue to execute in DataFusion.
+expressions and SQL use the same runtime. DataFusion evaluates queries, while
+eligible column-only projections reuse Arrow buffers directly.
 
 [`native_arrays.rs`](native_arrays.rs) uses the built-in synchronous Rust array
 functions directly: nullable Arrow input, rolling mean, scalar broadcasting,
@@ -63,6 +64,7 @@ the source.
 
 ```bash
 cargo run -p calc-flow --example native_arrays
+cargo run -p calc-flow --example native_matrices
 cargo run -p calc-flow --example native_array_state
 cargo run -p calc-flow --example native_indicators
 cargo run -p calc-flow --example native_table_indicators
@@ -113,12 +115,37 @@ cargo run -p calc-flow --example native_sequence_stream
 | [36_symbolic_event_window.py](../../../examples/36_symbolic_event_window.py)                     | [36_symbolic_event_window.rs](36_symbolic_event_window.rs)                                     | —                  |
 | [37_stream_session.py](../../../examples/37_stream_session.py)                                   | [37_stream_session.rs](37_stream_session.rs)                                                   | —                  |
 
+Example [32](32_sql_expression_pipeline.rs) checks that the restricted
+replacement aggregate requires `sql_replacement_state_budget` and accepts
+the configured budget before execution. The main calculation checks the
+filtered net amounts and their sum. Example [37](37_stream_session.rs) runs the
+same two-row rolling mean in an in-memory session and in a durable session. The
+durable path uses `StreamSession::new_with_checkpoints`, saves epoch 1 in a
+temporary managed v4 lineage, and restores the buffered quote before `finish()`.
+
 `support/` contains shared Arrow fixtures, replay sources, collectors, matrix
 factories, and lazy trade/quote data. In particular,
 [`support/stock_account_data.rs`](support/stock_account_data.rs) corresponds to
 [`stock_account_data.py`](../../../examples/stock_account_data.py). Source and
 sink traits own their asynchronous lifecycle; examples check their results
 with assertions that remain enabled in release builds.
+
+## Named relational counterparts
+
+Use `cargo run -p calc-flow --example NAME` for these programs. The filename
+stem selects the example.
+
+- [finite_union.rs](finite_union.rs), [finite_inner_join.rs](finite_inner_join.rs),
+  and [finite_asof_join.rs](finite_asof_join.rs) check native relational results.
+- [finite_event_window.rs](finite_event_window.rs) checks fixed event-window
+  results in batch and verifies that the same declaration compiles for streaming.
+- [bounded_global_ordering.rs](bounded_global_ordering.rs),
+  [bounded_global_distinct.rs](bounded_global_distinct.rs), and
+  [bounded_analytic_over.rs](bounded_analytic_over.rs) check bounded ordering,
+  deduplication, and analytic features.
+
+The [Python inventory](../../../examples/README.md#finite-and-bounded-relations)
+links the corresponding programs.
 
 ## Connector services
 
@@ -187,10 +214,16 @@ and uses the small stock/account inputs shown above. It also retains
 `expression_pipeline`, `windowed_streaming`, and the transactional
 `late_output_recovery` demonstration. The WebSocket server runs separately.
 
-`export_schema` and `gen_v3_schema` remain explicit tooling commands because
-the generator changes a checked-in contract:
+`export_schema` prints the project-v3 JSON Schema to standard output.
+`gen_v3_schema` regenerates the checked-in project-v3 contract.
 
 ```bash
 cargo run -p calc-flow --example export_schema
 cargo run -p calc-flow --example gen_v3_schema
 ```
+
+The [grouped sum benchmark](../../../benchmarks/sum-state/README.md) and
+[input partitions probe](input_partitions_probe.rs) use `benchmark-internals`.
+Run [auto_rows_probe](auto_rows_probe.rs) and
+[sql_plan_reuse_probe](sql_plan_reuse_probe.rs) directly for exploratory SQL
+diagnostics.

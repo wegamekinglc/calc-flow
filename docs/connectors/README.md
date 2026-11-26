@@ -237,8 +237,8 @@ Set stream runtime and managed state once at the project root:
 ```
 
 `StreamingRunner` consumes the compiled plan and returns the sole owning job.
-A durable manifest records source progress, operator segments, and sink
-pre-commit evidence. On restart, the runtime selects the latest complete
+A managed v4 runner manifest records source progress, operator segments, and
+sink pre-commit evidence. On restart, the runtime selects the latest complete
 manifest, restores every participant before opening the data gate, and
 finishes any idempotent post-manifest sink commit.
 

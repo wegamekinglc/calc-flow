@@ -2,7 +2,7 @@
 
 Date: 2026-11-15. Source baseline: `main` `39cab2fb`.
 Branch: `feature/stream-convenience-defaults`. Plan:
-streaming core re-architecture (`docs/plans/2026-11-15-streaming-core-rearchitecture.md`
+streaming core re-architecture ([2026-11-15-streaming-core-rearchitecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md)
 on `feature/stream-session`), decision 5 and phase P1 (§7.2).
 Status: revision 1; ready for critique.
 

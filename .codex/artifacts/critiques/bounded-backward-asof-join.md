@@ -4,7 +4,7 @@
 
 - Spec: [bounded-backward-asof-join.md](../specs/bounded-backward-asof-join.md).
 - API note: [bounded-backward-asof-join.md](../api-notes/bounded-backward-asof-join.md).
-- Plan: [2026-09-09-bounded-backward-asof-join.md](../../../docs/plans/2026-09-09-bounded-backward-asof-join.md).
+- Plan: [2026-09-09-bounded-backward-asof-join.md](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-09-09-bounded-backward-asof-join.md).
 - Baseline: PR #259 branch `feature/python-expression-api-refactor`,
   `eda1583751abbd1ca4d246fcb8ee6b70f57d9b09`.
 - Scope: pre-implementation contract critique. Read the complete artifacts,

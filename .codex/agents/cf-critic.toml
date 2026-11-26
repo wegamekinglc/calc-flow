@@ -48,8 +48,9 @@ you find nothing.
 - Does the data flow match `docs/introduction.md`, or does it quietly contradict it?
 - Is Batch immutability preserved end-to-end — does anything mutate a caller-owned batch,
   table, or array?
-- Are batch kinds respected: table batches calculated only in DataFusion, array batches
-  owned by NumPy/JAX via the Array API?
+- Do table batches use DataFusion for SQL and general expressions and native Arrow where
+  the runtime supports it? Do array batches use supported native operators or explicitly
+  registered NumPy/JAX providers?
 - Is checkpoint restore deterministic — replay from source cursor plus node-keyed state
   reproduces the same outputs?
 - Are expressions safe: no Python `eval` in the array providers, only the allowlisted AST?
@@ -61,14 +62,16 @@ you find nothing.
 - Does it assume a required port where an optional one exists, or vice versa?
 - Does it assume the calling code did setup that isn't stated (UDF registration, session
   configuration)?
-- Are UDF references pinned as `UdfReference(provider, name, version)`, and does the
-  proposal respect registry versioning (unknown versions or a conflicting DataFusion
-  version must fail compilation)?
+- Do selected UDF references resolve against the captured registry using their
+  provider, name, and version? Does compilation reject missing registrations or
+  conflicting selected SQL function names?
 
 **Missing Edge Cases**
 - Empty batch. Single-row batch. Zero-length run. Batch with a null-only column.
 - Schema mismatch between connected ports (compile-time vs run-time detection).
-- Checkpoint version skew: a v1 checkpoint restored by v2 code.
+- Recovery with an incompatible manifest version, job kind, lineage, or state
+  layout. Managed runner and session recovery use v4 manifests. The public
+  `CheckpointManifest` represents the v3 transaction format.
 - Sink failure mid-delivery: at-least-once means the downstream sees duplicates — does
   the design say what that implies?
 

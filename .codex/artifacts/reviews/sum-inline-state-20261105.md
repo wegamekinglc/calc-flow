@@ -29,7 +29,7 @@ actual measured candidate.
 
 **Upstream:** [Study specification](../specs/sum-inline-state-20261105.md)
 and the previous experiment's
-[next bounded hypothesis](../../../benchmarks/sum-state/sum-batch-parallel-20261104.md#next-bounded-hypothesis).
+[next bounded hypothesis](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-batch-parallel-20261104.md#next-bounded-hypothesis).
 
 **Files changed against base:** 33, including this review.
 

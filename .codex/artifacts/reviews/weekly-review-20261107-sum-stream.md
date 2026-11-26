@@ -119,7 +119,7 @@ Python, connector or coverage matrix was run for this scoped review.
    1T/4T controls; do not change the full-snapshot API to manufacture a gain.
 
 3. **Investigate filter materialization before another CASE rewrite.** The
-   completed [CASE retest](../../../benchmarks/sum-state/sum-case-retest-20261106.md)
+   completed [CASE retest](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-case-retest-20261106.md)
    attributes 49.13% of baseline samples to SUM update and 20.02% to transaction
    finishing. Inclusive `filter_record` is 15.42%; those inclusive shares
    overlap and are not elapsed-time percentages. Profile-selected filtering

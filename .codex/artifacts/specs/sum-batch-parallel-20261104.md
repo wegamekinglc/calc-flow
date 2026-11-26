@@ -10,7 +10,7 @@ the target branch's serial SUM implementation; its final tree is checked
 against merged `d5e05c31110ebb1e6bfb8fa3d63359f50010f16e`. The
 requirements below describe the rejected prototype, not a shipped parallel SUM
 contract. See the
-[experiment decision and sealed results](../../../benchmarks/sum-state/sum-batch-parallel-20261104.md).
+[experiment decision and sealed results](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-batch-parallel-20261104.md).
 
 ## Source
 

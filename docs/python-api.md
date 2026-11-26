@@ -191,21 +191,21 @@ into an independent wrapper for the other lifecycle. Calls for the other engine 
 diagnostics; it does not change the program engine or permit opposite-mode
 compilation, export, or execution.
 
-| Method                                                                                                | Result and input contract                                                        |
-|-------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                        | One Arrow table; one table root accepts data directly, otherwise use a mapping   |
-| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                   | One NativeArray from native array/table roots; explicit registered Runtime       |
-| `program.collect(inputs, /, *, runtime=None, options=None)`                                           | `dict[str, pyarrow.Table]` in logical output order; always supply a mapping      |
-| `cf.Program(name, mode=...)`                                                                          | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias             |
-| `program.execute(inputs, /, *, runtime=None, options=None, config=None, watermarks=None)`             | SQL: named Arrow tables; streaming: owned `StreamOutput` events                  |
-| `table_expr.collect_async(...)` / `program.collect_async(...)`                                        | Awaitable forms of the same contracts                                            |
-| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                         | Owned async iterator of Arrow tables                                             |
-| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                            | Owned async iterator of named `StreamOutput` events; input mapping required      |
-| `program.analyze(runtime=None, /, *, mode=None)`                                                      | Immutable analysis result; defaults to the selected engine                       |
-| `program.explain(runtime=None, /, *, mode=None)`                                                      | Deterministic explanation text                                                   |
-| `program.compile_batch(runtime=None, /)`                                                              | Explicit batch execution plan                                                    |
-| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error")`          | Explicit stream plan for a runner                                                |
-| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`   | Validated, data-only project-v3 document for the selected engine                 |
+| Method                                                                                                         | Result and input contract                                                      |
+|----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
+| `table_expr.collect(inputs, /, *, runtime=None, options=None)`                                                 | One Arrow table; one table root accepts data directly, otherwise use a mapping |
+| `array_expr.collect_array(inputs, /, *, runtime, options=None, array_options=None)`                            | One NativeArray from native array/table roots; explicit registered Runtime     |
+| `program.collect(inputs, /, *, runtime=None, options=None, portability=None)`                                  | `dict[str, pyarrow.Table]` in logical output order. Supply an input mapping.   |
+| `cf.Program(name, mode=...)`                                                                                   | Require `"batch"` or `"stream"`; legacy engine is an exclusive alias           |
+| `program.execute(inputs, /, *, runtime=None, options=None, portability=None, config=None, watermarks=None)`    | Named Arrow tables in batch mode or owned `StreamOutput` events in stream mode |
+| `table_expr.collect_async(...)` / `program.collect_async(...)`                                                 | Awaitable forms of the same contracts                                          |
+| `table_expr.stream(inputs, /, *, runtime=None, config=None, watermarks=None)`                                  | Owned async iterator of Arrow tables                                           |
+| `program.stream(inputs, /, *, runtime=None, config=None, watermarks=None, portability=None)`                   | Owned async iterator of named `StreamOutput` events. Supply an input mapping.  |
+| `program.analyze(runtime=None, /, *, mode=None, options=None)`                                                 | Immutable analysis result. Defaults to the Program's mode.                     |
+| `program.explain(runtime=None, /, *, mode=None, options=None)`                                                 | Deterministic explanation text                                                 |
+| `program.compile_batch(runtime=None, /, *, portability=None)`                                                  | Explicit batch execution plan                                                  |
+| `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error", portability=None)` | Explicit stream plan for a runner                                              |
+| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`            | Validated, data-only project-v3 document for the selected engine               |
 
 `BatchExecutionPlan.external_inputs` and `.external_outputs` are deterministic
 tuples of physical binding names. Use them when executing a reloaded project;
@@ -216,6 +216,11 @@ Arrow schemas. `table_expr.collect_schema(*, runtime=None, mode="batch")` return
 one schema. Both plan without data and reject an active event loop; use a worker
 for schema planning from async code. See [relation frontends](relational-frontends.md)
 for the lifecycle, compatibility and export contracts.
+
+Use `AnalysisOptions` with `analyze` and `explain` to inspect comparison
+premises. The `portability` argument takes a `PortabilityRequest` and requires
+the comparison to be supported before compilation or execution. See
+[query history and portability](query-history-portability.md).
 
 `execute` uses finite table inputs with the SQL engine and stream inputs with
 the streaming engine. `options` is SQL-only; `config` and `watermarks` are
@@ -280,10 +285,11 @@ UDFs or serialized callbacks.
 
 See the complete [SQL and Python pipeline](batch-guide.md#compose-sql-and-python-pipelines)
 and [multi-input SQL example](#multi-input-sql). SQL output has a distinct row
-lineage and does not inherit entity/event-time/sequence ordering. Row-local
-work after SQL and rolling before SQL are supported. SQL-to-event-window paths
-and standalone array Program outputs are unsupported; the
-[composition reference](symbolic-api.md#sql-composition) gives the full boundary.
+lineage and does not inherit entity, event-time, or sequence ordering. Row-local
+work after SQL and rolling before SQL are supported. A deterministic single-input
+row-local SQL stage can feed a fixed UTC event window if it passes the time
+column through or renames it. See the
+[composition reference](symbolic-api.md#sql-composition) for supported paths.
 
 Batch SQL accepts multiple aliases. Append stream SQL accepts one alias or the
 exact-schema [UNION ALL subset](relational-frontends.md#same-schema-union).
@@ -514,8 +520,9 @@ every operator, and returns the rows emitted by that call. There is no source,
 sink, job, progress driver, or async bridge. Use `stream` for async sources and
 `StreamingRunner` for connectors and sink delivery contracts; see
 [choose batch or stream](streaming-guide.md#choose-batch-or-stream). Run
-[example 37](../examples/37_stream_session.py) for a checked in-memory table
-session with ordered rows, explicit progress, and finalization.
+[example 37](../examples/37_stream_session.py) for ordered pushes, explicit
+progress, and finalization in memory, followed by a durable checkpoint and
+restore of buffered rows.
 
 | Member                               | Contract                                                                    |
 |--------------------------------------|-----------------------------------------------------------------------------|
@@ -585,8 +592,8 @@ policies. Rows dropped by `late_policy="drop"` are not observable: sessions
 expose no `status()` or late-row metrics.
 
 `config=None` uses `StreamRuntimeConfig()`. With `checkpoints=None`, sessions
-retain in-memory behavior and checkpoint configuration is ignored, including
-`checkpointing=True`; no state survives the session. Passing a public
+keep state in memory even when `checkpointing=True`. Supplied configuration
+fields must still pass validation. Passing a public
 `ManagedCheckpointRuntime` enables durable v4 capture and requires effective
 `checkpointing=True`: the default `None` resolves to enabled, while `False`
 rejects storage. The adapter unwraps the public storage wrapper at the native
@@ -609,10 +616,10 @@ keeps the observed maximum and last emitted watermark as actual microseconds.
 This preserves seconds, milliseconds, microseconds and nanoseconds, including
 negative values and empty or non-advancing pushes, across repeated checkpoints.
 
-`config.edge_budget` bounds each input and internal message. Internal edges have
-no queue backpressure: a call buffers whatever each operator emits during its
-turn and returns only after every queue is empty, so memory per call is bounded
-by the operators' output chunking rather than by queue capacity.
+`config.edge_budget` bounds each input and internal message. The caller's
+thread drains the session's queues without queue backpressure. A call can
+queue and return multiple chunks, so its total memory use depends on the
+emissions and operator working state as well as each message's size.
 
 `push`, `advance`, `finish`, and `close` may run inside a running event loop.
 They run the admitted operators on the calling thread with no I/O and no
@@ -921,10 +928,10 @@ fields. `options_schema=None` means no declarative editor is available; it
 does not mean every option is valid. The provider callback remains
 authoritative during compilation.
 
-Capability schema version 5 adds `ProviderCapability.state_layouts` to the
-closed provider record. Version 4 introduced option-defined provider ports;
-consumers must adopt the version-5 record explicitly. Project and manifest
-formats remain 3. `OperatorCapability` and
+Capability schema version 5 includes option-defined provider ports and
+`ProviderCapability.state_layouts` in the closed provider record. Project
+documents use format 3, and managed checkpoint manifests use version 4.
+`OperatorCapability` and
 `ProviderCapability` report
 `modes`, `finality`, `stateful`, `microbatch_invariant`, `requires_watermark`,
 `checkpoint_support`, `state_version`, `deterministic`, and `replay_safe`;
@@ -981,40 +988,45 @@ These rules establish neither table lineage nor a general array stream API.
 `supported_dtypes` tuple with a `safe_dtype_rule` and `shape_rules`, and
 stores both tuples sorted by identity.
 
-The `operators` tuple contains exactly `cross_section@1`, `expression@1`,
-`rolling@1`, `sql@1`, `stream_asof_join@1`, `stream_join@1`, and `window@1`,
-with truths anchored in
-the engine implementation:
+The `operators` tuple contains the following built-in capability records.
 
 | Operator             | Modes         | Finality                | Checkpoint support    | State version | State layouts       |
 |----------------------|---------------|-------------------------|-----------------------|---------------|---------------------|
+| `bounded_order@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2                |
+| `bounded_over@1`     | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2                |
 | `cross_section@1`    | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1                   |
+| `distinct@1`         | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 2, 3                |
 | `expression@1`       | batch, stream | per_row_final           | stateless             | —             | —                   |
 | `rolling@1`          | batch, stream | per_row_final           | checkpointed_stateful | 1             | 1, 2, 3, 4, 5, 6, 7 |
+| `snapshot_sql@1`     | stream        | unproven                | checkpointed_stateful | 1             | 1                   |
 | `sql@1`              | batch, stream | unproven                | checkpointed_stateful | 2             | 3, 4, 5, 6          |
-| `stream_asof_join@1` | stream        | group_final_append_only | checkpointed_stateful | 3             | 11                  |
-| `stream_join@1`      | stream        | unproven                | checkpointed_stateful | 1             | 12                  |
+| `stream_asof_join@1` | batch, stream | group_final_append_only | checkpointed_stateful | 3             | 11                  |
+| `stream_join@1`      | batch, stream | unproven                | checkpointed_stateful | 1             | 12                  |
 | `window@1`           | batch, stream | group_final_append_only | checkpointed_stateful | 1             | 1, 2                |
 
 The rolling inventory includes retained-history, accumulator, indicator and
-shared typed-state layouts through layout `7`. The SQL inventory includes its
-compact and retained-input layouts `3` through `6`. See
+shared typed-state layouts through layout `7`. The SQL inventory includes
+compact, retained-input, and restricted replacement aggregate layouts. The
+`stream_join@1` entry advertises inner layout `12`. Left semi and left anti
+use layouts `13` and `14`, respectively. See
+[join output materialization and recovery](streaming-guide.md#join-output-materialization-and-recovery) and
 [native rolling state](symbolic-design.md#native-rolling-state) for the
 implemented encoding and restore rules.
 
 `cross_section@1`, `rolling@1`, `stream_asof_join@1`, `stream_join@1`, and
-`window@1` describe stream state and watermark requirements. Finite windows
-finalize the complete input in fresh temporary state without watermarks or
-checkpoint recovery. Aggregate-bearing
+`window@1` describe stream state and watermark requirements. Finite joins and
+windows finalize complete inputs in fresh temporary state without watermarks
+or checkpoint recovery. Aggregate-bearing
 `sql@1` is stateful without requiring one. Row-local SQL remains stateless.
-`cross_section@1`, `expression@1`, `rolling@1`, `stream_asof_join@1`, and
-`window@1` are micro-batch invariant. All seven
-report `deterministic=True` and `replay_safe=True`. For `sql@1` those two claims
-hold from the engine viewpoint: exactly-once stream
-plans reject nodes that select volatile registered UDFs, and stream
-compilation rejects read-only queries that call volatile built-in SQL
-functions such as `random()` or wall-clock built-ins such as `now()`,
-`current_date()`, and `current_time()` (aliases included).
+`bounded_over@1`, `cross_section@1`, `distinct@1`, `expression@1`, `rolling@1`,
+`stream_asof_join@1`, and `window@1` are micro-batch invariant. The capability
+registry reports `deterministic=False` and `replay_safe=False` for the general
+`bounded_order@1` operator. Individual declarations can establish a stable
+tie order with `sequence_by`. The other entries report `deterministic=True`
+and `replay_safe=True`. For `sql@1`, exactly-once stream plans reject nodes
+that select volatile registered UDFs. Stream compilation rejects SQL queries
+that call volatile built-ins such as `random()` or clock functions such as
+`now()`, `current_date()`, and `current_time()`.
 
 Neither `register_provider` nor `register_mapping_provider` accepts lifecycle
 metadata, so a registered provider's entry is always batch-only with
@@ -1691,8 +1703,8 @@ and their 12/26/9/1/1 defaults. Input is one float32/float64 vector; its single
 float64 output has shape `[n, 3]` in line/signal/histogram order. The element
 limit counts all `3*n` positions. MACD uses layout 3 and retains its full 56-byte
 numerical group even when a downstream consumer selects one component. Semantic state
-version 1 identifies their codec/recovery contracts independently of layout; these are
-separate from capability schema 5 and project/manifest version 3.
+version 1 identifies their codec and recovery contracts independently of
+layout, capability schema 5, project format 3, and managed manifest version 4.
 
 The Python API adds no owned state class, `ArrayExpr.stream`, implicit input zip,
 or mixed array/table stream result convenience method. Independent sequence
@@ -1991,11 +2003,12 @@ semantics, digest contract, and recovery behavior are in
 
 A bounded event-time Join is declared on the builder with
 `stream_join(name, *, left_schema, right_schema, left_keys, right_keys,
-left_event_time, right_event_time, bounds, limits, left_prefix="left",
-right_prefix="right")`. Input schemas are `ArrowFieldSpec` sequences and the
-`JoinTimeBounds`/`JoinStateLimits` values are required; the
-[continuous streaming guide](streaming-guide.md) carries the full
-declaration.
+left_event_time, right_event_time, bounds, limits, join_type="inner",
+left_prefix="left", right_prefix="right")`. Input schemas are
+`ArrowFieldSpec` sequences. `bounds` and `limits` take `JoinTimeBounds` and
+`JoinStateLimits`, respectively. The supported join types are `inner`,
+`left_semi`, and `left_anti`. See the
+[bounded event-time join](streaming-guide.md#bounded-event-time-join) guide.
 
 Source `open`, `next`, and `close` and every sink lifecycle method must be
 declared with `async def`; binding construction rejects invalid method shapes
@@ -2025,7 +2038,8 @@ mapping views, `copy()`, and `dict(mapping)`; changing a copy leaves the owned
 position or evidence unchanged. Use `json.dumps(dict(mapping))` to serialize it.
 Status and outcomes are typed: `job.status()` returns a `JobStatus` mapping that
 includes `stream_joins`, a per-node mapping of `StreamJoinStatus` values with
-`StreamJoinSideStatus` per side (empty when the graph has no inner Join node).
+`StreamJoinSideStatus` per side. The mapping is empty when the graph has no
+bounded event-time Join node.
 Each side includes its last accepted `watermark_micros: int | None`, `idle`,
 and `ended`. A non-terminal managed restart publishes restored progress at
 running startup; terminal-manifest recovery does not restore these observations.

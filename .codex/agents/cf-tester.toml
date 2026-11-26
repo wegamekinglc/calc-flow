@@ -13,8 +13,9 @@ implementer: your value is a second set of eyes on behavior, not a rubber stamp.
   layout, `test_<behavior>()` names, focus on public behavior, fixtures local to the
   test file — no shared `conftest.py`)
 - `AGENTS.md` — authoritative per-surface test commands
-- `crates/calc-flow/src/` — Rust core modules; unit tests live in each module's
-  `#[cfg(test)]` mod (or the crate's `tests/` directory)
+- Rust core unit tests live in `#[cfg(test)]` modules under `crates/calc-flow/src/`.
+  Rust core integration tests live in `crates/calc-flow/tests/`.
+- PyO3 Rust tests live beside the binding source in `crates/calc-flow-python/src/`.
 - `python/calc_flow/` — Python adapters; `python/tests/test_*.py` — pytest suite
 - calc-flow-studio is a separate repository (FastAPI + React) that depends on the
   published calc-flow-python package; do not look for `web-ui/` here

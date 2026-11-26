@@ -806,18 +806,10 @@ by default. Supply
 to enforce application limits. The budget's cumulative input row/byte
 accounting also applies when native compact state is selected.
 
-Compact grouped integer `SUM` updates currently process each original Batch
-serially. Increasing DataFusion partitions does not create local partial
-workers for this compact path. A
-[bounded batch-parallel experiment](../benchmarks/sum-state/sum-batch-parallel-20261104.md)
-used multiple CPU workers but regressed in its dense four- and eight-CPU cases;
-that prototype is retained as experiment evidence. The shared native CPU
-service used by other operators does not imply parallel compact SUM updates.
-
-A separate [composite UTF-8 key experiment](../benchmarks/sum-state/sum-columnar-keys-20261105.md)
-reduced key encoding and allocated bytes in a focused probe, but its fixed
-five-case comparison established no dense-stream improvement. That runtime
-prototype was withdrawn; the existing key path remains in use.
+The compact path for one grouped integer `SUM` uses partitioned native state.
+It routes rows and applies updates serially in slices of up to 4,096 rows.
+This work runs inside the compact operator independently of DataFusion query
+partitions.
 
 Use `StreamRuntimeConfig(sql_compact_state_budget=StateBudget(100_000, 64 << 20))`
 to limit each aggregate SQL node to 100,000 live groups and 64 MiB of conservative
@@ -851,7 +843,9 @@ apply. Neither changes the semantic plan fingerprint.
 
 Other SQL remains batch-local. In default mode, `ORDER BY` and `LIMIT` apply to
 each snapshot; SQL window functions alone remain batch-local. Downstream stages
-receive each snapshot as new rows. Multi-alias append SQL is a batch operation;
+receive each snapshot as new rows. Batch SQL accepts multiple aliases.
+Multi-alias append SQL in a stream follows the
+[same-schema union subset](relational-frontends.md#same-schema-union).
 [`cf.snapshot_sql`](#complete-replacement-snapshot-sql) replaces complete
 relations in streams. Use native `ts`
 operations for rolling state and the documented window/join declarations for
@@ -982,9 +976,11 @@ continues to count cumulative accepted input, not live groups.
 
 ### SQL aggregate recovery compatibility
 
-`Runtime().capabilities()` lists SQL `state_version=2` with
-`state_layouts=(3, 4, 5)`: ordinary compact, retained input, and ordered compact
-state, respectively. The operator's semantic state version is separate from
+`Runtime().capabilities()` lists SQL `state_version=2` and layouts `3`, `4`,
+`5`, and `6`. Append aggregates use layout `3` for ordinary compact state,
+`4` for retained input, and `5` for ordered compact state.
+[Restricted replacement aggregates](#restricted-replacement-aggregates) use
+layout `6`. The operator's semantic state version is separate from
 the checkpoint layout and its native accumulator semantics. Compact control
 records use `native_semantics=1` for layout 3 and `native_semantics=2` for
 layout 5; retained layout 4 has no native accumulator semantics field.
@@ -1630,230 +1626,8 @@ shared-key pages and retires removed runs and buckets from its cache. Capture
 assembles only changes against the previous page lineage and maintains
 reservation summaries incrementally. Persistence applies those changes directly
 to the previous partition index and writes only changed payloads plus metadata.
-Direct snapshots still materialize every page, and each epoch serializes a
-complete partition index, so the final cost bound and performance acceptance
-remain open.
-
-#### Legacy migration-test storage and recovery
-
-The following material describes explicit migration tests and historical
-benchmark evidence. It is not the production execution or recovery path.
-
-Join retains payload chunks with columnar row metadata and stable chunk/row
-references. Expiration advances sorted run heads without relocating surviving
-rows. Native matching stores opposite row references plus incoming identity
-ranges or fan-out runs.
-When every direct consumer qualifies for compiler projection, materialization
-uses the union of their required columns, including dependencies of aliases,
-arithmetic and filters. Retained state adds keys and event-time fields. Narrowed
-state owns independent selected buffers, including nested, dictionary and view
-data; unread payload columns do not remain reachable through input slices.
-Logical declarations and complete input-schema validation remain the same.
-Unconsumed Join outputs, full-input or unqualified consumers, and graphs with
-selected UDFs keep complete retained payloads.
-
-Before the first output from an input batch, it validates retained-state and
-match admission, every output range's row/byte budget, and the complete output
-sequence range, then checks the cumulative emitted-row counter. It materializes
-each validated range into independently owned output payload buffers, awaits
-emission, and proceeds to the next range.
-Matching, duplicate-row behavior, and deterministic output order are preserved.
-
-Preflight computes and caches row costs only for distinct indices referenced
-by matched pairs, for both flat and nested payloads. Unmatched retained rows
-are not scanned for these costs. Eligible selections of fixed-width columns
-with null-free source arrays and a constant per-side row cost derive chunk
-lengths from the row and byte budgets. Other flat shapes use per-pair row costs
-and validity-bitmap charges without building the complete output. Nested and
-dictionary payloads require actual candidate-range materialization: an
-over-budget range is split in half and checked again. Each trial allocation
-is released before the next trial;
-accepted ranges are materialized again for emission. A trial can exceed the
-edge byte budget before splitting or rejection, so this path is not a hard
-allocation ceiling. Unreferenced dictionary values are excluded from the
-materialized payload.
-
-A single output row that cannot fit fails before any output from that input
-batch, even when earlier matched rows would fit. A later materialization error,
-cancellation, or failed send can leave some chunks delivered and aborts the job.
-New input state is committed only after all its chunks are emitted; output
-already accepted by a sink cannot be rolled back. Resume through a fresh
-compatible job from the last durable checkpoint, replaying input from that cut
-rather than retrying the live callback. Ordinary sinks may see repeated writes;
-stronger delivery still
-requires the [complete route proof](#delivery-requirements). Durable recovery
-follows the physical state-layout contract below.
-
-The working set includes retained state, admitted input references and metadata,
-`O(matches)` opposite row references and incoming selection runs,
-equality-probe scratch space, preflight
-allocations, the current output chunk, and chunks held by edges or sinks.
-Funded native matching shares persistent key identities across batches and both
-inputs through one dictionary per Join operator. Keys used only for probing
-create no persistent entries. Each retained row keeps its full V1 logical
-charge. On the serial native path, the counting pass caches each row's inclusive
-time-window bounds for the fill pass. Parallel count work can retain the same
-bounds in optional prepaid work-unit storage for fill and fused gather. Cache
-identity includes the captured immutable index and probe configuration. If
-cache credit is refused, each phase uses its own per-key cursors; optional
-bounds are released before retrying required output admission. Deferred output
-also releases optional bounds before mandatory state preparation for any pool
-other than the default unbounded implementation. Within each cursor's lifetime,
-consecutive forward windows reuse its position; the first window and windows
-that move backward use binary searches. Batch admission
-masks preserve null and late-drop rules. Native index capacity remains funded
-until its storage is released, including capacity retained after eviction.
-Retained append checks sparse replacement eligibility once per payload owner
-within each new retained chunk after live-row accounting is complete, preserving
-first-seen candidate order.
-Output gathering also keeps a local incoming-row cursor: duplicate and forward
-positions reuse the current payload segment, while backward positions locate
-their segment again. The cursor borrows immutable input and allocates no row
-mapping.
-
-Key preparation can use the existing native CPU pool for supported groups with
-at least 64,000 admitted rows and at least two available workers. The work-unit
-count follows the pool's CPU capacity and requires at least 16,000 rows per
-unit. Contiguous work units hash and deduplicate local keys. Dense admitted
-ranges avoid copying a row-offset tuple for every input row. The owner merges
-distinct representatives and establishes persistent identities; funded native
-work then maps each fragment directly to final row identities. The owner
-appends the completed identity lanes in input order without a second per-row
-mapping. Optional remap admission refusal uses a cooperative serial remap of
-the same fragments. Persistent identity creation still follows the first
-retained row,
-including unresolved probe-only prefixes. Extra scratch is reserved before
-worker buffers are allocated. Large key values or unsupported local shapes
-decline the optional work and use the cooperative serial path. Original Arrow
-buffers remain shared and owned until workers settle; cloned retained payloads
-keep their existing backing funding. A one-worker pool retains serial key
-preparation.
-
-Retained selection, logical payload charging and native chunk filling can also
-use the CPU pool. Useful retained work determines the task count; batches with
-no retained rows skip these tasks. With a bounded or custom runtime memory
-pool, these preparation tasks reuse an already funded worker generation; a
-cold or retiring generation takes the serial path. The standard unbounded
-runtime pool permits new worker generations. Chunk credits are admitted in source order,
-and worker results keep that order. When optional parallel metadata would
-prevent required chunk admission, the settled attempt releases those controls
-and uses the serial layout with the already computed logical charges. This
-preserves charges from before payload projection. Row identities, append
-coordinates, expiration preparation and index updates retain their owner order;
-state still commits only after output acceptance.
-
-Large admitted native probes divide contiguous input positions among funded
-count work units according to the pool's CPU capacity, with at least 8,192
-admitted rows per unit. The partition count is captured once and shared by
-count, fill and gather. The operator
-checks the global batch match limit before fill work builds any pairs. A cost
-gate aggregates each resolved key's admitted-row frequency times its
-opposite-run length. Frequencies are collected during key preparation, including
-probe-only rows, so the gate does not scan row identities again. Unknown
-probe-only identities contribute no visits. Saturating arithmetic preserves the
-cost estimate; the separate exact counting pass still enforces the match limit.
-A second gate admits large fixed-width projected output when at least
-64,000 input rows, two configured workers and one MiB of estimated primitive
-output work justify fused row work. This gate multiplies opposite-run visits by
-projected primitive width, so it estimates potential work before temporal
-filtering, not actual output bytes. It permits narrow one-to-one projections to
-use the existing row workers. Unsupported shapes and smaller work retain the
-serial path unless the original probe gate is met.
-
-For at least 64,000 admitted rows with supported flat output and funded payload
-owners, state and expiration admission complete before each unit probes,
-preflights and gathers its contiguous input range on the existing native pool.
-Probe-only projected views can also use this path after the work package
-prepays their full pinned Arrow backing, including parent-buffer capacity held
-by slices. This temporary lease covers background gather ownership until the
-workers settle; caller-owned input references outside that work remain shared.
-Its charge and the existing gather scratch use the runtime memory pool, with
-no additional internal byte ceiling. A pool refusal retains the serial fallback,
-and opposite-side state must still have a funded owner. Legacy payloads remain
-ineligible for fused gathering.
-All units finish before the first output. Results emit in range order,
-independently of completion order, without merging pair fragments or dispatching
-another column-gather job. Adjacent range records are packed into output
-Batch envelopes according to the actual edge row and byte budgets. The packing
-can slice records at an envelope boundary and shares the original Arrow
-buffers. Each record's visible slice bytes, including variable-width offsets
-and validity buffers, count toward its envelope. The complete envelope count
-is checked against the output sequence range before the first send. CPU work
-units therefore need not create separate output messages.
-Enabling these ranges can change physical batch boundaries. Matched row order
-and checkpoint state remain deterministic; downstream cumulative aggregates can
-emit different intermediate snapshots when they receive different batch sizes.
-Optional scratch and result reservations have no fixed per-batch or per-unit
-byte limit. They use the runtime memory pool, which is unbounded by default.
-Result funding uses the projected physical schema and selected byte-array
-values, including fixed-width values for null rows and validity buffers. Actual
-Arrow allocation sizes must also fit the lease before results leave the worker.
-Result funding stays alive through collector acceptance. Explicit logical state,
-match and edge budgets retain their configured limits; edge byte budgets are
-not process-memory ceilings.
-
-Shapes needing array-copy range preflight, including FixedSizeBinary, retain
-the split probe/materialization path. Fusion uses the same schema check as
-non-materializing range planning. Other unsupported shapes also retain the
-split path. Fused workspace or
-result refusal releases attempted output before using the prepaid serial pair
-reservation. Split fill fragments and their combined buffer remain funded until
-the fragments are released. All paths share immutable native indices and inputs.
-Cancellation or an abandoned handler retains those owners until cleanup;
-subsequent state changes wait for their release. Small batches run inline.
-If worker admission is refused, matching resumes through the existing serial
-native and DataFusion paths after the attempted work has been released.
-
-The shared native CPU service detects process-available parallelism at service
-startup. Join key preparation, probe work, column gathering and row gathering
-use this capacity rather than fixed worker counts. CPU capacity is an upper
-bound: useful input work and admitted memory can reduce actual concurrency.
-The service does not impose an additional fixed thread-memory ceiling. All jobs
-share its CPU capacity, and workers are created on demand. Task controls, request
-queues and result metadata are funded for their dynamic capacities. Thread
-startup failures propagate and retain the normal join-and-cleanup lifecycle.
-Explicit DataFusion partition settings remain separate from this native service.
-
-If optional workspace admission for the dictionary or native index is refused,
-matching uses the existing batched DataFusion equality path. Incomplete
-dictionary coverage keeps later batches on SQL until a complete funded rebuild
-succeeds. Cancellation, deadline expiry and other errors propagate.
-
-When native matching is unavailable, the existing DataFusion equality path
-reuses an unchanged opposite side's assembled key batch. This cache retains
-a side only when its estimated key-array and row-ID storage is at most
-32 MiB. It is released when that side gains or loses retained rows, or when
-the operator ends or restores.
-Per-side state limits and `max_matches_per_input_batch` remain separate from
-the edge's logical row/byte limits. Chunking removes the need to hold one
-complete materialized output, but neither bounds total process RSS by
-`EdgeBudget.max_bytes` nor limits results retained by application code.
-
-Only actually narrowed retained state uses inner checkpoint layout 3 with
-frame/inventory codec 2; full-retention state keeps layout 2 and rejects layout 3.
-The semantic checkpoint state version remains 1, and project format 3, manifest
-v3 and graph fingerprints remain unchanged. Layout 3 binds exact sorted logical
-indices and full logical/physical schema digests, including for empty or
-terminal state. Its `charge_mode: "v1_admission"` carries the original
-complete-input V1 admission charges. Status byte gauges and state limits keep
-that logical meaning; they do not measure selected Arrow allocation sizes.
-Restore checks every historical charge against the retained-cell lower bound
-and per-side byte cap, validates historical identities/keys/event times and
-inventory, and checks live charge sums, metrics and limits. Integrity checksums
-do not authenticate original admission values.
-
-Live row IDs must be unique within each input side.
-Legacy full layouts 1 and 2 undergo complete schema, history and exact V1 charge
-validation, including event times and charges of overwritten or tombstoned
-rows, before independently funded selected live copies replace their
-payload owners. No full legacy history is retained. A new narrow base must be
-prepared before the first capture, including clean, empty or terminal state;
-subsequent dirty captures and rebase remain incremental. A mismatched retained
-layout fails before state installation. Processing without checkpointing
-invalidates reusable recovery history and prepared cuts; successful live-base
-preparation restores trusted continuation. See the
-[checkpoint representation](runtime-envelope.md#the-operator-emission-boundary)
-for the exact recovery contract.
+Direct snapshots materialize every page, and each epoch serializes a
+complete partition index.
 
 See [Join materialization measurements](benchmark-suite.md#join-materialization-measurements)
 for the maintained wide-payload, fan-out and slow-sink workloads.
@@ -1887,11 +1661,11 @@ retain the delivery boundaries described in this guide.
 
 ## Checkpoints and recovery
 
-The default checkpoint mode depends on the entry point.
-`StreamRuntimeConfig.checkpointing` defaults to `None`: convenience streams
-resolve it to off, and an explicit `StreamingRunner` resolves it to on. An
-explicit `True` or `False` is honored by every entry point; any other value
-raises `TypeError`. Select the mode once when creating the job:
+Managed jobs and durable sessions publish strict v4 checkpoint manifests.
+`StreamRuntimeConfig.checkpointing` defaults to `None`. Convenience streams
+resolve it to off, and an explicit `StreamingRunner` resolves it to on. Either
+async entry point accepts an explicit `True` or `False`. Other values raise
+`TypeError`. Set the mode when creating the job.
 
 ```python
 config = cf.StreamRuntimeConfig(checkpointing=False)
@@ -1908,8 +1682,8 @@ mode/storage arguments fail before startup. Rust callers use
 custom `StreamRuntimeConfig`, set its `checkpointing` field to `false` as well.
 The existing Rust `StreamingRunner::new` keeps checkpointing enabled.
 
-Stream sessions select durability with `checkpoints`: `None` retains in-memory
-behavior and ignores checkpoint configuration, while a
+Stream sessions select durability with `checkpoints`. `None` keeps state in
+memory and still validates the supplied runtime configuration. A
 `ManagedCheckpointRuntime` enables durable v4 capture. Durable construction
 requires effective `checkpointing=True`; the default `None` resolves to enabled,
 and `False` rejects storage. `restore=True` requires storage and selects the
@@ -2031,6 +1805,14 @@ each entity's arithmetic order. Small, unsupported or severely skewed
 inputs keep their serial paths. Window and cumulative SQL aggregates retain
 their ordered state updates and compensated accumulators.
 
+Finite and streaming cross-section operators can process groups column-wise
+for exact timestamp grouping without partitions. This path requires supported
+Arrow payload columns, `Float64` operands, one `Utf8` entity column, one
+`UInt64` sequence column, and input ordered strictly by time, entity, and
+sequence. Stream admission also requires zero allowed lateness and a late
+policy of `error` or `drop`. Watermarks still close groups, and pending groups
+remain subject to the configured state budget.
+
 Rolling, cross-section and window nodes default to the JSON counter range,
 9,007,199,254,740,991 rows and logical bytes, without a smaller implicit state
 budget. Rust callers can set a finite `StateBudget` on the operator before
@@ -2045,10 +1827,10 @@ hide that signal behind an unbounded queue inside a connector. If the external
 transport cannot pause, declare the loss explicitly and use a best-effort
 route.
 
-Stream sessions have no queue backpressure. `edge_budget` still bounds every
-input and internal message, but each call returns only after every operator
-has drained its queues, so memory per call follows the operators' output
-chunking. See [stream sessions](python-api.md#stream-sessions).
+Stream sessions drain their internal queues synchronously. `edge_budget`
+bounds each input and internal message. One call can queue and return
+multiple chunks, so total memory use also depends on the number of emissions
+and the operator state. See [stream sessions](python-api.md#stream-sessions).
 
 ## Native Table indicators
 

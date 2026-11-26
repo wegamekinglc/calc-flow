@@ -199,15 +199,14 @@ each job:
 uv run python examples/12_symbolic_stream_join.py
 ```
 
-`table.stream_join` requires the existing public `JoinTimeBounds` and
-`JoinStateLimits`; no symbolic copy of those configuration types exists. Both
-inputs declare exact schemas plus event-time, entity, and sequence ordering.
+`table.stream_join` requires the public `JoinTimeBounds` and `JoinStateLimits`.
+Both inputs declare exact schemas plus event-time, entity, and sequence ordering.
 The compiler lowers one native `stream_join@1`, so its watermarks, state
 eviction, match ordering, metrics, checkpoint v1 state, and recovery rules are
 the same ones used by `PipelineBuilder.stream_join`.
 
 A join without output ordering can be a terminal output or feed stateless work.
-For nested joins or downstream rolling/cross-section state, declare all of
+For nested inner joins or downstream rolling and cross-section state, declare all of
 `output_entity_by`, `output_event_time`, and `output_sequence_by`. Analysis
 requires the prefixed left join keys, either prefixed join event time, and the
 concatenated prefixed left/right input sequence keys. Missing or projected-away
@@ -219,6 +218,13 @@ Independent joins and unrelated output branches may coexist, while each unique
 join digest retains one native state owner and checkpoint entry. Matrix
 attachment around a join remains unsupported. Event-window paths use the
 separate stateless composition rules above and cannot include a join.
+
+The same bounded join primitive supports finite execution and left semi and
+left anti predicates. A finite plan consumes both complete inputs. For those
+join types and their output identity and stream finality rules, see
+[symbolic bounded stream joins](symbolic-api.md#symbolic-bounded-stream-joins).
+Use the [ASOF guide](asof-join-guide.md) to match each left row to its latest
+eligible historical right row.
 
 ## Use static matrices with NumPy or JAX
 

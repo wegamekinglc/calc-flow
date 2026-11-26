@@ -115,12 +115,11 @@ noncolliding graphs and valid unsuffixed fallbacks retain their node IDs and
 plan fingerprints.
 
 The declaration-to-endpoint map records the chosen physical ID for collection
-and convenience streaming. Exported projects contain physical graph names;
-explicit runners use the compiled plan's binding IDs. Checkpoint recovery
-validates graph identity and the source/operator/sink ID sets through
-[CheckpointManifest](../crates/calc-flow/src/state/manifest.rs). This mapping
-does not provide checkpoint identity migration. See
-[logical names and physical bindings](symbolic-api.md#logical-names-and-physical-bindings).
+and convenience streaming. Exported projects contain physical graph names,
+and explicit runners use the compiled plan's binding IDs. Managed runner
+recovery validates graph identity and the source/operator/sink ID sets against
+the [v4 manifest](runtime-envelope.md#manifest-publication-and-recovery).
+See [logical names and physical bindings](symbolic-api.md#logical-names-and-physical-bindings).
 
 Aggregate-bearing event windows lower to the existing native
 `WindowAggregateOperator`. Their `@2` declaration identity includes the full
@@ -135,6 +134,10 @@ grouping/sort work across output branches. Prefilter identity, ordering, and
 group finality are part of compatibility. Filters do not move across finality
 boundaries. Complete-group calculations accumulate across micro-batches;
 batch segmentation does not establish group completeness.
+Eligible native and SQL-wrapper column projections can execute directly on
+Arrow arrays. The native cross-section operator can also use
+[columnar execution](runtime-envelope.md#columnar-cross-section-execution)
+when the specification and input satisfy its order and type constraints.
 
 Post-join entity, event-time, and sequence metadata proves the order needed by
 nested joins and downstream stateful calculations. It does not sort data.

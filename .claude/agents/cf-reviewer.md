@@ -12,7 +12,7 @@ are the team's sole blocking gate: nothing merges with your findings unaddressed
 ## Project Context
 
 - `.claude/rules/code-style.md` — functional-first, immutability, no caller mutation,
-  async web I/O, test and markdown conventions
+  async I/O and test and Markdown conventions
 - `AGENTS.md` — the authoritative per-surface verification matrix
 - `CLAUDE.md` — maintained compatibility guidance for Claude users; keep it aligned with
   `AGENTS.md`
@@ -97,13 +97,18 @@ need context. Check:
 
 #### Domain invariants
 - `Batch` envelopes stay immutable end-to-end
-- Table batches are Arrow-backed and calculated only in DataFusion; array batches are
-  Array API-backed (NumPy/JAX)
+- Table batches are Arrow-backed. DataFusion handles SQL and general table
+  expressions, and native operators handle their admitted Arrow paths. Check
+  the semantics of each path that a change can select.
+- The Array API has native Calc Flow kernels and explicitly registered NumPy
+  and JAX providers.
 - Array providers interpret the allowlisted AST — never Python `eval`
 - UDFs travel as `UdfReference(provider, name, version)`; configs/catalogs carry no source,
   callables, or import paths
-- Checkpoint recovery follows the supported manifest version, lineage, fingerprint,
-  and state-layout contracts; unsupported versions fail closed
+- Managed runner and durable session recovery use v4 manifests with distinct
+  job kinds. The public `CheckpointManifest` type represents the v3 transaction
+  format. Review version, lineage, fingerprint, and operator layout checks at
+  the boundary each entry point owns.
 
 #### Tests
 - Mirrored layout per `.claude/rules/code-style.md`; `test_<behavior>()` names; fixtures
@@ -216,14 +221,14 @@ merging it, confirm that intent before using a close operation.
 
 ## Key Conventions at a Glance
 
-| Element        | Convention                                                            |
-|----------------|-----------------------------------------------------------------------|
-| Rust           | fmt + clippy `-D warnings` clean; harness green; llvm-cov ≥90         |
-| Python         | ruff check/format clean; `pytest python/tests` green                  |
-| Branches       | `feature/<desc>` / `fix/<desc>` off `main`                            |
-| Commits        | imperative <72 chars + why body; no attribution trailer               |
-| PR             | category prefix <70 chars; `## Summary` + `## Test plan`              |
-| Domain         | Batch immutable; DataFusion-only tables; no `eval`; data-only configs |
+| Element  | Convention                                                                         |
+|----------|------------------------------------------------------------------------------------|
+| Rust     | fmt + clippy `-D warnings` clean; harness green; llvm-cov ≥90                      |
+| Python   | ruff check/format clean; `pytest python/tests` green                               |
+| Branches | `feature/<desc>` / `fix/<desc>` off `main`                                         |
+| Commits  | imperative <72 chars + why body; no attribution trailer                            |
+| PR       | category prefix <70 chars; `## Summary` + `## Test plan`                           |
+| Domain   | Immutable Batch; DataFusion queries; native Arrow/Array kernels; data-only configs |
 
 ## What Not to Do
 

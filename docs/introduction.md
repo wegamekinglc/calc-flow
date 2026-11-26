@@ -185,7 +185,9 @@ references rather than executable objects.
 Projects use format `3`. Runner-managed and durable session checkpoints use
 internal manifest version `4`, distinguished by `job_kind="runner"` and
 `job_kind="session"`. Runner source history carries native v4 segment handles.
-Legacy v3 checkpoints are rejected rather than converted; start a new lineage.
+Managed recovery rejects legacy v3 manifests. To continue an old job on the
+current runtime, start a new lineage and replay the input.
+Public Rust `CheckpointManifest` v3 remains the direct state-transaction contract.
 These protocol versions are separate from this checkout's package version
 `2026.11.14`.
 

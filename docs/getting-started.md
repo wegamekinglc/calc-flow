@@ -194,7 +194,7 @@ use `maturin develop` for this release-style installation, and do not leave
 For a build from this checkout, confirm that Calc Flow reports version `2026.11.14`.
 A published installation reports the release selected by the package manager,
 which can differ from the current source version. Confirm that the native
-extension loads from the environment rather than `python/calc_flow/`.
+extension loads from the installation environment.
 
 ### Linux and WSL
 
@@ -267,6 +267,7 @@ an extended-length absolute `TEMP` and `TMP` for the example process.
 - Compose [SQL and Python pipelines](batch-guide.md#compose-sql-and-python-pipelines).
 - Iterate a [stateful stream](streaming-guide.md#first-python-continuous-job),
   then add explicit recovery when needed.
+- Push batches synchronously with a [stream session](python-api.md#stream-sessions).
 - Configure production transports with the [connector guide](connectors/README.md).
 - Understand component ownership in the [design and architecture guide](design.md).
 - Look up exact names in the [Python API](python-api.md),

@@ -79,14 +79,16 @@ librdkafka uses its default trust configuration. SASL modes require
 these fields to either source or sink binding:
 
 ```json
-"options": {
-  "security_protocol": "sasl_ssl",
-  "ssl_ca_location": "/etc/ssl/certs/kafka-ca.pem",
-  "sasl_mechanism": "SCRAM-SHA-512",
-  "sasl_username": "calc-flow"
-},
-"secrets": {
-  "sasl_password": {"resolver": "environment", "key": "CALC_FLOW_KAFKA_PASSWORD"}
+{
+  "options": {
+    "security_protocol": "sasl_ssl",
+    "ssl_ca_location": "/etc/ssl/certs/kafka-ca.pem",
+    "sasl_mechanism": "SCRAM-SHA-512",
+    "sasl_username": "calc-flow"
+  },
+  "secrets": {
+    "sasl_password": {"resolver": "environment", "key": "CALC_FLOW_KAFKA_PASSWORD"}
+  }
 }
 ```
 

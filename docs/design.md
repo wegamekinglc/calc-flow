@@ -64,7 +64,9 @@ Four contracts connect the system:
 2. `ProjectSpec` format v3 is the strict data-only persisted configuration.
 3. `BatchExecutionPlan` and `StreamExecutionPlan` are distinct compiled
    artifacts with deterministic fingerprints.
-4. `CheckpointManifest` v3 is the durable truth for continuous recovery.
+4. Managed checkpoints use manifest v4. The `job_kind` identifies a runner or
+   durable session. Direct state transactions use the public
+   `CheckpointManifest` v3 contract.
 
 The graph configuration never contains a Python callable, Rust trait object,
 import path, credential value, or serialized operator instance. A project
@@ -72,8 +74,9 @@ selects trusted registrations by exact provider, name, and version.
 
 ## Data model
 
-A table `Batch` contains Arrow record batches. DataFusion is the only table
-expression and SQL engine. An external `Batch` contains a payload owned by an
+A table `Batch` contains Arrow record batches. DataFusion executes SQL and
+general expressions. Supported table operations operate directly on Arrow.
+An external `Batch` contains a payload owned by an
 explicitly registered provider, such as a read-only NumPy or JAX array.
 Table-to-array conversion is explicit: `table_matmul` provides a batch bridge,
 and supported symbolic matrix segments provide a table-attachment bridge in
@@ -94,7 +97,6 @@ immutable snapshots of registries and engine configuration.
 compute / collect -> supported Arrow schema + expression declaration
     -> strict project-v3 lowering and deterministic native graph compile
     -> fresh batch plan for convenience execution
-    -> one run-scoped DataFusion session when table nodes exist
     -> native node execution
     -> Arrow tables with logical output names
 
@@ -104,9 +106,12 @@ explicit builder/project/compile -> owned plan
 
 Each batch execution receives a fresh run context. It can carry copied JSON
 settings, a cooperative cancellation token, and an absolute UTC deadline.
-External-only plans do not initialize DataFusion. A mixed plan initializes one
-session for its table nodes and keeps external-provider execution behind the
-same cancellation, rollback, and timing boundaries.
+Ordinary DataFusion queries share a lazily initialized session per run. A query
+that preserves input order creates a dedicated serial session using the run's
+memory pool. Native nodes, including eligible column-only Arrow projections,
+execute without a DataFusion session. Each node shares the run's cancellation,
+rollback, and timing boundaries. See
+[SQL and DataFusion performance controls](sql-datafusion-performance.md).
 
 ## Streaming path
 
@@ -130,7 +135,7 @@ use explicit bindings and managed state through the same native runtime:
 ```text
 stream plan + source/sink bindings + checkpoint root
     -> whole-job capability and delivery preflight
-    -> bounded source, progress, operator, and sink tasks
+    -> bounded source/operator/sink execution and coordinated progress
     -> data + runtime-owned control on typed stream edges
     -> status, metrics, checkpoints, and one terminal outcome
 ```
@@ -147,6 +152,14 @@ the async send boundary when downstream work is slow; it does not accumulate
 an unbounded application queue. One job-scoped progress driver owns watermark
 generation, idle/reactivation, multi-source minimum progress, and deterministic
 timer ordering.
+
+An admitted single-source chain of Rolling, Expression, or native
+array-sequence nodes runs inline in the source task when checkpoints and
+restore are disabled. It keeps logical operator identities and still emits to
+bounded sink edges. A caller-driven `StreamSession` instead drains an admitted
+plan synchronously on the caller's thread and can capture managed snapshots
+explicitly. See [operator execution](runtime-envelope.md#operator-tasks-and-barrier-alignment)
+and [caller-driven sessions](runtime-envelope.md#caller-driven-sessions).
 
 `StreamingRunner` and `StreamingJob` are one-shot owners. Consuming ownership
 makes connector close, task settlement, reaper cleanup, and terminal outcome
@@ -240,21 +253,20 @@ for the exact type, numerical, null/NaN, and finality contracts.
 ## Cross-section groups
 
 `CrossSectionOperator` evaluates complete-group rank, percentile, z-score,
-demean, winsorize, top/bottom selection, and mean-fill outputs over exact-time
-or fixed-bucket groups and runs in both batch and stream graphs. Its
-`CrossSectionSpec` declares the event-time column, ordered entity and sequence
-keys, optional ordered partition-key columns, the grouping, per-output choices
-with minimum samples, allowed lateness, and a late-row policy; row identity is
-the event time, entity key, and sequence key, and duplicates are rejected
-transactionally.
+demean, mean, regression residual, winsorize, top/bottom selection, and
+mean-fill outputs over exact-time or fixed-bucket groups in batch and stream
+graphs. Its `CrossSectionSpec` declares the event-time column, ordered entity
+and sequence keys, optional ordered partition-key columns, the grouping,
+per-output choices with minimum samples, allowed lateness, and a late-row
+policy. Row identity consists of event time, entity key, and sequence key.
+Duplicate identities cause transactional rejection.
 
-One micro-batch is never evidence of completeness: groups accumulate across
-envelopes and close only when the input watermark reaches the group's
-finality coordinate — the exact event time or the bucket end plus the
-allowed lateness, with equality closing — or at end of input. A closed group
-emits once in canonical order — groups by finality coordinate then key,
-rows by event time, entity, and sequence — and releases its state and
-identity index. Late rows follow the policy, with `error` rejecting the
+Groups accumulate across envelopes. They close when the input watermark reaches
+the exact event time plus allowed lateness for exact-time groups, or the bucket
+end plus allowed lateness for fixed buckets. End of input closes every remaining
+group. A closed group emits once and releases its state and identity index.
+Output orders groups by finality coordinate then key, and rows by event time,
+entity, and sequence. Late rows follow the policy, with `error` rejecting the
 whole envelope, `drop` discarding the row while recording metrics, and native
 stream-only `side_output` routing it to a diagnostic port. Rolling and
 cross-section share the [late-row policy contract](rust-api.md#late-row-policy-contract),
@@ -263,6 +275,11 @@ groups checkpoint at the aligned epoch cut as versioned Arrow IPC state —
 per-segment configuration-hash and schema-fingerprint metadata with bounded
 inline manifest fields — and restore reproduces the same ordered output,
 watermark frontier, and metrics.
+
+Qualifying unpartitioned exact-time groups use
+[columnar execution](runtime-envelope.md#columnar-cross-section-execution) in
+both lifecycles. Stream state keeps Arrow rows pending until finality and uses
+the same checkpoint layout as the general grouped path.
 
 ## Checkpoint transaction
 

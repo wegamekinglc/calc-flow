@@ -72,7 +72,7 @@ measurements. Use the current guides for supported behavior.
   Process-restart soak evidence classifies v4 artifacts and includes their state
   bytes. Legacy protocol deletion, P6, performance gates and final CI remain
   open. See the
-  [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+  [re-architecture plan](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 
 - 2026-11-18: Add a crate-private synchronous columnar Join run core. Each
   retained input morsel becomes an immutable Arrow run with group-ID,
@@ -171,7 +171,7 @@ measurements. Use the current guides for supported behavior.
   and capture are not wired yet. Runner checkpoint wiring, the full fault
   matrix, and performance-gate verification remain open. See
   [caller-driven stream sessions](docs/rust-api.md#caller-driven-stream-sessions)
-  and the [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+  and the [re-architecture plan](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 
 - 2026-11-16: Replace selectable rolling numerical profiles with one
   compensated sliding numeric contract. Remove Rust `RollingNumericalProfile`,
@@ -205,7 +205,7 @@ measurements. Use the current guides for supported behavior.
   with forced GC); that gate moves to plan phase P2. See
   [stream sessions](docs/python-api.md#stream-sessions), the
   [Rust reference](docs/rust-api.md#caller-driven-stream-sessions), and the
-  [re-architecture plan](docs/plans/2026-11-15-streaming-core-rearchitecture.md).
+  [re-architecture plan](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md).
 
 - 2026-11-15: Default convenience streams (`TableExpr.stream`,
   `Program.stream`, streaming `Program.execute`) to checkpointing off and
@@ -400,7 +400,7 @@ measurements. Use the current guides for supported behavior.
   admission floor, all short of improvement: the inline kernel is already
   as fast as the delegated aggregate, so the large-batch gap lives in other
   serial stages. Preserve the prototype on `feature/sum-delta-delegation`
-  and the [complete study](benchmarks/sum-state/sum-delta-delegation-20261107.md);
+  and the [complete study](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-delta-delegation-20261107.md);
   this closes the third and final measured parallel-aggregate route.
 - 2026-11-07: Record an explicitly requested both-engine core-count sweep
   (1/4/8/16/32 pinned CPUs, 10M-row stock positions, disclosed concurrent
@@ -420,7 +420,7 @@ measurements. Use the current guides for supported behavior.
   and per-fragment state round-trips outweigh what four-thread parallelism
   saves on the already-optimized serial update. Preserve the prototype on
   `feature/sum-key-sharding` and the
-  [complete study](benchmarks/sum-state/sum-key-sharding-20261107.md); the
+  [complete study](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-key-sharding-20261107.md); the
   serial path remains delivered.
 
 - 2026-11-07: Repair native SQL join admission for nested CTEs and column
@@ -470,11 +470,11 @@ measurements. Use the current guides for supported behavior.
   observations, both CPU profiles and full snapshot checks. All maintained
   verdicts are inconclusive; neither dense case establishes the required
   improvement. Withdraw the runtime prototype and preserve the
-  [complete retest evidence](benchmarks/sum-state/sum-case-retest-20261106.md)
+  [complete retest evidence](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-case-retest-20261106.md)
   separately from the earlier stopped acquisition.
 
 - 2026-11-06: Record a narrow compiled integer sign CASE experiment and its
-  [source/allocation evidence](benchmarks/sum-state/sum-case-projection-20261106.md).
+  [source/allocation evidence](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-case-projection-20261106.md).
   Verify lower mixed-mask allocations and higher uniform-mask allocations.
   Stop the runtime comparison at its environment guard before any workload;
   withdraw the unmeasured runtime prototype and retain tools and evidence.
@@ -483,7 +483,7 @@ measurements. Use the current guides for supported behavior.
   Remove merge-time candidate lookups in the prototype, but obtain no accepted
   dense-stream improvement across five fixed cases. Withdraw runtime changes
   and preserve current main. Publish the
-  [complete study](benchmarks/sum-state/sum-candidate-ranks-20261106.md),
+  [complete study](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-candidate-ranks-20261106.md),
   paired intervals, CPU profiles, correctness evidence and reproducible tools.
 
 - 2026-11-05: Pin `arrow-data` and its required buffer/schema dependencies to
@@ -495,7 +495,7 @@ measurements. Use the current guides for supported behavior.
   Lower canonical encoding and allocated bytes in a focused probe, but obtain
   no confirmed dense-stream improvement in five fixed end-to-end cases.
   Withdraw the runtime prototype and preserve the existing key path. Publish
-  the [complete study](benchmarks/sum-state/sum-columnar-keys-20261105.md),
+  the [complete study](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-columnar-keys-20261105.md),
   paired intervals, profiles, correctness checks and reproducible tools.
 - 2026-11-05: Accept a non-empty list or tuple of materialized Arrow tables,
   record batches or table batches as one stream input. The sequence is
@@ -531,7 +531,7 @@ measurements. Use the current guides for supported behavior.
   its reproducible profiling tools. Reject the runtime prototype after confirmed
   dense-stream regressions of 15.75% with four CPUs and 18.60% with eight CPUs.
   Preserve the serial runtime and publish the
-  [complete experiment and follow-up direction](benchmarks/sum-state/sum-batch-parallel-20261104.md).
+  [complete experiment and follow-up direction](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/benchmarks/sum-state/sum-batch-parallel-20261104.md).
 
 - 2026-11-04: Construct cumulative SQL UTF-8 grouping-key output from borrowed
   strings and share group lookups within each output chunk. Remove intermediate

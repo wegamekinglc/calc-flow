@@ -85,7 +85,7 @@ and managed state settings.
 
 A source binding's `watermark` selects `{"policy": "source_provided"}`,
 `{"policy": "disabled"}`, or `{"policy": "bounded_out_of_orderness"}` with
-`column`, a positive `delay_ms`, an optional `emit_interval_ms`, and an
+`column`, a nonnegative `delay_ms`, an optional `emit_interval_ms`, and an
 optional positive `idle_timeout_ms`. A positive `emit_interval_ms` publishes
 generated watermarks on that period. An omitted or zero `emit_interval_ms`
 arms no watermark timer and publishes after every data batch that advances
@@ -101,9 +101,9 @@ runner, as in [example 10](../examples/10_symbolic_streaming_recovery.py).
 `PipelineBuilder.compile_stream()` remains the explicit graph alternative in
 [example 04](../examples/04_continuous_runtime.py).
 
-`program.to_project(mode="stream")` exports expression graphs from a Program
-with `engine="streaming"`, but its generated input placeholders are not
-production connector bindings.
+`program.to_project()` exports expression graphs from a Program created with
+`mode="stream"`. The generated input placeholders require connector bindings
+for a production job.
 Complete the explicit connector, watermark, delivery, and managed state settings
 before a connector-backed job launch. Python logical aliases do not rename these
 physical bindings, and export never chooses a checkpoint root for the caller.
@@ -171,20 +171,28 @@ record the source activation position and historical replay destination or
 deduplication choice. Old Error/Drop project serialization and checkpoint
 bytes retain their contract, but their checkpoints cannot initialize the new
 policy. See [two-branch recovery](streaming-guide.md#durable-recovery-of-both-branches).
-Project format 3 and manifest version 3 are independent of package version
-2026.11.14.
+Project documents use format 3. Managed recovery uses v4 checkpoint manifests.
+Both formats have versions independent of the package release.
 
 ## Union and event-time windows
 
-Project v3 represents the built-in same-schema union directly:
+Project v3 represents the built-in same-schema union with `kind: "union"`.
+Both ports in this fragment are required and declare the same exact schema,
+so the node also supports finite execution.
 
 ```json
 {
   "id": "merge",
   "operator": {"kind": "union"},
   "input_ports": [
-    {"name": "left", "kind": "table", "required": true},
-    {"name": "right", "kind": "table", "required": true}
+    {
+      "name": "left", "kind": "table", "required": true,
+      "schema": [{"name": "amount", "data_type": "float64", "nullable": false}]
+    },
+    {
+      "name": "right", "kind": "table", "required": true,
+      "schema": [{"name": "amount", "data_type": "float64", "nullable": false}]
+    }
   ]
 }
 ```
@@ -220,9 +228,10 @@ tumbling window.
 }
 ```
 
-Bounded inner Join nodes are another two-input table operator. Both inputs carry an
-exact schema, the bounds and limits are required with no defaults, and the
-output schema is derived from the prefixes rather than declared:
+Bounded Join nodes are another two-input table operator. Both inputs carry an
+exact schema and declare bounds and limits. Inner join output names use the
+declared prefixes. `"join_type": "left_semi"` and `"join_type": "left_anti"`
+return the original left schema. The following fragment declares an inner join.
 
 ```json
 {
@@ -288,9 +297,8 @@ or export an expression Program in stream mode to construct this graph.
 
 The [ASOF guide](asof-join-guide.md) defines selection, watermark/idle waiting,
 late policies, resource bounds, and recovery. A connector-backed project must
-provide watermark progress on all source paths reaching ASOF. Project format
-and managed manifests remain v3, and inner `stream_join` has its own
-independent spec and checkpoint identity.
+provide watermark progress on all source paths reaching ASOF. `stream_join`
+has its own spec and checkpoint identity.
 
 ## Static input declarations
 

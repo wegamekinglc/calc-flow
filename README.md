@@ -81,6 +81,12 @@ outputs. The convenience stream runs without checkpoints by default and has
 best-effort iterable delivery; durable recovery uses explicit source/sink
 bindings and a managed checkpoint root.
 
+For synchronous one-input pipelines, `TableExpr.session` and `Program.session`
+keep state between calls to `push`, `advance`, and `finish` on the caller's
+thread. Sessions start in memory by default and support explicit durable
+captures. See [stream sessions](docs/python-api.md#stream-sessions) and the
+[runnable session example](examples/37_stream_session.py).
+
 Continue with [SQL and reusable pipelines](docs/batch-guide.md#compose-sql-and-python-pipelines)
 and the [first streaming pipeline](docs/streaming-guide.md#first-python-continuous-job).
 The runnable examples cover [SQL composition](examples/32_sql_expression_pipeline.py),
@@ -113,7 +119,7 @@ crates/calc-flow  (Rust core: Batch, graph compiler, DataFusion, runners, stores
 
 The native dependency edges are `crates/calc-flow ← calc-flow-connectors` and
 `crates/calc-flow ← crates/calc-flow-python ← python/calc_flow`.
-The Python package is not a second engine.
+The PyO3 binding also links `calc-flow-connectors` for the enabled transports.
 
 | Path                             | Purpose                                                                                                                                    |
 |----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------|
@@ -137,8 +143,9 @@ The Python package is not a second engine.
   `format_version: 3`. They select batch or stream runtime mode explicitly;
   stream documents reference registered connectors and named secrets without
   embedding credentials, callables, import paths, or table backend selectors.
-- Table and mixed graph runs own one run-scoped DataFusion session. External-only
-  NumPy/JAX runs own no DataFusion configuration, UDF state, or runtime and
+- Ordinary DataFusion queries share a lazily initialized session per batch run.
+  Queries that preserve input order use dedicated serial sessions. Exact column
+  projections can reuse Arrow arrays directly. External-only NumPy/JAX runs
   return an empty DataFusion metrics list.
 - Convenience batch calls return Arrow tables. Explicit plan execution returns
   named `Batch` outputs, per-node timings, metadata, and DataFusion diagnostics.
@@ -159,9 +166,9 @@ The Python package is not a second engine.
   for another lifecycle. Calls for the other mode fail.
 - The source-driven `StreamingRunner` consumes a `StreamExecutionPlan`, owns
   async source/sink bindings, and returns a one-owner `StreamingJob`.
-- Managed epoch checkpoints use `LocalStateBackend` segments and strict v3
-  `CheckpointManifest` documents. Exactly-once compatibility is proved per
-  requested output; ordinary sinks can provide at-least-once delivery on a
+- Managed runner and durable session checkpoints use `LocalStateBackend`
+  segments and strict v4 manifests. The runner proves exactly-once compatibility
+  per requested output. Ordinary sinks can provide at-least-once delivery on a
   lossless replayable route. Async iterable convenience inputs provide best effort.
 
 The capabilities and execution model are introduced in
@@ -203,7 +210,7 @@ uv run python scripts/run_rust_tests.py
 CALC_FLOW_CONNECTOR_CONTAINERS=1 \
   CALC_FLOW_KAFKA_BOOTSTRAP=localhost:9092 \
   CALC_FLOW_PG_TEST_URL=postgresql://postgres:postgres@localhost:5432/postgres \
-  CALC_FLOW_MYSQL_TEST_URL=mysql://root:calcflow-test@localhost:3306/calcflow \
+  CALC_FLOW_MYSQL_TEST_URL="${CALC_FLOW_MYSQL_TEST_URL:?set the MySQL test URL}" \
   CH_TEST_URL=http://localhost:8123 \
   uv run python scripts/run_rust_coverage.py
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
@@ -243,8 +250,8 @@ the maintained repository commands and constraints.
   Trusted Publishers, and the PyPI procedure
 - **[Rust release guide](docs/rust-release.md)** — crate packaging, external
   consumers, dependency audit, and the crates.io procedure
-- **[Benchmark suite](docs/benchmark-suite.md)** — scheduled tables, scale matrices,
-  external-engine comparisons and historical regression evidence
+- **[Benchmark suite](docs/benchmark-suite.md)** — current workloads, timing
+  scopes, external-engine comparisons, and regression gates
 - **[Changelog](CHANGELOG.md)** — the single history of changes
 
 ## License

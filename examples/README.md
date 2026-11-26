@@ -1,14 +1,9 @@
 # Calc Flow examples
 
-The 37 numbered runnable Python examples have a [Rust counterpart](../crates/calc-flow/examples/README.md),
-including connector sources/sinks, recovery, and financial streams. Each pair
-uses the same unique number and filename stem, from `01_datafusion_pipeline`
-to `37_stream_session`.
-
-Numbers 01–31 retain their existing filenames. The formerly duplicated
-19–22 SQL/streaming examples are now 32–35, the previously unnumbered
-event-window example is 36, and the caller-driven session example is 37. Shared fixture modules and the WebSocket sample
-server keep descriptive, unnumbered names in both languages.
+The 37 numbered Python examples have [Rust counterparts](../crates/calc-flow/examples/README.md)
+with matching filename stems, from `01_datafusion_pipeline` to `37_stream_session`.
+Additional runnable examples use descriptive names for native arrays and
+[finite and bounded relations](#finite-and-bounded-relations).
 
 Start with the [documentation overview](../docs/introduction.md) and
 [installation guide](../docs/getting-started.md). Start with Python expressions
@@ -16,8 +11,9 @@ in 01, SQL composition in `32_sql_expression_pipeline.py`, and streams in
 `33_streaming_pipeline.py` and `34_streaming_outputs.py`. Continue to 05 for
 async batch execution, 09 for financial features, and 14 for project export.
 These programs use the internal Rust runtime and check observable results;
-explicit graph, provider, and native-extension examples cover advanced integrations. Each Python program
-is standalone; the [learning paths](../docs/examples.md) group them by task.
+explicit graph, provider, and native-extension examples cover advanced integrations.
+Each Python program is standalone. The [learning paths](../docs/examples.md)
+group them by task.
 
 [`native_matrices.py`](native_matrices.py) demonstrates packed rank-2 multiplication,
 axis means, reshape and transpose using only Arrow and the native core.
@@ -41,7 +37,7 @@ From a checkout with `calc-flow-python` built and installed, run one program:
 uv run --no-sync python examples/01_datafusion_pipeline.py
 ```
 
-Run the examples that need no external service, or choose a language:
+Run the default example inventory in both languages or choose a language:
 
 ```bash
 uv run --no-sync python scripts/run_examples.py
@@ -49,9 +45,11 @@ uv run --no-sync python scripts/run_examples.py --surface python
 uv run --no-sync python scripts/run_examples.py --surface rust
 ```
 
-These commands work in Bash and PowerShell. The runner defaults JAX to CPU
-when `JAX_PLATFORMS` is unset. NumPy is required by examples 06, 07, and 11;
-JAX is optional in 07, which prints an explicit skip when it is unavailable.
+The runner includes the numbered programs and three additional Rust
+demonstrations. Run other named programs directly. These commands work in Bash
+and PowerShell. The runner defaults JAX to CPU when `JAX_PLATFORMS` is unset.
+Examples 06, 07, and 11 require NumPy. Example 07 prints a skip when optional
+JAX is unavailable.
 The `dev` extra installs both providers. For individual application installs,
 use `calc-flow-python[numpy]` or `calc-flow-python[jax]` as needed.
 
@@ -74,8 +72,8 @@ these programs require no external service. The SQL/streaming pipeline examples
 listed below also need no service. The twelve connector read/write examples in
 [the connector inventory](#connector-readwrite-examples) require prepared
 services and opt-in native connector features; the runner skips them unless
-passed `--include-services`. The default wheel includes only the file connector.
-Follow [connector setup](../docs/connectors/README.md) to build the other native
+passed `--include-services`. Default wheels include the native file connector.
+Follow [connector setup](../docs/connectors/README.md) to build additional native
 features and prepare both source data and empty sink destinations before
 running them directly or enabling that flag. Example 14 also uses a temporary
 directory. For a constrained checkout, set `TMPDIR` on Linux or `TEMP` and `TMP` on Windows to
@@ -126,8 +124,9 @@ try {
    Guide: [arrays](../docs/array-guide.md#center-an-array).
 7. [07_array_and_dataframe.py](07_array_and_dataframe.py) — multiply ordered
    Arrow columns by NumPy/JAX weights. Checks
-   `[[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]`, shape, backend, and unchanged
-   inputs. Guide: [table matrices](../docs/array-guide.md#multiply-table-columns-by-weights).
+   `[[6.0, 10.0], [2.0, 12.0], [8.0, 10.0]]`, shape, backend, and input
+   immutability under ordinary execution and `python -O`.
+   Guide: [table matrices](../docs/array-guide.md#multiply-table-columns-by-weights).
 8. [08_streaming_recovery.py](08_streaming_recovery.py) — run a completed
    lineage again from its checkpoint. Checks that ended sources stay closed
    and final output is not duplicated.
@@ -211,9 +210,14 @@ Examples 32–37 run without external services and are included in the default
 example runner.
 
 - [32_sql_expression_pipeline.py](32_sql_expression_pipeline.py) — compose
-  reusable functions with `pipe`, SQL filtering, and column arithmetic. Checks
-  `order_id=[1, 3]` and `net=[18.0, 27.0]`.
-  Guide: [SQL pipelines](../docs/batch-guide.md#compose-sql-and-python-pipelines).
+  reusable functions with `pipe`, SQL filtering, and column arithmetic.
+  `for_mode("stream")` preserves the declaration fingerprint. The batch and
+  stream results contain `order_id=[1, 3]` and `net=[18.0, 27.0]`.
+  A second Program feeds full aggregate snapshots into a replacement aggregate.
+  It declares `latest_relation` updates, supplies `sql_replacement_state_budget`,
+  and checks `value=1` followed by `value=6`.
+  Guides: [SQL pipelines](../docs/batch-guide.md#compose-sql-and-python-pipelines)
+  and [replacement aggregates](../docs/streaming-guide.md#restricted-replacement-aggregates).
 - [33_streaming_pipeline.py](33_streaming_pipeline.py) — retain native delta
   and nested rolling-mean state across two input batches, followed by SQL.
   The source stays open while `async for` receives `delta=[None, 2.0, 3.0]` and
@@ -261,10 +265,10 @@ example runner.
 - [31_streaming_account_market_values.py](31_streaming_account_market_values.py)
   — consume trade and quote streams through one owning streaming Program.
   Keep cumulative account/stock positions and the price with the latest quote
-  timestamp. On every position or quote snapshot, reuse one compiled native
-  SQL plan to join the current snapshots and sum position times price per
-  account. Price-only updates revalue existing holdings while both inputs stay
-  open. The CLI drains every valuation and prints only the final table.
+  timestamp using compact SQL state. Once both relations are initialized,
+  `snapshot_sql` joins the current snapshots and sums position times price per
+  account after each update. Price-only updates can revalue holdings while both
+  inputs stay open. The CLI drains every valuation and prints the final table.
   Defaults to 10,000,000 business-flow
   rows, 100 accounts, 100 stocks, and 10,000 quotes. Both streams use batches
   of 1,000 rows with no sleep; 10,000 zero-position seed rows are additional.
@@ -283,10 +287,32 @@ watermarks and a `price_range` branch sharing the same window declaration.
 Guide: [symbolic event windows](../docs/symbolic-workflows.md#aggregate-event-time-windows).
 
 - [37_stream_session.py](37_stream_session.py) — push two ordered quote batches
-  through a two-row `cf.ts.mean` in one table session. An explicit watermark
-  closes the first push at `mean_price=[10.0, 11.0]`; the second push stays open,
-  and `finish()` emits `[13.5]`. Context exit closes the in-memory session.
+  through a two-row `cf.ts.mean` on the calling thread. An explicit watermark
+  closes the first push at `mean_price=[10.0, 11.0]`. The second push returns an
+  empty table, then `finish()` emits `[13.5]`. The durable variant checkpoints
+  the same buffered quote at epoch 1 and restores it from a temporary managed
+  v4 lineage. The restored session also emits `[13.5]` at `finish()`.
   Guide: [stream sessions](../docs/python-api.md#stream-sessions).
+
+## Finite and bounded relations
+
+Run these named programs directly, such as
+`uv run --no-sync python examples/finite_union.py`.
+
+- [finite_union.py](finite_union.py) checks that DataFrame and SQL union
+  preserve all five rows, including duplicates.
+- [finite_inner_join.py](finite_inner_join.py) checks six matching pairs
+  through both batch frontends.
+- [finite_asof_join.py](finite_asof_join.py) checks typed tie ordering
+  and preservation of an unmatched left row.
+- [finite_event_window.py](finite_event_window.py) compares fixed UTC
+  windows in batch and at stream EOF.
+- [bounded_global_ordering.py](bounded_global_ordering.py) compares
+  complete-history top-1 through both batch frontends.
+- [bounded_global_distinct.py](bounded_global_distinct.py) checks bounded
+  batch DISTINCT over repeated values and nulls.
+- [bounded_analytic_over.py](bounded_analytic_over.py) checks row number,
+  lag, and cumulative sum in Batch and Streaming.
 
 ## Rust counterparts
 
@@ -321,11 +347,10 @@ For separate-process recovery with a persistent root, follow the
 [three-phase commands](../docs/streaming-guide.md#run-the-file-recovery-example).
 The user-example runner includes this native example too.
 
-The [complete Rust inventory](../crates/calc-flow/examples/README.md) maps every
-runnable Python example to its Rust version, with connector feature flags and
-small stock/account commands. It also lists schema
-export/generation tools. They are excluded from the user-example runner
-because schema generation updates a tracked artifact.
+The [Rust inventory](../crates/calc-flow/examples/README.md) maps numbered and
+named counterparts, with connector feature flags and smaller stock/account
+inputs. Run schema export and generation tools directly. Schema generation
+updates a tracked artifact.
 
 ## Reading results and adding examples
 

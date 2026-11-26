@@ -25,11 +25,6 @@ imports are checked before test discovery so missing dependencies fail rather
 than skip the module. These tests use fixtures and mocked service lifecycles;
 they do not start RisingWave or collect new performance samples.
 
-Historical JSON results under `benchmarks/rolling/` are stored with Git LFS.
-Install Git LFS and run `git lfs pull --include='benchmarks/rolling/*.json'`
-when inspecting those results locally. Scheduled benchmark runs generate their
-own artifacts and do not read these historical files.
-
 On this page:
 
 - [Feature measurement scope](#feature-measurement-scope)
@@ -102,21 +97,23 @@ no run has restored them for 24 hours since. Preview a cleanup with
 
 | Family           | Dimensions                                          | Cases per dimension                                       |
 |------------------|-----------------------------------------------------|-----------------------------------------------------------|
-| Python           | overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
-| Engines          | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 71 through 10k, 79 at 100k/1M, 65 at 10M                  |
+| Python           | Overhead 1k, small 10k, standard 100k, nightly 1M   | All collected non-lifecycle pytest benchmarks             |
+| Engines          | 10, 100, 1k, 10k, 100k, 1M, 10M rows                | 115 through 10k, 131 at 100k and 1M, 106 at 10M           |
 | Report operators | 64k rows, 64 entities, 100 ticks per stream chunk   | 60 Batch, 60 Streaming, 58 Finance-Python                 |
-| Warm streaming   | 10, 100, 1k, 10k, 100k, 1M, 10M history; append 64  | SMA(20), SMA(5) minus SMA(20)                             |
-| Warm append      | History 1M; append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators; append 64 shared with history matrix     |
+| Warm streaming   | 10, 100, 1k, 10k, 100k, 1M, 10M history, append 64  | SMA(20), SMA(5) minus SMA(20)                             |
+| Warm append      | History 1M, append 1, 4, 16, 64, 640, 6,400, 64,000 | Both indicators, with append 64 shared with depth tests   |
 | Rust             | Every `[[bench]]` target in the core crate          | Core, allocation, state/window, Join/ASOF, SQL/DataFusion |
-| Lifecycle        | Isolated checkpoint/recovery benchmark              | Existing minimum-20-round evidence validation             |
+| Lifecycle        | Isolated checkpoint/recovery benchmark              | Minimum 20 rounds for evidence validation                 |
 
-The Python shard includes nine streaming operator examples at every Python
-scale and four selected `Program.execute` cases. The Rust `stream_union` target
-measures native Union forwarding. These cases extend the inventory without
-adding a new shard or changing the scheduled 06:00 and 18:00 runs.
+Each Python scale includes nine streaming operator examples, four selected
+`Program.execute` cases, and six compiled Batch expression parity cases. The
+paired declarations cover native and SQL projection, cumulative average, and
+cross-section mean. The Rust `stream_union` target measures native Union
+forwarding.
 
-There are 828 engine cases and 26 warm cases, in addition to dynamically
-discovered cases. Warm cases use one entity to support one-row appends.
+There are 828 engine cases including configured stream variants, 178 report
+operator cases and 26 warm cases, in addition to dynamically discovered cases.
+Warm cases use one entity to support one-row appends.
 Compare measurements only when entity count, history depth, append size,
 and timing boundaries match.
 
@@ -237,10 +234,6 @@ subtracting its entity-local index from the current index preserves oldest
 ties without expanding all frame members or relying on `arg_max` tie selection.
 All computation stays inside
 lazy collection; there are no Python per-row callbacks or precomputed answers.
-The [DAL-394 results](../benchmarks/polars-operators/README.md) retain the 84-cell
-inventory, all 84 complete measurements, environment and reproduction commands.
-The final three 10M/1T cells completed under the approved additional budget.
-
 The ASOF fixture has **zero tolerance**, on both engines. SQL therefore uses
 a left equality join on symbol and event time, selecting the reference row
 with the highest sequence on ties and retaining unmatched left rows. Its
@@ -431,11 +424,13 @@ timing boundaries remain unchanged.
 The scheduled `report-operators-64000` shard covers all 60 individual operator
 expressions at 64,000 rows. It has 178 measured cells across native compiled
 Batch, native ready Streaming and the isolated Finance-Python 0.9.10 worker.
-The same scope and fixture are used for paired native revisions when the
-baseline declares the case. The consolidated Markdown and raw shard artifacts
-include the full inventory. The existing engine IDs and timing scopes have
-their original meanings. Use `scripts.benchmark_suite run` or the
-`suite-recovery` workflow to run this shard from release wheels.
+The consolidated Markdown and raw shard artifacts include the full inventory.
+For paired native revisions, baseline admission checks the declared operator,
+workload contract, dimensions and backend timing scope. A confirmed absent or
+different declaration makes the case candidate-only. An unreadable or
+incomplete baseline catalog keeps the paired gate in force. Use
+`scripts.benchmark_suite run` or the `suite-recovery` workflow to run this shard
+from release wheels.
 
 The [standalone collector](../benchmarks/report_operator_comparison.py) shares
 the operators, validation and engine adapters. It also supports the two larger
@@ -451,11 +446,13 @@ Each full operator set has 26 time-series, 11 cross-section and 23 row-local
 or arithmetic cases. The stream source sends explicit watermarks after each
 complete timestamp chunk and finalizes the last group before timing ends.
 Every engine is checked against an independent NumPy or scalar oracle in
-sequence order. The native validator checks the UInt64 sequence and the
-operator’s Arrow value type before numerical normalization. The oracles cover
-partial rolling windows and missing values
-where the case uses them. Finance-Python has 58 supported cases in the full
-set. `rsi20` and `cs_demean` record their Finance status as unsupported, and
+sequence order. The native validator checks the UInt64 sequence and the operator’s
+Arrow value type before numerical normalization. The oracles cover partial
+rolling windows and missing values where the case uses them. Scheduled
+collection and artifact validation require the prepared row count on every
+sample and verify the Finance-Python worker identity. Finance-Python has 58
+supported cases in the full set. `rsi20` and `cs_demean` record their Finance
+status as unsupported, and
 `cs_percentile` rescales Finance ranks to the same endpoint convention.
 The generator uses deterministic synthetic inputs with the report's workload
 sizes. Use the JSON from a single run for its cross-engine ratios.
@@ -489,14 +486,10 @@ FINANCE_PYTHON_PYTHON=target/finance-python-venv/bin/python \
 
 ## ASOF settlement measurements
 
-The ASOF settlement and Join materialization targets now require
-`benchmark-internals` to retain their explicit 10,000-row, 64 MiB fixture
-budgets independently of runtime defaults. Establish fresh baselines for
-these builds: historical samples without that feature have different build
-and workload fingerprints and must not be used for speedup claims. The exact
-DAL-388 declarations below permit an informational cross-dependency release
-comparison for the recorded endpoints and budget-preserving workload changes.
-The harness continues to reject all undeclared or mismatched provenance.
+The ASOF settlement and Join materialization targets require
+`benchmark-internals` to set their explicit 10,000-row, 64 MiB fixture budgets.
+Comparisons use matching build and workload fingerprints or a reviewed
+cross-dependency declaration with exact endpoints.
 
 `stream_asof_perf` is an independent Rust target for bounded backward ASOF.
 It measures `operator-watermark-settlement`: one large watermark advance
@@ -524,7 +517,7 @@ identity-only entries. Every workload retains its right rows after settlement.
 
 Output chunks adapt to the fixture's explicit 10,000-row, 64 MiB edge budget
 and available workspace. The oracle requires positive, bounded chunk sizes
-covering every pending row; historical 128-row chunks remain valid. Left time
+covering every pending row. Left time
 starts at 1,000,000 microseconds, right time is 999,999, both watermarks advance
 to 2,000,000, and tolerance is 10,000,000 microseconds. The state limits are
 100,000 rows and 512 MiB. These choices exercise stable right history; they do
@@ -803,52 +796,6 @@ release**. Their statistics, allocation checks and coverage gates are unchanged;
 legacy suite-block verdicts remain informational, and the interleaved +5% rule
 is unchanged.
 
-DAL-384's declarations use run `39156806624`, Rust job `117764158200`, artifact
-`12151521716`: DataFusion 54.0.0 / Arrow 58.3.0 to 55.0.0 / 59.2.0 on the same
-Rust/Cargo 1.94.0. Ten of its twelve benchmark entry points have identical
-source bytes. The SQL entry point's exact `857973f8…` to `edeac305…` migration
-changes only the two version-reporting constants; fixtures, query declarations
-and clocks are unchanged. Join uses the existing common `0aa67fed…` harness
-and identical support, with common measured fingerprint `40f6b841…`.
-The registry retains the full endpoint digests. Allocation's target identity is
-also pinned, but its sixteen metric rows retain their existing validation.
-Replaying these historical b53 samples proves the contract only; it supplies
-no performance evidence for a newer candidate or a sealed release gate pass.
-
-DAL-388 appends two declarations for `stream_asof_perf` and
-`stream_join_materialization`, retaining all twelve DAL-384 declarations. The
-evidence is [run `39358081556`](https://github.com/wegamekinglc/calc-flow/actions/runs/39358081556),
-Rust job `118424384624`, artifact `12242296762`, comparing release
-`61a81f203f68c2cd20be603851c4b41fa3672b40` with candidate
-`3613026aec1d309ad1c4581188fb2fa1e12183c1`. The new bench sources retain the
-historical 10,000-row / 64 MiB output budgets, fixtures, oracle and timing
-boundaries through `benchmark-internals`. Their source changes already have
-exact workload declarations; the dependency declarations additionally bind the
-feature's compiled package inventory and the common measured workloads.
-
-| Target                        | Candidate dependency | Common measured workload |
-|-------------------------------|----------------------|--------------------------|
-| `stream_asof_perf`            | `9a8f739d…`          | `9f0d9f15…`              |
-| `stream_join_materialization` | `7fd334e5…`          | `ca874902…`              |
-
-The registry pins the full original endpoint and common-workload digests.
-The retained Cargo compiler-artifact messages were independently recomputed;
-both targets were also compiled without sampling at the newer `main` commit
-`abadd7fe6a02acfc6d5b4f55ba1ab6ce22b4fcb8`, confirming the same candidate
-dependency and workload endpoints with Rust/Cargo 1.94.0. This is build identity
-evidence for that newer commit, not a performance measurement.
-
-Offline replay of the historical four ABBA blocks removes only the twelve
-dependency-identity errors (eight ASOF and four Join cases). The other 790
-complete-report rows, raw samples, oracle evidence and timing boundaries remain
-unchanged. Unknown endpoints and mismatched common workloads still fail closed,
-including during persisted-fragment validation. Replayed rows retain the
-**cross-dependency release** label and informational verdicts; they establish
-neither a performance result for newer `main` nor a release gate pass. After
-review and merge, the complete rerun must explicitly retain
-`baseline_sha=61a81f203f68c2cd20be603851c4b41fa3672b40`; this input also sets
-the Rust baseline to that release rather than the default first parent.
-
 The `stream_join_perf` handler preflight checks every column of the 10,000
 one-to-one pairs and 100,000 fan-out pairs in ingress order. The fan-out
 fixture has identical values within each key. The recovery check adds a
@@ -864,12 +811,7 @@ runs.
 
 The shared Criterion inventory contains the four handlers and
 `checkpoint/capture_dirty_20k`, which times the first capture of 20,000
-dirty rows. The legacy segmented writer (layouts 1 and 2) supplied two
-`capture_dirty_1250_base_*`, two `prepare_then_left_500_*` and two
-`restore/full_*` series. Their published samples keep their original definitions.
-The frozen AC19 restore ceilings on WSL2 i9-13900HX were 59.3 ms for
-20,000 rows and 175.5 ms for 60,000 rows under those fixtures. The
-historical `CALC_FLOW_JOIN_PERF_FOCUSED` selector reports an error.
+dirty rows.
 
 For the native writer, `--native-component join_capture_restore_1m`
 records preparation, capture and restore separately. `join_compaction_1m`
@@ -905,20 +847,11 @@ diagnostics, not a replacement process clock. A native interval whose CPU plus
 two resolution ticks cannot establish its budget remains inconclusive, including
 zero-tick short callbacks. Missing CPU evidence cannot complete acceptance.
 
-Historical v1 `utime + stime`/`CLK_TCK` records remain unchanged: a 10ms tick
-cannot certify a shorter callback. Unknown clock names are rejected; v2 requires
-the process clock and a positive finite resolution. Thread sums cannot replace
-process totals, and the serial 2× gate is unchanged.
-
 The closed overlay adds only the existing pinned nix package to calc-flow's
 lock dependency list, seals the exact effective lock bytes, and retains the
 original product lock fingerprint. No package version or checksum is replaced.
-Both B/C overlays receive the same benchmark dependency. Existing instrumented
-binaries cannot be relabeled with the new clock: eight native artifacts and two
-traced wheels need new overlays, real builds and attestations. Ordinary wheels
-need new source/audit records under the shared build contract; helper changes
-alone do not establish a need to recompile their machine code. Cache hits must be
-real and installed bytes must still be checked.
+Both revisions use the same benchmark dependency. The collector verifies each
+artifact's build provenance and the bytes installed for execution.
 
 The native check-only `join_layout_controls` component executes production Join
 and ASOF callbacks for single-record, sliced multi-record `[7, 9, 8]`, recurring
@@ -946,13 +879,6 @@ witness checks that left-only appends preserve every right native page and that
 restore replays identical output. This stable-page check is not a dirty-page
 copy-on-write cost measurement and establishes no handler-overlap claim.
 
-This instrumentation changes the measured harness identity. Build it against
-both exact product revisions through the maintained overlay; old binaries and
-historical samples cannot inherit these clocks or controls. Final eight-target
-acceptance (#443) requires a separately frozen milestone, B/C SHAs, sealed
-release builds, sample inventory and budget. These controls make no performance
-claim and do not resume historical stopped collections.
-
 Rust workload fingerprints are scoped per bench target: each case's
 `workload_fingerprint` covers only its own `crates/calc-flow/benches/<target>.rs`
 bytes, so editing one bench source removes timing classification from that
@@ -970,37 +896,19 @@ A declaration also retires cases its candidate source removed: when the
 candidate measured that target, a case only the baseline blocks still report
 is dropped instead of failing as a missing block. Without a declaration, a
 removed case still fails.
-The common join harness requires an exact migration declaration for each
-supported older source. Both products run the same five-case inventory.
-The six retired segmented-writer measurements retain their historical IDs
-and samples.
+The common Join harness requires an exact migration declaration when run
+against a supported baseline with different benchmark source. Both products
+run the same five-case inventory.
 
-### Current-milestone Join/ASOF acquisition (#443)
+### Join/ASOF acquisition protocol
 
-The October 16 frozen run compared B `aaf793a3` with C `c7e8657d`, using original
-build tool `9c513611` and execution tool `64bbc6a4` (the same tree as guarded
-main `8e26b190`, a different commit). It accepted 1,026 measured calls and 104
-warmups, rejected one measured call at the unchanged process CPU gate, and left
-849 planned calls unstarted. The rejected 1.371196ms handler reported 10ms CPU
-at 10ms resolution; it does not prove a real CPU regression. Preserve the
-rejection and earlier zero-tick inconclusive evidence. Join/ASOF and
-snapshot/restore absolute misses remain separate from that clock limitation.
-Row 5 is incomplete; genuine during-compaction, row 7/8, ASOF10M, interval1M,
-native OFF runtime evidence and allocation coverage remain outstanding. The
-ASOF single-CPU ON baseline advanced epochs in only 13/20 measured samples.
-No clock fix completes these targets or allows new samples to fill old indices.
-
-`calc-flow.issue406-milestone.v2` is the current acquisition policy in
-`scripts/benchmark_suite/issue406_milestone.py`. Historical fresh v2/v3 plans,
-their exact revisions, third-product retained controls, recognized failures and
-stopped observations remain historical. The milestone v2 policy uses only 1T
-and 4T configurations; archived 32T results remain separate evidence. The new policy uses only its sealed
-baseline and candidate for every pair, including all twelve formerly missing
-baseline OFF arms. Both products require enabled and OFF builds of
+`calc-flow.issue406-milestone.v2` in `scripts/benchmark_suite/issue406_milestone.py`
+uses 1T and 4T configurations and pairs a sealed baseline and candidate.
+Both products require enabled and OFF builds of
 `stream_join_perf` and `stream_asof_e2e`, plus ordinary and traced wheels with
-the existing source, compiler, dependency, installed-member and artifact audits.
+the required source, compiler, dependency, installed-member and artifact audits.
 By default the build, execution and harness SHA fields identify one clean tool
-commit. Historical compatibility and controller-repair exceptions do not apply.
+commit.
 
 The current milestone can explicitly opt into source policy
 `calc-flow.issue406-build-execution.v1`. This separates original build provenance
@@ -1030,18 +938,11 @@ from a newer execution/fixture tool without changing either product identity:
   limits. Both B/C fixtures use that same sealed execution configuration and full
   identity/value/schema oracle.
 
-Unknown source policies fail closed. Omitting the policy preserves the original
-same-SHA contract; historical v2/v3 policies are unchanged. A frozen then-main C
-remains that exact product commit when main later changes only benchmark tools.
-Record the actual diff and distinct identities; do not relabel old artifacts as
-a new product or claim the whole repository SHAs are equal.
-
-After this tooling change is integrated, freeze new exact B/C and tool SHAs;
-the preflight's `6ad1e957` is not automatically a future then-main. Sealed ordinary
-wheels must record the build tool's `harness_git_sha` in their audited metadata.
-All supplied descriptors and installed native/binary bytes remain hash checked.
-An OFF sample requires successful cleanup and disabled checkpoint evidence;
-source support for the switch alone is not proof of true OFF execution.
+Unknown source policies fail closed. With no source-policy override, the tool
+SHA is shared. Seal the exact baseline, candidate and tool identities before
+acquisition. Ordinary wheels record the build tool's `harness_git_sha`, and the
+collector verifies artifact and installed-binary hashes. An OFF sample requires
+successful cleanup and evidence that checkpoints stayed disabled.
 
 The inventory contains the original 38 semantic cases plus ASOF 10M per side
 on one CPU in three checkpoint modes and interval Join 1M per side on one/four
@@ -1058,7 +959,7 @@ metrics each share a physical observation. Two rounds of ten adjacent AB/BA
 pairs, with one discarded warmup per arm per round, yield **1,800 measured calls
 and 180 warmups, or 1,980 physical calls**. These are not process-start counts;
 fixture preparation, correctness controls and preflight operations are additional
-work inside the same total budget. No historical `cff` control is added.
+work inside the same total budget.
 
 Builds are separate. Before any collection preparation, create a new accounting
 anchor, then prepare and seal the plan and its artifact inventory:
@@ -1101,9 +1002,7 @@ There is no retry, sample expansion, third product or automatic budget extension
 Reports retain all eight formal conditions and separately list the tighter
 planning targets, including ASOF10M, interval1M and runtime 0.1 ms per actual
 input data batch. LOW and ON limits are the corresponding absolute OFF goal
-divided by 0.90 and 0.75, respectively. These are product goals, not archived
-32T measurements or cross-thread comparisons; milestone v2 establishes new 4T
-evidence independently. For example, Join1M single-CPU LOW/ON
+divided by 0.90 and 0.75, respectively. For example, Join1M single-CPU LOW/ON
 limits are 66.67/80 ms even when measured OFF takes 200 ms. ON also requires
 completed, advancing nonterminal epochs; a fast finite run without them remains
 unmeasured for periodic impact. The runtime floor divides each projection sample
@@ -1111,11 +1010,8 @@ by its recorded input data-event count, checked against RecordBatch geometry.
 
 The paired revision gate remains two rounds with ten AB/BA pairs and the
 maintained median confidence intervals; cross-mode, cross-size and component
-medians are not temporal pairs. Row 5 remains unmeasured for genuine overlap:
-post-compaction, preparation, queue and combined clocks are diagnostics. Tool
-regressions and CI/90% coverage do not establish a performance result. This
-preparatory change starts neither release builds nor formal acquisition and
-does not close #443 or #406.
+medians are not temporal pairs. The post-compaction, preparation, queue and
+combined clocks describe the resulting phases without measuring overlap.
 
 ## Standalone paired measurements
 

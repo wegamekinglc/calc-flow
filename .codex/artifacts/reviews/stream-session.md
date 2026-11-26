@@ -185,7 +185,7 @@ finishes, returns its rows (or raises its own error), and drops the session on t
 6. `docs/introduction.md`: "Choose how to declare and execute".
 7. AGENTS.md: Python architecture bullet for `python/calc_flow/session.py`.
 8. `CHANGELOG.md`: an Unreleased entry.
-9. `docs/plans/2026-11-15-streaming-core-rearchitecture.md`: P1 execution record, including the
+9. [2026-11-15-streaming-core-rearchitecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md): P1 execution record, including the
    ≤20 µs gate miss and the §7.2 stop-rule outcome.
 
 ## Verdict

@@ -3,7 +3,7 @@
 Date: 2026-11-15. Source baseline: `main` `39cab2fb` (product-identical to
 `b9a46e12`; `39cab2fb` changed documentation only).
 Branch: `feature/stream-session`. Plan:
-[streaming core re-architecture](../../../docs/plans/2026-11-15-streaming-core-rearchitecture.md),
+[streaming core re-architecture](https://github.com/wegamekinglc/calc-flow/blob/4f83be5d5b12bbc2a93b1233f106033a487479df/docs/plans/2026-11-15-streaming-core-rearchitecture.md),
 phase P1, first PR.
 Status: revision 2, after [critique](../critiques/stream-session.md); ready
 for implementation.

@@ -415,12 +415,15 @@ Rust `Some(JoinOutputOrdering { ... })`, Python's three `output_*` arguments,
 or SQL `output_ordering`. These fields name identity and do not sort rows.
 Fan-out shares one owner per unique join; row-local DataFrame/SQL transforms may
 preserve unchanged or renamed identity fields. Rewritten time loses proof.
-Join paths do not yet include union/window/aggregate combinations; those may
-remain independent output branches. Outer, semi, anti, cross and replacement
-joins are outside this contract.
+Union, window, and aggregate declarations may run on independent output
+branches. Python `cf.table.stream_join(..., join_type=...)` and Rust
+`TableExpr::interval_join` also support bounded left semi and left anti joins
+in both lifecycles. These return original left rows and have their own stream
+finality and recovery rules. See
+[bounded event-time joins](streaming-guide.md#bounded-event-time-join).
 
-Revision 7 analysis conditionally proves `final_relation / accepted_history /
-all_sources_eof / unordered`: both executions must succeed within their budget,
+Query analysis conditionally proves `final_relation / accepted_history /
+all_sources_eof / unordered`. Both executions must succeed within their budget,
 and stream candidates must coexist without late/progress discards. Compare the
 multiset of all append pair outputs, not only the last chunk. Global ordering and
 non-EOF cuts remain unproved. Explicit latest semantics reject snapshot inputs

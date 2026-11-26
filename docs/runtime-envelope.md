@@ -228,14 +228,14 @@ with a SHA-256 computed at construction). Keyed row state never appears
 inline, and no segment may carry secrets; the runtime assigns object paths,
 lengths, and checksums during v4 persistence.
 
-Streaming Join writes native layout 12. Its metadata binds the Join spec,
-row-ID and output-sequence frontiers, metrics, ended state and epoch. Native
+Streaming Join writes native layout 12 for inner joins, 13 for left semi
+joins, and 14 for left anti joins. Its metadata binds the Join spec, row-ID
+and output-sequence frontiers, metrics, ended state and epoch. Native
 pages contain immutable run payload and identity columns, per-key and
 expiration indexes, shared keys and control counters. The managed runner passes
 `NativeCapture` directly to manifest-v4 persistence; direct
 `checkpoint()`/`restore()` uses the same page encoding as an
-`OperatorStateSnapshot`. Layouts 1–3 remain only in explicit migration tests
-and are rejected by production restore.
+`OperatorStateSnapshot`. Restore requires the native layout for the join type.
 
 Output projection is applied while materializing a result and does not create a
 second retained-schema checkpoint layout. Restore validates the spec, page
@@ -270,15 +270,12 @@ Capture assembles only upsert/remove changes against the previous page lineage
 and incrementally maintains page-count and reservation summaries. Persistence
 applies those changes directly to the previous partition index and writes only
 changed payloads plus metadata; clean handles remain unchanged. Direct
-snapshots still materialize every page, and each epoch still serializes a
-complete partition index, so the final end-to-end cost bound remains open.
+snapshots materialize every page, and each epoch serializes a complete
+partition index.
 
-Legacy layouts 1–3 and their base/delta history remain only in explicit
-migration tests. Production restore requires layout 12 and rejects those older
-formats rather than converting them. A refused, cancelled or invalid native
-restore leaves the installed state unchanged. These physical formats remain
-distinct from the runtime capability envelope under
-[checkpoint coordination](#checkpoint-coordination).
+A refused, cancelled or invalid native restore leaves the installed state
+unchanged. See [checkpoint coordination](#checkpoint-coordination) for the
+separate runtime capability envelope.
 
 On the built-in window's per-window path, the operator only marks touched,
 created, and closed window keys while processing data and control events, then
@@ -814,13 +811,12 @@ instead of from source, operator, and sink tasks. The Python
 differ from the runner path; everything else follows the per-operator code
 described above.
 
-**Admission.** Construction admits one dynamic source binding, no static
-inputs, no native array sequence nodes, no ExactlyOnce output, and only
-`Rolling`, `Expression`, and `Union` nodes. Rolling nodes with the RSI/ATR or
-MACD state layouts are rejected; rolling late side outputs are admitted. The
-check is an exhaustive match over compiled operator kinds, so a kind is
-rejected until it is explicitly admitted. Rejections are `InvalidArgument`
-values at `session.*` field paths, listed in the
+**Admission.** Construction admits one dynamic source binding and plans with
+Rolling, Expression, Union, and native array-sequence nodes. This includes
+rolling RSI, ATR and MACD and rolling late side outputs. Static inputs and
+ExactlyOnce outputs are outside the admitted set. The Python session adapter
+exposes table inputs and outputs. Rejections are `InvalidArgument` values at
+the `session.*` field paths listed in the
 [Rust reference](rust-api.md#caller-driven-stream-sessions).
 
 **Scheduling.** A call first validates its input: input ID, batch kind and
@@ -840,27 +836,28 @@ and end-of-input messages that reach a graph output are not returned. The
 session constructs these control messages itself from validated call
 arguments; callers still cannot construct control messages.
 
-**Threads.** Each session owns one current-thread Tokio runtime with only the
-timer driver and blocks the caller on it. Operator futures run on the caller's
-thread, and nothing on the admitted path waits on another thread. Calls from
-inside a Tokio runtime context are rejected before any work.
+**Threads.** All operators run on the caller's thread. A session with an
+asynchronous adapter retains a current-thread Tokio runtime with only the
+timer driver. A fully synchronous session releases the setup runtime before
+returning from construction. Rust data calls reject an existing Tokio runtime
+context before doing any work.
 
 **Edges and budgets.** Session edges are FIFO queues that apply the oversize
 rule of runtime edges to every envelope against the configured `edge_budget`
 and report that budget, so operators chunk output exactly as on runner edges.
 They have no queue-capacity backpressure: a queue holds everything its producer
 emits during that producer's turn, and the call returns only after every queue
-is empty. Memory per call is therefore bounded by operator output chunking, not
-per edge. The queue-capacity and backpressure rules of
+is empty. Chunking bounds each envelope. Total memory for a call depends on
+the emissions queued during the drain and retained in its output. The
+queue-capacity and backpressure rules of
 [the operator emission boundary](#the-operator-emission-boundary) apply to
 runners and streams, not sessions. An oversized input batch is a validation
 error; an oversized internal message fails the session.
 
-**Checkpoints.** `StreamSession::new` retains the original in-memory behavior:
-its job context has checkpointing disabled, every checkpoint field of
-`StreamRuntimeConfig` is ignored, including `checkpointing = true`, and nothing
-is durable. `StreamSession::new_with_checkpoints` and `StreamSession::restore`
-instead require `checkpointing = true` and `ManagedCheckpointRuntime` storage.
+**Checkpoints.** `StreamSession::new` creates an in-memory session whose job
+context disables checkpointing. `StreamSession::new_with_checkpoints` and
+`StreamSession::restore` require `checkpointing = true` and
+`ManagedCheckpointRuntime` storage.
 Fresh construction rejects a lineage that already contains a manifest. Restore
 selects the highest complete v4 session epoch, requires `job_kind="session"`,
 and validates the plan recovery fingerprint. Runner recovery uses manifest v4
@@ -1167,6 +1164,31 @@ Existing FIFO, watermark, barrier, cancellation and error ownership remain in
 force. A task that has already settled keeps its recorded outcome if its
 paired driver is subsequently aborted.
 
+### Columnar cross-section execution
+
+For unpartitioned exact-time groups, `CrossSectionOperator` can evaluate
+strictly ordered Arrow records directly. Admission requires a non-null UTC
+microsecond event time, one Utf8 entity key, one non-null `UInt64` sequence
+key, Float64 measure inputs, and supported flat Arrow payload columns.
+Regression residuals require Float64 for both inputs. The order proof covers
+event time, entity, and sequence across record boundaries. A single qualifying
+record shares its Arrow buffers. Multiple qualifying records are validated in
+order before concatenation.
+
+Streaming admits `error` and `drop` late-row policies with zero allowed lateness
+and input strictly beyond the current watermark. It keeps pending Arrow rows
+within the configured state budget and may join a bounded single-timestamp
+tail to advancing input. A watermark emits the closed timestamp prefix. The
+operator can retain one compact final group in Arrow and materializes state
+into the general grouped representation when more groups remain. End of input
+can emit pending Arrow rows directly. Checkpoint capture materializes pending
+rows in the existing cross-section Arrow IPC layout.
+
+Inputs outside columnar admission use the general grouped path, including
+fixed buckets, partition keys, and late side output. Both paths share group
+finality, canonical output order, and late-row and duplicate identity semantics.
+See [cross-section groups](design.md#cross-section-groups).
+
 ## Progress and replay
 
 The runtime prepares each source policy during whole-job preflight. Coordinated
@@ -1254,10 +1276,9 @@ segments use physical layout 2 with separate sum and correction columns;
 recovery accepts existing layout 1 segments, initializes their missing
 correction to zero, and rewrites live windows as a layout 2 base at the next
 checkpoint. Compatible continuation after restore is bit-identical to
-uninterrupted execution, including subsequent output and checkpoint bytes. The
-withdrawn experimental pane layout 3 is not supported; new snapshots always use
-per-window layouts 1 and 2. The public operator state capability remains version
-1, and project and manifest formats are unchanged.
+uninterrupted execution, including subsequent output and checkpoint bytes.
+New snapshots use per-window layouts 1 and 2. The public operator state
+capability is version 1.
 
 The public state surface consists of immutable `StateHandle` values, native
 v4 `SourceHistorySegmentHandle` references, lineage-exclusive `StateBackend`
