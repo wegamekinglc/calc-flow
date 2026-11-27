@@ -253,8 +253,13 @@ mod tests {
     }
 
     fn static_operator(fused: bool) -> StreamJoinOperator {
+        static_operator_with_spec(fused, spec())
+    }
+
+    fn static_operator_with_spec(fused: bool, declaration: StreamJoinSpec) -> StreamJoinOperator {
         let mut operator =
-            StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), spec()).unwrap();
+            StreamJoinOperator::new("hot", quote_schema(), dimension_schema(), declaration)
+                .unwrap();
         if fused {
             operator
                 .set_hot_projection(
@@ -765,6 +770,214 @@ mod tests {
         )
         .unwrap();
         (left, right)
+    }
+
+    const STATIC_PACK_ROWS: usize = 2 * crate::operator::keyed::MORSEL_ROWS;
+    const STATIC_PACK_BYTES: usize = STATIC_PACK_ROWS * 16;
+
+    fn sealed_static_spec(max_matches: usize) -> StreamJoinSpec {
+        let mut declaration = spec();
+        declaration.limits.max_matches_per_input_batch = max_matches as u64;
+        declaration
+    }
+
+    async fn open_sealed_static(
+        job: &StreamJobContext,
+        right: RecordBatch,
+        budget: crate::EdgeBudget,
+        max_matches: usize,
+    ) -> (StreamJoinOperator, EdgeCollector, StreamOperatorContext<'_>) {
+        let mut operator = static_operator_with_spec(true, sealed_static_spec(max_matches));
+        operator.set_terminal_hot_output_packing(true);
+        let mut collector = EdgeCollector::new(operator.output_ports().to_vec());
+        operator
+            .process_data(
+                "right",
+                Batch::table(vec![right], BatchMetadata::default()).unwrap(),
+                &hot_context(job),
+                &mut collector,
+            )
+            .await
+            .unwrap();
+        let progress = crate::IngressProgressSnapshot::new(BTreeMap::from([(
+            "right".into(),
+            crate::IngressProgress::new(
+                crate::IngressState::Active,
+                Some(crate::EventTime::from_micros(1)),
+            ),
+        )]));
+        let context = StreamOperatorContext::for_task(
+            job,
+            "hot",
+            None,
+            progress,
+            budget,
+            Arc::new(NoopLateMetrics),
+        );
+        operator
+            .on_ingress_progress("right", &context)
+            .await
+            .unwrap();
+        (operator, collector, context)
+    }
+
+    fn sealed_static_job() -> StreamJobContext {
+        StreamJobContext::new(
+            1,
+            "fingerprint",
+            JsonMap::new(),
+            None,
+            CancellationToken::new(),
+        )
+    }
+
+    async fn run_sealed_static(
+        budget: crate::EdgeBudget,
+        max_matches: usize,
+    ) -> (StreamJoinOperator, EdgeCollector, Result<()>) {
+        let job = sealed_static_job();
+        let (left, right) = large_static_inputs(STATIC_PACK_ROWS, 64);
+        let (mut operator, mut collector, context) =
+            open_sealed_static(&job, right, budget, max_matches).await;
+        let result = operator
+            .process_data(
+                "left",
+                Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut collector,
+            )
+            .await;
+        (operator, collector, result)
+    }
+
+    #[tokio::test]
+    async fn sealed_static_projection_packs_two_morsels_into_one_envelope() {
+        let budget = crate::EdgeBudget::new(STATIC_PACK_ROWS, STATIC_PACK_BYTES).unwrap();
+        let (mut operator, mut collector, result) =
+            run_sealed_static(budget, STATIC_PACK_ROWS).await;
+        result.unwrap();
+        let messages = collector.drain("output");
+        assert_eq!(messages.len(), 1);
+        let batch = messages[0].as_data().unwrap();
+        assert_eq!(batch.metadata().sequence(), 0);
+        assert_eq!(batch.num_rows(), STATIC_PACK_ROWS);
+        assert_eq!(batch.estimated_bytes().unwrap(), STATIC_PACK_BYTES);
+        let records = batch.table_payload().unwrap().batches();
+        assert_eq!(records.len(), 2);
+        let sequences = records
+            .iter()
+            .flat_map(|record| record.column(0).as_primitive::<UInt64Type>().values());
+        assert!(sequences.copied().eq(0..STATIC_PACK_ROWS as u64));
+        assert!(records.iter().all(|record| {
+            record
+                .column(1)
+                .as_primitive::<Float64Type>()
+                .values()
+                .iter()
+                .all(|&value| value.to_bits() == 4.0_f64.to_bits())
+        }));
+        assert_eq!(operator.state.metrics.left.retained_rows, 0);
+        assert_eq!(operator.state.metrics.left.evicted_rows, 0);
+        let snapshot = native_snapshot(&mut operator).await;
+        let mut restored = static_operator_with_spec(true, sealed_static_spec(STATIC_PACK_ROWS));
+        restored.restore_native(&snapshot).unwrap();
+        assert_eq!(restored.state.next_output_sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn sealed_static_projection_splits_at_each_edge_budget() {
+        for (rows, bytes) in [
+            (STATIC_PACK_ROWS - 1, STATIC_PACK_BYTES),
+            (STATIC_PACK_ROWS, STATIC_PACK_BYTES - 1),
+        ] {
+            let budget = crate::EdgeBudget::new(rows, bytes).unwrap();
+            let (operator, mut collector, result) =
+                run_sealed_static(budget, STATIC_PACK_ROWS).await;
+            result.unwrap();
+            let messages = collector.drain("output");
+            assert_eq!(messages.len(), 2);
+            for (index, message) in messages.iter().enumerate() {
+                let batch = message.as_data().unwrap();
+                assert_eq!(batch.metadata().sequence(), index as u64);
+                assert_eq!(batch.num_rows(), STATIC_PACK_ROWS / 2);
+                assert!(batch.estimated_bytes().unwrap() <= bytes);
+            }
+            assert_eq!(operator.state.next_output_sequence, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn sealed_static_projection_checks_match_limit_before_emitting() {
+        let budget = crate::EdgeBudget::new(STATIC_PACK_ROWS, STATIC_PACK_BYTES).unwrap();
+        let (operator, mut collector, result) =
+            run_sealed_static(budget, STATIC_PACK_ROWS - 1).await;
+        assert!(matches!(
+            result,
+            Err(crate::CalcFlowError::OperatorReason {
+                reason_code: crate::StreamingFailureReason::JoinMatchLimitExceeded,
+                ..
+            })
+        ));
+        assert!(collector.drain("output").is_empty());
+        assert_eq!(operator.state.next_output_sequence, 0);
+        assert_eq!(operator.state.next_left_row_id, 0);
+        assert_eq!(operator.state.metrics.match_limit_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn sealed_static_projection_keeps_frontier_when_a_later_envelope_fails() {
+        struct RejectSecond<'a> {
+            output: &'a mut EdgeCollector,
+            attempts: usize,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::StreamCollector for RejectSecond<'_> {
+            async fn emit(&mut self, port: &str, batch: Batch) -> Result<()> {
+                assert_eq!(batch.table_payload()?.batches().len(), 2);
+                self.attempts += 1;
+                if self.attempts == 2 {
+                    return Err(crate::CalcFlowError::Cancelled {
+                        run_id: "sealed static test".into(),
+                    });
+                }
+                crate::StreamCollector::emit(self.output, port, batch).await
+            }
+        }
+
+        let rows = 2 * STATIC_PACK_ROWS;
+        let job = sealed_static_job();
+        let (left, right) = large_static_inputs(rows, 64);
+        let budget = crate::EdgeBudget::new(STATIC_PACK_ROWS, STATIC_PACK_BYTES).unwrap();
+        let (mut operator, mut collector, context) =
+            open_sealed_static(&job, right, budget, rows).await;
+        let original = operator.run_core.as_ref().unwrap().fingerprint();
+        let mut rejecting = RejectSecond {
+            output: &mut collector,
+            attempts: 0,
+        };
+        let result = operator
+            .process_data(
+                "left",
+                Batch::table(vec![left], BatchMetadata::default()).unwrap(),
+                &context,
+                &mut rejecting,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(crate::CalcFlowError::Cancelled { .. })
+        ));
+        assert_eq!(rejecting.attempts, 2);
+        let messages = collector.drain("output");
+        assert_eq!(messages.len(), 1);
+        let escaped = messages[0].as_data().unwrap();
+        assert_eq!(escaped.metadata().sequence(), 0);
+        assert_eq!(escaped.num_rows(), STATIC_PACK_ROWS);
+        assert_eq!(operator.run_core.as_ref().unwrap().fingerprint(), original);
+        assert_eq!(operator.state.next_output_sequence, 0);
+        assert_eq!(operator.state.next_left_row_id, 0);
+        assert_eq!(operator.state.metrics.emitted_match_rows, 0);
     }
 
     #[tokio::test]

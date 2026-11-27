@@ -840,6 +840,7 @@ fn run_output_context(
     );
     output.product = operator.hot_projection;
     output.join_type = operator.spec.join_type;
+    output.pack_terminal_equi = operator.terminal_hot_output_packing();
     output
 }
 

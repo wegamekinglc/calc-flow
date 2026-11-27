@@ -826,6 +826,7 @@ pub(super) struct RunOutputContext<'a> {
     projection: Option<&'a [usize]>,
     pub(super) product: Option<HotProjection>,
     pub(super) join_type: StreamJoinType,
+    pub(super) pack_terminal_equi: bool,
     pub(super) anti_left: Option<AntiInput<'a>>,
     left_width: usize,
     budget: EdgeBudget,
@@ -845,6 +846,7 @@ impl<'a> RunOutputContext<'a> {
             projection,
             product: None,
             join_type: StreamJoinType::Inner,
+            pack_terminal_equi: false,
             anti_left: None,
             left_width,
             budget,
@@ -1366,20 +1368,14 @@ impl RunState {
         };
         #[cfg(feature = "benchmark-internals")]
         drop(merge_span);
-        let mut next_output = self.next_output;
-        let mut metadata = None;
-        let mut outputs = Vec::with_capacity(prepared.len());
-        for prepared in prepared {
-            #[cfg(feature = "benchmark-internals")]
-            let materialize_span = output
-                .trace
-                .map(|trace| trace.stage(&self.name, "run_materialize", prepared.probe.len()));
-            let batches = prepared.materialize(self, &output, next_output, &mut metadata, check)?;
-            #[cfg(feature = "benchmark-internals")]
-            drop(materialize_span);
-            next_output = next_output_sequence(next_output, batches.len())?;
-            outputs.push(batches);
-        }
+        let pack = can_pack_dense_outputs(
+            &prepared,
+            incoming_side,
+            update.is_none(),
+            output.pack_terminal_equi,
+        );
+        let (mut outputs, mut next_output) =
+            self.materialize_outputs(prepared, &output, pack, check)?;
         if let Some(input) = output.anti_left {
             let batches = input.materialize(self, &matches.absent_ids, &output, check)?;
             if !batches.is_empty() {
@@ -1399,6 +1395,43 @@ impl RunState {
             update,
             next_run,
         })
+    }
+
+    fn materialize_outputs(
+        &self,
+        prepared: Vec<Prepared>,
+        output: &RunOutputContext<'_>,
+        pack: bool,
+        check: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<(Vec<Vec<Batch>>, u64)> {
+        let mut sequence = (!pack).then_some(self.next_output);
+        let mut metadata = None;
+        let mut outputs = Vec::with_capacity(prepared.len());
+        for prepared in prepared {
+            let batches = {
+                #[cfg(feature = "benchmark-internals")]
+                let _span = output
+                    .trace
+                    .map(|trace| trace.stage(&self.name, "run_materialize", prepared.probe.len()));
+                prepared.materialize(self, output, sequence, &mut metadata, check)?
+            };
+            sequence = sequence
+                .map(|start| next_output_sequence(start, batches.len()))
+                .transpose()?;
+            outputs.push(batches);
+        }
+        if let Some(sequence) = sequence {
+            return Ok((outputs, sequence));
+        }
+        let envelopes = pack_output_envelopes(
+            outputs.into_iter().flatten(),
+            metadata.as_ref().expect("dense matches produced output"),
+            self.next_output,
+            output.budget,
+            check,
+        )?;
+        let next_output = next_output_sequence(self.next_output, envelopes.len())?;
+        Ok((vec![envelopes], next_output))
     }
 
     fn prepare(
@@ -1523,12 +1556,98 @@ fn next_output_sequence(start: u64, count: usize) -> Result<u64> {
         .ok_or_else(|| run_error("output sequence overflowed"))
 }
 
+fn can_pack_dense_outputs(
+    prepared: &[Prepared],
+    incoming_side: JoinSide,
+    transient: bool,
+    terminal_equi: bool,
+) -> bool {
+    terminal_equi
+        && incoming_side == JoinSide::Left
+        && transient
+        && prepared.len() > 1
+        && prepared.iter().all(|piece| {
+            piece.probe.len() == piece.incoming.len()
+                && piece.probe.spans.iter().all(|span| span.window.len() == 1)
+        })
+}
+
+#[derive(Default)]
+struct OutputEnvelope {
+    records: Vec<RecordBatch>,
+    rows: usize,
+    bytes: usize,
+}
+
+impl OutputEnvelope {
+    fn fits(&self, rows: usize, bytes: usize, budget: EdgeBudget) -> bool {
+        rows <= budget.max_rows - self.rows && bytes <= budget.max_bytes - self.bytes
+    }
+
+    fn flush(
+        &mut self,
+        template: &BatchMetadata,
+        first_sequence: u64,
+        envelopes: &mut Vec<Batch>,
+    ) -> Result<()> {
+        if self.records.is_empty() {
+            return Ok(());
+        }
+        let sequence = next_output_sequence(first_sequence, envelopes.len())?;
+        let envelope = std::mem::take(self);
+        envelopes.push(Batch::table(
+            envelope.records,
+            template.with_sequence(sequence),
+        )?);
+        Ok(())
+    }
+}
+
+// The pieces already fit the edge individually. Keep their immutable Arrow
+// records and apply the same visible row and byte charges to each envelope.
+fn pack_output_envelopes(
+    pieces: impl Iterator<Item = Batch>,
+    template: &BatchMetadata,
+    first_sequence: u64,
+    budget: EdgeBudget,
+    check: &mut dyn FnMut() -> Result<()>,
+) -> Result<Vec<Batch>> {
+    let mut envelopes = Vec::new();
+    let mut current = OutputEnvelope::default();
+    for piece in pieces {
+        check()?;
+        let rows = piece.num_rows();
+        let bytes = piece.estimated_bytes()?;
+        if !current.fits(rows, bytes, budget) {
+            current.flush(template, first_sequence, &mut envelopes)?;
+        }
+        current
+            .records
+            .extend_from_slice(piece.table_payload()?.batches());
+        current.rows += rows;
+        current.bytes += bytes;
+    }
+    current.flush(template, first_sequence, &mut envelopes)?;
+    Ok(envelopes)
+}
+
+fn chunk_output_metadata(
+    template: &BatchMetadata,
+    first_sequence: Option<u64>,
+    index: usize,
+) -> Result<BatchMetadata> {
+    match first_sequence {
+        Some(start) => next_output_sequence(start, index).map(|seq| template.with_sequence(seq)),
+        None => Ok(template.clone()),
+    }
+}
+
 impl Prepared {
     fn materialize(
         &self,
         state: &RunState,
         output: &RunOutputContext<'_>,
-        first_sequence: u64,
+        first_sequence: Option<u64>,
         metadata: &mut Option<BatchMetadata>,
         check: &mut dyn FnMut() -> Result<()>,
     ) -> Result<Vec<Batch>> {
@@ -1548,12 +1667,14 @@ impl Prepared {
         };
         let ranges = self.ranges(output, &mut payloads, check)?;
         // Check planned ranges here; byte-budget splits are counted after materialization.
-        next_output_sequence(first_sequence, ranges.len())?;
+        first_sequence
+            .map(|start| next_output_sequence(start, ranges.len()))
+            .transpose()?;
         let metadata = match metadata {
             Some(template) => template,
             slot @ None => slot.insert(BatchMetadata::new(
                 &state.name,
-                first_sequence,
+                first_sequence.unwrap_or_default(),
                 BTreeMap::new(),
             )?),
         };
@@ -1683,12 +1804,12 @@ impl Prepared {
         output: &RunOutputContext<'_>,
         payloads: &mut RunPayloads<'_>,
         range: std::ops::Range<usize>,
-        first_sequence: u64,
+        first_sequence: Option<u64>,
         batches: &mut Vec<Batch>,
     ) -> Result<()> {
         let record = self.record_range(template.source(), output, payloads, range.clone())?;
-        let sequence = next_output_sequence(first_sequence, batches.len())?;
-        let batch = Batch::table(vec![record], template.with_sequence(sequence))?;
+        let metadata = chunk_output_metadata(template, first_sequence, batches.len())?;
+        let batch = Batch::table(vec![record], metadata)?;
         let bytes = batch.estimated_bytes()?;
         if range.len() <= output.budget.max_rows && bytes <= output.budget.max_bytes {
             batches.push(batch);
@@ -2144,6 +2265,56 @@ fn test_probe_compacts_consecutive_single_matches() {
     assert_eq!(probe.windows(MORSEL_ROWS..MORSEL_ROWS).next(), None);
     println!("{} probe spans; {cost:?}", probe.spans.len());
     assert_eq!(probe.spans.len(), 1);
+}
+
+#[cfg(test)]
+#[test]
+fn packed_output_checks_only_final_envelope_sequences() {
+    use super::run_tests::fanout_input;
+
+    let mut state = RunState::new(
+        "static",
+        JoinStateLimits::new(8, 100_000, 8).unwrap(),
+        JoinTimeBounds::from_micros(0, 0).unwrap(),
+    )
+    .unwrap();
+    let right = fanout_input(1, 100, true);
+    let schema = right.payload.schema();
+    let budget = EdgeBudget::new(2, 4096).unwrap();
+    state
+        .apply(JoinSide::Right, right, &schema, Some(&[1, 3]), 2, budget)
+        .unwrap();
+    state.restore_counters([0, 1], u64::MAX - 1, 0);
+    let mut output = RunOutputContext::new(&schema, Some(&[1, 3]), 2, budget);
+    output.pack_terminal_equi = true;
+    let morsels = |start| {
+        (start..start + 2)
+            .map(|row| {
+                let mut input = fanout_input(1, 0, false);
+                input.row_ids[0] = row;
+                input.next_row_id = row + 1;
+                input
+            })
+            .collect()
+    };
+    let prepared = state
+        .prepare_batch(JoinSide::Left, morsels(0), output, &mut || Ok(()))
+        .unwrap();
+    let envelopes = prepared.commit(&mut state).unwrap();
+    let [envelope] = envelopes[0].as_slice() else {
+        panic!("two morsels should produce one envelope")
+    };
+    assert_eq!(envelope.metadata().sequence(), u64::MAX - 1);
+    assert_eq!(envelope.table_payload().unwrap().batches().len(), 2);
+    assert_eq!(state.next_output_sequence(), u64::MAX);
+
+    let fingerprint = state.snapshot().fingerprint();
+    let error = state
+        .prepare_batch(JoinSide::Left, morsels(2), output, &mut || Ok(()))
+        .err()
+        .expect("the next output frontier cannot advance");
+    assert!(error.to_string().contains("output sequence overflowed"));
+    assert_eq!(state.snapshot().fingerprint(), fingerprint);
 }
 
 #[cfg(test)]

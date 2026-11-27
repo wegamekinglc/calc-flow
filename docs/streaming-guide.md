@@ -1591,6 +1591,11 @@ still count toward retained state. A large discarded field can fit the state
 budget even when it exceeds the output edge budget. More matches can then
 share one output sequence. Their row order stays the same.
 
+An equijoin fused with a terminal product projection can group multiple Arrow
+record batches into one output envelope. This applies when a left input
+retains no rows and each admitted row has exactly one match. The edge limits
+apply to the combined rows and bytes in the envelope.
+
 The run core's `max_state_rows_per_side` charge is the number of live retained
 rows. Its `max_state_bytes_per_side` logical charge covers retained Arrow
 payload cells, group/time/row-ID and locator columns, run owners, per-key bucket

@@ -19,6 +19,11 @@ use datafusion::arrow::datatypes::SchemaRef;
 #[cfg(test)]
 pub(super) mod tests;
 
+pub(super) enum HotOutputPacking {
+    PerMorsel,
+    TerminalEqui,
+}
+
 impl StreamJoinOperator {
     pub(crate) fn hot_projection_supported(&self) -> bool {
         super::hot::projection_kind(self).is_some()
@@ -33,7 +38,23 @@ impl StreamJoinOperator {
             Port::with_schema_ref("output", BatchKind::Table, true, Some(schema))?;
         self.output_columns = None;
         self.hot_projection = Some(projection);
+        self.hot_output_packing = HotOutputPacking::PerMorsel;
         Ok(())
+    }
+
+    pub(crate) fn set_terminal_hot_output_packing(&mut self, terminal: bool) {
+        self.hot_output_packing = if terminal
+            && self.hot_projection.is_some()
+            && super::hot::projection_kind(self) == Some(super::hot::HotKind::Equi)
+        {
+            HotOutputPacking::TerminalEqui
+        } else {
+            HotOutputPacking::PerMorsel
+        };
+    }
+
+    pub(crate) const fn terminal_hot_output_packing(&self) -> bool {
+        matches!(self.hot_output_packing, HotOutputPacking::TerminalEqui)
     }
 
     /// Installs physical columns after logical validation; admission keeps its

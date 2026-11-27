@@ -4081,6 +4081,7 @@ pub struct StreamJoinOperator {
     logical_output_schema: SchemaRef,
     output_columns: Option<Arc<[usize]>>,
     hot_projection: Option<HotProjection>,
+    hot_output_packing: HotOutputPacking,
     #[cfg(test)]
     payload_projection: Option<Arc<state_projection::Layout>>,
     #[cfg(test)]
@@ -4872,6 +4873,7 @@ mod native_dictionary;
 mod native_lookup;
 mod output_gather;
 mod output_projection;
+use output_projection::HotOutputPacking;
 mod production;
 #[cfg(test)]
 mod row_ipc;
@@ -4971,6 +4973,7 @@ impl StreamJoinOperator {
             logical_output_schema: output_schema,
             output_columns: None,
             hot_projection: None,
+            hot_output_packing: HotOutputPacking::PerMorsel,
             #[cfg(test)]
             payload_projection: None,
             #[cfg(test)]
