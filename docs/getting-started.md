@@ -71,9 +71,10 @@ uv --version
 Create a Python project and install exactly one native distribution in a clean
 environment. `calc-flow-python` is the portable default. On Linux, macOS, or
 Windows x86-64 processors with x86-64-v3 support (including AVX2),
-`calc-flow-python-v3` is an explicitly installed alternative. Both distributions
-have the same calendar version and provide the same `calc_flow` import package
-and Python API. Add only the optional array providers your application uses.
+`calc-flow-python-v3` is an alternative when a matching version is published.
+Both distributions provide the same `calc_flow` import package and Python API.
+The Python 2026.11.28 release uses the portable distribution. Add only the
+optional array providers your application uses.
 
 ### Linux and WSL
 
@@ -99,8 +100,8 @@ uv add "calc-flow-python[numpy]"
 uv add "calc-flow-python[jax]"
 ```
 
-For the v3 alternative, create a new clean project and replace the core package
-command with `uv add calc-flow-python-v3`. Use the corresponding
+When a v3 release is available for the version you need, create a clean project
+and use `uv add calc-flow-python-v3`. Use the corresponding
 `calc-flow-python-v3[numpy]`, `calc-flow-python-v3[jax]`, or
 `calc-flow-python-v3[array]` extras for optional providers.
 
@@ -191,7 +192,7 @@ use `maturin develop` for this release-style installation, and do not leave
 
 ## Verify the installation
 
-For a build from this checkout, confirm that Calc Flow reports version `2026.11.14`.
+For a build from this checkout, confirm that Calc Flow reports version `2026.11.28`.
 A published installation reports the release selected by the package manager,
 which can differ from the current source version. Confirm that the native
 extension loads from the installation environment.

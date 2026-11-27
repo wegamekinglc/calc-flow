@@ -152,7 +152,21 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("tar.gz", verification)
         self.assertIn("needs: [verify-v3-artifacts]", smoke)
         self.assertIn("python -m venv", smoke)
-        self.assertIn("needs: [verify-v3-artifacts, v3-wheel-smoke]", publication)
+        self.assertIn(
+            "needs: [prepare-python-release, verify-v3-artifacts, v3-wheel-smoke]",
+            publication,
+        )
+        preparation = workflow.split("  prepare-python-release:\n", 1)[1].split(
+            "  wheels:\n", 1
+        )[0]
+        self.assertIn(
+            "publish-v3: ${{ steps.release-options.outputs.publish-v3 }}",
+            preparation,
+        )
+        self.assertIn(
+            "needs.prepare-python-release.outputs.publish-v3 == 'true'",
+            publication,
+        )
         self.assertIn("sha256sum --check ../v3-release-manifest.txt", publication)
         self.assertIn("packages-dir: dist-v3", publication)
 
