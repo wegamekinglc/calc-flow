@@ -9,6 +9,17 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-28: Prepare the aligned `calc-flow` and `calc-flow-python` 2026.11.28
+  releases. This release publishes the portable Python distribution.
+  Python and Rust can drive streaming graphs synchronously through stream
+  sessions. Managed runners and durable sessions use v4 checkpoint
+  manifests. Existing v3 runner checkpoints require a new lineage. Project
+  documents still use format 3. The release also adds compact stream SQL
+  changelog output and improves native rolling, Join, and ASOF execution.
+  See the [streaming guide](docs/streaming-guide.md),
+  [Python release guide](docs/python-release.md), and
+  [Rust release guide](docs/rust-release.md).
+
 - 2026-11-21: Withdraw the experimental N=1 pane preaggregation and its
   physical layout 3 after direct paired measurements found 86.04% and 233.12%
   regressions. All window declarations use per-window accumulators and layouts

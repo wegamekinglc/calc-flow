@@ -22,16 +22,16 @@ CPython 3.9 or newer, using the portable default:
 uv add calc-flow-python
 ```
 
-On Linux, macOS, or Windows x86-64 processors with x86-64-v3 support, the
-explicitly installed optimized alternative is:
+The optional `calc-flow-python-v3` distribution targets Linux, macOS, and
+Windows x86-64 processors with x86-64-v3 support. When it is published for the
+version you need, install it with:
 
 ```bash
 uv add calc-flow-python-v3
 ```
 
-Both distributions have the same version and `calc_flow` import package. Install
-exactly one in a clean environment: they are mutually exclusive, and importing
-with both present raises an `ImportError`. See
+Both distributions provide the `calc_flow` import package. Install exactly one
+in a clean environment. Importing with both present raises an `ImportError`. See
 [getting started](docs/getting-started.md#install-published-packages) for CPU,
 platform, and switching details.
 

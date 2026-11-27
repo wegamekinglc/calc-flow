@@ -2,7 +2,7 @@
 
 Publish only `calc-flow` to crates.io. The Python binding remains unpublished as
 a Rust crate; PyPI releases retain their existing workflow and tag namespace.
-The package keeps the workspace's calendar version, currently `2026.11.14`, and
+The package keeps the workspace's calendar version, currently `2026.11.28`, and
 MSRV `1.94.0`. Do not independently bump the Rust version: workspace crates,
 Python metadata, and exact binding dependencies must stay aligned.
 
@@ -55,10 +55,9 @@ database may lack these patched-version ranges. No new advisory exemptions or
 codec changes are needed. Consumers should keep their resolved dependencies
 updated and audit their own lockfiles as well.
 
-The crates.io API returned 404 for `calc-flow` during preparation; that is no
-guarantee of reservation or publish permission. Recheck the name and exact
-version immediately before release. Registry ownership and credentials have not
-been tested by a dry-run.
+Check that the exact version is available for publication on
+[crates.io](https://crates.io/crates/calc-flow) immediately before pushing the
+release tag. A dry-run does not verify registry ownership or credentials.
 
 ## Publish after review
 

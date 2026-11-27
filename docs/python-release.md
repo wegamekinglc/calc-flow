@@ -2,10 +2,11 @@
 
 [Documentation](README.md) / 5.5 Releases
 
-The [Python package release workflow](../.github/workflows/release.yml) publishes
-two mutually exclusive distributions: `calc-flow-python` is the portable default,
-and `calc-flow-python-v3` is the explicit opt-in for x86-64-v3 processors. Both
-have the same calendar version and provide the same `calc_flow` import package.
+The [Python package release workflow](../.github/workflows/release.yml) builds
+two mutually exclusive distributions at the same calendar version.
+`calc-flow-python` is the portable default. `calc-flow-python-v3` is the opt-in
+for x86-64-v3 processors when published. Both provide the same `calc_flow` import
+package.
 
 Install exactly one distribution in a clean environment with
 `pip install calc-flow-python` or `pip install calc-flow-python-v3`. Do not
@@ -30,10 +31,10 @@ shape fails the scheduled gate closed.
 The workflow builds the following artifacts for every manual or tagged release
 run:
 
-| Package               | Artifacts                                      | PyPI upload |
-|-----------------------|------------------------------------------------|-------------|
-| `calc-flow-python`    | Thirty abi3 wheels and one source distribution | Tagged runs |
-| `calc-flow-python-v3` | Eighteen abi3 wheels; no source distribution   | Tagged runs |
+| Package               | Artifacts                                      | PyPI upload            |
+|-----------------------|------------------------------------------------|------------------------|
+| `calc-flow-python`    | Thirty abi3 wheels and one source distribution | Tagged runs            |
+| `calc-flow-python-v3` | Eighteen abi3 wheels; no source distribution   | Tagged runs by default |
 
 The portable distribution covers five platform targets: Linux x86-64 and
 AArch64, macOS x86-64 and ARM64, and Windows AMD64. The v3 distribution covers
@@ -96,7 +97,8 @@ The workflow:
    installed-wheel tests; v3 publication requires v3 artifact/vector verification
    and its clean-install smoke test. Each job downloads only its distribution's
    artifacts, checks them against that distribution's manifest, and publishes
-   through the `pypi` environment using Trusted Publishing.
+   through the `pypi` environment using Trusted Publishing. The annotated tag
+   can skip the v3 upload with the `Publish-Python-v3: false` trailer.
 
 Manual workflow dispatch builds and verifies all artifacts and runs the
 post-build unit tests and v3 smoke test without publishing. Benchmark, soak,
@@ -125,9 +127,17 @@ OIDC credentials with `id-token: write`. No long-lived PyPI token or
    git push origin calc-flow-python-v<version>
    ```
 
-4. Approve the `pypi` deployments when prompted and confirm PyPI lists thirty
-   portable wheels and one source distribution, plus eighteen v3 wheels and no
-   v3 source distribution, for that version.
+   To publish only the portable distribution, add a second message paragraph
+   when creating the tag.
+
+   ```bash
+   git tag -a calc-flow-python-v<version> -m "Release calc-flow-python <version>" \
+     -m "Publish-Python-v3: false"
+   ```
+
+4. Approve the `pypi` deployments when prompted. Confirm PyPI lists thirty
+   portable wheels and one source distribution. If the release includes the
+   v3 distribution, confirm it lists eighteen wheels.
 
 The publication jobs are independent; a failure in one does not roll back files
 already uploaded for the other. PyPI versions and files are immutable. If either

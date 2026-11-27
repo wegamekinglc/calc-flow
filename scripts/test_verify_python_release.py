@@ -33,7 +33,7 @@ else:
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "2026.11.14"
+VERSION = "2026.11.28"
 PLATFORMS = {
     "linux-aarch64": "manylinux_2_28_aarch64",
     "linux-x86_64": "manylinux_2_28_x86_64",
@@ -124,7 +124,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
         self._sdist()
 
     def test_versions_match_the_release_tag(self) -> None:
-        config = validate_versions(root=ROOT, tag="calc-flow-python-v2026.11.14")
+        config = validate_versions(root=ROOT, tag="calc-flow-python-v2026.11.28")
 
         self.assertEqual(config.version, VERSION)
         self.assertEqual(config.requires_python, ">=3.9")
@@ -134,7 +134,7 @@ class VerifyPythonReleaseTests(unittest.TestCase):
             "scripts.verify_python_release.ensure_version_is_new_on_pypi"
         ) as check:
             validate_versions(
-                root=ROOT, tag="calc-flow-python-v2026.11.14", check_pypi=True
+                root=ROOT, tag="calc-flow-python-v2026.11.28", check_pypi=True
             )
 
         check.assert_called_once_with("calc-flow-python", VERSION)
