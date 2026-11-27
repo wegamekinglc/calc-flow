@@ -275,6 +275,7 @@ fn test_aligned_exact_runs_match_physical_rows_in_pending_order_without_index_pr
         .collect::<Vec<_>>();
     admit(&mut state, 1, &record(&rows)).unwrap();
     admit(&mut state, 0, &record(&probes)).unwrap();
+    assert!(state.complete_alignment(probes.len()).is_none());
 
     super::state::CANDIDATE_TIME_READS.set(0);
     let selection = select(&state, None, true, probes.len());
@@ -311,6 +312,7 @@ fn test_aligned_time_ties_still_choose_the_highest_right_sequence() {
     ]);
     admit(&mut state, 0, &rows).unwrap();
     admit(&mut state, 1, &rows).unwrap();
+    assert!(state.complete_alignment(4).is_none());
     let selection = select(&state, None, true, 4);
     assert_eq!(selection.matched(), 4);
     assert_eq!(
@@ -321,6 +323,41 @@ fn test_aligned_time_ties_still_choose_the_highest_right_sequence() {
             .collect::<Vec<_>>(),
         [0, 0, 1, 3]
     );
+}
+
+#[test]
+fn test_complete_aligned_runs_reuse_projected_columns_with_the_same_working_charge() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let declaration = spec(0, 1024, 1 << 20);
+    let mut state = state(&declaration, &pool);
+    let rows = (0..64)
+        .flat_map(|time| [0, 1, 2, 3].map(|key| (key, time, time, Some("value"))))
+        .collect::<Vec<_>>();
+    let record = record(&rows);
+    admit(&mut state, 0, &record).unwrap();
+    admit(&mut state, 1, &record).unwrap();
+
+    assert!(state.complete_alignment(rows.len() - 1).is_none());
+    let alignment = state.complete_alignment(rows.len()).unwrap();
+    let selection = state.select_prefix(rows.len());
+    let schema = output_schema(&declaration);
+    let projection = [(1, 3), (0, 2)];
+    let projected = Arc::new(Schema::new(vec![
+        schema.field(7).clone(),
+        schema.field(2).clone(),
+    ]));
+    let old = state.plan_output(&selection, Some(&projection)).unwrap();
+    let new = state
+        .plan_aligned_output(alignment, Some(&projection))
+        .unwrap();
+    assert_eq!(new.charge, old.charge);
+    assert_eq!(
+        new.materialize(&projected).unwrap(),
+        old.materialize(&projected).unwrap()
+    );
+    state.commit_alignment(alignment).unwrap();
+    assert_eq!(state.finalizable_len(None, true, usize::MAX), 0);
+    assert!(state.complete_alignment(rows.len()).is_none());
 }
 
 #[test]
@@ -656,11 +693,11 @@ fn test_strict_finality_commits_only_the_closed_prefix_and_eof_drains() {
     )
     .unwrap();
 
-    assert!(select(&state, Some(10), false, 100).is_empty());
+    assert_eq!(select(&state, Some(10), false, 100).len(), 0);
     let closed = select(&state, Some(11), false, 100);
     assert_eq!(closed.len(), 1);
     state.commit(&closed).unwrap();
-    assert!(select(&state, Some(11), false, 100).is_empty());
+    assert_eq!(select(&state, Some(11), false, 100).len(), 0);
 
     let ended = select(&state, None, true, 100);
     assert_eq!(ended.len(), 1);

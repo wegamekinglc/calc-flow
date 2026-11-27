@@ -1810,13 +1810,15 @@ reservations without an implicit byte limit. Explicit operator state budgets
 and edge budgets remain separate from these execution-memory reservations;
 edge backpressure does not impose a total runtime or process memory limit.
 
-Native ASOF selection and materialization use columnar locators and prepaid
-workspace. Its finalization prefixes follow the explicit edge budget and shrink
-when workspace or output bytes require it. Warm ordered
-Float64 rolling mean and compatible dual-SMA use whole-entity CPU lanes, retaining
-each entity's arithmetic order. Small, unsupported or severely skewed
-inputs keep their serial paths. Window and cumulative SQL aggregates retain
-their ordered state updates and compensated accumulators.
+Native ASOF selection and materialization use prepaid workspace. ASOF reuses
+complete Arrow columns when all pending left rows and their right matches
+form two fresh runs in output order with unique key-time pairs. Other selections
+use columnar row locators. Finalization prefixes follow the explicit edge
+budget and shrink when workspace or output bytes require it.
+Warm ordered Float64 rolling mean and compatible dual-SMA use whole-entity CPU
+lanes, retaining each entity's arithmetic order. Small, unsupported or severely
+skewed inputs keep their serial paths. Window and cumulative SQL aggregates
+retain their ordered state updates and compensated accumulators.
 
 Finite and streaming cross-section operators can process groups column-wise
 for exact timestamp grouping without partitions. This path requires supported
