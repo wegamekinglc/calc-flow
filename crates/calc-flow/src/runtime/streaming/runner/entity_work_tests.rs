@@ -1,7 +1,7 @@
 mod lifecycle_tests;
 
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     sync::{Arc, atomic::Ordering},
 };
 
@@ -18,9 +18,11 @@ use serde_json::json;
 use super::{ContinuousJobState, ContinuousRunner};
 use crate::{
     Batch, BatchMetadata, CancellationToken, EdgeBudget, EventTime, JsonMap, PipelineBuilder,
-    Result, RollingOperator, StreamExecutionPlan, StreamJobContext, StreamRequirements,
-    UdfRegistry,
+    Result, RollingOperator, SessionWatermark, StreamExecutionPlan, StreamJobContext,
+    StreamRequirements, StreamRuntimeConfig, StreamSession, UdfRegistry,
     runtime::streaming::{
+        checkpoint::ManagedCheckpointRuntime,
+        checkpoint_runtime::CheckpointRuntimeSpec,
         job::{
             ContinuousJobSpec, M2DeliveryMode, NamedSinkBinding, NamedSourceBinding,
             OrdinarySinkBinding, OrdinaryStreamSink,
@@ -76,6 +78,10 @@ fn input() -> RecordBatch {
 }
 
 fn plan() -> StreamExecutionPlan {
+    sma_plan("price_copy", &json!({"kind": "drop", "metrics_version": 1}))
+}
+
+fn sma_plan(right_input: &str, late_policy: &serde_json::Value) -> StreamExecutionPlan {
     let leaf = |size, input| {
         json!({
             "kind": "mean", "primitive_version": 1, "input": input,
@@ -85,10 +91,10 @@ fn plan() -> StreamExecutionPlan {
     let spec = serde_json::from_value(json!({
         "configuration_version": 1, "state_layout_version": 1,
         "partition_by": ["symbol"], "event_time": "event_time", "sequence_by": ["sequence"],
-        "allowed_lateness_micros": 0, "late_policy": {"kind": "drop", "metrics_version": 1},
+        "allowed_lateness_micros": 0, "late_policy": late_policy,
         "value_policy": "stateful_numeric_v1",
         "outputs": [{"kind": "difference", "primitive_version": 1,
-            "left": leaf(5, "price"), "right": leaf(20, "price_copy"), "output": "spread"}],
+            "left": leaf(5, "price"), "right": leaf(20, right_input), "output": "spread"}],
     }))
     .unwrap();
     PipelineBuilder::new("owned-entity-lanes")
@@ -145,11 +151,11 @@ impl OrdinaryStreamSink for Sink {
     }
 }
 
-#[tokio::test]
-async fn managed_native_dual_sma_registers_two_owned_morsels() {
-    let input = input();
-    let plan = plan();
-    let records = Arc::new(Mutex::new(Vec::new()));
+fn job_spec(
+    plan: StreamExecutionPlan,
+    input: &RecordBatch,
+    records: Arc<Mutex<Vec<RecordBatch>>>,
+) -> ContinuousJobSpec {
     let source = Source(VecDeque::from([
         SourceEvent::Data {
             batch: Batch::table(vec![input.slice(0, PRELOAD)], BatchMetadata::default()).unwrap(),
@@ -163,7 +169,7 @@ async fn managed_native_dual_sma_registers_two_owned_morsels() {
         },
         SourceEvent::Watermark(EventTime::from_micros(1019)),
     ]));
-    let spec = ContinuousJobSpec {
+    ContinuousJobSpec {
         context: StreamJobContext::new(
             7,
             plan.fingerprint(),
@@ -179,12 +185,19 @@ async fn managed_native_dual_sma_registers_two_owned_morsels() {
         sinks: vec![NamedSinkBinding {
             output_id: "output".into(),
             sink_id: "sink".into(),
-            binding: OrdinarySinkBinding::new(Box::new(Sink(Arc::clone(&records)))),
+            binding: OrdinarySinkBinding::new(Box::new(Sink(records))),
         }],
         edge_budget: EdgeBudget::new(ROWS, 8 << 20).unwrap(),
         delivery_mode: M2DeliveryMode::ProcessLocalOrdered,
         static_inputs: crate::static_input::PreparedStaticInputs::default(),
-    };
+    }
+}
+
+#[tokio::test]
+async fn managed_native_dual_sma_registers_two_owned_morsels() {
+    let input = input();
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let spec = job_spec(plan(), &input, Arc::clone(&records));
     let mut runner = ContinuousRunner::new();
     let job = runner.start(spec).await.unwrap();
     job.core.morsels.set_worker_limit_for_test(2);
@@ -228,4 +241,81 @@ async fn managed_native_dual_sma_registers_two_owned_morsels() {
         launched, 2,
         "the qualified managed route must register two owned compute morsels"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn checkpointed_shared_dual_sma_uses_owned_lanes_and_matches_caller_session() {
+    let input = input();
+    let plan = || sma_plan("price", &json!({"kind": "error", "scope": "envelope"}));
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let spec = job_spec(plan(), &input, Arc::clone(&records));
+    let directory = tempfile::tempdir().unwrap();
+    let config = StreamRuntimeConfig {
+        checkpointing: true,
+        edge_budget: spec.edge_budget,
+        ..StreamRuntimeConfig::default()
+    };
+    let checkpoint = CheckpointRuntimeSpec::managed(
+        ManagedCheckpointRuntime::new(directory.path().join("runner")).unwrap(),
+        config,
+    )
+    .unwrap();
+    let mut runner = ContinuousRunner::new();
+    let start = runner.start_checkpointed(spec, checkpoint);
+    start
+        .core
+        .as_ref()
+        .unwrap()
+        .morsels
+        .set_worker_limit_for_test(2);
+    let job = start.await.unwrap();
+    let outcome = job.wait().await;
+    assert_eq!(
+        outcome.state,
+        ContinuousJobState::Completed,
+        "{:?}",
+        outcome.errors
+    );
+    let rolling = job.rolling_metrics().remove("rolling").unwrap();
+    let parallel_rows = [rolling.data, rolling.watermark, rolling.end]
+        .iter()
+        .map(|callback| callback.numeric_parallel_rows)
+        .sum::<u64>();
+    let launched = job.core.owned_lane_launches.load(Ordering::SeqCst);
+    drop(job);
+    runner.shutdown().await.unwrap();
+
+    let actual = {
+        let records = records.lock();
+        concat_batches(&records[0].schema(), records.iter()).unwrap()
+    };
+    let expected = std::thread::spawn(move || {
+        let watermarks = BTreeMap::from([("input".to_owned(), SessionWatermark::Explicit)]);
+        let mut session = StreamSession::new_with_checkpoints(
+            plan(),
+            &config,
+            watermarks,
+            crate::ManagedCheckpointRuntime::new(directory.path().join("session")).unwrap(),
+        )
+        .unwrap();
+        let mut records = Vec::new();
+        for (offset, rows, watermark) in [(0, PRELOAD, 19), (PRELOAD, ROWS, 1019)] {
+            let batch =
+                Batch::table(vec![input.slice(offset, rows)], BatchMetadata::default()).unwrap();
+            let output = session
+                .push("input", batch, Some(EventTime::from_micros(watermark)))
+                .unwrap();
+            for batch in output.batches("output") {
+                records.extend(batch.table_payload().unwrap().batches().iter().cloned());
+            }
+        }
+        assert!(session.finish().unwrap().is_empty());
+        concat_batches(&records[0].schema(), records.iter()).unwrap()
+    })
+    .join()
+    .unwrap();
+    assert_eq!(actual.num_rows(), TOTAL);
+    assert_eq!(actual, expected);
+    assert_eq!(launched, 2, "shared dual SMA should use the owned lanes");
+    assert_eq!(parallel_rows, ROWS as u64);
 }

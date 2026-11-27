@@ -19,6 +19,7 @@ struct FusedProjection {
     consumer: String,
     projection: HotProjection,
     schema: SchemaRef,
+    terminal: bool,
 }
 
 pub(super) fn push_output_projections(
@@ -86,6 +87,7 @@ fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
                 consumer: edge.target.node_id.clone(),
                 projection,
                 schema,
+                terminal: output_edges(builder, &edge.target.node_id).next().is_none(),
             })
         })
         .collect::<Vec<_>>();
@@ -99,6 +101,7 @@ fn fuse_hot_projections(builder: &mut PipelineBuilder) -> Result<()> {
             unreachable!()
         };
         join.set_hot_projection(projection.projection, Arc::clone(&projection.schema))?;
+        join.set_terminal_hot_output_packing(projection.terminal);
         let NodeOperator::Expression(expression) = &mut builder
             .nodes
             .get_mut(&projection.consumer)

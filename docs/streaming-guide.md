@@ -1591,6 +1591,11 @@ still count toward retained state. A large discarded field can fit the state
 budget even when it exceeds the output edge budget. More matches can then
 share one output sequence. Their row order stays the same.
 
+An equijoin fused with a terminal product projection can group multiple Arrow
+record batches into one output envelope. This applies when a left input
+retains no rows and each admitted row has exactly one match. The edge limits
+apply to the combined rows and bytes in the envelope.
+
 The run core's `max_state_rows_per_side` charge is the number of live retained
 rows. Its `max_state_bytes_per_side` logical charge covers retained Arrow
 payload cells, group/time/row-ID and locator columns, run owners, per-key bucket
@@ -1613,19 +1618,27 @@ does not select a separate retained-state implementation.
 
 Native layout 12 stores inner join state. Layout 13 for left semi joins and
 layout 14 for left anti joins record witnessed rows in left key buckets.
-A witness-only update rewrites the affected bucket at the next checkpoint.
-All three layouts store payload and identity pages, per-key and expiration
+A witness-only update rewrites the affected bucket page at the next checkpoint.
+All three layouts store payload and identity pages, key bucket and expiration
 indexes, shared keys, control counters and operator metadata. The managed runner
 persists `NativeCapture` pages through manifest v4. Direct
 `checkpoint()`/`restore()` uses the same encoding and validates page inventory,
 run identity and prefixes, row-ID uniqueness and frontiers, locator ordering and
 coverage, expiration order, and logical accounting before installing state.
 Compatible continuation produces identical subsequent output records and
-sequences. Capture reuses clean run identity, per-key bucket, expiration and
-shared-key pages and retires removed runs and buckets from its cache. Capture
-assembles only changes against the previous page lineage and maintains
-reservation summaries incrementally. Persistence applies those changes directly
-to the previous partition index and writes only changed payloads plus metadata.
+sequences. Capture reuses clean run identity, bucket, expiration and shared-key
+pages and retires removed runs and buckets from its cache. A side starts using
+a packed bucket page at 8 to 128 buckets and up to 16,384 stored bucket entries,
+including consumed prefixes. The page keeps its slot through sparse and empty
+states. An inner Join stores up to 65,536 expiration entries in the same
+packed page. Once a packed side exceeds an applicable upper bound, it uses
+per-key pages until the state is reset or restored. Restore supports v4
+per-key snapshots and packed snapshots with either a combined or a separate
+expiration page.
+Capture assembles only changes against the previous page lineage and
+maintains reservation summaries incrementally.
+Persistence applies those changes directly to the previous partition index and
+writes only changed payloads plus metadata.
 Direct snapshots materialize every page, and each epoch serializes a
 complete partition index.
 
@@ -1797,13 +1810,15 @@ reservations without an implicit byte limit. Explicit operator state budgets
 and edge budgets remain separate from these execution-memory reservations;
 edge backpressure does not impose a total runtime or process memory limit.
 
-Native ASOF selection and materialization use columnar locators and prepaid
-workspace. Its finalization prefixes follow the explicit edge budget and shrink
-when workspace or output bytes require it. Warm ordered
-Float64 rolling mean and compatible dual-SMA use whole-entity CPU lanes, retaining
-each entity's arithmetic order. Small, unsupported or severely skewed
-inputs keep their serial paths. Window and cumulative SQL aggregates retain
-their ordered state updates and compensated accumulators.
+Native ASOF selection and materialization use prepaid workspace. ASOF reuses
+complete Arrow columns when all pending left rows and their right matches
+form two fresh runs in output order with unique key-time pairs. Other selections
+use columnar row locators. Finalization prefixes follow the explicit edge
+budget and shrink when workspace or output bytes require it.
+Warm ordered Float64 rolling mean and compatible dual-SMA use whole-entity CPU
+lanes, retaining each entity's arithmetic order. Small, unsupported or severely
+skewed inputs keep their serial paths. Window and cumulative SQL aggregates
+retain their ordered state updates and compensated accumulators.
 
 Finite and streaming cross-section operators can process groups column-wise
 for exact timestamp grouping without partitions. This path requires supported

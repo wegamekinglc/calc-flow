@@ -1,6 +1,6 @@
 mod charge;
 
-use super::{ColumnarState, RowLocator, Selection};
+use super::{AlignedRuns, ColumnarState, RowLocator, Selection};
 use crate::Result;
 use crate::operator::asof::arrow_error;
 use datafusion::arrow::{
@@ -21,14 +21,19 @@ enum SideLayout<'a> {
 
 pub(in crate::operator::asof) struct OutputPlan<'a> {
     state: &'a ColumnarState,
-    selection: &'a Selection,
     projection: Option<&'a [(usize, usize)]>,
-    sides: [SideLayout<'a>; 2],
+    sources: OutputSources<'a>,
     pub(in crate::operator::asof) charge: usize,
+}
+
+enum OutputSources<'a> {
+    Selected(&'a Selection, [SideLayout<'a>; 2]),
+    Aligned([&'a RecordBatch; 2]),
 }
 
 enum SideSources<'a> {
     AllNull,
+    CompleteRecord(&'a RecordBatch),
     CompleteRuns(Vec<&'a RecordBatch>),
     Take {
         record: &'a RecordBatch,
@@ -39,6 +44,25 @@ enum SideSources<'a> {
         positions: Vec<(usize, usize)>,
         has_nulls: bool,
     },
+}
+
+impl<'a> OutputSources<'a> {
+    fn len(&self) -> usize {
+        match self {
+            Self::Selected(selection, _) => selection.len(),
+            Self::Aligned(records) => records[0].num_rows(),
+        }
+    }
+
+    fn sides(self, state: &'a ColumnarState) -> [SideSources<'a>; 2] {
+        match self {
+            Self::Selected(selection, [left, right]) => [
+                left.sources(state, 0, &selection.left, None),
+                right.sources(state, 1, &selection.right, Some(&selection.right_validity)),
+            ],
+            Self::Aligned(records) => records.map(SideSources::CompleteRecord),
+        }
+    }
 }
 
 fn single_run_indices(
@@ -88,12 +112,12 @@ impl OutputPlan<'_> {
     pub(in crate::operator::asof) fn materialize(self, schema: &SchemaRef) -> Result<RecordBatch> {
         let Self {
             state,
-            selection,
             projection,
-            sides,
+            sources,
             ..
         } = self;
-        if selection.is_empty() {
+        let rows = sources.len();
+        if rows == 0 {
             return Ok(RecordBatch::new_empty(schema.clone()));
         }
         let requests = projection.map_or_else(
@@ -108,17 +132,13 @@ impl OutputPlan<'_> {
         if requests.len() != schema.fields().len() {
             return Err(invalid("ASOF projection and output schema lengths differ"));
         }
-        let [left, right] = sides;
-        let sources = [
-            left.sources(state, 0, &selection.left, None),
-            right.sources(state, 1, &selection.right, Some(&selection.right_validity)),
-        ];
+        let sources = sources.sides(state);
         let columns = requests
             .iter()
             .enumerate()
             .map(|(ordinal, &(side, column))| {
                 let data_type = schema.field(ordinal).data_type();
-                state.materialize_side(side, &sources[side], column, data_type, selection.len())
+                state.materialize_side(side, &sources[side], column, data_type, rows)
             })
             .collect::<Result<Vec<_>>>()?;
         RecordBatch::try_new(schema.clone(), columns).map_err(|error| arrow_error(&error))
@@ -213,6 +233,7 @@ impl ColumnarState {
     ) -> Result<ArrayRef> {
         let (runs, positions, has_nulls) = match sources {
             SideSources::AllNull => return Ok(new_null_array(data_type, rows)),
+            SideSources::CompleteRecord(record) => return Ok(record.column(column).clone()),
             SideSources::CompleteRuns(records) => {
                 if let [record] = records.as_slice() {
                     return Ok(record.column(column).clone());

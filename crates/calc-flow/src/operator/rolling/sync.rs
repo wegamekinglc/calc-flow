@@ -6,7 +6,7 @@ use super::{
     accumulate_late_metrics, async_trait, budget, operator_error, read_buffered_rows,
 };
 use crate::{
-    OperatorStateSnapshot, UdfReference,
+    OperatorStateSnapshot, StreamJobContext, UdfReference,
     operator::{
         late_output,
         sync_operator::{Emitter, PrepareContext, SyncContext, SyncStreamOperator},
@@ -22,6 +22,12 @@ impl RollingOperator {
         self.compiled.indicator_groups.is_empty()
             && matches!(self.spec.late_policy, LatePolicySpec::Error { .. })
             && self.compiled.kernel_plan.supports_typed_transition()
+    }
+
+    pub(crate) fn prefers_owned_mean_difference_lanes(&self, job: &StreamJobContext) -> bool {
+        self.compiled.kernel_plan.is_shared_rows_mean_difference()
+            && job.morsel_owner().is_some()
+            && job.morsel_worker_count() >= 2
     }
 
     pub(crate) fn into_sync(self) -> SyncRollingOperator {

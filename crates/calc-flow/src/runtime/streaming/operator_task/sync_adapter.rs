@@ -55,7 +55,9 @@ pub(super) async fn prepare(inputs: &mut OperatorTaskInputs) -> Result<()> {
             )));
         }
         CompiledStreamOperator::Rolling(operator) => {
-            if operator.supports_sync() {
+            let use_owned_lanes = inputs.checkpoint.is_some()
+                && operator.prefers_owned_mean_difference_lanes(inputs.context.job());
+            if operator.supports_sync() && !use_owned_lanes {
                 inputs.operator = CompiledStreamOperator::SyncRolling(Box::new(make_sync_node(
                     inputs,
                     operator.into_sync(),

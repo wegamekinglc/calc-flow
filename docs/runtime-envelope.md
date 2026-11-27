@@ -231,7 +231,7 @@ lengths, and checksums during v4 persistence.
 Streaming Join writes native layout 12 for inner joins, 13 for left semi
 joins, and 14 for left anti joins. Its metadata binds the Join spec, row-ID
 and output-sequence frontiers, metrics, ended state and epoch. Native
-pages contain immutable run payload and identity columns, per-key and
+pages contain immutable run payload and identity columns, key bucket and
 expiration indexes, shared keys and control counters. The managed runner passes
 `NativeCapture` directly to manifest-v4 persistence; direct
 `checkpoint()`/`restore()` uses the same page encoding as an
@@ -261,11 +261,19 @@ limits. Physical payload and temporary work reservations separately fund actual
 storage.
 
 Join tracks run-ID, row-ID and output-sequence frontiers independently of
-watermark progress. Native capture caches clean run identity, per-key bucket,
-expiration and shared-key page images. New runs and changed identity prefixes
-rebuild only their own pages; touched buckets and expiration are tracked
-separately, retired runs and buckets drop cached pages, and unchanged key
-records are shared. Control pages are reused when their counters are unchanged.
+watermark progress. Native capture caches clean run identity, key bucket,
+expiration and shared-key page images. A side starts packing its bucket index
+into one page when it has 8 to 128 buckets and at most 16,384 stored bucket
+entries, including consumed prefixes. The page keeps its slot when the bucket
+count falls below eight, including when the side becomes empty. An inner Join
+includes up to 65,536 stored expiration entries in the same packed page.
+Once a packed side exceeds an applicable upper bound, it uses per-key pages
+until the state is reset or restored. Other layouts track expiration changes
+in a separate page.
+Restore reads v4 per-key snapshots and both packed layouts. A combined
+bucket and expiration page requires Join control version 3.
+Retired runs and buckets drop cached pages, and unchanged key records are
+shared. Control pages are reused when their counters are unchanged.
 Capture assembles only upsert/remove changes against the previous page lineage
 and incrementally maintains page-count and reservation summaries. Persistence
 applies those changes directly to the previous partition index and writes only

@@ -62,7 +62,7 @@ impl RunCore {
                 DeferredLeft::Disabled
             },
             keys,
-            pages: NativePageCache::default(),
+            pages: NativePageCache::new(operator.spec.join_type == super::StreamJoinType::Inner),
             key_page: None,
             #[cfg(test)]
             key_reuses: 0,
@@ -299,6 +299,11 @@ impl RunCore {
         (self.native_reuse_counts(), self.native_change_count())
     }
 
+    #[cfg(test)]
+    pub(super) fn write_separate_packed_pages_for_test(&mut self) {
+        self.pages = NativePageCache::new(false);
+    }
+
     pub(super) fn restore_native(
         operator: &mut StreamJoinOperator,
         metadata: &JoinCheckpointMetadata,
@@ -307,6 +312,7 @@ impl RunCore {
         let mut core = Self::new(operator)?;
         core.state =
             RunState::restore_native(&operator.name, &metadata.spec, segments, &mut core.keys)?;
+        core.pages.remember_restored_packing(segments);
         core.deferred_left = DeferredLeft::Disabled;
         Ok(core)
     }
@@ -834,6 +840,7 @@ fn run_output_context(
     );
     output.product = operator.hot_projection;
     output.join_type = operator.spec.join_type;
+    output.pack_terminal_equi = operator.terminal_hot_output_packing();
     output
 }
 

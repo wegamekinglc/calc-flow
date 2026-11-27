@@ -42,9 +42,12 @@ fn test_capability_parallel_shared_rows_preserve_rebuilds_and_nan_policy() {
         };
     }
     plan.shared_rows = plan.shared_rows_shape();
+    SHARED_ROW_SAMPLE_VISITS.set(0);
     assert_parity(&plan, &batch);
+    assert_eq!(SHARED_ROW_SAMPLE_VISITS.replace(0), batch.num_rows());
     let finite = input(64_000, 64, false);
     assert_parity(&plan, &finite);
+    assert_eq!(SHARED_ROW_SAMPLE_VISITS.replace(0), finite.num_rows());
 }
 
 #[test]

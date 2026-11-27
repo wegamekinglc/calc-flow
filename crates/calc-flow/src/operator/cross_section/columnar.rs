@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::{cmp::Ordering, ops::Range, sync::Arc};
 
 use datafusion::{
     arrow::{
@@ -74,20 +74,36 @@ impl<'a> Keys<'a> {
     fn at(&self, index: usize) -> (i64, Option<&'a str>, u64) {
         (
             self.times.value(index),
-            self.entities
-                .is_valid(index)
-                .then(|| self.entities.value(index)),
+            self.entity(index),
             self.sequences.value(index),
         )
     }
 
+    fn entity(&self, index: usize) -> Option<&'a str> {
+        self.entities
+            .is_valid(index)
+            .then(|| self.entities.value(index))
+    }
+
     fn is_canonical(&self, watermark: Option<EventTime>) -> bool {
-        let len = self.times.len();
-        len != 0
+        let times = self.times.values();
+        let sequences = self.sequences.values();
+        !times.is_empty()
             && self.times.null_count() == 0
             && self.sequences.null_count() == 0
-            && watermark.is_none_or(|value| self.times.value(0) > value.as_micros())
-            && (1..len).all(|index| self.at(index - 1) < self.at(index))
+            && watermark.is_none_or(|value| times[0] > value.as_micros())
+            && times.windows(2).enumerate().all(|(left, pair)| {
+                let right = left + 1;
+                match pair[0].cmp(&pair[1]) {
+                    Ordering::Less => true,
+                    Ordering::Equal => self
+                        .entity(left)
+                        .cmp(&self.entity(right))
+                        .then_with(|| sequences[left].cmp(&sequences[right]))
+                        .is_lt(),
+                    Ordering::Greater => false,
+                }
+            })
     }
 }
 
@@ -217,12 +233,28 @@ fn float_column(input: &RecordBatch, index: usize) -> &Float64Array {
 
 fn mean_column(input: &RecordBatch, times: &[i64], index: usize, min_samples: u64) -> ArrayRef {
     let values = float_column(input, index);
-    let mut means = Float64Builder::with_capacity(input.num_rows());
+    let means = match values.nulls() {
+        Some(validity) => grouped_means(values.values(), times, min_samples, |row| {
+            validity.is_valid(row)
+        }),
+        None => grouped_means(values.values(), times, min_samples, |_| true),
+    };
+    Arc::new(means)
+}
+
+fn grouped_means(
+    values: &[f64],
+    times: &[i64],
+    min_samples: u64,
+    is_valid: impl Fn(usize) -> bool,
+) -> Float64Array {
+    let mut means = Float64Builder::with_capacity(times.len());
     for group in groups(times) {
-        let slice = values.slice(group.start, group.len());
         let mut accumulator = StatisticAccumulator::default();
-        for value in slice.iter().flatten().filter(|value| !value.is_nan()) {
-            accumulator.add(value);
+        for (offset, &value) in values[group.clone()].iter().enumerate() {
+            if is_valid(group.start + offset) && !value.is_nan() {
+                accumulator.add(value);
+            }
         }
         if accumulator.count >= min_samples {
             means.append_value_n(accumulator.classified_mean(), group.len());
@@ -230,7 +262,7 @@ fn mean_column(input: &RecordBatch, times: &[i64], index: usize, min_samples: u6
             means.append_nulls(group.len());
         }
     }
-    Arc::new(means.finish())
+    means.finish()
 }
 
 fn grouped_columns(

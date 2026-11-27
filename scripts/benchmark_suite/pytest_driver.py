@@ -9,9 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_support():
+def load_shared_module(name: str):
     spec = importlib.util.spec_from_file_location(
-        "benchmarks.support", ROOT / "benchmarks/support.py"
+        f"benchmarks.{name}", ROOT / "benchmarks" / f"{name}.py"
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -28,7 +28,10 @@ def main() -> int:
     from scripts.benchmark_suite import pytest_plugin
 
     sys.path.pop(0)
-    load_support()
+    # Checkout-owned tests can import the common catalog through the scripts package.
+    # Some releases predate the report inventory used by that catalog.
+    load_shared_module("report_operator_cases")
+    load_shared_module("support")
     import pytest
 
     return pytest.main(sys.argv[1:], plugins=[pytest_plugin])

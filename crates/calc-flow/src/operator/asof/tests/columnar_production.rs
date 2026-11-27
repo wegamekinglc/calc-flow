@@ -59,7 +59,19 @@ fn right_sequences(messages: &[crate::StreamMessage]) -> Vec<Option<i64>> {
 }
 
 #[tokio::test]
-async fn complete_run_output_verifies_locators_once_across_budget_and_gather() {
+async fn complete_aligned_output_checks_only_the_pending_run_locators() {
+    struct RejectOutput;
+
+    #[async_trait]
+    impl StreamCollector for RejectOutput {
+        async fn emit(&mut self, _port: &str, batch: Batch) -> Result<()> {
+            assert_eq!(batch.num_rows(), 32);
+            Err(CalcFlowError::Cancelled {
+                run_id: "ASOF output test".into(),
+            })
+        }
+    }
+
     let (mut operator, _) = fixture();
     let schema = operator.schemas[0].clone();
     let job = StreamJobContext::new(1, "asof", JsonMap::new(), None, CancellationToken::new());
@@ -77,14 +89,27 @@ async fn complete_run_output_verifies_locators_once_across_budget_and_gather() {
             .await
             .unwrap();
     }
+    let status = operator.status();
+    let sequence = operator.next_output_sequence;
+    assert!(matches!(
+        operator
+            .finalize(Some(32), false, &context, &mut RejectOutput)
+            .await,
+        Err(CalcFlowError::Cancelled { .. })
+    ));
+    assert_eq!(operator.status(), status);
+    assert_eq!(operator.next_output_sequence, sequence);
+    assert_eq!(operator.state.finalizable_len(None, true, usize::MAX), 32);
     columnar::VERIFIED_RUN_ROWS.set(0);
+    let _ = columnar::take_selections();
     operator.on_end(&context, &mut output).await.unwrap();
     let messages = output.drain("output");
     assert_eq!(
         right_sequences(&messages),
         (0..32).map(Some).collect::<Vec<_>>()
     );
-    assert_eq!(columnar::VERIFIED_RUN_ROWS.get(), 64);
+    assert_eq!(columnar::VERIFIED_RUN_ROWS.get(), 32);
+    assert_eq!(columnar::take_selections(), 0);
 }
 
 #[tokio::test]

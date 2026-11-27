@@ -94,7 +94,7 @@ class PytestHarnessTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("benchmark_support_sha256", rows[name]["metadata"])
 
     def test_common_support_replaces_old_recorder_before_collection(self):
-        from scripts.benchmark_suite.pytest_driver import load_support
+        from scripts.benchmark_suite.pytest_driver import load_shared_module
 
         old = ModuleType("benchmarks.support")
         old.record_benchmark = lambda benchmark, **kwargs: setattr(
@@ -105,7 +105,7 @@ class PytestHarnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("machine_fingerprint", fixture.extra_info)
         modules = _dependencies()
         with patch.dict(sys.modules, {"benchmarks.support": old, **modules}):
-            support = load_support()
+            support = load_shared_module("support")
             self.assertIs(sys.modules["benchmarks.support"], support)
             self.assertEqual(
                 Path(support.__file__).resolve(),
@@ -161,8 +161,12 @@ def _write_old_checkout(source: Path) -> None:
     (source / "benchmarks/test_record.py").write_text(
         "import pytest\n"
         "from benchmarks.support import record_benchmark\n"
+        "from scripts.benchmark_suite.catalog import get_shard\n"
+        "from scripts.benchmark_suite.report import comparison\n"
         "@pytest.mark.benchmark(min_rounds=1, max_time=0.001)\n"
         "def test_record(benchmark):\n"
+        "    assert get_shard('report-operators-64000')['rows'] == 64000\n"
+        "    assert callable(comparison)\n"
         "    record_benchmark(benchmark, scenario='case', "
         "input_rows=1, output_rows=1)\n"
         "    assert benchmark(lambda: 1) == 1\n"

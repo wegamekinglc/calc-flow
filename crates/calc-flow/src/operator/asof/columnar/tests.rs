@@ -1,7 +1,7 @@
 use super::{ColumnarState, Selection};
 use crate::operator::asof::{
     AsofJoinSide, AsofStateLimits, StreamAsofJoinSpec,
-    admission::{AcceptedRows, PreparedRecord, ValidatedInput},
+    admission::{AcceptedRows, PreparedRecord, ValidatedInput, times as input_times},
     schema,
 };
 use crate::{Result, StreamingFailureReason};
@@ -275,6 +275,7 @@ fn test_aligned_exact_runs_match_physical_rows_in_pending_order_without_index_pr
         .collect::<Vec<_>>();
     admit(&mut state, 1, &record(&rows)).unwrap();
     admit(&mut state, 0, &record(&probes)).unwrap();
+    assert!(state.complete_alignment(probes.len()).is_none());
 
     super::state::CANDIDATE_TIME_READS.set(0);
     let selection = select(&state, None, true, probes.len());
@@ -311,6 +312,7 @@ fn test_aligned_time_ties_still_choose_the_highest_right_sequence() {
     ]);
     admit(&mut state, 0, &rows).unwrap();
     admit(&mut state, 1, &rows).unwrap();
+    assert!(state.complete_alignment(4).is_none());
     let selection = select(&state, None, true, 4);
     assert_eq!(selection.matched(), 4);
     assert_eq!(
@@ -321,6 +323,41 @@ fn test_aligned_time_ties_still_choose_the_highest_right_sequence() {
             .collect::<Vec<_>>(),
         [0, 0, 1, 3]
     );
+}
+
+#[test]
+fn test_complete_aligned_runs_reuse_projected_columns_with_the_same_working_charge() {
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let declaration = spec(0, 1024, 1 << 20);
+    let mut state = state(&declaration, &pool);
+    let rows = (0..64)
+        .flat_map(|time| [0, 1, 2, 3].map(|key| (key, time, time, Some("value"))))
+        .collect::<Vec<_>>();
+    let record = record(&rows);
+    admit(&mut state, 0, &record).unwrap();
+    admit(&mut state, 1, &record).unwrap();
+
+    assert!(state.complete_alignment(rows.len() - 1).is_none());
+    let alignment = state.complete_alignment(rows.len()).unwrap();
+    let selection = state.select_prefix(rows.len());
+    let schema = output_schema(&declaration);
+    let projection = [(1, 3), (0, 2)];
+    let projected = Arc::new(Schema::new(vec![
+        schema.field(7).clone(),
+        schema.field(2).clone(),
+    ]));
+    let old = state.plan_output(&selection, Some(&projection)).unwrap();
+    let new = state
+        .plan_aligned_output(alignment, Some(&projection))
+        .unwrap();
+    assert_eq!(new.charge, old.charge);
+    assert_eq!(
+        new.materialize(&projected).unwrap(),
+        old.materialize(&projected).unwrap()
+    );
+    state.commit_alignment(alignment).unwrap();
+    assert_eq!(state.finalizable_len(None, true, usize::MAX), 0);
+    assert!(state.complete_alignment(rows.len()).is_none());
 }
 
 #[test]
@@ -656,11 +693,11 @@ fn test_strict_finality_commits_only_the_closed_prefix_and_eof_drains() {
     )
     .unwrap();
 
-    assert!(select(&state, Some(10), false, 100).is_empty());
+    assert_eq!(select(&state, Some(10), false, 100).len(), 0);
     let closed = select(&state, Some(11), false, 100);
     assert_eq!(closed.len(), 1);
     state.commit(&closed).unwrap();
-    assert!(select(&state, Some(11), false, 100).is_empty());
+    assert_eq!(select(&state, Some(11), false, 100).len(), 0);
 
     let ended = select(&state, None, true, 100);
     assert_eq!(ended.len(), 1);
@@ -1043,6 +1080,10 @@ fn test_late_drop_excludes_rows_before_key_birth_and_retains_watermark_equality(
         .unwrap();
     assert_eq!(state.right_payload_rows(), 1);
     assert_eq!(state.keys.len(), 1);
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    let retained_times = input_times(run.payload_record().unwrap(), declaration.right()).values();
+    assert_eq!(run.times(), &[5]);
+    assert_eq!(run.times().as_ptr(), retained_times.as_ptr());
     admit(&mut state, 0, &record(&[(1, 5, 1, Some("left"))])).unwrap();
     let selection = select(&state, Some(6), false, 10);
     assert_eq!(selection.matched(), 1);
@@ -1775,8 +1816,51 @@ fn test_sliced_payload_does_not_retain_large_backing_allocation() {
         (1, 100, 2, Some("z")),
         (1, 101, 3, Some(&"x".repeat(4 * 1024 * 1024))),
     ]);
-    admit(&mut state, 1, &input.slice(1, 1)).unwrap();
+    let input = input.slice(1, 1);
+    admit(&mut state, 1, &input).unwrap();
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    let retained_times = input_times(run.payload_record().unwrap(), declaration.right()).values();
+    let source_times = input_times(&input, declaration.right()).values();
+    assert_ne!(retained_times.as_ptr(), source_times.as_ptr());
+    assert_eq!(retained_times.inner().capacity(), size_of::<i64>());
+    assert_eq!(run.times().as_ptr(), retained_times.as_ptr());
     assert!(state.persistent_bytes() < 16_384);
+}
+
+#[test]
+fn test_oversized_assembled_timestamp_buffer_is_not_shared_for_identity() {
+    use datafusion::execution::memory_pool::MemoryConsumer;
+
+    let declaration = spec(0, 100, 1 << 20);
+    let pool: Arc<dyn MemoryPool> = Arc::new(GreedyMemoryPool::new(1 << 20));
+    let mut state = state(&declaration, &pool);
+    let mut times = Vec::with_capacity(1_024);
+    times.push(5);
+    let input = record(&[(1, 5, 1, Some("payload"))]);
+    let mut columns = input.columns().to_vec();
+    columns[1] = Arc::new(TimestampMicrosecondArray::new(times.into(), None).with_timezone("UTC"));
+    let assembled = RecordBatch::try_new(input.schema(), columns).unwrap();
+    let times = input_times(&assembled, declaration.right()).values();
+    assert!(times.inner().capacity() > times.inner().len());
+    let payload_times = times.as_ptr();
+
+    state
+        .admit(
+            PreparedRecord::Assembled {
+                record: assembled,
+                workspace: MemoryConsumer::new("assembled ASOF test").register(&pool),
+            },
+            ValidatedInput {
+                index: 1,
+                watermark: None,
+                accepted: 1,
+            },
+            &mut || Ok(()),
+        )
+        .unwrap();
+    let (_, run) = state.right_runs.first_key_value().unwrap();
+    assert_eq!(run.times(), &[5]);
+    assert_ne!(run.times().as_ptr(), payload_times);
 }
 
 #[test]

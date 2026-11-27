@@ -170,6 +170,38 @@ impl RowsTape {
             .copied()
     }
 
+    pub(super) fn apply_row<E>(
+        owner: &mut Arc<Self>,
+        sample: Option<f64>,
+        update: impl FnOnce(&Self) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        let tape = Arc::get_mut(owner).expect("shared rows were made private before the row loop");
+        debug_assert!(tape.rows.len() < tape.rows.capacity());
+        tape.rows.push_back(sample);
+        update(tape)?;
+        if tape.rows.len() > tape.window {
+            tape.rows.pop_front();
+        }
+        Ok(())
+    }
+
+    pub(super) fn update_group(
+        &self,
+        group: &mut TypedWindowState,
+        sample: Option<f64>,
+        node: &str,
+    ) -> Result<()> {
+        let TypedWindowState::Numeric(state) = group else {
+            return Err(internal_error(
+                "typed rolling group state does not match its input plan",
+            ));
+        };
+        let TypedFrame::Rows(width) = state.samples.frame else {
+            return Err(internal_error("shared numeric group is not a Rows frame"));
+        };
+        update_shared_numeric(state, self, width, sample, node)
+    }
+
     pub(super) fn bytes(&self) -> usize {
         self.credit.size()
     }
@@ -294,46 +326,25 @@ impl TypedEntityState {
         }
     }
 
-    pub(super) fn push_shared_row(&mut self, sample: Option<f64>) {
-        let tape = self
-            .shared_rows
-            .as_mut()
-            .and_then(Arc::get_mut)
-            .expect("shared rows were made private before the row loop");
-        debug_assert!(tape.rows.len() < tape.rows.capacity());
-        tape.rows.push_back(sample);
-    }
-
-    pub(super) fn trim_shared_rows(&mut self) {
-        let tape = self
-            .shared_rows
-            .as_mut()
-            .and_then(Arc::get_mut)
-            .expect("shared rows were made private before the row loop");
-        if tape.rows.len() > tape.window {
-            tape.rows.pop_front();
-        }
-    }
-
-    pub(super) fn update_shared_group(
+    pub(super) fn update_shared_sample(
         &mut self,
-        ordinal: usize,
         sample: Option<f64>,
+        group_count: usize,
         node: &str,
     ) -> Result<()> {
         let tape = self
             .shared_rows
-            .as_ref()
-            .ok_or_else(|| internal_error("shared numeric rows are missing"))?;
-        let Some(TypedWindowState::Numeric(state)) = self.groups.get_mut(ordinal) else {
-            return Err(internal_error(
-                "typed rolling group state does not match its input plan",
-            ));
-        };
-        let TypedFrame::Rows(width) = state.samples.frame else {
-            return Err(internal_error("shared numeric group is not a Rows frame"));
-        };
-        update_shared_numeric(state, tape, width, sample, node)
+            .as_mut()
+            .expect("shared numeric rows are present");
+        RowsTape::apply_row(tape, sample, |tape| {
+            for ordinal in 0..group_count {
+                let group = self.groups.get_mut(ordinal).ok_or_else(|| {
+                    internal_error("typed rolling group state does not match its input plan")
+                })?;
+                tape.update_group(group, sample, node)?;
+            }
+            Ok(())
+        })
     }
 }
 
@@ -350,12 +361,7 @@ pub(super) fn update_shared_groups(
         ));
     };
     let sample = valid_float64(first, row, nan_as_value);
-    entity.push_shared_row(sample);
-    for ordinal in 0..entity.groups.len().min(inputs.len()) {
-        entity.update_shared_group(ordinal, sample, node)?;
-    }
-    entity.trim_shared_rows();
-    Ok(())
+    entity.update_shared_sample(sample, entity.groups.len().min(inputs.len()), node)
 }
 
 fn update_shared_numeric(
@@ -423,11 +429,7 @@ mod tests {
 
     fn advance(entity: &mut TypedEntityState, value: Option<f64>) {
         entity.transition_count += 1;
-        entity.push_shared_row(value);
-        for ordinal in 0..2 {
-            entity.update_shared_group(ordinal, value, "r").unwrap();
-        }
-        entity.trim_shared_rows();
+        entity.update_shared_sample(value, 2, "r").unwrap();
     }
 
     #[test]

@@ -987,6 +987,8 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
         mark_phase("rows-collected")
         table = pa.concat_tables((*prefix_tables, *resumed_sink.tables))
         seconds = (time.perf_counter_ns() - started) / 1e9
+        # Capture before EOF can advance the terminal checkpoint.
+        resumed_epoch = resumed.status()["checkpoint"]["last_completed_epoch"]
         observation = (
             await asyncio.wait_for(_interval_observation(resumed, streams), 600)
             if case["scenario"] == "interval_join"
@@ -1008,6 +1010,7 @@ async def _run_checkpoint_stream(plan_factory, streams, root, expected_rows, cas
             {
                 **dimensions,
                 "nonterminal_epochs": [epoch],
+                "resumed_last_completed_epoch": resumed_epoch,
                 "rows_before_checkpoint": prefix_rows,
                 "recovery": "verified",
                 "interval_join": observation,

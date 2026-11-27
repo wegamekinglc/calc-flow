@@ -1,9 +1,13 @@
-use super::{ColumnarState, OutputPlan, RowLocator, Selection, SideLayout, invalid};
+use super::{
+    AlignedRuns, ColumnarState, OutputPlan, OutputSources, RowLocator, Selection, SideLayout,
+    invalid,
+};
 use crate::Result;
 use crate::operator::asof::columnar::run::{
     logical_array_indices_charge, logical_full_selection_charge, logical_null_charge,
 };
 use datafusion::arrow::buffer::BooleanBuffer;
+use datafusion::arrow::record_batch::RecordBatch;
 use std::collections::BTreeMap;
 
 impl ColumnarState {
@@ -12,9 +16,7 @@ impl ColumnarState {
         selection: &'a Selection,
         projection: Option<&'a [(usize, usize)]>,
     ) -> Result<OutputPlan<'a>> {
-        if projection.is_some_and(|fields| fields.iter().any(|&(side, _)| side > 1)) {
-            return Err(invalid("ASOF projection side is invalid"));
-        }
+        validate_projection(projection)?;
         let charge = |side| match projection {
             Some(fields) => self.side_output_charge(
                 selection,
@@ -29,11 +31,50 @@ impl ColumnarState {
         let (right_charge, right) = charge(1)?;
         Ok(OutputPlan {
             state: self,
-            selection,
             projection,
-            sides: [left, right],
+            sources: OutputSources::Selected(selection, [left, right]),
             charge: add_charge(left_charge, right_charge)?,
         })
+    }
+
+    pub(in crate::operator::asof) fn plan_aligned_output<'a>(
+        &'a self,
+        runs: AlignedRuns,
+        projection: Option<&'a [(usize, usize)]>,
+    ) -> Result<OutputPlan<'a>> {
+        validate_projection(projection)?;
+        let record = |side, id| {
+            self.run(side, id)
+                .payload_record()
+                .expect("aligned ASOF run has a complete live payload")
+        };
+        let [left, right] = [record(0, runs.left), record(1, runs.right)];
+        let charge = |side, record: &RecordBatch| match projection {
+            Some(fields) => self.aligned_side_charge(
+                side,
+                record,
+                fields
+                    .iter()
+                    .filter_map(move |&(source, column)| (source == side).then_some(column)),
+            ),
+            None => self.aligned_side_charge(side, record, 0..self.column_count(side)),
+        };
+        Ok(OutputPlan {
+            state: self,
+            projection,
+            sources: OutputSources::Aligned([left, right]),
+            charge: add_charge(charge(0, left)?, charge(1, right)?)?,
+        })
+    }
+
+    fn aligned_side_charge(
+        &self,
+        side: usize,
+        record: &RecordBatch,
+        columns: impl Iterator<Item = usize> + Clone,
+    ) -> Result<usize> {
+        let charge = self.column_overhead(side, columns.clone(), record.num_rows(), 0)?;
+        complete_record_charge(record, columns, charge)
     }
 
     fn side_output_charge(
@@ -56,10 +97,7 @@ impl ColumnarState {
             && let Some(records) = self.complete_runs(side, locators)
         {
             let charge = records.iter().try_fold(total, |charge, record| {
-                columns
-                    .clone()
-                    .map(|column| logical_full_selection_charge(record.column(column)))
-                    .try_fold(charge, add_charge)
+                complete_record_charge(record, columns.clone(), charge)
             })?;
             return Ok((charge, SideLayout::Complete(records)));
         }
@@ -111,6 +149,23 @@ impl ColumnarState {
                 .ok_or_else(|| invalid("ASOF output null-data charge overflowed"))
         })
     }
+}
+
+fn validate_projection(projection: Option<&[(usize, usize)]>) -> Result<()> {
+    if projection.is_some_and(|fields| fields.iter().any(|&(side, _)| side > 1)) {
+        return Err(invalid("ASOF projection side is invalid"));
+    }
+    Ok(())
+}
+
+fn complete_record_charge(
+    record: &RecordBatch,
+    columns: impl Iterator<Item = usize>,
+    charge: usize,
+) -> Result<usize> {
+    columns
+        .map(|column| logical_full_selection_charge(record.column(column)))
+        .try_fold(charge, add_charge)
 }
 
 fn selected_rows(

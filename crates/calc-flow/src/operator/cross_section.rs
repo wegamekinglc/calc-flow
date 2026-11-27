@@ -1479,22 +1479,22 @@ impl CrossSectionOperator {
         if closed == 0 {
             return Ok(true);
         }
-        let (pending, charge) = if closed == input.num_rows() {
-            (None, StateCharge::default())
-        } else {
-            let Some(tail) =
-                columnar::compact_last_group(input, closed, &self.compiled, context.operator_id())?
-            else {
-                return Ok(false);
-            };
-            let charge =
-                bounded_pending_columnar_charge(&tail, &self.compiled, context.operator_id())?
-                    .expect("a compacted columnar group has bounded state");
-            (Some(tail), charge)
+        if closed == input.num_rows() {
+            self.emit_columnar(input, context, output).await?;
+            self.state.pending_columnar = None;
+            self.state.charge = StateCharge::default();
+            return Ok(true);
+        }
+        let Some(tail) =
+            columnar::compact_last_group(input, closed, &self.compiled, context.operator_id())?
+        else {
+            return Ok(false);
         };
+        let charge = bounded_pending_columnar_charge(&tail, &self.compiled, context.operator_id())?
+            .expect("a compacted columnar group has bounded state");
         self.emit_columnar(&input.slice(0, closed), context, output)
             .await?;
-        self.state.pending_columnar = pending;
+        self.state.pending_columnar = Some(tail);
         self.state.charge = charge;
         Ok(true)
     }
@@ -4185,13 +4185,9 @@ mod tests {
         let job = mean_job();
         let context = StreamOperatorContext::new(&job, "features", None);
         let mut output = crate::EdgeCollector::new(operator.output_ports().to_vec());
+        let input = mean_input_record();
         operator
-            .process_data(
-                "input",
-                mean_batch(mean_input_record()),
-                &context,
-                &mut output,
-            )
+            .process_data("input", mean_batch(input.clone()), &context, &mut output)
             .await
             .unwrap();
         assert!(operator.state.pending_columnar.is_some());
@@ -4200,7 +4196,19 @@ mod tests {
             .on_watermark(EventTime::from_micros(2), &context, &mut output)
             .await
             .unwrap();
-        assert_mean_output(&mut output, &[2.0, 2.0, 5.0, 5.0]);
+        let emitted = output.drain("output");
+        assert_eq!(emitted.len(), 1);
+        let record = &emitted[0]
+            .as_data()
+            .unwrap()
+            .table_payload()
+            .unwrap()
+            .batches()[0];
+        assert_eq!(
+            record.column(5).as_ref(),
+            &Float64Array::from(vec![2.0, 2.0, 5.0, 5.0])
+        );
+        assert!(Arc::ptr_eq(record.column(1), input.column(1)));
         assert!(operator.state.pending_columnar.is_none());
     }
 

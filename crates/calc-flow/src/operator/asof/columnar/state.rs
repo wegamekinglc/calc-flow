@@ -1,4 +1,6 @@
-use super::{RowLocator, Selection, compact::compact_accepted, run::Run, run::SequenceColumn};
+use super::{
+    AlignedRuns, RowLocator, Selection, compact::compact_accepted, run::Run, run::SequenceColumn,
+};
 use crate::operator::asof::{AsofJoinSide, StreamAsofJoinSpec, admission, arrow_error, reason};
 use crate::operator::keyed::{GroupId, KeySchema, KeyStore, MORSEL_ROWS, VARIABLE_STEP_BYTES};
 use crate::{Result, StreamingFailureReason};
@@ -748,7 +750,6 @@ impl ColumnarState {
             })
             .collect::<Result<Vec<ArrayRef>>>()?;
         let groups = self.route_run_keys(&key_arrays, record.num_rows(), check)?;
-        let times = admission::times(&record, declaration).values().to_vec();
         let run_id = self.next_run;
         let next_run = self.next_run.checked_add(1).ok_or_else(|| {
             reason(
@@ -757,7 +758,7 @@ impl ColumnarState {
                 "ASOF run identifier space is exhausted",
             )
         })?;
-        let run = Run::new(record, groups, times, sequences);
+        let run = Run::new(record, groups, declaration, sequences);
         Ok(PreparedRun {
             run,
             workspace,
@@ -1376,20 +1377,51 @@ impl ColumnarState {
             .saturating_add(4096)
     }
 
-    fn aligned_right_run(&self, pending: &[RowLocator]) -> Option<u64> {
+    fn alignment_candidates(&self, count: usize) -> Option<([u64; 2], [&Run; 2])> {
         #[cfg(feature = "benchmark-internals")]
         if self.legacy_latest_lookup {
             return None;
         }
-        if pending.len() != self.right_payloads
-            || self.left_runs.len() != 1
-            || self.right_runs.len() != 1
+        if count != self.right_payloads || self.left_runs.len() != 1 || self.right_runs.len() != 1 {
+            return None;
+        }
+        let (&left, left_run) = self.left_runs.first_key_value()?;
+        let (&right, right_run) = self.right_runs.first_key_value()?;
+        Some(([left, right], [left_run, right_run]))
+    }
+
+    fn aligned_right_run(&self, pending: &[RowLocator]) -> Option<u64> {
+        let ([_, right], [left_run, right_run]) = self.alignment_candidates(pending.len())?;
+        left_run
+            .has_unique_aligned_times(right_run, pending)
+            .then_some(right)
+    }
+
+    pub(in crate::operator::asof) fn complete_alignment(
+        &self,
+        count: usize,
+    ) -> Option<AlignedRuns> {
+        let pending = self.pending.rows();
+        if pending.len() != count {
+            return None;
+        }
+        let ([left, right], [left_run, right_run]) = self.alignment_candidates(count)?;
+        if left.min(right) < self.first_fresh_run
+            || !pending
+                .iter()
+                .enumerate()
+                .all(|(row, locator)| locator.run == left && locator.row as usize == row)
+            || !left_run.has_unique_aligned_times(right_run, pending)
         {
             return None;
         }
-        let (_, left) = self.left_runs.first_key_value()?;
-        let (&id, right) = self.right_runs.first_key_value()?;
-        left.has_unique_aligned_times(right, pending).then_some(id)
+        #[cfg(test)]
+        super::VERIFIED_RUN_ROWS.set(super::VERIFIED_RUN_ROWS.get() + count);
+        Some(AlignedRuns {
+            left,
+            right,
+            rows: count,
+        })
     }
 
     /// Builds a selection for an already verified pending prefix.
@@ -1617,20 +1649,43 @@ impl ColumnarState {
             ));
         }
         if selection.len() == self.pending.len() {
-            for run in std::mem::take(&mut self.left_runs).into_values() {
-                self.run_bytes -= run.charge();
-            }
-            for column in &mut self.left_by_key {
-                self.index_bytes -= column.capacity_bytes();
-                *column = LocatorColumn::default();
-            }
+            self.retire_all_left();
         } else {
             self.retire_left_rows(&selection.left);
         }
-        let (before, after) = self.pending.drop_prefix(selection.len());
+        self.finish_left_commit(selection.len());
+        Ok(())
+    }
+
+    pub(in crate::operator::asof) fn commit_alignment(&mut self, runs: AlignedRuns) -> Result<()> {
+        if self.pending.len() != runs.rows
+            || self.pending.first().is_none_or(|row| row.run != runs.left)
+        {
+            return Err(reason(
+                &self.name,
+                StreamingFailureReason::AsofProtocolError,
+                "ASOF output commit is not the selected pending prefix",
+            ));
+        }
+        self.retire_all_left();
+        self.finish_left_commit(runs.rows);
+        Ok(())
+    }
+
+    fn finish_left_commit(&mut self, count: usize) {
+        let (before, after) = self.pending.drop_prefix(count);
         self.adjust_index(before, after);
         self.finish_retirement();
-        Ok(())
+    }
+
+    fn retire_all_left(&mut self) {
+        for run in std::mem::take(&mut self.left_runs).into_values() {
+            self.run_bytes -= run.charge();
+        }
+        for column in &mut self.left_by_key {
+            self.index_bytes -= column.capacity_bytes();
+            *column = LocatorColumn::default();
+        }
     }
 
     fn retire_left_rows(&mut self, left: &[RowLocator]) {

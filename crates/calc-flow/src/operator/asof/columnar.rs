@@ -6,6 +6,7 @@ mod materialize;
 mod run;
 mod state;
 
+pub(super) use materialize::OutputPlan;
 use run::RowLocator;
 pub(super) use run::{logical_filtered_record_charge, logical_record_selection_charge};
 #[cfg(test)]
@@ -27,6 +28,13 @@ pub(super) struct Selection {
     pub(super) right_validity: BooleanBuffer,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct AlignedRuns {
+    left: u64,
+    right: u64,
+    pub(super) rows: usize,
+}
+
 impl Selection {
     pub(super) fn new(left: Vec<RowLocator>, right: Vec<RowLocator>, validity: Vec<bool>) -> Self {
         debug_assert_eq!(left.len(), right.len());
@@ -41,10 +49,6 @@ impl Selection {
 
     pub(super) fn len(&self) -> usize {
         self.left.len()
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.left.is_empty()
     }
 
     pub(super) fn matched(&self) -> usize {

@@ -116,6 +116,42 @@ fn hot_join_fuses_native_final_projection() {
 }
 
 #[test]
+fn hot_join_packs_only_terminal_equijoin_projection() {
+    for terminal in [true, false] {
+        let mut graph = hot_graph(
+            &[
+                "quote__sequence AS sequence",
+                "quote__price * dimension__factor AS value",
+            ],
+            false,
+        );
+        if !terminal {
+            let next = ExpressionOperator::new(
+                "next",
+                "",
+                vec!["sequence".into(), "value".into()],
+                None,
+                vec![],
+            )
+            .unwrap();
+            graph = graph
+                .add_node("next", Box::new(next))
+                .unwrap()
+                .connect(Edge::new(
+                    PortEndpoint::new("result", "output").unwrap(),
+                    PortEndpoint::new("next", "input").unwrap(),
+                ))
+                .unwrap();
+        }
+        super::super::push_output_projections(&mut graph, None).unwrap();
+        let NodeOperator::StreamJoin(join) = &graph.nodes["asof"].operator else {
+            unreachable!()
+        };
+        assert_eq!(join.terminal_hot_output_packing(), terminal);
+    }
+}
+
+#[test]
 fn fused_join_keeps_the_full_output_for_named_union_inputs() {
     let graph = hot_graph(
         &[

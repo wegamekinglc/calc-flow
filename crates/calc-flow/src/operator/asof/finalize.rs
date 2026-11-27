@@ -1,6 +1,6 @@
 use super::{
     StreamAsofJoinOperator, StreamAsofJoinStatus, SweepStamp, checked,
-    columnar::{Progress, Selection},
+    columnar::{AlignedRuns, ColumnarState, OutputPlan, Progress, Selection},
     reason,
 };
 use crate::operator::asof::kernel::KernelContext;
@@ -22,11 +22,49 @@ pub(super) fn take_materializations() -> usize {
 }
 
 struct PreparedOutput {
-    selection: Selection,
+    selection: PreparedSelection,
     batch: Batch,
-    matched: u64,
     _workspace: MemoryReservation,
     _scratch: MemoryReservation,
+}
+
+enum PreparedSelection {
+    Rows(Selection),
+    Aligned(AlignedRuns),
+}
+
+impl PreparedSelection {
+    fn len(&self) -> usize {
+        match self {
+            Self::Rows(selection) => selection.len(),
+            Self::Aligned(runs) => runs.rows,
+        }
+    }
+
+    fn matched(&self) -> usize {
+        match self {
+            Self::Rows(selection) => selection.matched(),
+            Self::Aligned(runs) => runs.rows,
+        }
+    }
+
+    fn plan<'a>(
+        &'a self,
+        state: &'a ColumnarState,
+        projection: Option<&'a [(usize, usize)]>,
+    ) -> Result<OutputPlan<'a>> {
+        match self {
+            Self::Rows(rows) => state.plan_output(rows, projection),
+            Self::Aligned(runs) => state.plan_aligned_output(*runs, projection),
+        }
+    }
+
+    fn commit(self, state: &mut ColumnarState) -> Result<()> {
+        match self {
+            Self::Rows(rows) => state.commit(&rows),
+            Self::Aligned(runs) => state.commit_alignment(runs),
+        }
+    }
 }
 
 impl StreamAsofJoinOperator {
@@ -43,7 +81,7 @@ impl StreamAsofJoinOperator {
                 break;
             };
             let rows = prepared.selection.len();
-            let matched = prepared.matched;
+            let matched = prepared.selection.matched() as u64;
             let status = self.output_status(rows, matched)?;
             let next_output_sequence = checked(&self.name, self.next_output_sequence, rows as u64)?;
             context.check_cancelled()?;
@@ -53,7 +91,7 @@ impl StreamAsofJoinOperator {
                 result = output.emit("output", prepared.batch) => result?,
                 () = context.cancellation().cancelled() => return context.check_cancelled(),
             }
-            self.state.commit(&prepared.selection)?;
+            prepared.selection.commit(&mut self.state)?;
             self.status = status;
             self.next_output_sequence = next_output_sequence;
             self.swept = None;
@@ -96,19 +134,19 @@ impl StreamAsofJoinOperator {
             u64::try_from(self.state.selection_scratch_charge(count, columns))
                 .expect("ASOF selection charge fits u64"),
         )?;
-        let selection = self.state.select_prefix(count);
-        let plan = self
-            .state
-            .plan_output(&selection, self.output_projection.as_deref())?;
+        let selection = self.state.complete_alignment(count).map_or_else(
+            || PreparedSelection::Rows(self.state.select_prefix(count)),
+            PreparedSelection::Aligned,
+        );
+        let plan = selection.plan(&self.state, self.output_projection.as_deref())?;
         let workspace = self
             .reserve_workspace(u64::try_from(plan.charge).expect("ASOF output charge fits u64"))?;
         #[cfg(test)]
         MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
         let record = plan.materialize(self.outputs[0].schema().expect("exact ASOF output"))?;
         let batch =
-            self.prepare_output_batch(&selection, record, context.output_budget().max_bytes)?;
+            self.prepare_output_batch(selection.len(), record, context.output_budget().max_bytes)?;
         Ok(PreparedOutput {
-            matched: selection.matched() as u64,
             selection,
             batch,
             _workspace: workspace,
@@ -118,7 +156,7 @@ impl StreamAsofJoinOperator {
 
     fn prepare_output_batch(
         &self,
-        selection: &Selection,
+        rows: usize,
         record: RecordBatch,
         max_bytes: usize,
     ) -> Result<Batch> {
@@ -133,7 +171,7 @@ impl StreamAsofJoinOperator {
                 "ASOF output row exceeds the output edge budget",
             ));
         }
-        debug_assert_eq!(batch.num_rows(), selection.len());
+        debug_assert_eq!(batch.num_rows(), rows);
         Ok(batch)
     }
 
@@ -164,7 +202,7 @@ impl StreamAsofJoinOperator {
             .or(self.status.output_watermark_micros);
         self.terminal = ended;
         if ended && self.state.is_empty() {
-            self.state = super::ColumnarState::new(
+            self.state = ColumnarState::new(
                 &self.name,
                 &self.spec,
                 [self.schemas[0].clone(), self.schemas[1].clone()],
