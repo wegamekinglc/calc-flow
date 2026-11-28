@@ -1,10 +1,10 @@
 //! Native stages corresponding to Python's nested delta/mean expressions.
 use crate::support::{connect_all, expression, expression_schemas, rolling, sql, sql_input_schema};
+use calc_flow::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use calc_flow::{
     NodeOperator, OperatorMetadata, PipelineBuilder, Result, RollingFrameSpec, RollingOperator,
     RollingOutputSpec,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use std::sync::Arc;
 
 pub fn delta_mean(

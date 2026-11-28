@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -78,7 +77,7 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-async def run_once(checkpoint_root: Path) -> tuple[list[int], list[int], int]:
+def run_once(checkpoint_root: Path) -> tuple[list[int], list[int], int]:
     plan = (
         PipelineBuilder("streaming-recovery-example")
         .expression("calculate", "result = value * 2")
@@ -97,17 +96,17 @@ async def run_once(checkpoint_root: Path) -> tuple[list[int], list[int], int]:
         {"output": [SinkBinding.ordinary("collector", sink)]},
         ManagedCheckpointRuntime(checkpoint_root),
     )
-    outcome = await (await runner.start_async()).wait_async()
+    outcome = runner.start().wait()
     require(outcome.state == "completed", f"unexpected outcome: {outcome.state}")
     require(outcome.completed_epoch is not None, "terminal epoch is missing")
     return sink.values, source.opened_at, outcome.completed_epoch
 
 
-async def main() -> None:
+def main() -> None:
     with TemporaryDirectory(prefix="calc-flow-recovery-") as directory:
         checkpoint_root = Path(directory)
-        first_values, first_open, first_epoch = await run_once(checkpoint_root)
-        second_values, second_open, second_epoch = await run_once(checkpoint_root)
+        first_values, first_open, first_epoch = run_once(checkpoint_root)
+        second_values, second_open, second_epoch = run_once(checkpoint_root)
 
         require(first_values == [20, 40, 60], f"unexpected output: {first_values}")
         require(first_open == [0], f"unexpected initial cursor: {first_open}")
@@ -126,4 +125,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

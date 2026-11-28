@@ -55,7 +55,7 @@ Shared topics on this page:
 ## Connect Python expressions to transports
 
 Declare calculations with the root `calc_flow` expression API and exact source
-schemas. `program.to_project(mode="stream")` exports the native graph and input
+schemas. `program.to_project()` exports the native graph and input
 placeholders; complete its source/sink connector bindings, formats, watermarks,
 delivery requirements, and managed state settings before launch. Use the
 physical binding names in the graph document, not `Program.collect` aliases.

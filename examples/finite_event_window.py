@@ -19,7 +19,7 @@ def values(table):
     )
 
 
-async def main():
+def main() -> None:
     schema = pa.schema([pa.field("ts", pa.timestamp("us")), pa.field("q", pa.int8())])
     source = cf.table_input("trades", schema=schema)
     df = cf.window.tumbling(
@@ -45,11 +45,18 @@ async def main():
         schema=schema,
     )
     expected = [(-10, 1, 2), (0, 1, 3), (10, 1, 5)]
-    for result in (await program.collect_async({"trades": table})).values():
+    for result in program.collect({"trades": table}).values():
         if values(result) != expected:
             raise RuntimeError("finite window oracle mismatch")
+    asyncio.run(check_stream(program.for_mode("stream"), table, expected))
+    print("DataFrame and SQL window oracles passed in batch and at real EOF")
+
+
+async def check_stream(
+    program: cf.Program, table: pa.Table, expected: list[tuple[int, int, int]]
+) -> None:
     observed = {"df": [], "sql": []}
-    async with program.for_mode("stream").stream(
+    async with program.stream(
         {"trades": [table.slice(0, 2), table.slice(2)]},
         watermarks=cf.DisabledWatermarks(),
     ) as events:
@@ -57,8 +64,7 @@ async def main():
             observed[event.name].extend(values(event.table))
     if any(actual != expected for actual in observed.values()):
         raise RuntimeError("EOF window oracle mismatch")
-    print("DataFrame and SQL window oracles passed in batch and at real EOF")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -42,9 +42,8 @@ as the application's `src/main.rs`.
 
 ### Use a published registry version
 
-After `calc-flow` version `2026.11.29` is published on crates.io, use these
-dependencies instead. The version in this checkout does not establish registry
-availability; confirm that exact release exists before selecting this route.
+To run the calculation below against the published crate, use
+[calc-flow 2026.11.29 on crates.io](https://crates.io/crates/calc-flow/2026.11.29).
 
 ```toml
 [dependencies]
@@ -52,13 +51,14 @@ calc-flow = "=2026.11.29"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-Use `calc_flow::arrow` for compatible table types. All table execution
-uses DataFusion 55 / Arrow 59. The optional `benchmark-*` features expose
+Import compatible Arrow 59 types from `calc_flow::arrow`. DataFusion 55
+executes SQL and general expressions. Native table operators work directly
+on Arrow. The optional `benchmark-*` features expose
 diagnostic internals; ordinary applications need no crate features. Transport
 implementations live in the separate `calc-flow-connectors` workspace crate.
 
 DataFrame and SQL declarations can be mixed in one graph and compiled for
-batch or streaming. See [the relation guide](../../docs/relational-frontends.md#rust)
+batch or streaming. See the [Rust relation guide](https://github.com/wegamekinglc/calc-flow/blob/main/docs/relational-frontends.md#rust)
 and the independently runnable `32_sql_expression_pipeline` example.
 
 ## A first calculation

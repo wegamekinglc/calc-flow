@@ -30,7 +30,7 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-async def run() -> None:
+def main() -> None:
     orders = pa.table(
         {
             "order_id": [1, 2, 3],
@@ -51,20 +51,26 @@ async def run() -> None:
     )
     stream = batch.for_mode("stream")
     require(stream.fingerprint == batch.fingerprint, "mode changed the declaration")
-    schemas = await asyncio.to_thread(batch.collect_schema)
+    schemas = batch.collect_schema()
     require(schemas["result"].names == ["order_id", "net"], "unexpected result schema")
-    result = (await batch.collect_async({"orders": orders}))["result"]
+    result = batch.collect({"orders": orders})["result"]
     expected = {"order_id": [1, 3], "net": [18.0, 27.0]}
     if result.to_pydict() != expected:
         raise RuntimeError(result.to_pydict())
+    asyncio.run(check_stream(stream, orders, result))
+    print(result.to_pydict())
+
+
+async def check_stream(
+    stream: cf.Program, orders: pa.Table, batch_result: pa.Table
+) -> None:
     streamed = []
     async with stream.stream({"orders": [orders]}) as events:
         async for event in events:
             if event.name == "result":
                 streamed.extend(event.table.to_pylist())
-    require(streamed == result.to_pylist(), "stream and batch results differ")
+    require(streamed == batch_result.to_pylist(), "stream and batch results differ")
     await replacement_chain()
-    print(result.to_pydict())
 
 
 async def replacement_chain() -> None:
@@ -85,10 +91,6 @@ async def replacement_chain() -> None:
     async with program.stream({"events": feed()}, config=config) as events:
         seen = [event.table.to_pydict() async for event in events]
     require(seen == [{"value": [1]}, {"value": [6]}], "unexpected latest aggregate")
-
-
-def main() -> None:
-    asyncio.run(run())
 
 
 if __name__ == "__main__":

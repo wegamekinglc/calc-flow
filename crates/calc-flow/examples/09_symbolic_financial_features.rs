@@ -54,7 +54,7 @@ async fn main() -> ExampleResult {
 }
 
 fn financial_graph(
-    input_schema: &datafusion::arrow::datatypes::Schema,
+    input_schema: &calc_flow::arrow::datatypes::Schema,
 ) -> calc_flow::Result<PipelineBuilder> {
     let (rolling, means, cross) = native_stages(input_schema)?;
     let nodes = graph_nodes(rolling, means, cross)?;
@@ -75,22 +75,22 @@ fn financial_graph(
 }
 
 fn with_fields(
-    schema: &datafusion::arrow::datatypes::Schema,
+    schema: &calc_flow::arrow::datatypes::Schema,
     names: &[&str],
-) -> datafusion::arrow::datatypes::SchemaRef {
+) -> calc_flow::arrow::datatypes::SchemaRef {
     let mut fields = schema.fields().to_vec();
     fields.extend(names.iter().map(|name| {
-        std::sync::Arc::new(datafusion::arrow::datatypes::Field::new(
+        std::sync::Arc::new(calc_flow::arrow::datatypes::Field::new(
             *name,
-            datafusion::arrow::datatypes::DataType::Float64,
+            calc_flow::arrow::datatypes::DataType::Float64,
             true,
         ))
     }));
-    std::sync::Arc::new(datafusion::arrow::datatypes::Schema::new(fields))
+    std::sync::Arc::new(calc_flow::arrow::datatypes::Schema::new(fields))
 }
 
 fn native_stages(
-    input_schema: &datafusion::arrow::datatypes::Schema,
+    input_schema: &calc_flow::arrow::datatypes::Schema,
 ) -> calc_flow::Result<(RollingOperator, RollingOperator, CrossSectionOperator)> {
     let rolling = rolling_stage(with_fields(input_schema, &["log_price"]))?;
     let means = mean_stage(with_fields(
@@ -102,7 +102,7 @@ fn native_stages(
 }
 
 fn rolling_stage(
-    schema: datafusion::arrow::datatypes::SchemaRef,
+    schema: calc_flow::arrow::datatypes::SchemaRef,
 ) -> calc_flow::Result<RollingOperator> {
     let rolling_spec: RollingSpec = serde_json::from_value(json!({
         "configuration_version":1,"state_layout_version":2,"partition_by":["symbol"],"event_time":"ts","sequence_by":["ts"],
@@ -122,7 +122,7 @@ fn rolling_stage(
 }
 
 fn mean_stage(
-    schema: datafusion::arrow::datatypes::SchemaRef,
+    schema: calc_flow::arrow::datatypes::SchemaRef,
 ) -> calc_flow::Result<RollingOperator> {
     let mean_spec: RollingSpec = serde_json::from_value(json!({
         "configuration_version":1,"state_layout_version":1,"partition_by":["symbol"],"event_time":"ts","sequence_by":["ts"],
@@ -136,7 +136,7 @@ fn mean_stage(
 }
 
 fn cross_stage(
-    schema: datafusion::arrow::datatypes::SchemaRef,
+    schema: calc_flow::arrow::datatypes::SchemaRef,
 ) -> calc_flow::Result<CrossSectionOperator> {
     let cross_spec: CrossSectionSpec = serde_json::from_value(json!({
         "configuration_version":1,"state_layout_version":1,"event_time":"ts","entity_by":["symbol"],"partition_by":[],"sequence_by":["ts"],"grouping":{"kind":"exact_time"},

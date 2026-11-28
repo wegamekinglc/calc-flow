@@ -34,7 +34,7 @@ def build_project(directory: Path) -> cf.ProjectDocument:
     orders = cf.table_input("orders", schema=sample_orders().schema)
     program = cf.Program(
         "clickhouse-sink",
-        engine="streaming",
+        mode="stream",
         outputs={"totals": orders.pipe(order_totals)},
     )
     sink = {
@@ -55,7 +55,7 @@ def build_project(directory: Path) -> cf.ProjectDocument:
     }
     return cf.ProjectDocument.model_validate(
         {
-            **program.to_project(mode="stream").model_dump(),
+            **program.to_project().model_dump(),
             "data_sources": [],
             "runtime": {"mode": "stream", "options": {}},
             "sources": [

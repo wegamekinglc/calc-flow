@@ -24,7 +24,7 @@ import calc_flow as cf
 source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
 program = cf.Program(
     "positive",
-    engine="sql",
+    mode="batch",
     outputs={
         "result": source.filter(source["x"] > cf.lit(0)).select("x"),
     },

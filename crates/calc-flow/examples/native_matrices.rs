@@ -1,10 +1,10 @@
 //! Packed native matrix multiplication and axis reductions without Python.
 
+use calc_flow::arrow::array::Float64Array;
 use calc_flow::{
     Result,
     array::{self, ArrayExecutionOptions, NativeArray, Reduction, ReductionOptions},
 };
-use datafusion::arrow::array::Float64Array;
 use std::sync::Arc;
 
 fn main() -> Result<()> {

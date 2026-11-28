@@ -1,13 +1,13 @@
 //! Trusted Rust matrix provider used by the two array/table examples.
 use crate::support::invalid;
 use async_trait::async_trait;
+use calc_flow::arrow::{array::Float64Array, record_batch::RecordBatch};
 use calc_flow::{
     Batch, BatchMetadata, BatchOperator, BatchOperatorContext, BatchOperatorFactory, EventTime,
     ExternalOperatorSpec, JsonMap, OperatorMetadata, Port, ProviderRegistry, Result,
     StaticArraySnapshot, StaticArrayValues, StreamCollector, StreamOperator, StreamOperatorContext,
     StreamOperatorFactory, StreamOperatorLifecycle,
 };
-use datafusion::arrow::{array::Float64Array, record_batch::RecordBatch};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub struct MatrixFactory;
@@ -118,15 +118,15 @@ fn attach_record(record: &RecordBatch, weights: &[f64]) -> Result<RecordBatch> {
         .map(|(a, b)| a.zip(b).map(|(a, b)| a * weights[0] + b * weights[1]))
         .collect();
     let mut fields = record.schema().fields().to_vec();
-    fields.push(Arc::new(datafusion::arrow::datatypes::Field::new(
+    fields.push(Arc::new(calc_flow::arrow::datatypes::Field::new(
         "risk_score",
-        datafusion::arrow::datatypes::DataType::Float64,
+        calc_flow::arrow::datatypes::DataType::Float64,
         true,
     )));
     let mut arrays = record.columns().to_vec();
     arrays.push(Arc::new(Float64Array::from(scores)));
     RecordBatch::try_new(
-        Arc::new(datafusion::arrow::datatypes::Schema::new(fields)),
+        Arc::new(calc_flow::arrow::datatypes::Schema::new(fields)),
         arrays,
     )
     .map_err(|e| invalid("output", e.to_string()))

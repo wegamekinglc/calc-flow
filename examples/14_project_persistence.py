@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
@@ -16,12 +15,12 @@ from calc_flow.store import (
 )
 
 
-async def run(directory: str) -> None:
+def run(directory: str) -> None:
     data = pa.table({"a": [1, 3], "b": [2, 4]})
     t = cf.table_input("numbers", schema=data.schema)
     program = cf.Program(
         "saved-totals",
-        engine="sql",
+        mode="batch",
         outputs={"totals": t.select(total=t["a"] + t["b"])},
     )
     document = program.to_project()
@@ -35,16 +34,16 @@ async def run(directory: str) -> None:
         raise RuntimeError("unexpected YAML round-trip result")
 
     store = cf.FileProjectStore(directory)
-    await store.create(from_yaml)
-    loaded = await store.get(document.root["id"])
+    store.create_blocking(from_yaml)
+    loaded = store.get_blocking(document.root["id"])
     if loaded.canonical_json() != canonical:
         raise RuntimeError("unexpected stored project content")
-    if [item.root["id"] for item in await store.list()] != [document.root["id"]]:
+    if [item.root["id"] for item in store.list_blocking()] != [document.root["id"]]:
         raise RuntimeError("unexpected project-store inventory")
 
     # Reloaded projects expose native bindings, not Python program aliases.
     plan = cf.Runtime().compile_batch_project(loaded.canonical_json())
-    result = await plan.execute_async({"input": cf.Batch.from_pyarrow(data)})
+    result = plan.execute({"input": cf.Batch.from_pyarrow(data)})
     totals = result.outputs["output"].to_pyarrow()["total"].to_pylist()
     if totals != [3, 7]:
         raise RuntimeError(f"unexpected reloaded totals: {totals}")
@@ -56,7 +55,7 @@ async def run(directory: str) -> None:
 
 def main() -> None:
     with TemporaryDirectory(prefix="calc-flow-project-example-") as directory:
-        asyncio.run(run(directory))
+        run(directory)
 
 
 if __name__ == "__main__":

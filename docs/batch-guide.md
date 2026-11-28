@@ -52,6 +52,9 @@ contains:
 [{'order_id': 'A-100', 'gross': 30}, {'order_id': 'A-102', 'gross': 40}]
 ```
 
+The [DataFusion quickstart notebook](../examples/notebooks/datafusion_quickstart.ipynb)
+uses the same inputs and applies the filter in a SQL stage.
+
 `t["quantity"]` selects a column expression. Arithmetic and comparisons build
 calculations, not formula strings. Compose boolean conditions with parenthesized
 comparisons and `&`, `|`, `~`; Python `and`, `or`, `not`, and expression truth
@@ -159,7 +162,7 @@ t = cf.table_input("orders", schema=data.schema)
 gross = t["quantity"] * t["unit_price"]
 program = cf.Program(
     "orders",
-    engine="sql",
+    mode="batch",
     outputs={
         "totals": t.select("order_id", gross=gross),
         "quantities": t.select("order_id", "quantity"),

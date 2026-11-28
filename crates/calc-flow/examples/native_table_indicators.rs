@@ -2,15 +2,15 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use calc_flow::arrow::{
+    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
+    datatypes::{DataType, Field, Schema, TimeUnit},
+    record_batch::RecordBatch,
+};
 use calc_flow::{
     Batch, BatchExecutionPlan, BatchMetadata, ExecutionOptions, LateErrorScope, LatePolicySpec,
     PipelineBuilder, ROLLING_CONFIGURATION_VERSION, ROLLING_INDICATOR_STATE_LAYOUT_VERSION,
     RollingOperator, RollingOutputSpec, RollingSpec, RollingValuePolicy, StateBudget, UdfRegistry,
-};
-use datafusion::arrow::{
-    array::{Array, ArrayRef, Float64Array, StringArray, TimestampMicrosecondArray, UInt64Array},
-    datatypes::{DataType, Field, Schema, TimeUnit},
-    record_batch::RecordBatch,
 };
 
 fn quotes() -> Result<RecordBatch, Box<dyn std::error::Error>> {

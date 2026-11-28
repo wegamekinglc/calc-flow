@@ -73,8 +73,9 @@ environment. `calc-flow-python` is the portable default. On Linux, macOS, or
 Windows x86-64 processors with x86-64-v3 support (including AVX2),
 `calc-flow-python-v3` is an alternative when a matching version is published.
 Both distributions provide the same `calc_flow` import package and Python API.
-The Python 2026.11.29 release uses the portable distribution. Add only the
-optional array providers your application uses.
+Install the [portable 2026.11.29 release](https://pypi.org/project/calc-flow-python/2026.11.29/)
+with `uv add "calc-flow-python==2026.11.29"` to reproduce these examples.
+Add only the optional array providers your application uses.
 
 ### Linux and WSL
 
@@ -265,10 +266,12 @@ an extended-length absolute `TEMP` and `TMP` for the example process.
 ## Continue learning
 
 - Run the complete [executable example inventory](examples.md).
+- Open the [DataFusion quickstart notebook](../examples/notebooks/datafusion_quickstart.ipynb)
+  with the package installed in your Jupyter kernel.
 - Compose [SQL and Python pipelines](batch-guide.md#compose-sql-and-python-pipelines).
+- Push batches synchronously with a [stream session](python-api.md#stream-sessions).
 - Iterate a [stateful stream](streaming-guide.md#first-python-continuous-job),
   then add explicit recovery when needed.
-- Push batches synchronously with a [stream session](python-api.md#stream-sessions).
 - Configure production transports with the [connector guide](connectors/README.md).
 - Understand component ownership in the [design and architecture guide](design.md).
 - Look up exact names in the [Python API](python-api.md),

@@ -1,8 +1,34 @@
 //! Python 01: order expressions, filtering, and two named outputs.
 mod support;
-use calc_flow::{Batch, ExecutionOptions, PipelineBuilder, UdfRegistry};
+use calc_flow::{
+    Batch, CompileMode, CompileOptions, ExecutionOptions, InputOptions, Program, Result, RunResult,
+    TableExpr, UdfRegistry, arrow::datatypes::DataType, lit, table_input,
+};
 use std::collections::BTreeMap;
-use support::{ExampleResult, connect_all, expression, i64_values, ints, strings, table};
+use support::{ExampleResult, i64_values, ints, strings, table};
+
+fn large_orders(source: &TableExpr) -> Result<TableExpr> {
+    let gross = source.column("quantity")? * source.column("unit_price")?;
+    let fee = gross.clone().cast(DataType::Float64)? / lit(10.0_f64)?;
+    let enriched = source.with_columns(vec![gross.alias("gross")?, fee.alias("fee")?])?;
+    let large = enriched.filter(enriched.column("gross")?.ge(lit(20_i64)?))?;
+    large.select(vec![
+        large.column("order_id")?.alias("order_id")?,
+        large.column("gross")?.alias("gross")?,
+    ])
+}
+
+async fn execute(program: &Program, orders: Batch) -> Result<RunResult> {
+    let udfs = UdfRegistry::new();
+    let plan = program
+        .compile_batch(&udfs.snapshot(), &CompileOptions::default())
+        .await?;
+    plan.execute(
+        BTreeMap::from([("orders".into(), orders)]),
+        ExecutionOptions::default(),
+    )
+    .await
+}
 
 #[tokio::main]
 async fn main() -> ExampleResult {
@@ -11,88 +37,49 @@ async fn main() -> ExampleResult {
         ("quantity", ints(&[3, 1, 4])),
         ("unit_price", ints(&[10, 12, 10])),
     ]);
-    filtered_orders(&orders).await?;
-    named_outputs(orders).await
-}
+    let source = table_input(
+        "orders",
+        orders.table_payload()?.schema().clone(),
+        InputOptions::default(),
+    )?;
+    let filtered = Program::new(
+        "large-orders",
+        CompileMode::Batch,
+        BTreeMap::from([("large".into(), large_orders(&source)?)]),
+    )?;
+    let filtered_result = execute(&filtered, orders.clone()).await?;
+    let large = std::slice::from_ref(&filtered_result.outputs["large"]);
+    assert_eq!(i64_values(large, "gross"), [Some(30), Some(40)]);
+    support::print(large)?;
 
-fn filtered_graph() -> calc_flow::Result<PipelineBuilder> {
-    let builder = PipelineBuilder::new("large-orders")?
-        .add_node(
-            "gross",
-            expression("gross", "gross = quantity * unit_price", &[], None)?,
-        )?
-        .add_node(
-            "large",
-            expression(
-                "large",
-                "fee = CAST(gross AS DOUBLE) / 10.0",
-                &["order_id", "gross"],
-                Some("gross >= 20"),
-            )?,
-        )?;
-    connect_all(builder, &[("gross", "output", "large", "input")])
-}
-
-async fn filtered_orders(orders: &Batch) -> ExampleResult {
-    let plan = filtered_graph()?.compile_batch(&UdfRegistry::new().snapshot())?;
-    let result = plan
-        .execute(
-            BTreeMap::from([("input".into(), orders.clone())]),
-            ExecutionOptions::default(),
-        )
-        .await?;
+    let gross = source.column("quantity")? * source.column("unit_price")?;
+    let totals = source.select(vec![
+        source.column("order_id")?.alias("order_id")?,
+        gross.alias("gross")?,
+    ])?;
+    let quantities = source.select(vec![
+        source.column("order_id")?.alias("order_id")?,
+        source.column("quantity")?.alias("quantity")?,
+    ])?;
+    let named = Program::new(
+        "order-outputs",
+        CompileMode::Batch,
+        BTreeMap::from([("totals".into(), totals), ("quantities".into(), quantities)]),
+    )?;
+    let result = execute(&named, orders).await?;
     assert_eq!(
-        i64_values(&[result.outputs["output"].clone()], "gross"),
-        [Some(30), Some(40)]
-    );
-    support::print(&[result.outputs["output"].clone()])
-}
-
-fn named_graph() -> calc_flow::Result<PipelineBuilder> {
-    let builder = PipelineBuilder::new("order-outputs")?
-        .add_node(
-            "source",
-            expression("source", "gross = quantity * unit_price", &[], None)?,
-        )?
-        .add_node(
-            "totals",
-            expression("totals", "", &["order_id", "gross"], None)?,
-        )?
-        .add_node(
-            "quantities",
-            expression("quantities", "", &["order_id", "quantity"], None)?,
-        )?;
-    connect_all(
-        builder,
-        &[
-            ("source", "output", "totals", "input"),
-            ("source", "output", "quantities", "input"),
-        ],
-    )
-}
-
-async fn named_outputs(orders: Batch) -> ExampleResult {
-    let program = named_graph()?.compile_batch(&UdfRegistry::new().snapshot())?;
-    let result = program
-        .execute(
-            BTreeMap::from([("input".into(), orders)]),
-            ExecutionOptions::default(),
-        )
-        .await?;
-    assert_eq!(
-        i64_values(&[result.outputs["totals.output"].clone()], "gross"),
+        i64_values(std::slice::from_ref(&result.outputs["totals"]), "gross"),
         [Some(30), Some(12), Some(40)]
     );
     assert_eq!(
-        i64_values(&[result.outputs["quantities.output"].clone()], "quantity"),
+        i64_values(
+            std::slice::from_ref(&result.outputs["quantities"]),
+            "quantity",
+        ),
         [Some(3), Some(1), Some(4)]
     );
     let names = ["totals", "quantities"];
-    assert!(
-        names
-            .iter()
-            .all(|name| result.outputs.contains_key(&format!("{name}.output")))
-    );
+    assert_eq!(result.outputs.len(), names.len());
     println!("named outputs: {names:?}");
     Ok(())
 }

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from tempfile import TemporaryDirectory
 
 import numpy as np
@@ -77,7 +76,7 @@ class CollectSink:
         pass
 
 
-def symbolic_matrix_program(engine: str = "sql") -> Program:
+def symbolic_matrix_program() -> Program:
     source = table_input(
         "prices",
         schema=(Field("return", "float64"), Field("volatility", "float64")),
@@ -101,7 +100,7 @@ def symbolic_matrix_program(engine: str = "sql") -> Program:
     )
     return Program(
         "symbolic-static-matrix",
-        engine=engine,
+        mode="batch",
         outputs={"signals": output},
     )
 
@@ -112,7 +111,7 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-async def stream_scores(
+def stream_scores(
     program: Program,
     runtime: Runtime,
     input_table: pa.Table,
@@ -132,16 +131,16 @@ async def stream_scores(
             ManagedCheckpointRuntime(directory),
             static_inputs={"weights": weights},
         )
-        outcome = await (await runner.start_async()).wait_async()
+        outcome = runner.start().wait()
         require(outcome.state == "completed", f"unexpected outcome: {outcome.state}")
     output = pa.concat_tables([batch.to_pyarrow() for batch in sink.batches])
     placements = [batch.metadata["copy_bytes"]["weights"] for batch in sink.batches]
     return output["risk_score"].to_pylist(), placements
 
 
-async def main() -> None:
+def main() -> None:
     program = symbolic_matrix_program()
-    stream_program = symbolic_matrix_program("streaming")
+    stream_program = program.for_mode("stream")
     unsupported = Runtime()
     try:
         stream_program.compile_stream(unsupported)
@@ -167,11 +166,11 @@ async def main() -> None:
         np.array([[100.0], [-10.0]], dtype=np.float64),
         backend="numpy",
     )
-    batch_result = await program.collect_async(
+    batch_result = program.collect(
         {"prices": input_table, "weights": weights}, runtime=runtime
     )
     batch_scores = batch_result["signals"]["risk_score"].to_pylist()
-    streamed_scores, placements = await stream_scores(
+    streamed_scores, placements = stream_scores(
         stream_program,
         runtime,
         input_table,
@@ -185,4 +184,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

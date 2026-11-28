@@ -4,6 +4,15 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use calc_flow::arrow::{
+    array::{
+        Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        UInt64Array,
+    },
+    datatypes::SchemaRef,
+    record_batch::RecordBatch,
+    util::pretty::print_batches,
+};
 use calc_flow::{
     Batch, BatchKind, BatchMetadata, CalcFlowError, Cursor, Edge, EventTime, ExpressionOperator,
     JobOutcome, JobState, LateErrorScope, LatePolicySpec, ManagedCheckpointRuntime,
@@ -12,15 +21,6 @@ use calc_flow::{
     RollingValuePolicy, SinkBinding, SourceBinding, SourceCapabilities, SourceDeliveryCapability,
     SourceEvent, SourceSchema, SqlOperator, StreamExecutionPlan, StreamRequirements, StreamSink,
     StreamSource, StreamingJob, StreamingRunner, UdfRegistry, WatermarkPolicy,
-};
-use datafusion::arrow::{
-    array::{
-        Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
-        UInt64Array,
-    },
-    datatypes::SchemaRef,
-    record_batch::RecordBatch,
-    util::pretty::print_batches,
 };
 use tokio::sync::{Mutex, Notify};
 

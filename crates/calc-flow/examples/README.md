@@ -16,10 +16,13 @@ cargo run -p calc-flow --example 29_sql_stream_switch -- --engine both
 cargo run -p calc-flow-connectors --example 15_file_source --features file
 ```
 
-Rust uses `PipelineBuilder`, native operators, immutable `Batch` values, and
+Start with `01_datafusion_pipeline` for `table_input`, typed column
+expressions, and a batch `Program` with named outputs. Import compatible
+Arrow types through `calc_flow::arrow`. Lower-level examples use
+`PipelineBuilder`, native operators, immutable `Batch` values, and
 owned `StreamingRunner` jobs directly. The `symbolic_*` filenames identify
-the matching Python demonstrations; compose their native stages explicitly in
-Rust. Named outputs use physical graph bindings, such as `totals.output`.
+the matching Python demonstrations. Explicit runtime graphs use physical
+bindings such as `calculate.output`.
 
 The examples retain the Python calculations and output information: result
 columns and values, named branches, source cursors, checkpoint epochs, delivery

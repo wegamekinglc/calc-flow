@@ -8,8 +8,9 @@ command groups and toolchain rules. Its [verification policy](../AGENTS.md#verif
 defines the smallest local checks, three exceptions for local full testing, and
 one non-blocking CI snapshot. Full regression gates run in regular CI; routine
 benchmarks run twice daily on a separate schedule. The Python package release
-verifies both distributions, runs portable installed-wheel unit tests, and
-checks a clean v3 installation. Pending required CI results
+verifies the portable distribution and runs its installed-wheel unit tests.
+When v3 is selected, the workflow also verifies its artifacts and checks a
+clean installation. Pending required CI results
 permit handoff but do not permit merge. Keep build, coverage, release, and cache
 outputs under `target/` in a constrained checkout.
 
@@ -40,6 +41,10 @@ only after the [connector setup](connectors/README.md) has prepared native
 features, services, source data, and empty sink destinations.
 Schema exporters are separate tools because generation updates a tracked
 artifact. See [the example inventory](../examples/README.md).
+Run the [quickstart notebook](../examples/notebooks/datafusion_quickstart.ipynb)
+in a fresh Jupyter kernel with the target Python wheel installed. Both
+calculation cells check the expected totals. Keep generated cell outputs
+out of the checked-in notebook.
 
 Check every relative Markdown link and heading anchor in changed documents,
 including links from the repository and example indexes. Confirm that each
@@ -125,11 +130,12 @@ Do not run benchmarks alongside builds or tests. Preserve raw failed and
 inconclusive results as well as successful ones.
 
 The [Python release workflow](python-release.md) builds and verifies the
-portable wheels and source distribution and a separate set of x86-64-v3
-wheels. It tests installed portable Linux wheels across Python 3.9–3.14,
-checks v3 Linux wheel vector instructions, and smoke-tests a clean installation
-of the v3 Linux CPython 3.13 wheel. A pushed release tag publishes each
-distribution through its own gates. Benchmarks, soaks, audits, crate packaging,
-and documentation checks run outside this workflow.
+portable wheels and source distribution. It tests installed portable Linux
+wheels across Python 3.9–3.14. When v3 is selected, the workflow builds and
+verifies the x86-64-v3 wheels, checks Linux wheel vector instructions, and
+smoke-tests a clean installation of the v3 Linux CPython 3.13 wheel. A pushed
+release tag publishes each selected distribution through its own gates.
+Benchmarks, soaks, audits, crate packaging, and documentation checks run
+outside this workflow.
 
 Next: [benchmark suite](benchmark-suite.md).

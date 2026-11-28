@@ -2,12 +2,12 @@
 #[path = "support/stock_account_data.rs"]
 mod stock_account_data;
 mod support;
+use calc_flow::arrow::datatypes::{DataType, Field};
 use calc_flow::{
     BatchKind, NodeOperator, OperatorMetadata, PipelineBuilder, Port, SinkBinding,
     SnapshotSqlOperator, SourceBinding, StateBudget, StreamRuntimeConfig, StreamingRunner,
     WatermarkPolicy,
 };
-use datafusion::arrow::datatypes::{DataType, Field};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use stock_account_data::{DemoSource, LastSink, Latest, Options, check_valuation};
 use support::{ExampleResult, best_effort_plan, expression, sql};

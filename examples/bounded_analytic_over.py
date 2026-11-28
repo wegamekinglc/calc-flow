@@ -26,10 +26,10 @@ def declaration():
     return cf.Program("features", mode="batch", outputs={"out": out}), schema
 
 
-async def main():
+def main() -> None:
     program, schema = declaration()
     data = pa.Table.from_pydict({"v": [3, 1, 2], "seq": [30, 10, 20]}, schema)
-    batch = (await program.collect_async({"events": data}))["out"]
+    batch = program.collect({"events": data})["out"]
     expected = dict(
         v=[1, 2, 3],
         seq=[10, 20, 30],
@@ -39,11 +39,16 @@ async def main():
     )
     if batch.to_pydict() != expected:
         raise RuntimeError("batch analytic result differs from the expected rows")
+    asyncio.run(check_stream(program.for_mode("stream"), data, batch))
+    print(batch.to_pydict())
+
+
+async def check_stream(program: cf.Program, data: pa.Table, batch: pa.Table) -> None:
     source = cf.SourceBinding.from_arrow(
         data, budget=cf.EdgeBudget(max_rows=2, max_bytes=4096)
     )
     finals = []
-    async with program.for_mode("stream").stream(
+    async with program.stream(
         {"events": source}, config=cf.StreamRuntimeConfig(checkpointing=False)
     ) as results:
         async for event in results:
@@ -52,8 +57,7 @@ async def main():
         raise RuntimeError("expected exactly one stream final")
     if not finals[0].equals(batch):
         raise RuntimeError("stream analytic result differs from the batch result")
-    print(batch.to_pydict())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

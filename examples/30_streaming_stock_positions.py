@@ -34,9 +34,7 @@ def make_program() -> cf.Program:
         "SELECT account, stock, SUM(delta) AS position "
         "FROM input GROUP BY account, stock"
     )
-    return cf.Program("stock-positions", engine="streaming").output(
-        "positions", positions
-    )
+    return cf.Program("stock-positions", mode="stream").output("positions", positions)
 
 
 async def trade_batches(batches: Iterator[pa.Table]) -> AsyncIterator[pa.Table]:

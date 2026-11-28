@@ -52,7 +52,7 @@ async fn receive_before_eof(job: &calc_flow::StreamingJob, output: &Collected) -
     Ok(())
 }
 
-fn source() -> calc_flow::Result<(datafusion::arrow::datatypes::SchemaRef, ReplaySource)> {
+fn source() -> calc_flow::Result<(calc_flow::arrow::datatypes::SchemaRef, ReplaySource)> {
     let batch = |ts: &[i64], prices: &[f64], seq: &[u64]| {
         table(vec![
             ("ts", times(ts)),

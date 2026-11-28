@@ -1,13 +1,13 @@
 //! Python 36: shared minute-window state and derived price ranges.
 mod support;
-use calc_flow::{
-    AggregateFunction, Batch, BatchMetadata, OperatorMetadata, PipelineBuilder,
-    WindowAggregateOperator, WindowSpec,
-};
-use datafusion::arrow::{
+use calc_flow::arrow::{
     array::{Float64Array, Int64Array, TimestampMicrosecondArray},
     datatypes::{DataType, Field, Schema},
     record_batch::RecordBatch,
+};
+use calc_flow::{
+    AggregateFunction, Batch, BatchMetadata, OperatorMetadata, PipelineBuilder,
+    WindowAggregateOperator, WindowSpec,
 };
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use support::{
@@ -89,7 +89,7 @@ fn check_schema_and_rows(minute: &[Batch]) -> ExampleResult {
         Field::new(
             "window_start",
             DataType::Timestamp(
-                datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                calc_flow::arrow::datatypes::TimeUnit::Microsecond,
                 Some("UTC".into()),
             ),
             false,
@@ -97,7 +97,7 @@ fn check_schema_and_rows(minute: &[Batch]) -> ExampleResult {
         Field::new(
             "window_end",
             DataType::Timestamp(
-                datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                calc_flow::arrow::datatypes::TimeUnit::Microsecond,
                 Some("UTC".into()),
             ),
             false,
@@ -123,7 +123,7 @@ fn check_schema_and_rows(minute: &[Batch]) -> ExampleResult {
             Arc::new(Float64Array::from(vec![Some(101.0), None, Some(100.0)])),
         ],
     )?;
-    let actual = datafusion::arrow::compute::concat_batches(
+    let actual = calc_flow::arrow::compute::concat_batches(
         &expected.schema(),
         minute
             .iter()
@@ -134,7 +134,7 @@ fn check_schema_and_rows(minute: &[Batch]) -> ExampleResult {
 }
 
 fn window_operator(
-    schema: datafusion::arrow::datatypes::SchemaRef,
+    schema: calc_flow::arrow::datatypes::SchemaRef,
 ) -> calc_flow::Result<WindowAggregateOperator> {
     let spec = WindowSpec::tumbling("ts", Duration::from_secs(60))?
         .group_by(["symbol"])?
@@ -167,7 +167,7 @@ fn branch_nodes(
     ])
 }
 
-fn program(schema: datafusion::arrow::datatypes::SchemaRef) -> calc_flow::Result<PipelineBuilder> {
+fn program(schema: calc_flow::arrow::datatypes::SchemaRef) -> calc_flow::Result<PipelineBuilder> {
     let nodes = branch_nodes(window_operator(schema)?)?;
     let builder = nodes.into_iter().try_fold(
         PipelineBuilder::new("minute-bars")?,

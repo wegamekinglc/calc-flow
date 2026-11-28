@@ -9,7 +9,8 @@ pages explain how the implementation provides those behaviors.
 1. [Introduction](introduction.md): capabilities, vocabulary, and execution modes.
 2. [Getting started](getting-started.md): installation and a first
    calculation.
-3. [Example learning paths](examples.md): which programs to run next.
+3. [Example learning paths](examples.md) and the
+   [DataFusion quickstart notebook](../examples/notebooks/datafusion_quickstart.ipynb).
 
 ## 2. Function guides
 
@@ -20,15 +21,14 @@ pages explain how the implementation provides those behaviors.
    NumPy and JAX providers, table-to-matrix composition, and static weights.
    Start with the [native Array example](../examples/native_arrays.py) or examples
    06, 07, and 11.
-3. [Continuous streaming](streaming-guide.md): start with
-   `33_streaming_pipeline.py` and `34_streaming_outputs.py` for `stream` and
-   named events. Continue to sources, sinks, event time, windows, bounded joins,
-   and recovery in examples 04, 08, 10, 12, and 13.
+3. [Continuous streaming](streaming-guide.md) starts with
+   [example 37](../examples/37_stream_session.py) for synchronous batch pushes
+   and watermark advancement. Use `33_streaming_pipeline.py` and
+   `34_streaming_outputs.py` for async streams and named events. Continue to
+   sources, sinks, event time, windows, bounded joins, and recovery in
+   examples 04, 08, 10, 12, and 13.
    [Backward ASOF Join](asof-join-guide.md) uses example 35 for final
    trade/quote matching, watermark waiting, state bounds, and recovery.
-   [Stream sessions](python-api.md#stream-sessions) and
-   [example 37](../examples/37_stream_session.py) show caller-driven batches
-   and watermark advancement.
 4. [Expression workflows](symbolic-workflows.md): financial features, analysis,
    composition, and batch/stream execution; examples 09–13.
 5. [Projects and persistence](projects-guide.md): validate, serialize, save,
@@ -81,7 +81,8 @@ project contract.
    telemetry, rewrite limits, and measurements.
 4. [Warm-stream measurements](warm-stream-performance.md): persistent jobs,
    sparse appends, latency interpretation, and reproduction.
-5. [Python release guide](python-release.md): packaging and publication.
+5. [Python release guide](python-release.md) and [Rust release guide](rust-release.md)
+   cover packaging and publication.
 
 ## History and maintenance
 

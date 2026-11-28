@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
+use calc_flow::arrow::array::Float64Array;
 use calc_flow::{
     Result,
     array::{
         self, ArrayExecutionOptions, ArrayView, NativeArray, ReductionOptions, RollingMeanOptions,
     },
 };
-use datafusion::arrow::array::Float64Array;
 
 fn main() -> Result<()> {
     let values = NativeArray::from_arrow(
