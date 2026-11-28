@@ -109,6 +109,9 @@ impl MorselCancellation {
     pub(crate) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
         if let Some(pool) = self.pool.upgrade() {
+            // Let waiters finish checking cancellation and enter their wait
+            // before sending a notification that a condition variable cannot save.
+            drop(lock(&pool.state));
             pool.ready.notify_all();
             pool.settled.notify_all();
             pool.settled_async.notify_waiters();

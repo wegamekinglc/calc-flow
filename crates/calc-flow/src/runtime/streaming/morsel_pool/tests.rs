@@ -629,6 +629,39 @@ fn direct_cancellation_wakes_blocked_admission() {
 }
 
 #[test]
+fn cancellation_synchronizes_with_admission_entering_its_wait() {
+    let pool = MorselPool::new("cancel-at-wait-boundary", config(1)).unwrap();
+    let state = super::lock(&pool.inner.state);
+    let cancellation = pool.cancellation();
+    let (started_tx, started_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let canceller = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        cancellation.cancel();
+        finished_tx.send(()).unwrap();
+    });
+    started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let early_notification = finished_rx.recv_timeout(Duration::from_millis(250)).is_ok();
+
+    let (state, wait) = pool
+        .inner
+        .settled
+        .wait_timeout(state, Duration::from_secs(2))
+        .unwrap();
+    drop(state);
+    canceller.join().unwrap();
+
+    assert!(
+        !early_notification,
+        "cancellation notified before admission could wait"
+    );
+    assert!(
+        !wait.timed_out(),
+        "admission did not receive the cancellation"
+    );
+}
+
+#[test]
 fn queued_cancellation_contains_input_destructor_panics() {
     struct PanicDrop;
     impl Drop for PanicDrop {

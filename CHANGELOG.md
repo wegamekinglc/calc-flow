@@ -14,7 +14,9 @@ measurements. Use the current guides for supported behavior.
   and the installed-wheel tests still run on all six interpreter versions.
   Artifact verification requires both ABI tiers on all five platforms and
   one source distribution. The portable-only release selection also applies
-  to rehearsal builds. See the [Python release guide](docs/python-release.md).
+  to rehearsal builds. Fix a Rust streaming race where a waiter could miss
+  the morsel pool's cancellation notification. See the
+  [Python release guide](docs/python-release.md).
 
 - 2026-11-28: Prepare the aligned `calc-flow` and `calc-flow-python` 2026.11.28
   releases. This release publishes the portable Python distribution.
