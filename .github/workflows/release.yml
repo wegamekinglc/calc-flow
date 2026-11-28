@@ -1,6 +1,11 @@
 name: Python package release
 on:
   workflow_dispatch:
+    inputs:
+      build-v3:
+        description: Build and verify the x86-64-v3 distribution
+        type: boolean
+        default: true
   push:
     tags:
       - "calc-flow-python-v*"
@@ -14,7 +19,7 @@ jobs:
     name: Validate release version and tag
     runs-on: ubuntu-latest
     outputs:
-      publish-v3: ${{ steps.release-options.outputs.publish-v3 }}
+      build-v3: ${{ steps.release-options.outputs.build-v3 }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -33,17 +38,22 @@ jobs:
             args+=(--tag "${GITHUB_REF_NAME}" --check-pypi)
           fi
           python scripts/verify_python_release.py "${args[@]}"
-      - name: Read v3 publication setting from the tag
-        if: github.event_name == 'push' && github.ref_type == 'tag'
+      - name: Select the distributions to build
         id: release-options
         shell: bash
+        env:
+          DISPATCH_BUILD_V3: ${{ inputs.build-v3 }}
         run: |
-          publish_v3=$(git tag -l --format='%(trailers:key=Publish-Python-v3,valueonly)' "${GITHUB_REF_NAME}")
-          case "${publish_v3}" in
-            ''|true) echo "publish-v3=true" >> "${GITHUB_OUTPUT}" ;;
-            false) echo "publish-v3=false" >> "${GITHUB_OUTPUT}" ;;
+          build_v3="${DISPATCH_BUILD_V3}"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            build_v3=$(git tag -l --format='%(trailers:key=Publish-Python-v3,valueonly)' "${GITHUB_REF_NAME}")
+          fi
+          case "${build_v3}" in
+            ''|true) build_v3=true ;;
+            false) ;;
             *) echo "::error::Publish-Python-v3 must be true or false" >&2; exit 1 ;;
           esac
+          echo "build-v3=${build_v3}" >> "${GITHUB_OUTPUT}"
 
   wheels:
     name: Wheel ${{ matrix.os }} ${{ matrix.target }} ${{ matrix.python_tag }}
@@ -118,21 +128,6 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --locked --out dist --find-interpreter --features legacy-python
           manylinux: ${{ matrix.manylinux }}
-      - name: Add explicit Python version tags
-        shell: bash
-        run: |
-          python -m pip install wheel==0.46.3
-          shopt -s nullglob
-          wheels=(dist/*.whl)
-          test "${#wheels[@]}" -eq 1
-          case "${{ matrix.python_tag }}" in
-            cp39) tags=(cp310 cp311 cp312) ;;
-            cp313) tags=(cp314) ;;
-            *) exit 1 ;;
-          esac
-          for tag in "${tags[@]}"; do
-            python -m wheel tags --python-tag="$tag" "${wheels[0]}"
-          done
       - name: Upload wheel
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -144,6 +139,7 @@ jobs:
   v3-wheels:
     name: V3 Wheel ${{ matrix.os }} ${{ matrix.target }} ${{ matrix.python_tag }}
     needs: prepare-python-release
+    if: needs.prepare-python-release.outputs.build-v3 == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -264,22 +260,16 @@ jobs:
       matrix:
         include:
           - python_version: "3.9"
-            python_tag: cp39
             base_tag: cp39
           - python_version: "3.10"
-            python_tag: cp310
             base_tag: cp39
           - python_version: "3.11"
-            python_tag: cp311
             base_tag: cp39
           - python_version: "3.12"
-            python_tag: cp312
             base_tag: cp39
           - python_version: "3.13"
-            python_tag: cp313
             base_tag: cp313
           - python_version: "3.14"
-            python_tag: cp314
             base_tag: cp313
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -293,7 +283,7 @@ jobs:
           path: dist
       - name: Run installed wheel unit tests
         run: |
-          python -m pip install dist/calc_flow_python-*-${{ matrix.python_tag }}-abi3-*.whl pytest numpy
+          python -m pip install dist/calc_flow_python-*-${{ matrix.base_tag }}-abi3-*.whl pytest numpy
           python -m pytest -q \
             python/tests/test_import.py \
             python/tests/test_python_version_contract.py \
@@ -444,7 +434,7 @@ jobs:
     name: Publish calc-flow-python-v3 to PyPI
     if: >-
       github.event_name == 'push' && github.ref_type == 'tag' &&
-      needs.prepare-python-release.outputs.publish-v3 == 'true'
+      needs.prepare-python-release.outputs.build-v3 == 'true'
     needs: [prepare-python-release, verify-v3-artifacts, v3-wheel-smoke]
     runs-on: ubuntu-latest
     environment:

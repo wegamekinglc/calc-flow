@@ -9,6 +9,13 @@ measurements. Use the current guides for supported behavior.
 
 ## 2026-11
 
+- 2026-11-29: Prepare the portable Python release with one `cp39-abi3` and
+  one `cp313-abi3` wheel per platform. The ten wheels cover CPython 3.9–3.14
+  and the installed-wheel tests still run on all six interpreter versions.
+  Artifact verification requires both ABI tiers on all five platforms and
+  one source distribution. The portable-only release selection also applies
+  to rehearsal builds. See the [Python release guide](docs/python-release.md).
+
 - 2026-11-28: Prepare the aligned `calc-flow` and `calc-flow-python` 2026.11.28
   releases. This release publishes the portable Python distribution.
   Python and Rust can drive streaming graphs synchronously through stream

@@ -344,9 +344,10 @@ table backend selectors.
 - Portable and v3 wheels contain only `calc_flow`, exactly one native module,
   metadata and a software bill of materials (SBOM), and license, with no runtime
   native-module selector.
-- V3 wheels cover Linux, macOS, and Windows x86-64 with the same six Python tags
-  and two abi3 tiers as portable wheels. Only v3 jobs set
-  `target-cpu=x86-64-v3`; portable x86-64 and AArch64 builds remain unchanged.
+- Portable wheels use two abi3 tags per platform, `cp39` and `cp313`.
+  The release tests install them on all six supported Python versions.
+- V3 wheels cover Linux, macOS, and Windows x86-64 with six explicit Python tags
+  derived from the two abi3 tiers. Only v3 jobs set `target-cpu=x86-64-v3`.
   No v3 source distribution is published.
 - Portable source distributions contain essential Rust/Python build sources.
   Release inspection rejects frozen `src/calc_flow`, fixtures, and guidance
