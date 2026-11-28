@@ -20,6 +20,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 matrix,
             )
         )
+        self.assertNotIn("python -m wheel tags", wheel_job)
         for os, target in (
             ("ubuntu-latest", "x86_64"),
             ("ubuntu-latest", "aarch64"),
@@ -53,6 +54,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("RUSTFLAGS: -C target-cpu=x86-64-v3", v3_job)
         self.assertIn("CARGO_PROFILE_RELEASE_STRIP: none", v3_job)
         self.assertIn("working-directory: v3-source", v3_job)
+        self.assertIn("cp39) tags=(cp310 cp311 cp312)", v3_job)
+        self.assertIn("cp313) tags=(cp314)", v3_job)
 
         verification = workflow.split("  verify-core-artifacts:\n", 1)[1].split(
             "  publish-python-core:\n", 1
@@ -118,7 +121,7 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "name: wheel-ubuntu-latest-x86_64-${{ matrix.base_tag }}", unit_tests
         )
         self.assertIn(
-            "dist/calc_flow_python-*-${{ matrix.python_tag }}-abi3-*.whl",
+            "dist/calc_flow_python-*-${{ matrix.base_tag }}-abi3-*.whl",
             unit_tests,
         )
         self.assertIn("python -m pytest -q", unit_tests)
@@ -160,11 +163,17 @@ class ReleaseWorkflowTests(unittest.TestCase):
             "  wheels:\n", 1
         )[0]
         self.assertIn(
-            "publish-v3: ${{ steps.release-options.outputs.publish-v3 }}",
+            "build-v3: ${{ steps.release-options.outputs.build-v3 }}",
             preparation,
         )
+        self.assertIn("DISPATCH_BUILD_V3: ${{ inputs.build-v3 }}", preparation)
+        v3_wheels = workflow.split("  v3-wheels:\n", 1)[1].split("  sdist:\n", 1)[0]
         self.assertIn(
-            "needs.prepare-python-release.outputs.publish-v3 == 'true'",
+            "if: needs.prepare-python-release.outputs.build-v3 == 'true'",
+            v3_wheels,
+        )
+        self.assertIn(
+            "needs.prepare-python-release.outputs.build-v3 == 'true'",
             publication,
         )
         self.assertIn("sha256sum --check ../v3-release-manifest.txt", publication)

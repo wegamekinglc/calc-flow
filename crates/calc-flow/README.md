@@ -8,7 +8,7 @@ interpreter.
 
 ## Install
 
-Use Rust 1.94.0 or newer. This checkout's shared version is `2026.11.28`.
+Use Rust 1.94.0 or newer. This checkout's shared version is `2026.11.29`.
 
 ### Use the current source checkout
 
@@ -42,13 +42,13 @@ as the application's `src/main.rs`.
 
 ### Use a published registry version
 
-After `calc-flow` version `2026.11.28` is published on crates.io, use these
+After `calc-flow` version `2026.11.29` is published on crates.io, use these
 dependencies instead. The version in this checkout does not establish registry
 availability; confirm that exact release exists before selecting this route.
 
 ```toml
 [dependencies]
-calc-flow = "=2026.11.28"
+calc-flow = "=2026.11.29"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

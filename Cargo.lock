@@ -558,7 +558,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "calc-flow"
-version = "2026.11.28"
+version = "2026.11.29"
 dependencies = [
  "ahash 0.8.12",
  "allocation-counter",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "calc-flow-connectors"
-version = "2026.11.28"
+version = "2026.11.29"
 dependencies = [
  "allocation-counter",
  "arrow",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "calc-flow-python"
-version = "2026.11.28"
+version = "2026.11.29"
 dependencies = [
  "async-trait",
  "calc-flow",

@@ -28,12 +28,12 @@ unpadded numeric shape: the scheduled benchmark suite anchors its baseline on
 the newest reachable `calc-flow-python-v*` tag, and a tag deviating from that
 shape fails the scheduled gate closed.
 
-The workflow builds the following artifacts for every manual or tagged release
+The portable artifacts are built on each manual or tagged release
 run:
 
 | Package               | Artifacts                                      | PyPI upload            |
 |-----------------------|------------------------------------------------|------------------------|
-| `calc-flow-python`    | Thirty abi3 wheels and one source distribution | Tagged runs            |
+| `calc-flow-python`    | Ten abi3 wheels and one source distribution    | Tagged runs            |
 | `calc-flow-python-v3` | Eighteen abi3 wheels; no source distribution   | Tagged runs by default |
 
 The portable distribution covers five platform targets: Linux x86-64 and
@@ -41,20 +41,23 @@ AArch64, macOS x86-64 and ARM64, and Windows AMD64. The v3 distribution covers
 only the three x86-64 targets: Linux x86-64, macOS x86-64, and Windows AMD64.
 There are no v3 AArch64 wheels and no v3 source distribution.
 
-Every target in both matrices gets wheels with explicit `cp39`, `cp310`,
-`cp311`, `cp312`, `cp313`, and `cp314` Python tags. The workflow compiles two
-native abi3 tiers per target: Python 3.9–3.12 share the 3.9-compatible binary,
-and Python 3.13–3.14 share the 3.13-compatible binary. The `wheel tags` command
-creates the additional version-specific wheel files and updates their WHEEL
-metadata and RECORD. The portable source distribution builds against the
-installing interpreter.
+The portable distribution publishes one `cp39-abi3` wheel and one
+`cp313-abi3` wheel for each target. Python 3.9–3.12 install the
+`cp39-abi3` wheel. Python 3.13–3.14 prefer `cp313-abi3` for the same
+platform. The portable source distribution builds against the installing
+interpreter.
+
+V3 builds use the same two abi3 tiers per target and use `wheel tags` to
+produce wheels with explicit `cp39`, `cp310`, `cp311`, `cp312`, `cp313`,
+and `cp314` tags. The generated wheels carry the matching WHEEL metadata
+and RECORD.
 
 Only v3 wheel jobs set `RUSTFLAGS=-C target-cpu=x86-64-v3`. Portable x86-64 and
 AArch64 build settings remain unchanged. Every portable or v3 wheel contains the
 `calc_flow` package, exactly one `calc_flow._native` abi3 module, metadata/SBOM,
 and license, with no second native module or runtime selector.
 
-The core artifact verifier requires all thirty versioned wheels and one
+The core artifact verifier requires all ten versioned wheels and one
 versioned source distribution from the same workflow run. The v3 verifier
 separately requires all eighteen v3 wheels and rejects a v3 source distribution
 or any other extra artifact. Both verifiers check wheel platforms, ABI, Python
@@ -82,28 +85,28 @@ The workflow:
 
 1. Checks the package version and, on a tag run, confirms the annotated tag is
    at the current `main` head and the core PyPI version is unused.
-2. Builds ten portable and six v3 native wheel binaries, creates thirty portable
-   and eighteen v3 explicitly tagged wheels, and builds one portable source
-   distribution.
-3. Installs each version's matching portable Linux wheel on Python 3.9–3.14 and
-   runs the selected package unit tests. Python 3.9 also runs the optional JAX
-   array unit test. A separate clean-install smoke test imports the v3 Linux
-   CPython 3.13 wheel.
-4. Verifies the thirty-one core artifacts and eighteen v3 artifacts through
-   separate jobs, saves their hash manifests, and inspects the Linux v3 wheels
-   for the required numeric vector instructions.
+2. Builds ten portable wheels and one portable source distribution. When
+   selected, v3 builds six native wheels and generates eighteen wheel files
+   with explicit interpreter and platform tags.
+3. Installs the corresponding portable Linux abi3 wheel on each of Python
+   3.9–3.14 and runs the selected package unit tests. Python 3.9 also runs the
+   optional JAX array unit test. For v3 runs, a separate clean-install smoke
+   test imports the v3 Linux CPython 3.13 wheel.
+4. Verifies the eleven core artifacts and, when selected, eighteen v3 artifacts
+   in separate jobs, saves their hash manifests, and inspects the Linux v3
+   wheels for the required numeric vector instructions.
 5. On a pushed release tag only, publishes the distributions through independent
    jobs. Core publication requires core artifact verification and the portable
    installed-wheel tests; v3 publication requires v3 artifact/vector verification
    and its clean-install smoke test. Each job downloads only its distribution's
    artifacts, checks them against that distribution's manifest, and publishes
-   through the `pypi` environment using Trusted Publishing. The annotated tag
-   can skip the v3 upload with the `Publish-Python-v3: false` trailer.
+   through the `pypi` environment using Trusted Publishing. A tag with
+   `Publish-Python-v3: false` selects the portable distribution alone.
 
-Manual workflow dispatch builds and verifies all artifacts and runs the
-post-build unit tests and v3 smoke test without publishing. Benchmark, soak,
-audit, documentation, and crate work are outside this Python publishing
-workflow.
+Manual workflow dispatch verifies the selected distributions and runs the
+post-build unit tests. Set `build-v3=false` to rehearse the portable release alone.
+Only a tagged push publishes. Benchmark, soak, audit, documentation, and crate
+work are outside this Python publishing workflow.
 
 ## Trusted Publisher
 
@@ -117,9 +120,11 @@ OIDC credentials with `id-token: write`. No long-lived PyPI token or
 
 1. Update the aligned version surfaces and changelog for the planned date.
 2. Run `Python package release` manually from the reviewed `main` commit.
-   Confirm the forty-eight wheels, portable source distribution, both artifact
-   verification jobs, v3 vector inspection, portable installed-wheel unit tests,
-   and v3 clean-install smoke test finish successfully.
+   Confirm the ten portable wheels, source distribution, artifact verification
+   and six portable installed-wheel unit test jobs succeed. For a portable-only
+   release, set `build-v3=false`. When the release includes v3, also confirm
+   its eighteen wheels, artifact verification, vector inspection, and
+   clean-install smoke test.
 3. Tag that same `main` commit and push the annotated tag:
 
    ```bash
@@ -135,7 +140,7 @@ OIDC credentials with `id-token: write`. No long-lived PyPI token or
      -m "Publish-Python-v3: false"
    ```
 
-4. Approve the `pypi` deployments when prompted. Confirm PyPI lists thirty
+4. Approve the `pypi` deployments when prompted. Confirm PyPI lists ten
    portable wheels and one source distribution. If the release includes the
    v3 distribution, confirm it lists eighteen wheels.
 

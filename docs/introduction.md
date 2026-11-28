@@ -189,7 +189,7 @@ Managed recovery rejects legacy v3 manifests. To continue an old job on the
 current runtime, start a new lineage and replay the input.
 Public Rust `CheckpointManifest` v3 remains the direct state-transaction contract.
 These protocol versions are separate from this checkout's package version
-`2026.11.28`.
+`2026.11.29`.
 
 The DataFusion 55 / Arrow 59 upgrade changes engine-specific checkpoint
 identity. SQL checkpoints created with DataFusion 54 and ASOF checkpoints

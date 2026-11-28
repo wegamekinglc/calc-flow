@@ -73,7 +73,7 @@ environment. `calc-flow-python` is the portable default. On Linux, macOS, or
 Windows x86-64 processors with x86-64-v3 support (including AVX2),
 `calc-flow-python-v3` is an alternative when a matching version is published.
 Both distributions provide the same `calc_flow` import package and Python API.
-The Python 2026.11.28 release uses the portable distribution. Add only the
+The Python 2026.11.29 release uses the portable distribution. Add only the
 optional array providers your application uses.
 
 ### Linux and WSL
@@ -192,7 +192,7 @@ use `maturin develop` for this release-style installation, and do not leave
 
 ## Verify the installation
 
-For a build from this checkout, confirm that Calc Flow reports version `2026.11.28`.
+For a build from this checkout, confirm that Calc Flow reports version `2026.11.29`.
 A published installation reports the release selected by the package manager,
 which can differ from the current source version. Confirm that the native
 extension loads from the installation environment.

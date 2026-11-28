@@ -11,8 +11,8 @@ for the contracts documented here.
 
 | Surface      | Package or path                  | Purpose                                      |
 |--------------|----------------------------------|----------------------------------------------|
-| Python API   | `calc-flow-python==2026.11.28`   | Expressions, Arrow execution, integrations   |
-| Rust core    | `calc-flow = "2026.11.28"`       | Internal runtime and extension contracts     |
+| Python API   | `calc-flow-python==2026.11.29`   | Expressions, Arrow execution, integrations   |
+| Rust core    | `calc-flow = "2026.11.29"`       | Internal runtime and extension contracts     |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -566,7 +566,7 @@ finished, closed, or busy session.
 
 ## Version and compatibility
 
-The Rust crate and Python binding are versioned `2026.11.28` in this checkout.
+The Rust crate and Python binding are versioned `2026.11.29` in this checkout.
 Project format version `3` governs serialized projects. Managed runner and
 durable session checkpoints use manifest version `4` with `job_kind="runner"`
 or `job_kind="session"`.

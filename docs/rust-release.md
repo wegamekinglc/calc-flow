@@ -2,7 +2,7 @@
 
 Publish only `calc-flow` to crates.io. The Python binding remains unpublished as
 a Rust crate; PyPI releases retain their existing workflow and tag namespace.
-The package keeps the workspace's calendar version, currently `2026.11.28`, and
+The package keeps the workspace's calendar version, currently `2026.11.29`, and
 MSRV `1.94.0`. Do not independently bump the Rust version: workspace crates,
 Python metadata, and exact binding dependencies must stay aligned.
 

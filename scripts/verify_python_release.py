@@ -32,8 +32,9 @@ CORE_TARGETS = frozenset(
         "windows-amd64",
     }
 )
-CORE_PYTHON_TAGS = frozenset({"cp39", "cp310", "cp311", "cp312", "cp313", "cp314"})
+CORE_PYTHON_TAGS = frozenset({"cp39", "cp313"})
 V3_TARGETS = frozenset({"linux-x86_64", "macos-x86_64", "windows-amd64"})
+V3_PYTHON_TAGS = CORE_PYTHON_TAGS | {"cp310", "cp311", "cp312", "cp314"}
 _FINAL_VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
@@ -312,10 +313,13 @@ def validate_core_wheel(
         raise ValueError(f"{path.name}: unexpected distribution {distribution!r}")
     if version != config.version:
         raise ValueError(f"{path.name}: version {version!r} != {config.version!r}")
-    if python_tag not in CORE_PYTHON_TAGS:
+    expected_python_tags = (
+        V3_PYTHON_TAGS if project == "calc-flow-python-v3" else CORE_PYTHON_TAGS
+    )
+    if python_tag not in expected_python_tags:
         raise ValueError(
             f"{path.name}: Python tag {python_tag!r} must be one of "
-            f"{sorted(CORE_PYTHON_TAGS)}"
+            f"{sorted(expected_python_tags)}"
         )
     if abi_tag != "abi3":
         raise ValueError(f"{path.name}: ABI {abi_tag!r} must equal 'abi3'")
@@ -420,7 +424,7 @@ def validate_v3_release(
         actual.add(target)
         manifest[_relative_name(wheel, dist_dir)] = digest
     expected = {
-        (target, python_tag) for target in V3_TARGETS for python_tag in CORE_PYTHON_TAGS
+        (target, python_tag) for target in V3_TARGETS for python_tag in V3_PYTHON_TAGS
     }
     if actual != expected:
         raise ValueError(
