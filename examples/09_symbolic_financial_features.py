@@ -96,7 +96,7 @@ def main() -> None:
     )
     program = Program(
         "financial-features",
-        engine="sql",
+        mode="batch",
         outputs={"signals": quotes.with_columns(financial_features(quotes))},
     )
     analysis = program.analyze()

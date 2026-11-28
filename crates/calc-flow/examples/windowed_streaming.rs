@@ -1,17 +1,17 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use calc_flow::arrow::{
+    array::{ArrayRef, Int64Array, StringArray, TimestampMicrosecondArray},
+    datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
+    record_batch::RecordBatch,
+};
 use calc_flow::{
     AggregateFunction, Batch, BatchMetadata, Cursor, EventTime, ManagedCheckpointRuntime,
     NativeWatermarkCapability, PipelineBuilder, ReplayPositioning, Result, SinkBinding,
     SourceBinding, SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema,
     StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource, StreamingRunner,
     UdfRegistry, WatermarkPolicy, WindowAggregateOperator, WindowSpec,
-};
-use datafusion::arrow::{
-    array::{ArrayRef, Int64Array, StringArray, TimestampMicrosecondArray},
-    datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
-    record_batch::RecordBatch,
 };
 use tokio::sync::Mutex;
 

@@ -48,12 +48,12 @@ def build_project(directory: Path) -> ProjectDocument:
     orders = cf.table_input("orders", schema=schema)
     graph = cf.Program(
         "kafka-custom-decoder",
-        engine="streaming",
+        mode="stream",
         outputs={"totals": orders.pipe(order_totals)},
     )
     return ProjectDocument.model_validate(
         {
-            **graph.to_project(mode="stream").model_dump(),
+            **graph.to_project().model_dump(),
             "data_sources": [],
             "runtime": {"mode": "stream", "options": {}},
             "sources": [

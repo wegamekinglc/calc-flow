@@ -58,7 +58,7 @@ def minute_program() -> Program:
     )
     return Program(
         "minute-bars",
-        engine="streaming",
+        mode="stream",
         inputs=[trades],
         outputs=[("minute", minute), ("summary", summary)],
     )

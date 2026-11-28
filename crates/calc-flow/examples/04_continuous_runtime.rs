@@ -1,6 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use calc_flow::arrow::{array::Int64Array, record_batch::RecordBatch};
 use calc_flow::{
     Batch, BatchMetadata, Cursor, ExpressionOperator, ManagedCheckpointRuntime,
     NativeWatermarkCapability, PipelineBuilder, ReplayPositioning, Result, SinkBinding,
@@ -8,7 +9,6 @@ use calc_flow::{
     StreamExecutionPlan, StreamRequirements, StreamSink, StreamSource, StreamingRunner,
     UdfRegistry, WatermarkPolicy,
 };
-use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 use tokio::sync::Mutex;
 
 struct ReplaySource {

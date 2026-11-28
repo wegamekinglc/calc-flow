@@ -15,6 +15,11 @@ explicit graph, provider, and native-extension examples cover advanced integrati
 Each Python program is standalone. The [learning paths](../docs/examples.md)
 group them by task.
 
+Use synchronous `compute()` and `collect()` for complete inputs. For local
+incremental input, [37_stream_session.py](37_stream_session.py) uses synchronous
+session calls. The async examples cover event-loop integration, streaming
+iterators, and connector lifecycle coordination.
+
 [`native_matrices.py`](native_matrices.py) demonstrates packed rank-2 multiplication,
 axis means, reshape and transpose using only Arrow and the native core.
 
@@ -28,6 +33,15 @@ shared recurrence.
 means, explicit scalar broadcasting, Boolean selection and scalar reduction.
 It requires no NumPy/JAX provider or optional array backend. Run it with
 `uv run --no-sync python examples/native_arrays.py` after installing the package.
+
+## Notebook
+
+Open the [DataFusion quickstart](notebooks/datafusion_quickstart.ipynb) in
+Jupyter with `calc-flow-python==2026.11.29` installed in that kernel's
+environment. It calculates gross order totals, filters them with SQL, and
+collects a named output from a reusable `Program`. It uses top-level `await`
+in the running IPython event loop. The synchronous script counterpart is
+[01_datafusion_pipeline.py](01_datafusion_pipeline.py).
 
 ## Prepare and run
 
@@ -112,9 +126,9 @@ try {
    select a typed vectorized `double_amount` UDF. Checks totals
    `[200, 500, 800]`; prints registration metadata.
    Guide: [scalar functions](../docs/batch-guide.md#registered-scalar-functions).
-4. [04_continuous_runtime.py](04_continuous_runtime.py) — run an async source
-   and sink with replay cursors, managed checkpoints, status, and terminal
-   wait. Checks lifecycle completion.
+4. [04_continuous_runtime.py](04_continuous_runtime.py) — start a runner and
+   wait for completion synchronously. Its async source and sink callbacks use
+   replay cursors and managed checkpoints. Checks lifecycle completion.
    Guide: [continuous streaming](../docs/streaming-guide.md).
 5. [05_async_execution.py](05_async_execution.py) — await `cf.compute_async` alongside
    an asyncio heartbeat with settings and a deadline. Checks totals `[3, 7]`.
@@ -153,8 +167,9 @@ try {
     join results.
     Guide: [symbolic joins](../docs/symbolic-workflows.md#join-two-symbolic-streams).
 14. [14_project_persistence.py](14_project_persistence.py) — round-trip a
-    `Program.to_project()` document through JSON, YAML, and an async file store,
-    then execute its physical `input`/`output` bindings after reload. Checks
+    `Program.to_project()` document through JSON, YAML, and a local file store
+    using blocking methods. Execute its physical `input`/`output` bindings
+    after reload. Checks
     totals `[3, 7]` and unchanged program declarations.
     Guide: [project persistence](../docs/projects-guide.md).
 ### Connector read/write examples
@@ -162,7 +177,7 @@ try {
 All thirteen scripts use `cf.table_input`, a reusable `order_totals` function
 with `pipe`, overloaded arithmetic/comparisons, and
 `with_columns` → `filter` → `select`. They export with
-`Program.to_project(mode="stream")`, then supply the native connector and
+`Program.to_project()` on a stream-mode program, then supply the native connector and
 managed-job settings. Each connector page below has feature flags, service
 preparation, environment variables, complete run commands, and delivery limits.
 
@@ -241,9 +256,9 @@ example runner.
   Runs without external services or checkpoints and cleans up its job.
   Guide: [late-row routing](../docs/streaming-guide.md#route-late-rows).
 
-- [29_sql_stream_switch.py](29_sql_stream_switch.py) — use one aggregate SQL
-  declaration to construct separate `Program` instances with `engine="sql"`
-  or `engine="streaming"` before declaring outputs and calling `execute()`.
+- [29_sql_stream_switch.py](29_sql_stream_switch.py) — declare the aggregate SQL
+  once in a `mode="batch"` program and use `for_mode("stream")` for streaming.
+  Call `execute()` in both modes.
   Batch SQL returns `total=6`; streaming emits cumulative snapshots `total=1`,
   then `total=6`. The default runs both and checks their final result.
   Guide: [SQL stream boundaries](../docs/streaming-guide.md#stream-ownership-and-sql-boundaries).

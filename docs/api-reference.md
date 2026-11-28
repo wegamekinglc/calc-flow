@@ -3,16 +3,19 @@
 [Documentation](README.md) / 3.1 API reference
 
 Python is the application API. Rust implements the internal runtime and exposes
-extension interfaces:
+extension interfaces.
 
-The versions below describe this checkout. Published package versions can lag
-the source; use the [source installation](getting-started.md#build-and-install-from-source)
-for the contracts documented here.
+The `2026.11.29` releases match the APIs documented here. See
+[Python installation](getting-started.md#install-published-packages) and
+[Rust installation](../crates/calc-flow/README.md#install).
+Published package versions can lag a newer checkout. Use the
+[source installation](getting-started.md#build-and-install-from-source) for
+unreleased APIs.
 
-| Surface      | Package or path                  | Purpose                                      |
-|--------------|----------------------------------|----------------------------------------------|
-| Python API   | `calc-flow-python==2026.11.29`   | Expressions, Arrow execution, integrations   |
-| Rust core    | `calc-flow = "2026.11.29"`       | Internal runtime and extension contracts     |
+| Surface    | Package or path                | Purpose                                    |
+|------------|--------------------------------|--------------------------------------------|
+| Python API | `calc-flow-python==2026.11.29` | Expressions, Arrow execution, integrations |
+| Rust core  | `calc-flow = "2026.11.29"`     | Internal runtime and extension contracts   |
 
 For examples and lifecycle detail, see the [executable example guide](examples.md),
 [Rust runtime reference](rust-api.md), [Python API](python-api.md), and
@@ -45,7 +48,7 @@ The runnable inventories cover both surfaces; the SQL examples share a dataset:
   SQL join, registered UDF, continuous execution and recovery, async batch
   execution, and NumPy arrays plus NumPy/JAX `pyarrow.Table` matrix multiplication.
 - Rust: [`crates/calc-flow/examples/README.md`](../crates/calc-flow/examples/README.md)
-  — native counterparts for every runnable Python example, including connectors,
+  — native counterparts for the numbered Python scripts, including connectors,
   financial features, recovery, windows, arrays, and account valuation.
 
 Run the user examples that need no external service with
@@ -85,7 +88,7 @@ selected lifecycle. The same declaration graph has the same fingerprint in both
 modes; `for_mode` creates an independent declaration wrapper for another mode.
 `collect`, `collect_async`, and `stream` reject the opposite mode.
 Explicit opposite modes in `analyze` and `explain` provide diagnostics only;
-compilation, project export, and execution stay bound to the fixed engine.
+compilation, project export, and execution use the Program's mode.
 
 See the [Python contracts](python-api.md#compute-arrow-data) for exact
 signatures, supported schema/name restrictions, async ownership, independent
@@ -456,9 +459,9 @@ Constructors copy caller-owned sequences and mappings.
 | `TableExpr.with_columns(features=None, /, **named)`                                     | Append a mapping, named expressions, or a feature set                                                              |
 | `Program(name, /, *, mode, inputs=None, outputs=())`                                    | Immutable lifecycle, declared inputs and outputs, and the declaration v1 fingerprint                               |
 | `Program.for_mode(mode, /)`                                                             | Independent declaration wrapper for `"batch"` or `"stream"`, preserving update semantics                           |
-| `Program.execute(inputs, /, *, ...)`                                                    | Finite named Arrow tables or owned streaming events, according to the selected engine                              |
+| `Program.execute(inputs, /, *, ...)`                                                    | Finite named Arrow tables or owned streaming events, according to the selected mode                                |
 | `with_late_output(value, /, *, allowed_lateness_micros=0)`                              | Frozen `LateOutputs(output, late)`; both TableExpr references share one stream state owner and must be consumed    |
-| `Program.analyze(runtime=None, /, *, mode=None)` / `.explain(...)`                      | Static analysis plus deterministic optimization and cost facts; mode defaults to the selected engine               |
+| `Program.analyze(runtime=None, /, *, mode=None)` / `.explain(...)`                      | Static analysis plus deterministic optimization and cost facts; mode defaults to the Program's mode                |
 | `Program.compile_batch(runtime=None, /)` / `.compile_stream(runtime=None, /, *, ...)`   | Optimize and cache supported row-local, stateful, matrix, and relational-DAG strict project-v3 plans               |
 | `AnalysisIssue` / `AnalysisResult`                                                      | Immutable findings with stable output/input-rooted paths                                                           |
 

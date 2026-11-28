@@ -20,9 +20,11 @@ these operations:
 
 1. Build a Python expression `Program` and export it with `program.to_project()`.
 2. Round-trip its data through canonical JSON and safe YAML.
-3. Create the document in a temporary `FileProjectStore` and read it back.
-4. Compile the loaded document through `Runtime` and execute Arrow input.
-5. Assert that totals remain `[3, 7]` and the original program is unchanged.
+3. Save and reload the document with `FileProjectStore.create_blocking()`
+   and `get_blocking()`.
+4. Compile the loaded document through `Runtime` and call `plan.execute()`
+   with Arrow input.
+5. Check that totals remain `[3, 7]` and the original program is unchanged.
 
 It prints the totals and a round-trip confirmation. Its temporary store is
 cleaned up on exit. For persistent application storage, provide a stable
@@ -40,7 +42,7 @@ import calc_flow as cf
 data = pa.table({"a": [1, 3], "b": [2, 4]})
 t = cf.table_input("numbers", schema=data.schema)
 program = cf.Program(
-    "saved-totals", engine="sql", outputs={"totals": t.select(total=t["a"] + t["b"])}
+    "saved-totals", mode="batch", outputs={"totals": t.select(total=t["a"] + t["b"])}
 )
 document = program.to_project()
 ```
@@ -53,21 +55,21 @@ not serialized or reconstructed from project-v3.
 
 `to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0,
 late_policy="error")` uses the same lowering and strict validation as compilation.
-The default mode follows the Program's immutable engine: `"sql"` exports batch
-mode and `"streaming"` exports stream mode. An explicit mode must match that
-engine. Pass a registered runtime for provider-dependent graphs. The document
-stores the native graph and data-only input placeholders, without table/array contents,
-Python builders, expression objects, or running state. It can be passed directly
-to the store and serialization helpers below.
+Export defaults to the Program's mode. An explicit mode must match the
+Program's lifecycle. Pass a registered runtime for provider-dependent graphs.
+The document stores the native graph and data-only input placeholders. Pass it
+directly to the store and serialization helpers below.
 
 ## Document and store APIs
 
 `ProjectDocument` validates the strict project-v3 model. Use
 `calc_flow.store.export_project_json` / `import_project_json` and the matching
-YAML functions for serialization. `FileProjectStore` provides async `create`,
-`put`, `get`, `list`, and `delete` operations. `create` requires a new project
-identity; `put` writes an existing or new identity. The explicitly named
-`*_blocking` forms are for callers outside an active event loop.
+YAML functions for serialization. Use the `FileProjectStore` methods
+`create_blocking`, `put_blocking`, `get_blocking`, `list_blocking`, and
+`delete_blocking` outside an active event loop. In async code, await the
+corresponding `create`, `put`, `get`, `list`, and `delete` methods.
+Creation requires a new project identity. A put accepts an existing or new
+identity.
 
 Unknown fields, duplicate JSON keys, executable objects, and unsafe YAML
 content fail validation. Project documents contain exact UDF/provider
@@ -139,7 +141,7 @@ schema is the operator input plus the
 [nine diagnostic fields](streaming-guide.md#diagnostic-rows-and-control-messages).
 Input names beginning with `_cf_late_` are rejected for this policy.
 
-Export `LateOutputs` Programs with `to_project(mode="stream")`.
+Export a stream-mode `LateOutputs` Program with `to_project()`.
 For the [iterator example](streaming-guide.md#route-late-rows), logical
 `normal`/`late` outputs become named expression exits with physical bindings
 `normal.output`/`late.output`. The state's own ports remain `output`/`late`.

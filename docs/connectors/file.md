@@ -12,7 +12,7 @@ Identity: `calc-flow-connectors/file/2.0.0`.
 Run [15_file_source.py](../../examples/15_file_source.py) for both source
 and sink directions. It composes `order_totals` with `pipe`, overloaded
 multiplication/comparison, `with_columns`, `filter`, and `select`, then exports
-a stream project with `Program.to_project(mode="stream")`.
+a stream project with `Program.to_project()`.
 `write_input` creates the two orders; `build_project(directory, format_name)`
 selects the file codec; `run` waits for natural source completion, reads the
 Parquet output, and checks both totals and the exactly-once delivery status.

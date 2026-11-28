@@ -68,7 +68,7 @@ def make_program() -> cf.Program:
     values = cf.snapshot_sql(VALUATION_SQL, p=positions, q=latest)
     return cf.Program(
         "account-market-values",
-        engine="streaming",
+        mode="stream",
         outputs={"market_values": values},
     )
 

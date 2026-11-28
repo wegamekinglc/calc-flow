@@ -2,18 +2,18 @@
 #![allow(dead_code)]
 use crate::support::{self, ExampleResult};
 use async_trait::async_trait;
-use calc_flow::{
-    Batch, BatchMetadata, Cursor, EdgeBudget, NativeWatermarkCapability, ReplayPositioning, Result,
-    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRuntimeConfig,
-    StreamSink, StreamSource,
-};
-use datafusion::arrow::{
+use calc_flow::arrow::{
     array::{
         Array, Float64Array, Float64Builder, Int64Array, Int64Builder, StringArray, StringBuilder,
         TimestampMicrosecondBuilder,
     },
     datatypes::{DataType, Field, Schema, SchemaRef},
     record_batch::RecordBatch,
+};
+use calc_flow::{
+    Batch, BatchMetadata, Cursor, EdgeBudget, NativeWatermarkCapability, ReplayPositioning, Result,
+    SourceCapabilities, SourceDeliveryCapability, SourceEvent, SourceSchema, StreamRuntimeConfig,
+    StreamSink, StreamSource,
 };
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::Mutex;
@@ -144,7 +144,7 @@ pub fn quote_schema() -> SchemaRef {
         Field::new(
             "timestamp",
             DataType::Timestamp(
-                datafusion::arrow::datatypes::TimeUnit::Microsecond,
+                calc_flow::arrow::datatypes::TimeUnit::Microsecond,
                 Some("UTC".into()),
             ),
             true,

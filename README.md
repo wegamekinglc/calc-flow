@@ -16,7 +16,8 @@ repository.
 
 ## Install
 
-CPython 3.9 or newer, using the portable default:
+Install the portable Python package on CPython 3.9 or newer. The examples
+target [calc-flow-python 2026.11.29](https://pypi.org/project/calc-flow-python/2026.11.29/).
 
 ```bash
 uv add calc-flow-python
@@ -70,6 +71,12 @@ SQL returns another `TableExpr`, so `pipe`, column operators, and table methods
 compose before and after it. `expression.pipe(function, *args, **kwargs)` calls
 an ordinary synchronous function once while building the calculation.
 
+For synchronous one-input pipelines, `TableExpr.session` and `Program.session`
+keep state between calls to `push`, `advance`, and `finish` on the caller's
+thread. Sessions start in memory by default and support explicit durable
+captures. See [stream sessions](docs/python-api.md#stream-sessions) and the
+[runnable session example](examples/37_stream_session.py).
+
 For streams, use `async with output.stream(batches()) as results`, then
 `async for table in results`. One native job retains state across batches and
 owns cleanup. Declared event-time inputs default to validated nondecreasing
@@ -81,14 +88,10 @@ outputs. The convenience stream runs without checkpoints by default and has
 best-effort iterable delivery; durable recovery uses explicit source/sink
 bindings and a managed checkpoint root.
 
-For synchronous one-input pipelines, `TableExpr.session` and `Program.session`
-keep state between calls to `push`, `advance`, and `finish` on the caller's
-thread. Sessions start in memory by default and support explicit durable
-captures. See [stream sessions](docs/python-api.md#stream-sessions) and the
-[runnable session example](examples/37_stream_session.py).
-
 Continue with [SQL and reusable pipelines](docs/batch-guide.md#compose-sql-and-python-pipelines)
 and the [first streaming pipeline](docs/streaming-guide.md#first-python-continuous-job).
+The [DataFusion quickstart notebook](examples/notebooks/datafusion_quickstart.ipynb)
+walks through Arrow input, a SQL stage, and named batch outputs in Jupyter.
 The runnable examples cover [SQL composition](examples/32_sql_expression_pipeline.py),
 [stateful streaming](examples/33_streaming_pipeline.py), and
 [named streaming outputs](examples/34_streaming_outputs.py). The
@@ -104,9 +107,9 @@ The [Rust runtime reference](docs/rust-api.md) and
 extension work. The `calc-flow` crate's exports remain available to those users.
 
 For native applications, see the [Rust installation and quickstart](crates/calc-flow/README.md).
-Use the current source checkout, or a registry dependency after the required
-version is published. The [Rust release guide](docs/rust-release.md) covers
-packaging, external consumers, and the registry dependency audit.
+Use the current source checkout or [calc-flow 2026.11.29 on crates.io](https://crates.io/crates/calc-flow/2026.11.29).
+The [Rust release guide](docs/rust-release.md) covers packaging, external
+consumers, and the registry dependency audit.
 
 ## Architecture
 
@@ -217,7 +220,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
 uv run maturin develop
 JAX_PLATFORMS=cpu uv run pytest python/tests -q
-JAX_PLATFORMS=cpu uv run python scripts/run_examples.py
+JAX_PLATFORMS=cpu uv run --no-sync python scripts/run_examples.py
 uv run ruff check .
 uv run ruff format --check .
 ```

@@ -14,6 +14,8 @@ array-provider, and performance workflows implemented in Calc Flow.
 The complete declaration reference is in the [expression API](symbolic-api.md).
 Use this guide to choose an executable example and understand the boundary
 between compile-time facts and runtime measurements.
+Use the environment prepared in [getting started](getting-started.md) for
+the run commands.
 
 On this page:
 
@@ -49,6 +51,11 @@ snapshots for ordinary aggregation. See the
 [SQL composition reference](symbolic-api.md#sql-composition).
 
 ## Consume stateful and branching streams
+
+For synchronous batch pushes, use `TableExpr.session()` or
+`Program.session()` with a supported one-input graph. The
+[session example](../examples/37_stream_session.py) drives a rolling
+calculation and restores it from a checkpoint.
 
 [33_streaming_pipeline.py](../examples/33_streaming_pipeline.py) runs one
 native job through `async with output.stream(batches()) as results`. Its
@@ -111,7 +118,7 @@ describes the declaration and writer layouts.
 Run it from a source checkout with:
 
 ```bash
-uv run python examples/09_symbolic_financial_features.py
+uv run --no-sync python examples/09_symbolic_financial_features.py
 ```
 
 ## Run continuously and recover
@@ -126,7 +133,7 @@ also proves that recovery neither reopens the ended source nor duplicates sink
 output.
 
 ```bash
-uv run python examples/10_symbolic_streaming_recovery.py
+uv run --no-sync python examples/10_symbolic_streaming_recovery.py
 ```
 
 Temporal rolling and cross-section declarations add event-time finality. Their
@@ -136,9 +143,8 @@ timestamp field non-null. Build the exact schema before declaring the input.
 `program.compile_stream(runtime)` returns a plan whose `source_binding_ids`,
 `static_input_ids`, and `sink_binding_ids` are physical graph names, independent
 of the logical names used by `Program.collect`. The
-lowered rolling or cross-section node remains the only implementation of its
-state and watermark rules; the streaming runner checkpoints that native state
-using the ordinary project-v3 recovery contract.
+lowered rolling or cross-section node owns its state and watermark rules.
+The streaming runner checkpoints that native state in managed v4 manifests.
 
 ## Aggregate event-time windows
 
@@ -149,7 +155,7 @@ count, volume, low, high, and arithmetic average price, then derives
 `summary` outputs share one native window state owner.
 
 ```bash
-uv run python examples/36_symbolic_event_window.py
+uv run --no-sync python examples/36_symbolic_event_window.py
 ```
 
 The source sends two public `Watermark` events through
@@ -191,12 +197,11 @@ declarations add no Python state or checkpoint format.
 [`12_symbolic_stream_join.py`](../examples/12_symbolic_stream_join.py)
 declares authorization and payment inputs, joins equal account keys inside
 inclusive event-time bounds, and derives a row-local amount check from the
-prefixed output fields. It analyzes and compiles in stream mode, then runs the
-same declaration with two independently segmented sources and a fresh plan for
-each job:
+prefixed output fields. It analyzes and compiles in stream mode, then starts
+a runner for two independently segmented sources and waits for it synchronously.
 
 ```bash
-uv run python examples/12_symbolic_stream_join.py
+uv run --no-sync python examples/12_symbolic_stream_join.py
 ```
 
 `table.stream_join` requires the public `JoinTimeBounds` and `JoinStateLimits`.
@@ -235,7 +240,7 @@ executes the same program in batch and segmented stream modes and verifies that
 the immutable weights are placed once for the whole stream job.
 
 ```bash
-uv run python examples/11_symbolic_static_matrix.py
+uv run --no-sync python examples/11_symbolic_static_matrix.py
 ```
 
 Provider selection is explicit. Register the provider on the exact `Runtime`

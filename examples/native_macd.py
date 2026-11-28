@@ -50,7 +50,7 @@ def _table_values() -> dict[str, list[float | None]]:
         line=parts.line, signal=parts.signal, histogram=parts.histogram
     )
     return (
-        cf.Program("table-macd", engine="sql", outputs={"out": output})
+        cf.Program("table-macd", mode="batch", outputs={"out": output})
         .collect({"prices": data})["out"]
         .to_pydict()
     )

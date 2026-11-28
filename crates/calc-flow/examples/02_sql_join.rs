@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use calc_flow::arrow::{array::Int64Array, record_batch::RecordBatch};
 use calc_flow::{
     Batch, BatchMetadata, ExecutionOptions, PipelineBuilder, SqlOperator, UdfRegistry,
 };
-use datafusion::arrow::{array::Int64Array, record_batch::RecordBatch};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("net is an Int64 column");
 
     assert_eq!(net.values(), &[140, 216, 72]);
-    datafusion::arrow::util::pretty::print_batches(output.batches())?;
+    calc_flow::arrow::util::pretty::print_batches(output.batches())?;
     Ok(())
 }
 
@@ -61,14 +61,14 @@ fn inputs() -> Result<BTreeMap<String, Batch>, Box<dyn std::error::Error>> {
     let orders = RecordBatch::try_from_iter(vec![
         (
             "order_id",
-            Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn datafusion::arrow::array::Array>,
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn calc_flow::arrow::array::Array>,
         ),
         ("amount", Arc::new(Int64Array::from(vec![75, 120, 40])) as _),
     ])?;
     let fees = RecordBatch::try_from_iter(vec![
         (
             "order_id",
-            Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn datafusion::arrow::array::Array>,
+            Arc::new(Int64Array::from(vec![1, 2, 3])) as Arc<dyn calc_flow::arrow::array::Array>,
         ),
         ("fee", Arc::new(Int64Array::from(vec![5, 12, 4])) as _),
     ])?;

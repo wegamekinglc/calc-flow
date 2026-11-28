@@ -32,7 +32,7 @@ def main() -> None:
     t = cf.table_input("orders", schema=orders.schema)
     program = cf.Program(
         "order-outputs",
-        engine="sql",
+        mode="batch",
         outputs={
             "totals": t.select("order_id", gross=t["quantity"] * t["unit_price"]),
             "quantities": t.select("order_id", "quantity"),
@@ -41,6 +41,8 @@ def main() -> None:
     tables = program.collect({"orders": orders})
     if tables["totals"]["gross"].to_pylist() != [30, 12, 40]:
         raise RuntimeError("unexpected reusable program totals")
+    if tables["quantities"]["quantity"].to_pylist() != [3, 1, 4]:
+        raise RuntimeError("unexpected reusable program quantities")
     print("named outputs:", list(tables))
 
 

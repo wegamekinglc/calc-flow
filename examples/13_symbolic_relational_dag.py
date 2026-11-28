@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
 
@@ -105,7 +104,7 @@ def symbolic_program() -> Program:
     )
     return Program(
         "symbolic-relational-dag",
-        engine="streaming",
+        mode="stream",
         inputs=[authorizations, payments, settlements],
         outputs=[("settled_matches", output)],
     )
@@ -184,10 +183,10 @@ def _input_table(
     )
 
 
-async def run() -> None:
+def main() -> None:
     program = symbolic_program()
     runtime = Runtime()
-    analysis = program.analyze(runtime, mode="stream")
+    analysis = program.analyze(runtime)
     if analysis.issues:
         raise RuntimeError(analysis.issues)
     plan = program.compile_stream(runtime)
@@ -209,13 +208,13 @@ async def run() -> None:
         ),
     }
     with TemporaryDirectory(prefix="calc-flow-relational-dag-") as directory:
-        job = await StreamingRunner(
+        runner = StreamingRunner(
             plan,
             sources,
             {"output": [SinkBinding.ordinary("archive", sink)]},
             ManagedCheckpointRuntime(directory),
-        ).start_async()
-        outcome = await job.wait_async()
+        )
+        outcome = runner.start().wait()
         if outcome.state != "completed":
             raise RuntimeError(outcome)
 
@@ -226,4 +225,4 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    main()

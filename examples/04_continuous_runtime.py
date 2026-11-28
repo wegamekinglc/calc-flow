@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from tempfile import TemporaryDirectory
 
 import pyarrow as pa
@@ -69,7 +68,7 @@ class CollectSink:
         pass
 
 
-async def main() -> None:
+def main() -> None:
     with TemporaryDirectory(prefix="calc-flow-continuous-") as directory:
         plan = (
             PipelineBuilder("continuous-example")
@@ -89,9 +88,9 @@ async def main() -> None:
             {"output": [SinkBinding.ordinary("console", sink)]},
             ManagedCheckpointRuntime(directory),
         )
-        job = await runner.start_async()
+        job = runner.start()
         print("started job:", job.id, job.status()["state"])
-        outcome = await job.wait_async()
+        outcome = job.wait()
 
         if outcome.state != "completed":
             raise RuntimeError(f"unexpected terminal state: {outcome.state}")
@@ -105,4 +104,4 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -10,9 +10,13 @@ named Python examples to their native equivalents.
 
 ## Calculate a finite dataset
 
-Read the [batch guide](batch-guide.md) while running 01 → 05 → 09:
-compose and filter order expressions with `cf.compute`, collect several named
-outputs, await a calculation in asyncio, then build reusable financial features.
+Read the [batch guide](batch-guide.md) while running 01 and 09 to compose and
+filter order expressions with `cf.compute`, collect named outputs, and build
+reusable financial features. The
+[DataFusion quickstart notebook](../examples/notebooks/datafusion_quickstart.ipynb)
+uses the same order data with a SQL stage. Run
+[05_async_execution.py](../examples/05_async_execution.py) for a calculation
+that runs alongside other asyncio tasks.
 Continue to [example 14](../examples/14_project_persistence.py) to export a
 `Program` and reload its native graph through JSON/YAML and the file store.
 
@@ -30,10 +34,10 @@ results as Python 01 and 02. The additional `expression_pipeline` keeps the
 small `[3, 7]` addition from the introduction.
 
 Run [29_sql_stream_switch.py](../examples/29_sql_stream_switch.py) to compare
-batch SQL and cumulative streaming for the same declaration. Each `Program`
-sets `engine="sql"` or `engine="streaming"` in its constructor, then calls
-`execute()`;
-the final `total=6` matches in both modes.
+batch SQL and cumulative streaming for the same declaration. Build a batch
+`Program` with `mode="batch"`, derive the stream wrapper with
+`for_mode("stream")`, and call `execute()` in each mode. The final `total=6`
+matches in both modes.
 
 ## Calculate with arrays
 
@@ -46,6 +50,14 @@ For built-in native arrays, run [native_arrays.py](../examples/native_arrays.py)
 operations, packed matrices, and the shared MACD recurrence.
 
 ## Consume a stateful pipeline
+
+Run [37_stream_session.py](../examples/37_stream_session.py) when you push
+batches synchronously from your own code. It pushes ordered rows through a
+two-row rolling mean, uses an explicit watermark to close the first push, and
+calls `finish()` for the last row. It then checkpoints a durable session at
+epoch 1, reopens it, and checks that `finish()` returns the same buffered
+quote's mean of 13.5. See [stream sessions](python-api.md#stream-sessions)
+for setup and ownership.
 
 Read the [first-stream tutorial](streaming-guide.md#first-python-continuous-job)
 while running [33_streaming_pipeline.py](../examples/33_streaming_pipeline.py).
@@ -61,13 +73,6 @@ Use an explicit [watermark policy](streaming-guide.md#watermark-policies) for
 disorder or source-provided progress. Async iterables have no replay; use explicit
 sinks and a stable checkpoint root for durable recovery.
 
-Run [37_stream_session.py](../examples/37_stream_session.py) for the synchronous
-caller-driven alternative. It pushes ordered rows through a two-row rolling mean,
-uses an explicit watermark to close the first push, and calls `finish()` for the
-last row. It then checkpoints a durable session at epoch 1, reopens it, and
-checks that `finish()` returns the same buffered quote's mean of 13.5.
-See [stream sessions](python-api.md#stream-sessions) for setup and ownership.
-
 Run [26_late_side_output.py](../examples/26_late_side_output.py) for paired
 normal/late outputs of one rolling stage. A single Program iterator checks
 `normal=[20.0]` and `late=[10.0]` using explicit source watermarks; the
@@ -80,6 +85,8 @@ bindings, and the separate durable-recovery contract.
 Read the [streaming guide](streaming-guide.md) while running 04 → 08 → 10:
 own a source/sink lifecycle, recover a completed stream, then restore a
 multi-stage rolling calculation from a checkpoint taken during processing.
+Examples 04 and 08 use blocking runner calls. Example 10 coordinates a
+checkpoint and restart while its source is still active.
 For runtime contributors, Rust's `04_continuous_runtime` and `windowed_streaming` demonstrate the native
 traits and watermark-driven tumbling windows.
 

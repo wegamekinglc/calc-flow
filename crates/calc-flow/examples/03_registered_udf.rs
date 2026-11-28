@@ -1,12 +1,10 @@
 //! Python 03: register an exact, trusted Rust/`DataFusion` scalar UDF.
 mod support;
+use calc_flow::arrow::{array::Int64Array, datatypes::DataType};
 use calc_flow::{
     ExecutionOptions, ExpressionOperator, PipelineBuilder, UdfKind, UdfReference, UdfRegistry,
 };
-use datafusion::{
-    arrow::{array::Int64Array, datatypes::DataType},
-    logical_expr::{ColumnarValue, Volatility, create_udf},
-};
+use datafusion::logical_expr::{ColumnarValue, Volatility, create_udf};
 use std::{collections::BTreeMap, sync::Arc};
 use support::{ExampleResult, i64_values, ints, table};
 

@@ -64,7 +64,7 @@ t = cf.table_input("orders", schema=data.schema)
 gross = t["quantity"] * t["unit_price"]
 program = cf.Program(
     "orders",
-    engine="sql",
+    mode="batch",
     outputs={
         "totals": t.select("order_id", gross=gross),
         "quantities": t.select("order_id", "quantity"),
@@ -96,9 +96,10 @@ row-local functions, rolling frames (`rows`/`duration`), cross-section groups
 (`exact_time`/`event_time_bucket`), table bridges, and matrix work.
 
 A `Program` declares uniquely named inputs (`table_input`, native `array_input`
-or `parameter` values) and outputs (tables or arrays) in declaration order. Its required
-keyword-only `engine` is `"sql"` or `"streaming"` and remains fixed on copies
-returned by `with_input` and `output`. Outputs accept a
+or `parameter` values) and outputs (tables or arrays) in declaration order.
+Construction requires a lifecycle. Pass `mode="batch"` or `mode="stream"`;
+the legacy `engine` selector is an exclusive alias. Copies returned by
+`with_input` and `output` preserve the mode. Outputs accept a
 mapping or tuple-pair sequence. Omitting `inputs` discovers reachable roots;
 explicit inputs, including an empty sequence, are honored. Its `fingerprint`
 is the runtime-independent `calc_flow.symbolic.declaration.v1` program
@@ -111,9 +112,9 @@ rooted at `inputs.<name>`.
 
 `Program.analyze(runtime=None, /, *, mode=None)` and
 `Program.explain(runtime=None, /, *, mode=None)` select a default `Runtime`
-when omitted. The default mode follows the selected engine: `"batch"` for
-`"sql"` and `"stream"` for `"streaming"`. An explicit mode selects diagnostic
-analysis without changing the engine. Pass the registered runtime for providers.
+when omitted. Analysis defaults to the Program's mode. An explicit mode
+selects diagnostic analysis for that lifecycle. Pass the registered runtime
+for providers.
 Both consume one immutable capability snapshot and record its session and
 revision. From the
 declaration graph alone — no data object, source, sink, or runner is accepted —
@@ -221,7 +222,7 @@ semantics. Use
 [SQL composition](../examples/32_sql_expression_pipeline.py),
 [named SQL inputs](../examples/02_sql_join.py), and the
 [rolling-to-SQL stream](../examples/33_streaming_pipeline.py) as executable examples.
-The [engine selection example](../examples/29_sql_stream_switch.py) executes
+The [batch and stream example](../examples/29_sql_stream_switch.py) executes
 the same SQL declaration through two separately selected `Program` instances.
 
 For full replacement relations, `cf.snapshot_sql(query, **tables)` is a separate

@@ -26,8 +26,8 @@ async def stream_snapshots(
     return snapshots
 
 
-def make_program(engine: str) -> cf.Program:
-    program = cf.Program("sum-across-modes", engine=engine)
+def make_program() -> cf.Program:
+    program = cf.Program("sum-across-modes", mode="batch")
     source = cf.table_input("events", schema=pa.schema([("x", pa.int64())]))
     return program.output("totals", source.sql("SELECT SUM(x) AS total FROM input"))
 
@@ -45,8 +45,9 @@ def main() -> None:
         "streaming": [{"total": [1]}, {"total": [6]}],
     }
 
+    batch_program = make_program()
     for engine in ("sql", "streaming") if selected == "both" else (selected,):
-        program = make_program(engine)
+        program = batch_program if engine == "sql" else batch_program.for_mode("stream")
         analysis = program.analyze().query
         total = next(node for node in analysis.nodes if node.path == "outputs.totals")
         scopes = (total.batch.history, total.stream.history, total.stream.update)

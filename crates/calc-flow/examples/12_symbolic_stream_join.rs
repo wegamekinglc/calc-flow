@@ -105,7 +105,7 @@ fn check_results(results: &BTreeMap<String, Vec<calc_flow::Batch>>) -> ExampleRe
             b.column_by_name("amount_matches")
                 .unwrap()
                 .as_any()
-                .downcast_ref::<datafusion::arrow::array::BooleanArray>()
+                .downcast_ref::<calc_flow::arrow::array::BooleanArray>()
                 .unwrap()
                 .iter()
         })

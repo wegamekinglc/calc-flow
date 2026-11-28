@@ -63,6 +63,7 @@ batches. A session admits one dynamic input feeding rolling, row-local
 expression, and union stages. Use a stream instead for async sources, several
 dynamic inputs, other operators, status observation, or bounded queue
 backpressure, and an explicit runner for connector and sink delivery contracts.
+Start with the [synchronous session example](../examples/37_stream_session.py).
 See [stream sessions](python-api.md#stream-sessions) and
 [session watermarks](#session-watermarks).
 
@@ -171,7 +172,7 @@ async def main() -> None:
     source = cf.table_input("events", schema=pa.schema([("value", pa.int64())]))
     program = cf.Program(
         "branches",
-        engine="streaming",
+        mode="stream",
         outputs={
             "double": source.select(value2=source["value"] * 2),
             "large": source.filter(source["value"] >= 2).select("value"),
@@ -452,7 +453,7 @@ calculation = events.with_columns(avg=cf.ts.mean(events["x"], window=cf.rows(2))
 routed = cf.with_late_output(calculation)
 program = cf.Program(
     "late-demo",
-    engine="streaming",
+    mode="stream",
     outputs={"normal": routed.output, "late": routed.late},
 )
 
@@ -1041,10 +1042,13 @@ runner = StreamingRunner(
     {"output": [SinkBinding.ordinary("archive", sink)]},
     ManagedCheckpointRuntime(".calc-flow-state/orders"),
 )
-job = await runner.start_async()
+job = runner.start()
 print(job.status())
-outcome = await job.wait_async()
+outcome = job.wait()
 ```
+
+For an asyncio application, await `runner.start_async()` and
+`job.wait_async()`. Source and sink callbacks are async in both cases.
 
 Both expression and builder stream compilation produce graph-only plans for
 connectors owned by the application. A connector-backed project uses
@@ -1748,7 +1752,7 @@ output. A restart from that manifest returns the same terminal epoch without reo
 ended sources or writing final output twice. Run the proof:
 
 ```bash
-uv run python examples/08_streaming_recovery.py
+uv run --no-sync python examples/08_streaming_recovery.py
 ```
 
 ## Job lifecycle

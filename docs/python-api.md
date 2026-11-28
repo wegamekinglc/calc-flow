@@ -9,7 +9,9 @@ expression catalog has its own [reference](symbolic-api.md).
 The `calc-flow-python` and explicitly installed `calc-flow-python-v3`
 distributions expose the same Python expressions and Arrow execution over the
 internal Rust runtime through PyO3. CPython 3.9 or newer is required. This page
-describes version `2026.11.29` in the current checkout;
+describes version `2026.11.29` in the current checkout, also available as the
+[portable release](https://pypi.org/project/calc-flow-python/2026.11.29/).
+For a newer checkout,
 use a source build when the published package has a different version.
 
 On this page:
@@ -182,14 +184,15 @@ inputs become analysis errors. Conflicting roots with the same name fail.
 Declarations and output mappings are copied and remain immutable.
 Pass exactly one of `mode="batch"|"stream"` or legacy
 `engine="sql"|"streaming"` when constructing the program, before adding declarations.
-Neither is a default; explicit `None` and supplying both are errors. `program.execute(inputs)` uses that fixed engine.
-Immutable `with_input` and `output` calls preserve it, and incompatible graph
-shapes are rejected when outputs are declared. The same declarations retain
-their fingerprint in either engine; use `program.for_mode("batch"|"stream")` to copy the declarations
-into an independent wrapper for the other lifecycle. Calls for the other engine raise `RuntimeError`.
-`analyze` and `explain` accept an explicit opposite `mode` only for hypothetical
-diagnostics; it does not change the program engine or permit opposite-mode
-compilation, export, or execution.
+Omission, explicit `None`, and supplying both are errors.
+`program.execute(inputs)` uses the selected mode. Immutable `with_input` and
+`output` calls preserve it and reject incompatible graph shapes. The same
+declarations retain their fingerprint in either mode. Use
+`program.for_mode("batch"|"stream")` to copy the declarations into an
+independent wrapper for the other lifecycle. Opposite-mode execution raises
+`RuntimeError`. An explicit mode on `analyze` and `explain` selects
+hypothetical diagnostics. Compilation, export, and execution use the
+Program's mode.
 
 | Method                                                                                                         | Result and input contract                                                      |
 |----------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------|
@@ -205,7 +208,7 @@ compilation, export, or execution.
 | `program.explain(runtime=None, /, *, mode=None, options=None)`                                                 | Deterministic explanation text                                                 |
 | `program.compile_batch(runtime=None, /, *, portability=None)`                                                  | Explicit batch execution plan                                                  |
 | `program.compile_stream(runtime=None, /, *, allowed_lateness_micros=0, late_policy="error", portability=None)` | Explicit stream plan for a runner                                              |
-| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`            | Validated, data-only project-v3 document for the selected engine               |
+| `program.to_project(runtime=None, /, *, mode=None, allowed_lateness_micros=0, late_policy="error")`            | Validated, data-only project-v3 document for the selected mode                 |
 
 `BatchExecutionPlan.external_inputs` and `.external_outputs` are deterministic
 tuples of physical binding names. Use them when executing a reloaded project;
@@ -222,9 +225,9 @@ premises. The `portability` argument takes a `PortabilityRequest` and requires
 the comparison to be supported before compilation or execution. See
 [query history and portability](query-history-portability.md).
 
-`execute` uses finite table inputs with the SQL engine and stream inputs with
-the streaming engine. `options` is SQL-only; `config` and `watermarks` are
-streaming-only. Consume streaming results with `async with` and `async for`.
+`execute` uses finite table inputs in batch mode and streaming inputs in
+stream mode. `options` applies to batch mode. `config` and `watermarks`
+apply to stream mode. Consume streaming results with `async with` and `async for`.
 See [example 29](../examples/29_sql_stream_switch.py) for both modes using the
 same SQL declaration.
 
@@ -1981,10 +1984,13 @@ runner = StreamingRunner(
     {"output": [SinkBinding.ordinary("archive", sink)]},
     ManagedCheckpointRuntime(".calc-flow-continuous"),
 )
-job = await runner.start_async()
-print(job.status())  # synchronous and safe inside the event loop
-outcome = await job.wait_async()
+job = runner.start()
+print(job.status())
+outcome = job.wait()
 ```
+
+Inside an active event loop, await `runner.start_async()` and
+`job.wait_async()`. Read `job.status()` directly in either case.
 
 The constructor accepts one further keyword-only argument,
 `static_inputs: Mapping[str, Batch] | None = None`, supplying the immutable

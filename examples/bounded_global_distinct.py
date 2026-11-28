@@ -8,7 +8,7 @@ events = cf.table_input("events", schema=pa.schema([pa.field("x", pa.int64())]))
 out = events.distinct(
     ["x"], spec=cf.DistinctSpec.bounded_source(cf.StateBudget(5, 8 << 20))
 )
-program = cf.Program("unique", engine="sql", inputs=[events], outputs={"out": out})
+program = cf.Program("unique", mode="batch", inputs=[events], outputs={"out": out})
 result = program.collect(
     {"events": pa.table({"x": pa.array([1, None, 1, None, 2], pa.int64())})}
 )
